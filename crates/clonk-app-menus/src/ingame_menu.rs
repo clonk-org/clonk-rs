@@ -596,6 +596,11 @@ pub struct DisplayFlags {
     pub upper_board: UpperBoardMode,
     pub fps: bool,
     pub clock: bool,
+    /// `Graphics.ShowStats`, the port's opt-in diagnostics overlay. It has no
+    /// oracle counterpart and no entry in the Display menu — C++ presents once
+    /// per game tick, so `fps` is its render rate too and there is nothing
+    /// here for it to show.
+    pub show_stats: bool,
     pub white_chat: bool,
     pub is_fullscreen: bool,
     /// `Config.General.ScrollSmooth`, the raw viewport-camera smoothing
@@ -620,6 +625,7 @@ impl Default for DisplayFlags {
             upper_board: UpperBoardMode::Full,
             fps: false,
             clock: false,
+            show_stats: false,
             white_chat: false,
             is_fullscreen: true,
         }

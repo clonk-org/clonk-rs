@@ -4495,6 +4495,10 @@ const RUNTIME_REGISTERED_GLOBAL_KEYS: &[&str] = &[
     "CtrlRateUp",
     "NetAllowJoinToggle",
     "NetStatsToggle",
+    // Port-only, and deliberately last: the diagnostics overlay yields the
+    // chord to every action C++ registers, so no shipped binding changes
+    // meaning. See the `Graphics.ShowStats` divergence in PORT_STATUS.md.
+    "StatsToggle",
 ];
 
 fn runtime_player_key_slot(name: &str) -> Option<(usize, ControlBindingId)> {

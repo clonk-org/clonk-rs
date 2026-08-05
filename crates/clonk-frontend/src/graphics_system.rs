@@ -317,6 +317,9 @@ pub struct GraphicsSystem {
     debug_draw_flags: DebugDrawFlags,
     definition_debug_geometry: HashMap<DefinitionId, DefinitionDebugGeometry>,
     network_status_text: Option<String>,
+    /// Composed rows of the port's opt-in diagnostics overlay. `None` is the
+    /// whole gate: with it unset there is no draw site at all.
+    diagnostics_overlay_text: Option<String>,
     pub(crate) viewport_x: f32,
     pub(crate) viewport_y: f32,
     pub(crate) viewport_zoom: f32,
@@ -470,6 +473,7 @@ impl GraphicsSystem {
             debug_draw_flags: DebugDrawFlags::default(),
             definition_debug_geometry: HashMap::new(),
             network_status_text: None,
+            diagnostics_overlay_text: None,
             viewport_x: 0.0,
             viewport_y: 0.0,
             viewport_zoom: 1.0,
@@ -736,6 +740,14 @@ impl GraphicsSystem {
         self.network_status_text.as_deref()
     }
 
+    pub fn set_diagnostics_overlay_text(&mut self, text: Option<String>) {
+        self.diagnostics_overlay_text = text;
+    }
+
+    pub fn diagnostics_overlay_text(&self) -> Option<&str> {
+        self.diagnostics_overlay_text.as_deref()
+    }
+
     pub fn set_world_width(&mut self, world_width: i32) {
         self.world_width = world_width.max(self.surface_width as i32);
     }
@@ -804,6 +816,7 @@ impl GraphicsSystem {
         self.debug_draw_flags = previous.debug_draw_flags;
         self.definition_debug_geometry = previous.definition_debug_geometry.clone();
         self.network_status_text = previous.network_status_text.clone();
+        self.diagnostics_overlay_text = previous.diagnostics_overlay_text.clone();
     }
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
@@ -8972,6 +8985,68 @@ impl GraphicsSystem {
             }
         }
         true
+    }
+
+    /// The port's opt-in diagnostics overlay, drawn once rather than per
+    /// viewport: every number on it is process-wide.
+    ///
+    /// It has no C++ counterpart. `C4UpperBoard`'s readout is `C4Game::FPS`,
+    /// which counts *game* frames (C4Game.cpp:1915-1916); C++ presents once
+    /// per tick, so there that one number is also the render rate. This port
+    /// decouples the two, which leaves the numbers that would show a
+    /// presentation stall with nowhere to appear.
+    ///
+    /// `C4Network2::DrawStatus` owns (+20,+50) and its placement is pinned to
+    /// the oracle, so this overlay is the one that yields where both are up.
+    pub fn draw_diagnostics_overlay(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> bool {
+        let _renderer_config = activate_advanced_renderer_config(self.advanced_renderer_config);
+        let Some(text) = self.diagnostics_overlay_text.clone() else {
+            return false;
+        };
+        let Some(viewport) = self.active_viewports.first().cloned() else {
+            return false;
+        };
+        let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+        let offset = self
+            .drawn_network_status_lines()
+            .saturating_mul(font.line_height().max(1));
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(viewport.rect))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    viewport.rect
+                }
+            });
+        self.surface.set_clip(clip);
+        font.draw_markup_with_gamma(
+            &mut self.surface,
+            viewport.rect.x + 20,
+            viewport.rect.y.saturating_add(50).saturating_add(offset),
+            &text,
+            Color::opaque(255, 255, 255),
+            clonk_graphics::clonk_font::TextAlign::Left,
+            gamma,
+        );
+        match previous_clip {
+            Some(clip) => self.surface.set_clip(clip),
+            None => self.surface.clear_clip(),
+        }
+        true
+    }
+
+    /// Rows `draw_network_status` occupies in a viewport, or zero when it is
+    /// drawing nothing. Its text is `|`-delimited, one status line each.
+    fn drawn_network_status_lines(&self) -> i32 {
+        if !self.debug_draw_flags.show_net_status {
+            return 0;
+        }
+        self.network_status_text
+            .as_deref()
+            .map(|text| i32::try_from(text.split('|').count()).unwrap_or(i32::MAX))
+            .unwrap_or(0)
     }
 
     /// Draw the final per-viewport Help/PlayerMenu/Chat controls after

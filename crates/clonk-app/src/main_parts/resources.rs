@@ -2644,6 +2644,7 @@ pub(crate) fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
         .unwrap_or(flags.splitscreen_dividers);
     flags.fire_particles = graphics_bool("FireParticles", flags.fire_particles);
     flags.clock = graphics_bool("ShowClock", flags.clock);
+    flags.show_stats = graphics_bool("ShowStats", flags.show_stats);
     flags.fps = general_bool("FPS", flags.fps);
     // C++ keeps the raw configured value and clamps it only where the camera
     // divides by it (C4Config.cpp:381-388; C4Viewport.cpp:1195-1207).

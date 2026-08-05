@@ -7671,6 +7671,42 @@
     
 }
 
+    /// `Graphics.ShowStats` has no oracle counterpart — it opts in to the
+    /// port's diagnostics overlay, which reports the presentation half of the
+    /// frame budget `General.FPS` (C4Game::FPS) structurally cannot see. It is
+    /// off unless the player asked for it, so a config LegacyClonk wrote still
+    /// produces LegacyClonk's screen, and it follows the same native Boolean
+    /// grammar as every key beside it.
+    #[test]
+    fn show_stats_is_opt_in_and_follows_the_native_boolean_grammar() {
+        let flags = |body: &str| {
+            let root = tempdir().expect("stats config root");
+            let user_data = tempdir().expect("stats user data");
+            fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(root.path())),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ]);
+            let paths = AppPaths::discover().expect("fixture app paths");
+            paths.ensure_user_dirs().expect("fixture user directories");
+            fs::write(paths.config_file(), body).expect("write fixture config");
+            load_display_flags(Some(&paths))
+        };
+
+        assert!(
+            !flags("[Graphics]\nShowClock=1\n").show_stats,
+            "an untouched key leaves the overlay off"
+        );
+        assert!(flags("[Graphics]\nShowStats=1\n").show_stats);
+        assert!(!flags("[Graphics]\nShowStats=0\n").show_stats);
+        for invalid in ["TRUE", "yes", "on", "wobble"] {
+            assert!(
+                !flags(&format!("[Graphics]\nShowStats={invalid}\n")).show_stats,
+                "{invalid:?} must leave the default-false ShowStats alone"
+            );
+        }
+    }
+
     /// `StdCompilerINIRead::ReadNum` (StdCompiler.h:705-724) skips leading
     /// whitespace, selects base 16 only for a leading `0x`/`0X`, consumes the
     /// longest valid numeric prefix and ignores the rest. No digits is

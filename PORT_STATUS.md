@@ -3032,6 +3032,55 @@ an ordered-map model gap.
   `max_refresh_delay_missing_or_invalid_matches_cpp_thirty_ms` still hold the
   default path unchanged.
 
+- **A diagnostics overlay may report the presentation rate the oracle's FPS
+  counter cannot see** (`PresentationStats` +
+  `GameApp::update_diagnostics_overlay` +
+  `GraphicsSystem::draw_diagnostics_overlay`; opt-in `Graphics.ShowStats` plus
+  a default-unbound `StatsToggle` key, both off). Approved 2026-08-05, follows
+  clonk-org/clonk-rs#118. `C4UpperBoard` draws one frame rate under
+  `Config.General.FPS` (src/C4UpperBoard.cpp:81-86), and it is `C4Game::FPS`:
+  `cFPS++` counts executed *game* frames (C4Game.cpp:1915-1916) and
+  `C4Game::Sec1Timer` samples it (C4Game.cpp:1758-1762). C++ presents once per
+  tick, so there that single number is also the render rate. This port already
+  diverges on exactly that point — `Graphics.SmoothPresentation`, the
+  presentation-detail governor, automatic graphics skips and the
+  refuse-to-draw-while-inactive gate all move the present rate independently of
+  `frames_since_second` — so the ported counter kept a label that is no longer
+  true here, and a presentation stall cannot reach the screen at all. Measured
+  on `content/mods/Super_Mega_Ultra_Extrem_Wettlauf.c4s` at `fd3465c0e`: 35.7
+  simulation FPS held steady across a 9.03 -> 0.93 collapse in
+  `presentation_submission_fps`, and establishing which half was slow cost a
+  two-hour investigation (causes filed as clonk-org/clonk-rs#158 and #159). The
+  overlay carries numbers the tree already computes and previously emitted only
+  as one `LC_APP_PRESENTATION_BENCHMARK` line at process exit: both frame rates,
+  the last and p95 graphics-pass cost, automatic graphics skips per second, and
+  — in a network round — the worst route's ping and loss beside control behind,
+  PreSend, measured lateness and the `ControlLatencyEstimator` envelope PreSend
+  is actually sized from. That last pair needed new read-only accessors; the
+  script- and dialog-visible `ACT` field stays C++'s ping-derived mean and is
+  untouched. `StatsToggle` is registered after every C++ action and yields the
+  chord to all of them, so no shipped binding changes meaning.
+  **Blast radius.** Presentation-only in both directions. Nothing on this path
+  reads or writes `C4Fixed`, `C4Random`, movement, control ordering or anything
+  else determinism-critical, so two clients with the key set differently stay in
+  lockstep and cross-play against a stock LegacyClonk client is unaffected.
+  Composing no text *is* the gate, so with the key unset there is no draw site
+  and the frame is byte-identical to the one shipped today —
+  `C4Network2::DrawStatus` keeps its oracle-pinned (+20,+50) anchor
+  unconditionally, and the port-only panel is the one that shifts below it when
+  both are visible. `parity verify` and `engine-snapshots verify` cannot observe
+  it; neither renders. Pinned by
+  `presentation_stats_count_the_present_rate_the_game_tick_counter_cannot_see`,
+  `presentation_stats_summarize_what_the_graphics_pass_cost_that_second`,
+  `presentation_stats_bound_the_samples_one_second_may_retain`,
+  `show_stats_is_opt_in_and_follows_the_native_boolean_grammar`,
+  `the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default`,
+  `the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from`,
+  `stats_toggle_is_default_unbound_and_a_custom_chord_flips_the_overlay`,
+  `the_measured_horizon_inputs_are_readable_after_a_control_tick`,
+  `the_diagnostics_overlay_is_inert_until_it_is_given_text` and
+  `the_diagnostics_overlay_stands_clear_of_the_network_status_block`.
+
 - **The sky gradient may be dithered below the 8-bit step**
   (`GpuSolidStyle::dither` + `SOLID_SHADER`, `crates/clonk-app-render`; opt-in
   `Graphics.SkyDither`, default off). Approved 2026-07-28. C++ emits the sky

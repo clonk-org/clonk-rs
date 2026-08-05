@@ -911,6 +911,212 @@ fn render_floor_forces_a_repaint_at_two_hertz_however_deep_the_skip() {
 }
 
 #[test]
+fn presentation_stats_count_the_present_rate_the_game_tick_counter_cannot_see() {
+    // `frames_per_second` is C4Game::FPS: `cFPS++` counts executed *game*
+    // frames (C4Game.cpp:1915-1916) and `C4Game::Sec1Timer` samples it
+    // (C4Game.cpp:1758-1762). C++ presents once per tick, so there that one
+    // number is also the render rate. This port decouples presentation from
+    // the tick, so the same counter stays nominal straight through a
+    // presentation stall. These counters are the half it cannot see.
+    let mut stats = PresentationStats::default();
+    assert_eq!(stats.presentations_per_second(), 0);
+
+    for _ in 0..9 {
+        stats.record_presentation(Duration::from_millis(33));
+    }
+    assert_eq!(
+        stats.presentations_per_second(),
+        0,
+        "like cFPS, the readout only moves when the second closes"
+    );
+
+    stats.sample_second();
+    assert_eq!(stats.presentations_per_second(), 9);
+    assert_eq!(stats.last_graphics(), Duration::from_millis(33));
+
+    // And the next second starts from zero, exactly like cFPS.
+    stats.sample_second();
+    assert_eq!(stats.presentations_per_second(), 0);
+    assert_eq!(
+        stats.last_graphics(),
+        Duration::from_millis(33),
+        "the last measured pass survives an idle second; only the rate resets"
+    );
+}
+
+#[test]
+fn presentation_stats_summarize_what_the_graphics_pass_cost_that_second() {
+    // A presentation stall shows up as pass *cost*, not as a missing frame:
+    // the measured Wettlauf regression held a 33 ms average graphics pass
+    // while presenting under one frame per second. `graphics_pass_percentiles`
+    // already computes that tail for the exit-time benchmark; the overlay
+    // needs the same number while the session is still running.
+    let mut stats = PresentationStats::default();
+    for millis in [4, 5, 6, 7, 8, 9, 10, 11, 12, 90] {
+        stats.record_presentation(Duration::from_millis(millis));
+    }
+    stats.record_automatic_graphics_skip();
+    stats.record_automatic_graphics_skip();
+    stats.sample_second();
+
+    assert_eq!(stats.presentations_per_second(), 10);
+    assert_eq!(stats.automatic_graphics_skips_per_second(), 2);
+    assert_eq!(
+        stats.graphics_p95(),
+        Duration::from_millis(90),
+        "nearest rank over ten samples is the slowest pass, not the median"
+    );
+
+    // The window is the second, so the next one is not dragged by this one.
+    stats.record_presentation(Duration::from_millis(4));
+    stats.sample_second();
+    assert_eq!(stats.graphics_p95(), Duration::from_millis(4));
+    assert_eq!(stats.automatic_graphics_skips_per_second(), 0);
+}
+
+#[test]
+fn presentation_stats_bound_the_samples_one_second_may_retain() {
+    // The sample vector is cleared by the one-second timer, which the shell
+    // drives — but a stats accumulator that trusts a timer to run is a leak
+    // waiting for the first path that stops driving it. The cap costs the
+    // percentile nothing at any real present rate.
+    let mut stats = PresentationStats::default();
+    for _ in 0..(PRESENTATION_STATS_MAX_SAMPLES * 4) {
+        stats.record_presentation(Duration::from_millis(7));
+    }
+    assert_eq!(
+        stats.retained_graphics_samples(),
+        PRESENTATION_STATS_MAX_SAMPLES,
+        "an undrained second must not grow without bound"
+    );
+    stats.sample_second();
+    assert_eq!(stats.graphics_p95(), Duration::from_millis(7));
+    assert_eq!(stats.retained_graphics_samples(), 0);
+}
+
+#[test]
+fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
+    // The bug this exists for: the upper board held 36 FPS through a 38x drop
+    // in present rate, because that readout is C4Game::FPS and counts game
+    // frames. Naming both numbers is the entire point, so the panel labels the
+    // C++ one `Sim` rather than leaving `FPS` to mean two different things.
+    let mut app = new_running_sandbox_app();
+    app.frames_per_second = 36;
+    for _ in 0..9 {
+        app.presentation_stats
+            .record_presentation(Duration::from_millis(32));
+    }
+    app.presentation_stats.record_automatic_graphics_skip();
+    app.presentation_stats.sample_second();
+
+    app.update_diagnostics_overlay();
+    assert_eq!(
+        app.graphics.diagnostics_overlay_text(),
+        None,
+        "Graphics.ShowStats is opt-in: unset means no overlay at all"
+    );
+
+    app.display_flags.show_stats = true;
+    app.update_diagnostics_overlay();
+    let text = app
+        .graphics
+        .diagnostics_overlay_text()
+        .expect("an enabled overlay composes text")
+        .to_string();
+    assert!(text.contains("Sim 36 FPS"), "{text}");
+    assert!(text.contains("Render 9 FPS"), "{text}");
+    assert!(text.contains("32.0 ms"), "{text}");
+    assert!(text.contains("skips 1"), "{text}");
+    assert!(
+        !text.contains("PreSend"),
+        "an offline round has no control horizon to report: {text}"
+    );
+
+    // And turning it back off retires the draw site rather than freezing it.
+    app.display_flags.show_stats = false;
+    app.update_diagnostics_overlay();
+    assert_eq!(app.graphics.diagnostics_overlay_text(), None);
+}
+
+#[test]
+fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from() {
+    // `ControlLatencyEstimator` and the measured lateness decide PreSend, and
+    // until now neither reached a screen. They are what separates a slow link
+    // from a slow machine: `ACT` cannot, because it is ping-derived.
+    let mut app = new_running_sandbox_app();
+    let (_events, _commands) = install_running_network_stub(&mut app, 1, 40, 4);
+    app.display_flags.show_stats = true;
+    let clock = app
+        .network_control_clock
+        .as_mut()
+        .expect("the stub installs a control clock");
+    clock.observe_control_send_time_ms(40);
+    clock.observe_control_lateness_ms(300);
+    clock.calculate_performance();
+
+    app.update_diagnostics_overlay();
+    let text = app
+        .graphics
+        .diagnostics_overlay_text()
+        .expect("a networked round composes the control rows")
+        .to_string();
+    let presend = app
+        .network_control_clock
+        .expect("control clock")
+        .control_presend();
+    assert!(text.contains(&format!("PreSend {presend}")), "{text}");
+    assert!(text.contains("late 300 ms"), "{text}");
+    assert!(
+        text.contains("budget 300.0 ms"),
+        "the tail-aware envelope, not the ping-derived ACT: {text}"
+    );
+    assert!(
+        !text.contains("Ping"),
+        "a stub with no live route must not invent one: {text}"
+    );
+}
+
+#[test]
+fn stats_toggle_is_default_unbound_and_a_custom_chord_flips_the_overlay() {
+    // Registered the way C++ registers its own diagnostics actions —
+    // `ChartToggle` is KEY_Default in the "no default keys assigned" block
+    // (src/C4Game.cpp:3457) — so the shipped key map is untouched and only a
+    // custom `[Keys] StatsToggle=` binding can reach it.
+    let mut app = new_running_sandbox_app();
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+        .expect("an unconfigured StatsToggle stays unbound");
+    assert!(!app.display_flags.show_stats);
+
+    let parsed = parse_runtime_key_config(b"[Keys]\nStatsToggle=F8\n")
+        .expect("parse the custom diagnostics binding");
+    app.runtime_key_config_cache = OnceLock::new();
+    app.runtime_key_config_cache
+        .set(Ok(parsed))
+        .expect("install diagnostics key registry");
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+        .expect("configured StatsToggle shows the overlay");
+    assert!(app.display_flags.show_stats);
+    app.update_diagnostics_overlay();
+    assert!(app.graphics.diagnostics_overlay_text().is_some());
+    assert!(
+        app.runtime_flash_message.is_none(),
+        "the toggle flashes no message, exactly like ToggleShowNetStatus"
+    );
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Released)
+        .expect("a release stays unprocessed");
+    assert!(app.display_flags.show_stats);
+
+    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+        .expect("configured StatsToggle hides the overlay again");
+    assert!(!app.display_flags.show_stats);
+    app.update_diagnostics_overlay();
+    assert!(app.graphics.diagnostics_overlay_text().is_none());
+}
+
+#[test]
 fn a_refused_presentation_rearms_the_repaint_floor() {
     // `C4GraphicsSystem::StartDrawing` refuses to draw while the shell is
     // inactive (C4GraphicsSystem.cpp:96-106), so the pass consumes the graphics

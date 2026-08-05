@@ -387,6 +387,7 @@ fn graphics(config: &Config) -> AdvancedConfigSection {
         i32_row(config, section, "VerboseObjectLoading", 0),
         enum_row(config, section, "UpperBoard", "Full", UPPER_BOARD_VALUES),
         bool_row(config, section, "ShowClock", false),
+        bool_row(config, section, "ShowStats", false),
         bool_row(config, section, "ShowCrewNames", true),
         bool_row(config, section, "ShowCrewCNames", true),
         bool_row(config, section, "MsgBoard", true),

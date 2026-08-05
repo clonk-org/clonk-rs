@@ -4839,6 +4839,7 @@ impl GameApp {
         self.league_votes.clear();
         self.frames_per_second = 0;
         self.frames_since_second = 0;
+        self.presentation_stats = PresentationStats::default();
         self.script_created_objects = false;
         self.full_speed = false;
         self.frame_skip = 1;
