@@ -378,7 +378,7 @@ impl GameApp {
             return;
         }
         self.finalize_pending_league_end_for_teardown();
-        self.request_exit();
+        self.request_exit("the window was closed");
     }
 
     pub(crate) fn clear_physical_viewport_states(&mut self) {

@@ -4783,6 +4783,23 @@ fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
     assert!(app.status_text.is_empty());
 }
 
+/// Escape on the main menu ends the process with no confirmation and, until
+/// now, no trace: the session log simply stopped, which reads exactly like a
+/// crash to anyone triaging it (clonk-org/clonk-rs#40). Record which exit ran
+/// so the shutdown banner can name it.
+#[test]
+fn quitting_from_the_main_menu_records_why_the_session_ended() {
+    let mut app = new_classic_menu_app(640, 480);
+    assert_eq!(app.startup_view, StartupView::MainMenu);
+    assert_eq!(app.exit_reason, None);
+
+    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+        .expect("Escape quits from the main menu");
+
+    assert!(app.exit_requested);
+    assert_eq!(app.exit_reason, Some("the main menu was closed"));
+}
+
 #[test]
 fn keyboard_subscreen_back_reconstructs_main() {
     let mut app = new_classic_menu_app(640, 480);

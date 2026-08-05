@@ -436,6 +436,14 @@ fn main() -> Result<()> {
     // actually shown depends on the platform sink, so a target without one —
     // like C++'s Unix build without WITH_DEVELOPER_MODE — stays stderr-only.
     if let Err(error) = &result {
+        // First, and unconditionally: the runtime prints a returned error to
+        // stderr alone, which a windowed build has nowhere to show. winit's
+        // Wayland loop reaches here after a failed `Connection::flush` without
+        // logging anything itself
+        // (`winit-0.30.13/src/platform_impl/linux/wayland/event_loop/mod.rs:284-287`),
+        // so a lost compositor connection used to end the session with an
+        // empty-looking log (clonk-org/clonk-rs#40).
+        clonk_logging::log_fatal_error(&format!("{error:#}"));
         if !clonk_platform::startup_dialog::window_was_created() {
             let mut sink = native_startup_dialog_sink();
             clonk_platform::startup_dialog::report_startup_failure(
@@ -1724,6 +1732,16 @@ fn run() -> Result<()> {
                             }
                         }
                     }
+                    // Last, and after every other teardown line, so a log that
+                    // ends here ended on purpose. Nothing else marked a
+                    // shutdown, which left "the log stops and the process is
+                    // gone" reading identically whether the player quit or the
+                    // process was destroyed (clonk-org/clonk-rs#40). This is
+                    // the app's final controlled point on both platforms: on
+                    // macOS `run_app` never returns from here.
+                    clonk_logging::log_shutdown_banner(
+                        app.exit_reason.unwrap_or("the event loop ended"),
+                    );
                 }
                 _ => {}
             }
@@ -2488,6 +2506,7 @@ impl GameApp {
             ingame_ignore_left_up: false,
             window_active: true,
             exit_requested: false,
+            exit_reason: None,
             configuration_reset_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
@@ -5822,8 +5841,13 @@ impl GameApp {
         self.main_menu_state.update_participants_label(label);
     }
 
-    fn request_exit(&mut self) {
+    /// Ask the event loop to unwind, recording which exit ran so the shutdown
+    /// banner can name it. Several of these quit with no dialog and no other
+    /// log line, so `reason` is all a bug report has to distinguish a
+    /// deliberate quit from the process being destroyed (clonk-org/clonk-rs#40).
+    fn request_exit(&mut self, reason: &'static str) {
         self.exit_requested = true;
+        self.exit_reason = Some(reason);
     }
 
     fn take_exit_request(&mut self) -> bool {

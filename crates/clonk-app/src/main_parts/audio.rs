@@ -1578,7 +1578,7 @@ fn handle_developer_console_window_event(
         WindowEvent::CloseRequested => {
             // A native modal C4Console::Message disables its parent window.
             if !message_dialog_active {
-                app.request_exit();
+                app.request_exit("the developer console window was closed");
             }
         }
         WindowEvent::Resized(size) => {

@@ -332,7 +332,9 @@ impl GameApp {
                     }
                 }
                 DeveloperConsoleAction::CloseGame => self.close_console_game(),
-                DeveloperConsoleAction::QuitApplication => self.request_exit(),
+                DeveloperConsoleAction::QuitApplication => {
+                    self.request_exit("the developer console quit")
+                }
                 DeveloperConsoleAction::Play => self.set_runtime_pause(false),
                 DeveloperConsoleAction::Halt => self.set_runtime_pause(true),
                 DeveloperConsoleAction::TogglePause => self.toggle_runtime_pause(),
@@ -411,7 +413,7 @@ impl GameApp {
 
     pub(crate) fn process_console_command(&mut self, line: &str) -> Result<()> {
         if line == "/quit" {
-            self.request_exit();
+            self.request_exit("the console /quit command");
             return Ok(());
         }
 

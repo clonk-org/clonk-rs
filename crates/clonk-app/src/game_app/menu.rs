@@ -1843,7 +1843,7 @@ impl GameApp {
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
                 if state == ElementState::Pressed {
-                    self.request_exit();
+                    self.request_exit("the main menu was closed");
                 }
             }
             StartupView::NetworkLobby => {
@@ -3511,7 +3511,7 @@ impl GameApp {
             return false;
         };
         self.pending_editor_launch = Some(editor);
-        self.request_exit();
+        self.request_exit("the classic editor was launched");
         true
     }
 
@@ -4425,7 +4425,7 @@ impl GameApp {
                 }
                 self.pending_options_display_requests.clear();
                 self.configuration_reset_requested = true;
-                self.request_exit();
+                self.request_exit("the configuration was reset");
             }
             MessageDialogContinuation::OptionsResetConfiguration => {}
             MessageDialogContinuation::OptionsAdvancedWarning

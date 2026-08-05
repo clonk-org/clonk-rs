@@ -405,7 +405,7 @@ impl GameApp {
                 match launched {
                     Ok(()) => {
                         update.hand_off();
-                        self.request_exit();
+                        self.request_exit("an update was handed off to the applier");
                     }
                     Err(error) => {
                         let message = format!(
