@@ -4597,7 +4597,7 @@ impl GameApp {
                 self.open_about_dialog();
             }
             MainMenuItem::Quit => {
-                self.request_exit();
+                self.request_exit("the main menu Quit item");
             }
         }
         Ok(())
@@ -5065,7 +5065,7 @@ impl GameApp {
                     // ParseCommandLine disables the startup dialog for a
                     // nonempty RecordStream. A failed StreamToRecord therefore
                     // ends the application instead of exposing the main menu.
-                    self.request_exit();
+                    self.request_exit("a command-line scenario failed to start");
                     return;
                 }
                 if failed

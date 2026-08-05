@@ -535,6 +535,31 @@ pub fn log_startup_banner(port_version: &str, engine_version: &str) {
     );
 }
 
+/// Record that the session ended under the application's own control, as its
+/// last log line.
+///
+/// The counterpart of [`log_startup_banner`], and the one line that makes a
+/// truncated-looking log self-diagnosing. Nothing else marks a shutdown, so a
+/// log that simply stops reads identically whether the player quit on purpose
+/// or the process was destroyed under it — the fork every "it just vanished"
+/// report gets stuck on (clonk-org/clonk-rs#40). Its presence settles that in
+/// one line, and `reason` says which exit ran.
+pub fn log_shutdown_banner(reason: &str) {
+    tracing::info!(reason, "stopping clonk");
+}
+
+/// Record the error that ended the session, before the process returns it.
+///
+/// An error propagated out of `main` is formatted by the Rust runtime straight
+/// to stderr, bypassing the session log exactly as the default panic hook does
+/// — and a windowed build has nowhere to show stderr. So the one event that
+/// ended the session is the one event missing from the file a bug report
+/// attaches, leaving a log that simply stops (clonk-org/clonk-rs#40). It is
+/// still returned afterwards, so the exit status is unchanged.
+pub fn log_fatal_error(error: &str) {
+    tracing::error!(error, "stopping clonk after a fatal error");
+}
+
 /// Route panics through the log before the process dies.
 ///
 /// The default hook writes straight to stderr, which bypasses the session log

@@ -436,6 +436,14 @@ fn main() -> Result<()> {
     // actually shown depends on the platform sink, so a target without one —
     // like C++'s Unix build without WITH_DEVELOPER_MODE — stays stderr-only.
     if let Err(error) = &result {
+        // First, and unconditionally: the runtime prints a returned error to
+        // stderr alone, which a windowed build has nowhere to show. winit's
+        // Wayland loop reaches here after a failed `Connection::flush` without
+        // logging anything itself
+        // (`winit-0.30.13/src/platform_impl/linux/wayland/event_loop/mod.rs:284-287`),
+        // so a lost compositor connection used to end the session with an
+        // empty-looking log (clonk-org/clonk-rs#40).
+        clonk_logging::log_fatal_error(&format!("{error:#}"));
         if !clonk_platform::startup_dialog::window_was_created() {
             let mut sink = native_startup_dialog_sink();
             clonk_platform::startup_dialog::report_startup_failure(
@@ -1017,7 +1025,7 @@ fn run() -> Result<()> {
             }
             // Read before the match, which moves out of `event`, and acted on
             // after the shell borrow below has ended.
-            let releases_developer_windows = matches!(event, Event::LoopExiting);
+            let loop_is_exiting = matches!(event, Event::LoopExiting);
             let shell_window_host::ShellWindowHost {
                 window,
                 pixels: pixels_slot,
@@ -1800,11 +1808,24 @@ fn run() -> Result<()> {
             // cancellation-free join — would run nested inside the OS's own
             // quit, where a slow worker hangs termination and a panicking drop
             // unwinds across an `extern "C"` boundary and aborts.
-            if releases_developer_windows {
+            if loop_is_exiting {
                 let destroyed = developer_windows.release_all();
                 tracing::debug!(
                     windows = destroyed.len(),
                     "released the developer windows before the event loop returned"
+                );
+                // After every other teardown line, so a log ending here ended
+                // on purpose. Nothing marked a shutdown before, which left
+                // "the log stops and the process is gone" reading identically
+                // whether the player quit or the process was destroyed
+                // (clonk-org/clonk-rs#40). It follows the config and console
+                // persistence above deliberately: those can still `warn!`, and
+                // a marker printed ahead of them would call a session clean
+                // that then died saving its own config. This is the last point
+                // the app controls on both platforms — on macOS `run_app`
+                // never returns past here.
+                clonk_logging::log_shutdown_banner(
+                    app.exit_reason.unwrap_or("the event loop ended"),
                 );
             }
         }))
@@ -2492,6 +2513,7 @@ impl GameApp {
             window_active: true,
             window_occluded: false,
             exit_requested: false,
+            exit_reason: None,
             configuration_reset_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
@@ -5826,8 +5848,13 @@ impl GameApp {
         self.main_menu_state.update_participants_label(label);
     }
 
-    fn request_exit(&mut self) {
+    /// Ask the event loop to unwind, recording which exit ran so the shutdown
+    /// banner can name it. Several of these quit with no dialog and no other
+    /// log line, so `reason` is all a bug report has to distinguish a
+    /// deliberate quit from the process being destroyed (clonk-org/clonk-rs#40).
+    fn request_exit(&mut self, reason: &'static str) {
         self.exit_requested = true;
+        self.exit_reason = Some(reason);
     }
 
     fn take_exit_request(&mut self) -> bool {

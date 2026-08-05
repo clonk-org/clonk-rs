@@ -484,7 +484,7 @@ impl GameApp {
         self.mode = AppMode::Menu;
         self.restore_startup_fonts();
         if prepared_go || self.failed_record_stream_exits() {
-            self.request_exit();
+            self.request_exit("a scenario failed to load with no menu to return to");
         } else if returns_to_startup {
             if let Some(audio) = self.audio.as_mut() {
                 audio.configure_scenario(None);
