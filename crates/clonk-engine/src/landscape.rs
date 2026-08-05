@@ -64,6 +64,18 @@ fn initial_render_token(width: u32, height: u32, bytes: &[u8]) -> u64 {
     render_token_bytes(token, bytes.iter().copied())
 }
 
+/// Which C4Landscape pixel write this is. `SetPix` notes the pixel for
+/// relighting (C4Landscape.cpp:755-761); the raw `_SetPix` does not, and
+/// leaves that to the `PrepareChange`/`FinishChange` caller that relights the
+/// whole changed rectangle (C4Landscape.cpp:2851-2880).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelWrite {
+    /// `C4Landscape::SetPix`.
+    SetPix,
+    /// `C4Landscape::_SetPix`.
+    Raw,
+}
+
 /// A clipped half-open rectangle whose current texmap bytes must be
 /// recomposed in the frontend's persistent landscape cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -499,7 +511,7 @@ impl PixelGrid {
 
     /// Raw plane write (C4SolidMask's _SBackPix): bumps the revision on change.
     pub fn write_byte(&mut self, x: i32, y: i32, byte: u8) {
-        self.set_byte_impl(x, y, byte, false);
+        self.set_byte_impl(x, y, byte, PixelWrite::Raw);
     }
 
     /// `CSurface8::Circle` (`src/StdSurface8.cpp:231-239`). Its bottom and
@@ -1259,7 +1271,7 @@ impl PixelGrid {
     }
 
     fn set_byte(&mut self, x: i32, y: i32, byte: u8) {
-        self.set_byte_impl(x, y, byte, true);
+        self.set_byte_impl(x, y, byte, PixelWrite::SetPix);
     }
 
     /// FnDrawVolcanoBranch's raw C4Landscape::SetPix loop
@@ -1304,13 +1316,13 @@ impl PixelGrid {
             .then_some(first_column as usize..last_column.saturating_add(1) as usize)
     }
 
-    fn set_byte_impl(&mut self, x: i32, y: i32, byte: u8, schedule_relight: bool) {
+    fn set_byte_impl(&mut self, x: i32, y: i32, byte: u8, write: PixelWrite) {
         if let Some(slot) = self.slot(x, y) {
             let old = self.bytes[slot];
             if old == byte {
                 return;
             }
-            if schedule_relight {
+            if write == PixelWrite::SetPix {
                 self.schedule_surface32_relight_around(x, y);
             }
             if self.material_counts.is_empty() && self.materials.iter().any(Option::is_some) {
