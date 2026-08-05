@@ -6,7 +6,12 @@
 //! reraises so the process keeps its original signal exit status and core-dump
 //! behaviour. Everything here runs in signal context, so it uses only
 //! async-signal-safe calls: `write(2)`, `backtrace`/`backtrace_symbols_fd`,
-//! `signal(2)` and `raise(2)`.
+//! `signal(2)` and `raise(2)`. `backtrace` earns that description only after
+//! [`install`] has resolved it once — glibc loads it from libgcc on first use.
+//!
+//! The handlers themselves go in with `sigaction(2)` and `SA_ONSTACK` rather
+//! than C++'s `signal(2)`, so that a stack overflow can still be reported; see
+//! [`install`].
 
 use std::ffi::c_void;
 
@@ -90,17 +95,74 @@ extern "C" fn crash_handler(signo: i32) {
     }
 }
 
+/// Room for the handler to run when the ordinary stack is gone. The banner
+/// plus a 100-frame `backtrace_symbols_fd` measured under 5 KiB; the margin is
+/// for the deeper symbol resolution a release build with more shared objects
+/// can need. Linux x86-64's `SIGSTKSZ` is only 8 KiB, so it is not enough on
+/// its own, and macOS refuses anything under its 32 KiB `MINSIGSTKSZ`.
+const ALTERNATE_STACK_SIZE: usize = 128 * 1024;
+
+/// Give this thread a stack the handler can run on when its own is exhausted.
+///
+/// Leaked deliberately: it has to outlive every frame in the process, and it
+/// is allocated exactly once.
+fn install_alternate_signal_stack() {
+    let size = ALTERNATE_STACK_SIZE.max(libc::MINSIGSTKSZ);
+    let stack = Box::leak(vec![0u8; size].into_boxed_slice());
+    let descriptor = libc::stack_t {
+        ss_sp: stack.as_mut_ptr().cast(),
+        ss_size: size,
+        ss_flags: 0,
+    };
+    // SAFETY: `descriptor` borrows a leaked allocation of exactly `ss_size`
+    // bytes, so the kernel's reference to it stays valid for the process.
+    unsafe {
+        libc::sigaltstack(&descriptor, std::ptr::null_mut());
+    }
+}
+
+/// Resolve `backtrace` before a fault needs it.
+///
+/// glibc keeps it in libgcc and loads that on first use, which allocates — so
+/// the first call is the one call that is *not* async-signal-safe. Making it
+/// here leaves only resolved code on the crash path.
+fn prewarm_backtrace() {
+    let mut frames = [std::ptr::null_mut::<c_void>(); 8];
+    // SAFETY: `frames` is a live buffer of exactly the length passed.
+    unsafe {
+        backtrace(frames.as_mut_ptr(), frames.len() as i32);
+    }
+}
+
 /// Installs the classic handlers. Call before application initialization
 /// (C4WinMain.cpp:256-265). `log_descriptor` is the session log's raw fd, or a
 /// negative value when there is no log yet.
+///
+/// C++ installs these with plain `signal(2)` (C4WinMain.cpp:257-264) and this
+/// deliberately does not. A handler with no alternate stack cannot be entered
+/// once the stack is exhausted, so `signal(2)` makes a stack overflow — the
+/// one fault a deeply recursive engine can actually hit — kill the process
+/// having written nothing at all. Worse than inheriting C++'s behaviour: it
+/// also *replaces* the `SA_ONSTACK` handler the Rust runtime installs before
+/// `main`, so the port loses the `has overflowed its stack` line stock Rust
+/// would have printed (clonk-org/clonk-rs#40). `SA_ONSTACK` restores the
+/// banner without changing which signals are handled or what is written.
 pub fn install(log_descriptor: i32) {
     LOG_DESCRIPTOR.store(log_descriptor, std::sync::atomic::Ordering::Release);
+    prewarm_backtrace();
+    install_alternate_signal_stack();
     let handler: extern "C" fn(i32) = crash_handler;
     for (signo, _) in HANDLED_SIGNALS {
         // SAFETY: `crash_handler` has the C signal-handler signature and uses
-        // only async-signal-safe calls.
+        // only async-signal-safe calls. The mask mirrors what `signal(2)`
+        // would have set, so the only change is where the handler runs.
         unsafe {
-            libc::signal(signo, handler as libc::sighandler_t);
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handler as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaddset(&mut action.sa_mask, signo);
+            action.sa_flags = libc::SA_ONSTACK | libc::SA_RESTART;
+            libc::sigaction(signo, &action, std::ptr::null_mut());
         }
     }
 }
@@ -129,6 +191,77 @@ mod tests {
             vec![
                 "SIGBUS", "SIGILL", "SIGSEGV", "SIGABRT", "SIGINT", "SIGQUIT", "SIGFPE", "SIGTERM"
             ]
+        );
+    }
+
+    /// Consume stack until the guard page faults. `black_box` and the live
+    /// padding keep the optimizer from turning this into a loop or eliding the
+    /// frames, which it otherwise does at the profile the tests build with.
+    #[allow(
+        unconditional_recursion,
+        reason = "overflowing the stack is the fixture"
+    )]
+    fn exhaust_the_stack(depth: u64) -> u64 {
+        let padding = std::hint::black_box([depth; 512]);
+        std::hint::black_box(exhaust_the_stack(depth + 1)) + padding[511]
+    }
+
+    /// A stack overflow must reach the banner like any other fatal signal.
+    ///
+    /// It is the one fault the handler cannot report from the exhausted stack
+    /// itself, so without an alternate stack the kernel cannot enter the
+    /// handler at all and the process dies having written nothing — no banner,
+    /// no backtrace, and not even the `has overflowed its stack` line the Rust
+    /// runtime would have printed had we left its handler in place. That is
+    /// exactly the "it just vanished, and the log simply stops" signature of
+    /// clonk-org/clonk-rs#40.
+    #[test]
+    fn unix_stack_overflow_still_reaches_the_crash_banner() {
+        // Re-exec this test binary as the overflowing child.
+        if std::env::var("LC_CRASH_OVERFLOW_CHILD").is_ok() {
+            install(1); // stdout doubles as the "log" descriptor for the child
+            println!("overflowed to {}", exhaust_the_stack(0));
+            unreachable!("the recursion must fault before it returns");
+        }
+
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "crash::tests::unix_stack_overflow_still_reaches_the_crash_banner",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LC_CRASH_OVERFLOW_CHILD", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run the overflowing child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The guard-page fault is SIGSEGV on the main thread; macOS reports
+        // some thread-stack guard faults as SIGBUS. Either is a handled signal
+        // and either must be named.
+        let banner = format!("{}: Caught signal ", crate::PRODUCT_NAME);
+        assert!(
+            stderr.contains(&banner),
+            "a stack overflow wrote no banner to stderr.\n\
+             status={:?}\nstdout={stdout}\nstderr={stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains(&banner),
+            "a stack overflow wrote no banner to the log descriptor: {stdout}"
+        );
+        assert!(
+            stderr.contains("SIGSEGV") || stderr.contains("SIGBUS"),
+            "the banner must name the fault: {stderr}"
+        );
+        // The backtrace is the diagnosis here: the repeated frame names the
+        // runaway recursion.
+        assert!(
+            stderr.lines().count() > 1,
+            "no backtrace frames on stderr: {stderr}"
         );
     }
 
