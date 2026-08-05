@@ -411,7 +411,18 @@ fn graphics(config: &Config) -> AdvancedConfigSection {
         i32_row(config, section, "Gamma1", 0),
         i32_row(config, section, "Gamma2", 0x80_80_80),
         i32_row(config, section, "Gamma3", 0xff_ff_ff),
-        int_row(config, section, "RenderInactive", 2, 0, U32_MAX),
+        // The editor materializes the shipped default, both bits, rather than
+        // C++'s Console alone (C4Config.cpp:481): the divergence is the default
+        // itself, so showing the oracle value here would write the frozen
+        // Alt-Tab behaviour back in as an explicit key on the next Save.
+        int_row(
+            config,
+            section,
+            "RenderInactive",
+            i128::from(crate::RENDER_INACTIVE_FULLSCREEN | crate::RENDER_INACTIVE_CONSOLE),
+            0,
+            U32_MAX,
+        ),
         bool_row(config, section, "DisableGamma", false),
         i32_row(config, section, "Monitor", 0),
         bool_row(config, section, "FireParticles", true),

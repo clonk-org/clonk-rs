@@ -1707,6 +1707,12 @@ fn handle_developer_console_window_event(
                 window.request_redraw();
             }
         }
+        WindowEvent::Occluded(occluded) => {
+            app.window_occluded = occluded;
+            if !occluded {
+                window.request_redraw();
+            }
+        }
         WindowEvent::Focused(focused) => {
             app.window_active = focused;
             if message_dialog_active {
@@ -1780,6 +1786,12 @@ pub(crate) fn handle_window_event(
             app.handle_focus_lost()
                 .context("failed to clear controls after focus loss")?;
             window.request_redraw();
+        }
+        WindowEvent::Occluded(occluded) => {
+            app.window_occluded = occluded;
+            if !occluded {
+                window.request_redraw();
+            }
         }
         WindowEvent::MouseInput { state, button, .. } => match button {
             MouseButton::Left => app

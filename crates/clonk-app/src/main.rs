@@ -1272,8 +1272,10 @@ fn run() -> Result<()> {
                 }
                 // `C4GraphicsSystem::StartDrawing` refuses to draw while the
                 // application is inactive unless `Graphics.RenderInactive` carries
-                // the active shell's bit (C4GraphicsSystem.cpp:96-106). Placed
-                // ahead of the frame-skip arm so a suppressed frame costs nothing.
+                // the active shell's bit (C4GraphicsSystem.cpp:96-106) — which the
+                // shipped default does for both shells — and never draws a window
+                // the display server has hidden. Placed ahead of the frame-skip
+                // arm so a suppressed frame costs nothing.
                 Event::WindowEvent {
                     window_id,
                     event: WindowEvent::RedrawRequested,
@@ -1283,6 +1285,7 @@ fn run() -> Result<()> {
                         app.window_active,
                         app.console_mode,
                         render_floor.has_presented(),
+                        app.window_occluded,
                     ) =>
                 {
                     // The opportunity was still consumed. Leaving the repaint floor
@@ -2487,6 +2490,7 @@ impl GameApp {
             ingame_last_left_down: None,
             ingame_ignore_left_up: false,
             window_active: true,
+            window_occluded: false,
             exit_requested: false,
             configuration_reset_requested: false,
             game_over_dialog: None,
