@@ -5171,6 +5171,21 @@ func FxFireTimer(object target, int number, int time)
                 .all(|particle| matches!(particle.layer, ParticleLayer::Global)),
             "Smoke() passes no target, so it uses the global list",
         );
+
+        // The two feeders are mutually exclusive per fire effect
+        // (engine/tick.rs's `native_fire` branch), so the overload must
+        // produce the SAME amount of smoke, not double it. Both objects are
+        // 16 wide at the default SmokeRate, so both smoke on a period of 5
+        // whatever phase their object number puts them on.
+        let (mut native, _) = burning_smoker(74, 16, 100)?;
+        for _ in 0..15 {
+            native.tick_without_snapshot()?;
+        }
+        assert_eq!(
+            smoke.len(),
+            native.particle_system().particles().len(),
+            "the inherited chain smokes exactly once per execution",
+        );
         Ok(())
     }
 
