@@ -513,6 +513,21 @@ impl NetworkControlClock {
         self.control_presend
     }
 
+    /// Lateness of the last consumed control tick, or `None` before one has
+    /// been measured. Read-only diagnostics; the horizon uses it through
+    /// `update_control_presend`.
+    pub fn control_lateness_ms(self) -> Option<i32> {
+        self.control_lateness_ms
+    }
+
+    /// Delivery-time budget the horizon is currently sized to cover. Unlike
+    /// [`avg_control_send_time`](Self::avg_control_send_time), which stays on
+    /// C++'s ping-derived mean for the script- and dialog-visible ACT field,
+    /// this is the tail-aware envelope PreSend is actually chosen from.
+    pub fn control_latency_budget(self) -> Duration {
+        self.latency.budget()
+    }
+
     pub fn target_fps(self) -> i32 {
         self.target_fps
     }
@@ -14947,6 +14962,30 @@ Message=Server says Andr\xe9\r\n\
             punctual.avg_control_send_time(),
             ping_only.avg_control_send_time(),
             "and the script-visible ACT must stay C++'s ping-derived average"
+        );
+    }
+
+    /// Both inputs to the horizon are measured every control tick and neither
+    /// could be read back out. The diagnostics overlay reports the estimate a
+    /// stalling player's PreSend is actually being sized from, which is what
+    /// separates a slow link from a slow machine from the outside — exactly
+    /// the distinction `ACT` alone cannot draw, because it is ping-derived.
+    #[test]
+    fn the_measured_horizon_inputs_are_readable_after_a_control_tick() {
+        let mut clock = NetworkControlClock::new(0, 1);
+        assert_eq!(clock.control_lateness_ms(), None);
+        assert_eq!(clock.control_latency_budget(), Duration::ZERO);
+
+        clock.observe_control_send_time_ms(40);
+        clock.observe_control_lateness_ms(300);
+        clock.calculate_performance();
+        clock.complete_control_frame();
+
+        assert_eq!(clock.control_lateness_ms(), Some(300));
+        assert_eq!(
+            clock.control_latency_budget(),
+            Duration::from_millis(300),
+            "the envelope attacks straight to the larger of ping and lateness"
         );
     }
 
