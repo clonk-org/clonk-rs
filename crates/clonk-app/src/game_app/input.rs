@@ -12249,7 +12249,7 @@ impl GameApp {
     pub(crate) fn new_network_dialog_controller(
         &self,
     ) -> clonk_frontend::startup_netdlg::NetDlgController {
-        let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
+        let masterserver_signup = self.masterserver_signup_setting();
         let metrics = self
             .assets
             .clonk_fonts

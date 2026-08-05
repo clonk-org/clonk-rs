@@ -1197,9 +1197,7 @@ impl GameApp {
         self.startup_masterserver_request_timeout_at =
             now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT);
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
-            let mut entry = dialog.masterserver_entry().clone();
-            entry.row_icon = clonk_frontend::startup_netdlg::NetDlgRowIcon::Query;
-            dialog.set_masterserver_entry(entry);
+            dialog.set_masterserver_row_icon(clonk_frontend::startup_netdlg::NetDlgRowIcon::Query);
         }
     }
 
@@ -4989,10 +4987,10 @@ impl GameApp {
             self.runtime_network_status_barrier = None;
             self.control_clients = initial_control_clients(None, None);
             self.network_client_activity.clear();
-            self.scenario_game_options = GameOptionButtons::new(
-                GameOptionContext::LocalSelector,
-                load_scenario_game_option_values(self.app_paths.as_ref()),
-            );
+            let mut values = load_scenario_game_option_values(self.app_paths.as_ref());
+            values.master_server_signup = self.masterserver_signup_setting();
+            self.scenario_game_options =
+                GameOptionButtons::new(GameOptionContext::LocalSelector, values);
             self.sync_scenario_game_option_bounds();
         }
         self.startup_scenario_back_dialog = None;

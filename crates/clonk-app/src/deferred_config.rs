@@ -1,7 +1,8 @@
 //! Runtime config changes held in memory until a clean shutdown.
 //!
 //! C++ mutates the process-wide `Config` object for ordinary runtime toggles
-//! and writes it once during `C4Application::Clear` (`C4Application.cpp:351-367`).
+//! and writes it once during `C4Application::Quit` (`C4Application.cpp:351-367`;
+//! `C4Application::Clear` at `:304-331` saves nothing).
 //! `C4StartupNetDlg::OnBtnInternet`/`OnBtnRecord` are the clearest examples:
 //! they flip `Config.Network.MasterServerSignUp` and `Config.General.Record`
 //! and never touch the file (`C4StartupNetDlg.cpp:840-850`).
@@ -32,6 +33,14 @@ impl DeferredConfig {
     ) {
         self.pending
             .insert((section.into(), key.into()), value.into());
+    }
+
+    /// Drops a pending change because a surface that saves immediately — the
+    /// ones C++ also writes straight to the file — has just superseded it.
+    /// Without this the stale in-memory value would keep outranking the newer
+    /// file value for the rest of the session.
+    pub(crate) fn clear(&mut self, section: &str, key: &str) {
+        self.pending.remove(&(section.to_owned(), key.to_owned()));
     }
 
     pub(crate) fn is_empty(&self) -> bool {

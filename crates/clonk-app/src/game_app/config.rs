@@ -1340,6 +1340,9 @@ impl GameApp {
     }
 
     pub(crate) fn synchronize_advanced_options_runtime(&mut self) {
+        // The advanced editor writes `Network.MasterServerSignUp` straight to
+        // the file, so an older netdlg toggle must stop shadowing it.
+        self.deferred_config.clear("Network", "MasterServerSignUp");
         let paths = self.app_paths.as_ref();
         let is_fullscreen = self.display_flags.is_fullscreen;
         self.display_flags = load_display_flags(paths);
@@ -2027,6 +2030,9 @@ impl GameApp {
     }
 
     pub(crate) fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
+        // Saving now makes the file authoritative again, so an older deferred
+        // change to the same key must not keep shadowing it.
+        self.deferred_config.clear(section, key);
         let Some(paths) = self.app_paths.as_ref() else {
             return;
         };

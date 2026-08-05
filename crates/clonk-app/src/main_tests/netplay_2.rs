@@ -2657,6 +2657,87 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
 }
 
 #[test]
+fn an_unflushed_internet_toggle_outranks_the_config_file() {
+    // `OnBtnInternet` flips `Config.Network.MasterServerSignUp` in memory and
+    // calls UpdateMasterserver; the file is written only by
+    // `C4Application::Clear`. `OnShown` -> `UpdateMasterserver` and the
+    // btnInternet icon both read that same in-memory value, so the toggle
+    // survives every dialog switch (pinned oracle 7d43b47b
+    // src/C4StartupNetDlg.cpp:710,771-777,838-845,851-866).
+    let _lock = env_lock().lock();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repository root");
+    let user_data = tempdir().expect("isolated internet-toggle config");
+    let _guard = EnvGuard::set(&[
+        ("LC_INSTALL_ROOT", Some(repository)),
+        ("LC_USER_DATA_DIR", Some(user_data.path())),
+    ]);
+    let paths = AppPaths::discover().expect("discover app paths");
+    if let Some(parent) = paths.config_file().parent() {
+        fs::create_dir_all(parent).expect("create native config directory");
+    }
+    fs::write(paths.config_file(), b"[Network]\r\nMasterServerSignUp=1\r\n")
+        .expect("seed an enabled masterserver signup");
+
+    let mut app = new_classic_menu_app(800, 600);
+    app.app_paths = Some(paths.clone());
+    app.open_network_game_dialog();
+    assert!(app
+        .startup_network_dialog
+        .as_ref()
+        .expect("network dialog")
+        .config()
+        .masterserver_signup);
+
+    // The controller flips its own flag before emitting the action.
+    app.startup_network_dialog
+        .as_mut()
+        .expect("network dialog")
+        .sync_masterserver_signup_from_config(false);
+    app.process_network_dialog_actions(vec![
+        clonk_frontend::startup_netdlg::NetDlgAction::MasterserverSignupChanged(false),
+    ])
+    .expect("turn the Internet row off");
+    assert_eq!(
+        app.deferred_config.get("Network", "MasterServerSignUp"),
+        Some("0")
+    );
+    assert!(
+        load_network_startup_settings(Some(&paths)).0,
+        "the toggle is deliberately not written through, so the file still reads enabled"
+    );
+
+    app.refresh_retained_network_dialog_internet();
+    assert!(
+        !app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .config()
+            .masterserver_signup,
+        "re-showing the retained dialog must not resurrect the on-disk value"
+    );
+
+    app.open_network_game_dialog();
+    assert!(
+        !app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .config()
+            .masterserver_signup,
+        "rebuilding the dialog must not resurrect the on-disk value either"
+    );
+
+    // The scenario selector's Internet checkbox saves immediately, which is one
+    // of the surfaces C++ also writes straight through, so it supersedes the
+    // netdlg's unflushed change instead of being shadowed by it.
+    app.persist_game_option_value("Network", "MasterServerSignUp", "1".to_string());
+    assert_eq!(app.deferred_config.get("Network", "MasterServerSignUp"), None);
+    assert!(app.masterserver_signup_setting());
+}
+
+#[test]
 fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
     use clonk_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgTextLine};
 
@@ -2719,6 +2800,13 @@ fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
         requerying.title, replied.title,
         "the re-query leaves sInfoText[0] alone"
     );
+    // `QueryReferences` re-arms iRequestTimeout and the branch clears iTimeout
+    // (src/C4StartupNetDlg.cpp:182,203-204).
+    assert_eq!(
+        app.startup_masterserver_request_timeout_at,
+        Some(requery_at + clonk_network::REFERENCE_QUERY_TIMEOUT)
+    );
+    assert!(app.startup_masterserver_next_query_at.is_none());
 }
 
 #[test]
