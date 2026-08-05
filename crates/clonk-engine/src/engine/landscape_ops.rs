@@ -1117,7 +1117,7 @@ impl Engine {
                         .push(definition_id.as_deref(), dxdir, dydir);
                 }
                 ParticleCommand::ObjectFire(emission) => {
-                    // "special effects only if loaded" (C4Effect.cpp:678):
+                    // "special effects only if loaded" (C4Effect.cpp:660-661):
                     // no fire defs, no draws off the SafeRandom stream.
                     if self.particle_system.is_fire_particle_loaded() {
                         self.particle_system.create_object_fire(&emission);

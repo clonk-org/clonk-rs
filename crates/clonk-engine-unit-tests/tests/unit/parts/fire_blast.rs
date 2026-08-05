@@ -4935,7 +4935,7 @@ func FxFireTimer(object target, int number, int time)
     #[test]
     fn burning_object_emits_its_fire_particles_on_every_fourth_execution(
     ) -> Result<(), EngineError> {
-        // FnFxFireTimer's emitter (C4Effect.cpp:686-786) runs after the burn
+        // FnFxFireTimer's emitter (C4Effect.cpp:660-769) runs after the burn
         // arms, gated on `iTime % 4` outside C4Fx_FireMode_Object. A burning
         // 16x16 structure therefore stays particle-free for three executions
         // and then spawns its double set — 2 `Fire`, 6 additive `Fire2`.
@@ -5028,7 +5028,7 @@ func FxFireTimer(object target, int number, int time)
 
     #[test]
     fn object_mode_fire_emits_particles_on_every_execution() -> Result<(), EngineError> {
-        // C4Effect.cpp:690-691 exempts C4Fx_FireMode_Object from the
+        // C4Effect.cpp:673-674 exempts C4Fx_FireMode_Object from the
         // `iTime % 4` gate "except for objects (e.g.: Projectiles)", so a
         // burning plain object trails fire on every single execution.
         let mut engine = engine_with_fire_particle_defs(51);
@@ -5058,7 +5058,7 @@ func FxFireTimer(object target, int number, int time)
 
     #[test]
     fn contained_burning_object_emits_no_fire_particles() -> Result<(), EngineError> {
-        // "no gfx for contained" (C4Effect.cpp:693-694): the burn arms still
+        // "no gfx for contained" (C4Effect.cpp:676-677): the burn arms still
         // run inside a container, only the particles are suppressed.
         let mut engine = engine_with_fire_particle_defs(52);
         let mut torch = Definition::from_script("TRCH", "Torch", "")?;
@@ -5092,7 +5092,7 @@ func FxFireTimer(object target, int number, int time)
     #[test]
     fn burning_object_emits_nothing_when_fire_particles_are_switched_off(
     ) -> Result<(), EngineError> {
-        // "special effects only if loaded" (C4Effect.cpp:677-678):
+        // "special effects only if loaded" (C4Effect.cpp:660-661):
         // SetDefParticles leaves pFire1/pFire2 null when
         // Config.Graphics.FireParticles is off (C4Particles.cpp:483-489), so
         // the emitter never runs — while the burn itself is unaffected.
@@ -5122,7 +5122,7 @@ func FxFireTimer(object target, int number, int time)
     #[test]
     fn burning_object_reads_its_fire_mode_from_the_effects_first_variable(
     ) -> Result<(), EngineError> {
-        // FxFireVarMode is EffectVars[0] (C4Effect.cpp:687-688). Rewriting it
+        // FxFireVarMode is EffectVars[0] (C4Effect.cpp:670-671). Rewriting it
         // to C4Fx_FireMode_Object lifts the `iTime % 4` gate for the next
         // execution, which is the cheapest observable proof the emitter reads
         // that variable rather than re-deriving the mode.
@@ -5196,6 +5196,100 @@ func FxFireTimer(object target, int number, int time)
             vec!["Fire", "Fire", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2", "Fire2"],
             "the inherited chain reaches the same double set",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_fire_particle_gate_counts_effect_time_not_the_game_frame(
+    ) -> Result<(), EngineError> {
+        // `iTime % 4` (C4Effect.cpp:673-674) is the effect's own clock, which
+        // C4Effect::Execute increments per effect (C4Effect.cpp:340-345) — not
+        // the global frame the Tick5/Tick10 burn arms read. Igniting off-phase
+        // separates the two: the effect's fourth execution lands on a game
+        // frame that is not a multiple of four, and a frame-driven gate would
+        // instead fire one execution early, on frame 4.
+        let mut engine = engine_with_fire_particle_defs(57);
+        let mut barn = Definition::from_script("BRN2", "Barn", "")?;
+        barn.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        barn.set_fire_properties(0, true, true);
+        engine.register_definition(barn)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("BRN2").with_category(CATEGORY_STRUCTURE))?;
+
+        // Burn the first two frames so effect time trails the frame by two.
+        for _ in 0..2 {
+            engine.tick_without_snapshot()?;
+        }
+        let index = engine.find_object_index(object).expect("barn exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+
+        for execution in 1..4 {
+            engine.tick_without_snapshot()?;
+            assert!(
+                engine.particle_system().particles().is_empty(),
+                "execution {execution} is inside the gate even though the game \
+                 frame passed a multiple of four",
+            );
+        }
+        engine.tick_without_snapshot()?;
+        let index = engine.find_object_index(object).expect("barn survives");
+        assert_eq!(
+            engine.objects[index].state.effects[0].timer, 4,
+            "the effect's own clock reached four on its fourth execution",
+        );
+        assert!(!engine.particle_system().particles().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn removing_a_burning_object_releases_its_attached_fire_particles(
+    ) -> Result<(), EngineError> {
+        // C4Object::Clear drops both attached lists (C4Object.cpp:272-273).
+        // Nothing iterates a removed object's particle layer, so without that
+        // release the particles leak and their def's Count climbs until
+        // MaxCount refuses every later one (C4Particles.cpp:389-391) — which
+        // would silently switch fire off for the rest of the round.
+        let mut engine = engine_with_fire_particle_defs(56);
+        let mut hut = Definition::from_script("HUT2", "Hut", "")?;
+        hut.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        hut.set_fire_properties(0, true, true);
+        engine.register_definition(hut)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("HUT2").with_category(CATEGORY_STRUCTURE))?;
+        let index = engine.find_object_index(object).expect("hut exists");
+        assert!(engine.incinerate_object(index, OWNER_NONE, false, None)?);
+        for _ in 0..4 {
+            engine.tick_without_snapshot()?;
+        }
+        assert!(!engine.particle_system().particles().is_empty());
+        let live_before: i32 = ["Fire", "Fire2"]
+            .iter()
+            .filter_map(|name| engine.particle_system().get_def(name))
+            .map(|definition| definition.count)
+            .sum();
+        assert!(live_before > 0, "the defs are counting their live particles");
+
+        // AssignRemoval; the tick's retain sweep is what runs C4Object::Clear.
+        let index = engine.find_object_index(object).expect("hut survives");
+        engine.objects[index].destroyed = true;
+        engine.tick_without_snapshot()?;
+        assert!(engine.find_object_index(object).is_none(), "the hut is gone");
+
+        assert!(
+            engine.particle_system().particles().is_empty(),
+            "the removed object's attached particles are released",
+        );
+        for name in ["Fire", "Fire2"] {
+            assert_eq!(
+                engine
+                    .particle_system()
+                    .get_def(name)
+                    .expect("def registered")
+                    .count,
+                0,
+                "{name} gets its MaxCount budget back",
+            );
+        }
         Ok(())
     }
 

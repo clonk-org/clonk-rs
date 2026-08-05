@@ -9,7 +9,7 @@ fn catalog_has(engine: &Engine, name: &str) -> bool {
 }
 
 /// The engine's own fire, on shipped content: `FnFxFireTimer`'s emitter
-/// (oracle-src-pinned src/C4Effect.cpp:696-786) spawns a double set of
+/// (oracle-src-pinned src/C4Effect.cpp:660-769) spawns a double set of
 /// particles per execution — the first quarter the normal `Fire` def and the
 /// remaining three quarters the additive `Fire2` — dealt to the burning
 /// object's own back/front lists.
@@ -41,7 +41,7 @@ fn burning_clonk_emits_shipped_fire_and_fire2_particles() {
 
     // The crew joins above the landscape and falls in. Setting it alight
     // before it lands would put every particle at a negative world y, which
-    // fxStdExec culls against `YOff` (src/C4Particles.cpp:706) — in C++ too.
+    // fxStdExec culls against `YOff` (src/C4Particles.cpp:695) — in C++ too.
     for _ in 0..40 {
         engine.tick_without_snapshot().expect("the scenario settles");
     }
@@ -56,7 +56,7 @@ fn burning_clonk_emits_shipped_fire_and_fire2_particles() {
     assert!(engine.particle_system().particles().is_empty());
 
     // The emitter is gated on `iTime % 4` outside C4Fx_FireMode_Object
-    // (src/C4Effect.cpp:690-691); a clonk is C4D_Living, so it burns in
+    // (src/C4Effect.cpp:673-674); a clonk is C4D_Living, so it burns in
     // C4Fx_FireMode_LivingVeg and waits for the fourth execution.
     for _ in 0..4 {
         engine.tick_without_snapshot().expect("the fire executes");

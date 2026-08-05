@@ -12115,7 +12115,7 @@ mod tests {
     #[test]
     fn shipped_fire2_particles_draw_with_the_additive_blit() {
         // The engine's burning-object emitter makes three quarters of every
-        // double set the `Fire2` def (src/C4Effect.cpp:749-759), and that def
+        // double set the `Fire2` def (src/C4Effect.cpp:732-742), and that def
         // is additive by content. `C4GFXBLIT_ADDITIVE` maps to
         // `glBlendFunc(GL_SRC_ALPHA, GL_ONE)` (src/StdGL.cpp:908), so the
         // flame adds to what is behind it instead of replacing it — which is

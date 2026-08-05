@@ -276,7 +276,7 @@ impl Engine {
     }
 
     /// `C4Object::ExecFire` (C4Object.cpp:766-810), run by the fire
-    /// effect's timer (FnFxFireTimer, C4Effect.cpp:660-788), followed by
+    /// effect's timer (FnFxFireTimer, C4Effect.cpp:643-771), followed by
     /// that function's particle emitter. Returns the deferred Fx*Stop
     /// events of effects an extinguish killed. Still open: SmokeRate smoke
     /// (visual), and death/removal callbacks from the energy and damage
@@ -397,7 +397,7 @@ impl Engine {
             }
         }
         // FnFxFireTimer returns C4Fx_Execute_Kill once the flag is gone
-        // (C4Effect.cpp:680-683) — belt and braces when something cleared
+        // (C4Effect.cpp:663-666) — belt and braces when something cleared
         // OnFire without killing the effect. C++ checks it before the
         // emitter, so a fire that just went out draws no particles.
         if !self.objects[idx].state.on_fire {
@@ -427,16 +427,16 @@ impl Engine {
             .unwrap_or(0)
     }
 
-    /// The particle half of `FnFxFireTimer` (C4Effect.cpp:677-786): the
+    /// The particle half of `FnFxFireTimer` (C4Effect.cpp:660-769): the
     /// three gates, then a snapshot of the burning object handed to the
     /// particle system, which owns the unsynchronized `SafeRandom` stream
     /// the emitter draws from.
     fn exec_object_fire_particles(&mut self, idx: usize, fire_number: i32, effect_time: i32) {
-        // special effects only if loaded (C4Effect.cpp:677-678)
+        // special effects only if loaded (C4Effect.cpp:660-661)
         if !self.particle_system.is_fire_particle_loaded() {
             return;
         }
-        // get fire mode (C4Effect.cpp:687-688); an unset EffectVar reads as
+        // get fire mode (C4Effect.cpp:670-671); an unset EffectVar reads as
         // zero, which is no mode at all and takes the normal-fire arms.
         let fire_mode =
             self.object_fire_effect_var(idx, fire_number, |effect| match effect.vars.first() {
@@ -446,11 +446,11 @@ impl Engine {
                 _ => 0,
             });
         // special effects only each four frames, except for objects
-        // (C4Effect.cpp:690-691) — the effect's own clock, not the frame.
+        // (C4Effect.cpp:673-674) — the effect's own clock, not the frame.
         if effect_time % 4 != 0 && fire_mode != C4FX_FIRE_MODE_OBJECT {
             return;
         }
-        // no gfx for contained (C4Effect.cpp:693-694)
+        // no gfx for contained (C4Effect.cpp:676-677)
         if self.objects[idx].state.container.is_some() {
             return;
         }
