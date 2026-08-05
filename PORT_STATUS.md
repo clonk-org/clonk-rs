@@ -2579,6 +2579,36 @@ an ordered-map model gap.
   and 8 hex digits, none overflowing the lexer's `i64`/`u64` scan. Not covered
   by `parity verify`, whose golden compiles no such script.
 
+- Open: **Nothing automated exercises a real window, event loop or GPU surface,
+  so neither NVIDIA/Wayland segfault fix has a regression gate or a confirmed
+  repro.** `--integration-test`, `--dump-frame` and `run_console_event_loop` all
+  drive `GameApp` directly and render into the CPU surface; no test in the
+  workspace constructs a `winit::EventLoop`, a `Window` or a `Pixels`. Both
+  fixes are argued from source rather than observed: one retained
+  `wgpu::Instance` per backend set, so closing a window never runs
+  `vkDestroyInstance` while another holds a swapchain (clonk-org/clonk-rs#53,
+  landed in clonk-org/clonk-rs#171), and `DeveloperWindows::release_all` on
+  `Event::LoopExiting`, so no surface is destroyed after `run_app` has consumed
+  the loop that owned its display (clonk-org/clonk-rs#54). Their unit tests pin
+  the invariants — one instance per backend set, viewport windows destroyed
+  before the shell — not the crash, and nothing pins that the runner still
+  *calls* the teardown, because an `ActiveEventLoop` cannot be constructed in a
+  test. Both were developed on macOS/Metal, where neither crash reproduces, so
+  only a headed Linux/Wayland/NVIDIA run on the reporting hardware can retire
+  either issue.
+
+  Note for anyone tempted to simplify the second one by dropping the whole
+  event-handler closure instead of just the window registry: on macOS
+  `Event::LoopExiting` is dispatched from inside `applicationWillTerminate:`
+  (`winit-0.30.13/src/platform_impl/macos/app_state.rs:166-172`), an AppKit
+  callback that never returns to `run_app`. That would newly run
+  `NetworkManager::drop`'s unbounded `blocking_send` + `join`
+  (`crates/clonk-app-netplay/src/network.rs:4856-4865`) and the lobby preload
+  worker's cancellation-free join inside the OS's own quit, where a slow worker
+  hangs termination and a panicking drop unwinds across `extern "C"` and aborts.
+  `clonk-launcher-shell` still has the untouched ordering
+  (clonk-org/clonk-rs#174).
+
 ## Deliberate divergences from the oracle
 
 - **A one-column script menu may claim the horizontal controls as a step**
