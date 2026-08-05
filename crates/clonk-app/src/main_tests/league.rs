@@ -880,7 +880,11 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
         .as_ref()
         .unwrap()
         .masterserver_entry();
-    assert_eq!(master.details, "Querying game infos...");
+    // SetError flushed the error to the label (C4StartupNetDlg.cpp:506-518),
+    // and the re-query branch clears fError and re-animates the icon without
+    // calling UpdateText, so the error text stays on screen until the reply
+    // overwrites it (C4StartupNetDlg.cpp:191-207,267).
+    assert_eq!(master.details, "masterserver timed out");
     assert_eq!(master.row_icon, NetDlgRowIcon::Query);
     assert!(app.startup_masterserver_next_query_at.is_none());
 

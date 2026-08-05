@@ -2187,6 +2187,14 @@ impl NetDlgController {
         self.clamp_list_scroll();
     }
 
+    /// The periodic masterserver re-query changes the icon and nothing else, so
+    /// this deliberately skips `clamp_list_scroll`: the row keeps its line count
+    /// and C++ reaches no `UpdateEntrySize` on that path
+    /// (C4StartupNetDlg.cpp:191-207).
+    pub fn set_masterserver_row_icon(&mut self, row_icon: NetDlgRowIcon) {
+        self.masterserver.row_icon = row_icon;
+    }
+
     pub fn masterserver_entry(&self) -> &NetDlgMasterserverEntry {
         &self.masterserver
     }

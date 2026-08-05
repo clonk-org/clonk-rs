@@ -3527,6 +3527,18 @@ impl GameApp {
         editor.is_file().then_some(editor)
     }
 
+    /// This session's `Network.MasterServerSignUp`. `OnBtnInternet` flips the
+    /// process-wide `Config` and leaves the file to `C4Application::Clear`, and
+    /// every reader — `UpdateMasterserver`, `OnShown`, the btnInternet icon —
+    /// reads that in-memory value, so an unflushed toggle outranks the file
+    /// (src/C4StartupNetDlg.cpp:710,771-777,838-845,851-866).
+    pub(crate) fn masterserver_signup_setting(&self) -> bool {
+        self.deferred_config
+            .get("Network", "MasterServerSignUp")
+            .and_then(parse_native_config_bool)
+            .unwrap_or_else(|| load_network_startup_settings(self.app_paths.as_ref()).0)
+    }
+
     /// Spawns the worker that stands in for `C4StartupNetDlg`'s DiscoverClient
     /// and pMasterserverClient and issues their first query
     /// (src/C4StartupNetDlg.cpp:737-738,864-865).
@@ -3601,7 +3613,8 @@ impl GameApp {
         self.netdlg_edit_consumed_keys.clear();
         self.pending_network_join = None;
         let mut dialog = self.new_network_dialog_controller();
-        let search_config = load_network_search_settings(self.app_paths.as_ref());
+        let mut search_config = load_network_search_settings(self.app_paths.as_ref());
+        search_config.internet_enabled = self.masterserver_signup_setting();
         let masterserver_enabled = search_config.internet_enabled;
         dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
             &self.startup_tooltip_resources,
@@ -3630,7 +3643,7 @@ impl GameApp {
         // OnShown runs UpdateMasterserver before the first OnSec1Timer, so a
         // re-shown dialog always searches (src/C4StartupNetDlg.cpp:771-777).
         self.restore_startup_game_search();
-        let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
+        let masterserver_signup = self.masterserver_signup_setting();
         let recreate_masterserver = self.startup_network_dialog.as_mut().is_some_and(|dialog| {
             let recreate = !dialog.config().masterserver_signup && masterserver_signup;
             dialog.sync_masterserver_signup_from_config(masterserver_signup);

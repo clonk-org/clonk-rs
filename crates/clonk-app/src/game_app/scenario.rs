@@ -389,7 +389,10 @@ impl GameApp {
             ScenarioSelectorMode::Local => StartupDialog::MainMenu,
             ScenarioSelectorMode::NetworkHost => StartupDialog::NetworkGame,
         });
-        let values = load_scenario_game_option_values(self.app_paths.as_ref());
+        let mut values = load_scenario_game_option_values(self.app_paths.as_ref());
+        // The Internet checkbox is the same in-memory `Config` field the netdlg
+        // button writes (src/C4StartupNetDlg.cpp:838-845).
+        values.master_server_signup = self.masterserver_signup_setting();
         self.startup_view_flags.fair_crew = values.fair_crew;
         self.startup_view_flags.record = values.record;
         self.recording_enabled = values.record && self.recordings_dir.is_some();
