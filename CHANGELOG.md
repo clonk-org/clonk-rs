@@ -4,6 +4,18 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-08-05
+
+### Bug fixes
+
+- Compose the landscape with every solid mask lifted (#166)
+- Yield a simulation burst when the next graphics opportunity is due (#163)
+- Keep solid-mask bytes out of the render-dirty lineage (#161)
+
+### Testing
+
+- Fail loudly when content changes a function the menu overrides replace (#160)
+
 ## [0.7.0] - 2026-08-04
 
 ### Bug fixes
