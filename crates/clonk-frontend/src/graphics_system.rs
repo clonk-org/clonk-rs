@@ -4748,6 +4748,20 @@ impl GraphicsSystem {
                     .as_ref()
                     .map(|cache| (cache.gpu_texture_id(), plan));
             }
+            // `C4Landscape::DoRelights` takes every C4SolidMask out with
+            // RemoveTemporary before it recomputes Surface32 and puts them back
+            // afterwards (C4Landscape.cpp:2497,2501), so a mask byte is never
+            // composed — not as its own material and not as the placement its
+            // neighbours shade against. Read the plane the same way.
+            let masks_put = grid.has_mask_background();
+            let render_byte = move |slot: usize| {
+                let byte = bytes[slot];
+                if masks_put {
+                    grid.render_byte_in_slot(slot, byte)
+                } else {
+                    byte
+                }
+            };
             // C4Landscape::GetPix/GetPlacement are inline array lookups in
             // the native relight loop. Keep the same border rules local to
             // this hot composition pass instead of crossing the crate
@@ -4767,7 +4781,7 @@ impl GraphicsSystem {
                 if y as u32 >= height {
                     return border(bottom_open);
                 }
-                Some(bytes[y as usize * width as usize + x as usize])
+                Some(render_byte(y as usize * width as usize + x as usize))
             };
             let placement_at = |x: i32, y: i32| {
                 byte_with_border(x, y).map_or(0, |byte| placements[usize::from(byte & 0x7f)])
@@ -4809,7 +4823,7 @@ impl GraphicsSystem {
                         }
                         let (output, liquid) = pixel.split_at_mut(4);
                         output.fill(0);
-                        let byte = bytes[y as usize * width as usize + x as usize];
+                        let byte = render_byte(y as usize * width as usize + x as usize);
                         liquid[0] =
                             u8::from(liquid_slots[usize::from(byte & 0x7f)]).saturating_mul(255);
                         if has_surface32_pixels {

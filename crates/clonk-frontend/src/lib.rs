@@ -3823,6 +3823,53 @@ mod tests {
     }
 
     #[test]
+    fn a_put_solid_mask_composes_as_the_material_it_covers() {
+        // C4Landscape::DoRelights removes every C4SolidMask before recomputing
+        // Surface32 and puts them back afterwards (C4Landscape.cpp:2497,2501),
+        // so the drawn landscape never contains a mask byte - neither as its
+        // own material nor in the placement its neighbours shade against.
+        let mut graphics = test_graphics(24, 24, 24, "Masked landscape");
+        graphics.surface_mut().fill(Color::transparent());
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            ImageData::new(1, 1, vec![255, 255, 255, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([17, 33, 65, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 50),
+        )])));
+        let mut material_names = vec![None; 128];
+        material_names[14] = Some("Earth".to_string());
+        // Vehicle carries no render info, so a composed mask byte shows up as
+        // an untouched pixel rather than as earth.
+        material_names[2] = Some("Vehicle".to_string());
+        let mut landscape =
+            Landscape::with_default_material(24, vec![24; 24], None).expect("test landscape");
+        landscape.set_world_height(24);
+        let mut texture_names = vec![None; 128];
+        texture_names[14] = Some("Earth".to_string());
+        landscape.set_pixel_grid(PixelGrid::new(
+            24,
+            24,
+            vec![14; 24 * 24],
+            vec![0; 128],
+            material_names,
+            texture_names,
+        ));
+
+        landscape.grid_write_mask_byte(10, 10, 2);
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let masked = graphics.surface().get_pixel(10, 10);
+        assert_eq!(
+            masked,
+            graphics.surface().get_pixel(14, 10),
+            "the masked pixel draws exactly like the earth beside it"
+        );
+        assert_ne!(masked, Some(Color::transparent()), "and it is drawn at all");
+    }
+
+    #[test]
     fn full_landscape_capture_uses_ownerless_world_pass_and_restores_viewport() {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 60);
