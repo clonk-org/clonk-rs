@@ -424,37 +424,36 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- Open: **Two process-exit routes still skip the league `Action=End`.**
+- Open: **macOS `-[NSApplication terminate:]` skips the league `Action=End`.**
   `C4Application::Quit` reaches `C4Game::Clear` → `Network.Clear()` →
   `LeagueEnd(); DeinitLeague();` (`src/C4Game.cpp:581`;
   `src/C4Network2.cpp:746-763`) for *every* way the loop unwinds, so a native
-  host always de-registers. In the port the `End` is sent only by
-  `NetworkManager::drop`, and `GameApp::request_exit` now drops the session on
-  the way out, which covers every flagged quit — the main-menu Quit item, the
-  window close button, the developer console's `/quit`, the editor launch, the
-  update handoff and the configuration reset. Two routes remain:
+  host always de-registers.
 
-  - **macOS `terminate:`** — Cmd+Q, the Dock's Quit item and log-out all send
-    `-[NSApplication terminate:]`, which never delivers `CloseRequested`:
-    winit 0.30.13 implements only `applicationWillTerminate:`
-    (`winit-0.30.13/src/platform_impl/macos/app_state.rs:69-72`), never
-    `applicationShouldTerminate:`, so the app first hears about the quit from
-    inside AppKit's own terminate, where joining worker threads is exactly what
-    `Event::LoopExiting` is restricted from doing. SDL cancels that terminate
-    and re-posts it as `SDL_QUIT` (`src/StdAppUnix.cpp:809-815`), which is why
-    C++ is unaffected; matching it needs the port to own an
-    `applicationShouldTerminate:` of its own. Note the Cmd+Q in question is
-    winit's own default menu item
-    (`winit-0.30.13/src/platform_impl/macos/menu.rs:66-73`).
-  - **Fatal-error aborts** — the event loop's error arms call
-    `event_target.exit()` directly rather than `request_exit`
-    (`crates/clonk-app/src/main.rs`, the `tracing::error!` + `exit()` pairs).
-    Unlike `terminate:`, these unwind on a normal stack, so they are coverable;
-    they are simply not covered yet, and a single teardown at loop unwind would
-    close them and `terminate:` together if the macOS hook above lands first.
+  The port sends the `End` from `NetworkManager::drop`, and reaches it two ways:
+  `GameApp::request_exit` drops the session at the quit latch, and — for
+  anything that never touches that latch, including the event loop's
+  `event_target.exit()` error arms — the handler closure owns the `GameApp`
+  (`crates/clonk-app/src/main.rs`, the `move` closure the initializer returns)
+  and is dropped when `run_app` returns. So Windows, X11 and Wayland always
+  de-register, and so does macOS whenever `exit()` was the trigger.
 
-  A host taking either route leaves its game registered until the server times
-  it out. The consequence is bounded: since
+  The exception is macOS `terminate:` — Cmd+Q, the Dock's Quit item and log-out.
+  It never delivers `CloseRequested`, and `run_app` never returns, so neither
+  route runs: winit 0.30.13 implements only `applicationWillTerminate:`
+  (`winit-0.30.13/src/platform_impl/macos/app_state.rs:69-72`), never
+  `applicationShouldTerminate:`, so the app first hears about the quit from
+  inside AppKit's own terminate — where joining worker threads is exactly what
+  `Event::LoopExiting` is restricted from doing. SDL cancels that terminate and
+  re-posts it as `SDL_QUIT` (`src/StdAppUnix.cpp:809-815`), which is why C++ is
+  unaffected; matching it needs the port to own an `applicationShouldTerminate:`
+  that returns `NSTerminateCancel` and routes into `request_exit`, the same
+  shape `CStdApp::Quit`'s `fQuitMsgReceived` latch has
+  (`src/StdAppUnix.cpp:256-259`). Note the Cmd+Q in question is winit's own
+  default menu item (`winit-0.30.13/src/platform_impl/macos/menu.rs:66-73`).
+
+  A macOS host quitting that way leaves its game registered until the server
+  times it out. The consequence is bounded: since
   `fix: keep hosting when the league server refuses the registration`, a refused
   `Start` on the next host is a dismissible dialog, not a failed host. No gate
   covers this — neither `parity verify` nor the snapshots reach process
