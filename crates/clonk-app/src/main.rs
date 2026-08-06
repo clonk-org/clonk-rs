@@ -448,7 +448,7 @@ fn main() -> Result<()> {
             let mut sink = native_startup_dialog_sink();
             clonk_platform::startup_dialog::report_startup_failure(
                 &mut sink,
-                false,
+                clonk_platform::startup_dialog::headless_run_was_requested(),
                 &format!("{error:#}"),
             );
         }
@@ -561,6 +561,13 @@ fn run() -> Result<()> {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
+    // The startup-failure reporter in `main` is installed before this point
+    // and has no access to the parsed command line. A dedicated server must
+    // never wait on a modal acknowledgement, so latch the choice as soon as it
+    // is known.
+    if cli.headless {
+        clonk_platform::startup_dialog::note_headless_run();
+    }
     let update_notice_detail = update_download::take_update_notice_detail();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
