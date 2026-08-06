@@ -4,6 +4,25 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-06
+
+### Bug fixes
+
+- Resolve a savegame Origin against the data root that spells it (#195)
+- End the league registration when the application quits (#191)
+- End the network session when a round is torn down (#190)
+- Stop the config file overriding the netdlg Internet toggle and masterserver row (#189)
+- Release the launcher window before the event loop returns (#185)
+- Keep the network dialog searching after an abandoned join (#182)
+
+### Documentation
+
+- Correct which exits actually skip the league End (#192)
+
+### Testing
+
+- Stop packed-group round-trip checks depending on the wall clock (#188)
+
 ## [0.8.1] - 2026-08-05
 
 ### Bug fixes
