@@ -164,6 +164,48 @@ impl DeveloperTools {
         self.cursor
     }
 
+    /// `C4EditCursor::EditingOK`'s refusal arm (`C4EditCursor.cpp:677`).
+    ///
+    /// It is not a predicate: refusing a stroke drops `Hold`, so `Move`'s
+    /// `if (Hold) ApplyToolBrush()` stays quiet for the rest of the drag
+    /// rather than asking again on every pointer message. The anchor survives,
+    /// because C++ leaves `DragLine`/`DragFrame` alone — a later release
+    /// re-asks and is refused the same way.
+    pub fn clear_hold(&mut self) {
+        self.hold = false;
+    }
+
+    /// The dialog writes `C4EditCursor::ApplyToolPicker` makes with what it
+    /// sampled (`C4EditCursor.cpp:698-731`).
+    ///
+    /// Each mode writes a different amount, and the difference is the whole
+    /// point: Static resolves a full material/texture pair plus the IFT bit
+    /// (`:706-714`), Exact has no texture to offer so it writes material and
+    /// IFT only (`:722-726`), and an unresolved pixel selects the sky
+    /// pseudo-material and leaves **both** texture and IFT exactly as they
+    /// were (`:717`, `:728`) — C++ reaches those `SelectTexture`/`SetIFT`
+    /// calls only inside the resolved arms.
+    pub fn apply_pick(&mut self, pick: &crate::developer_landscape::ToolPick) {
+        use crate::developer_landscape::{ToolPick, TOOL_SKY_MATERIAL};
+
+        match pick {
+            ToolPick::MaterialTexture {
+                material,
+                texture,
+                ift,
+            } => {
+                self.set_material(material.clone());
+                self.set_texture(texture.clone());
+                self.set_ift(*ift);
+            }
+            ToolPick::Material { material, ift } => {
+                self.set_material(material.clone());
+                self.set_ift(*ift);
+            }
+            ToolPick::Sky => self.set_material(TOOL_SKY_MATERIAL),
+        }
+    }
+
     pub fn active(&self) -> bool {
         self.active
     }
@@ -535,6 +577,51 @@ mod tests {
             None,
             "releasing stops the repeat"
         );
+
+        // C4EditCursor.cpp:698-731 — what the picker writes back differs per
+        // landscape mode, and a sky pick writes the least of the three.
+        {
+            use crate::developer_landscape::ToolPick;
+
+            let mut picked = DeveloperTools::default();
+            picked.apply_pick(&ToolPick::MaterialTexture {
+                material: "Granite".to_owned(),
+                texture: "Smooth".to_owned(),
+                ift: false,
+            });
+            assert_eq!(
+                (picked.material(), picked.texture(), picked.ift()),
+                ("Granite", "Smooth", false),
+                "Static resolves the whole pair plus the IFT bit"
+            );
+
+            // Exact has no texture to offer, so it leaves the one it had.
+            picked.apply_pick(&ToolPick::Material {
+                material: "Water".to_owned(),
+                ift: true,
+            });
+            assert_eq!(
+                (picked.material(), picked.texture(), picked.ift()),
+                ("Water", "Smooth", true)
+            );
+
+            // Sky writes the pseudo-material and *nothing else*: C++ reaches
+            // SelectTexture/SetIFT only inside the resolved arms.
+            picked.apply_pick(&ToolPick::Sky);
+            assert_eq!(
+                (picked.material(), picked.texture(), picked.ift()),
+                ("Sky", "Smooth", true)
+            );
+        }
+
+        // `EditingOK`'s refusal drops Hold so the drag stops dead (`:677`),
+        // while the anchor survives for a release that is refused in turn.
+        tools.set_tool(Tool::Brush, false);
+        tools.press(3, 4);
+        assert!(tools.holding());
+        tools.clear_hold();
+        assert!(!tools.holding());
+        assert_eq!(tools.drag(5, 6), None, "a refused stroke does not resume");
 
         // Alt selects Picker temporarily, in Draw mode only.
         tools.set_tool(Tool::Rect, false);

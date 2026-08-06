@@ -2732,8 +2732,19 @@ impl GameApp {
         let drop_target = self.edit_cursor_drop_target.take();
         self.edit_cursor_hold = false;
         self.edit_cursor_last_world = None;
+        // `LeftButtonUp` dispatches its finish on the *current* mode but then
+        // clears `Hold`, `DragFrame` and `DragLine` unconditionally
+        // (`C4EditCursor.cpp:300-304`) — and C++ has one `Hold` for both arms.
+        // So the tools' gesture ends here whatever the mode is now; only the
+        // Line or Rect it finished is mode-dependent. The release carries no
+        // coordinates of its own: C++ reads the `X`/`Y` the window's preceding
+        // motion message already stored.
+        let (x, y) = self.developer_tools.cursor();
+        let finished_stroke = self.developer_tools.release(x, y);
         if self.developer_console_edit_mode == ConsoleEditMode::Draw {
-            self.console_draw_release();
+            if let Some(control) = finished_stroke {
+                self.submit_editor_draw_tool(control);
+            }
             return None;
         }
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
@@ -2829,15 +2840,15 @@ impl GameApp {
     /// `WM_VSCROLL` move `cvp->ViewX`/`ViewY` (`C4Viewport.cpp:125-146`).
     ///
     /// A locked viewport refuses, because `ScrollBarsByViewPosition` returns
-    /// false before it touches anything (`:272`) — there is no bar to drag.
-    /// The step is clamped into the range those bars would span, which is what
-    /// `scroll_ranges` models.
+    /// false before it touches anything (`:272`) — there is no bar to move.
+    /// The step itself is applied **unclamped**, exactly as the line buttons
+    /// do (`ViewX -= ViewportScrollSpeed`, `:127-128,140-141`). An owned
+    /// viewport is allowed a view outside the landscape — `UpdateViewPosition`
+    /// clamps only `fIsNoOwnerViewport` (`:1234-1236`) and everything else just
+    /// grows its borders — so clamping the step would be stricter than C++.
     pub(crate) fn scroll_console_viewport(&mut self, identity: u64, dx: i32, dy: i32) -> bool {
         use clonk_engine::developer_viewport::scroll_ranges;
 
-        if self.console_viewport_player_lock(identity) {
-            return false;
-        }
         let Some((view_x, view_y, view_width, view_height)) =
             self.graphics.detached_viewport_view(identity)
         else {
@@ -2846,8 +2857,10 @@ impl GameApp {
         let Some(landscape) = self.snapshot.landscape.as_ref() else {
             return false;
         };
-        let Some((horizontal, vertical)) = scroll_ranges(
-            false,
+        // The refusal is the whole of `scroll_ranges`' role here: it returns
+        // `None` exactly when `ScrollBarsByViewPosition` returns false.
+        if scroll_ranges(
+            self.console_viewport_player_lock(identity),
             view_x,
             view_y,
             view_width,
@@ -2855,16 +2868,11 @@ impl GameApp {
             landscape.width() as i32,
             // `GBackHgt`, which the renderer resolves the same way.
             landscape.estimated_height().max(1),
-        ) else {
+        )
+        .is_none()
+        {
             return false;
-        };
-        let clamp = |range: clonk_engine::developer_viewport::ScrollRange, delta: i32| {
-            // `SCROLLINFO` never scrolls past `nMax - nPage`, so the last page
-            // of the landscape is where a bar stops.
-            let limit = (range.max - range.page).max(range.min);
-            range.position.saturating_add(delta).clamp(range.min, limit) - range.position
-        };
-        let (dx, dy) = (clamp(horizontal, dx), clamp(vertical, dy));
+        }
         if (dx, dy) == (0, 0) {
             return false;
         }
@@ -2945,50 +2953,45 @@ impl GameApp {
     /// The release carries no coordinates of its own: C++ reads the `X`/`Y`
     /// the window's preceding motion message already stored, which is exactly
     /// what the tools' retained cursor holds.
-    fn console_draw_release(&mut self) {
-        let (x, y) = self.developer_tools.cursor();
-        if let Some(control) = self.developer_tools.release(x, y) {
-            self.submit_editor_draw_tool(control);
-        }
-    }
-
     /// `C4EditCursor::ApplyToolPicker` (`C4EditCursor.cpp:698-731`) — what the
     /// picker samples goes into the tools dialog, not onto the landscape.
     fn console_apply_tool_picker(&mut self, x: i32, y: i32) {
-        use clonk_engine::developer_landscape::{ToolPick, TOOL_SKY_MATERIAL};
-
-        match self.engine.developer_tool_pick(x, y) {
-            Some(ToolPick::MaterialTexture {
-                material,
-                texture,
-                ift,
-            }) => {
-                self.developer_tools.set_material(material);
-                self.developer_tools.set_texture(texture);
-                self.developer_tools.set_ift(ift);
-            }
-            Some(ToolPick::Material { material, ift }) => {
-                self.developer_tools.set_material(material);
-                self.developer_tools.set_ift(ift);
-            }
-            // Sky selects the pseudo-material and leaves texture and IFT
-            // exactly as they were (`:708-717`, `:726-729`).
-            Some(ToolPick::Sky) => self.developer_tools.set_material(TOOL_SKY_MATERIAL),
-            None => {}
+        if let Some(pick) = self.engine.developer_tool_pick(x, y) {
+            self.developer_tools.apply_pick(&pick);
         }
+    }
+
+    /// `C4EditCursor::EditingOK` (`C4EditCursor.cpp:673-682`), which every
+    /// `ApplyTool*` opens with.
+    ///
+    /// It is not a predicate: a refusal drops `Hold` and reports itself, so a
+    /// drag the console may not make stops at the first stroke instead of
+    /// asking again on every pointer message. `C4Console::Message` shows
+    /// nothing at all on the reference build — both its arms sit behind
+    /// `_WIN32`/`WITH_DEVELOPER_MODE` (`C4Console.cpp:841-853`) — so the log is
+    /// the port's own choice of surface, the one the save and reload notices
+    /// already use.
+    fn console_editing_ok(&mut self) -> bool {
+        if self.developer_console_editing() {
+            return true;
+        }
+        self.developer_tools.clear_hold();
+        let message =
+            self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
+        self.developer_console.out(&message);
+        false
     }
 
     /// Pack one finished gesture into `C4ControlEMDrawTool` and queue it
     /// (`C4EditCursor::ApplyToolBrush` and its siblings, `:551-580`).
     ///
-    /// Every one of them opens with `if (!EditingOK()) return;`, so a console
-    /// that cannot edit still tracks the gesture and simply emits nothing. The
-    /// landscape mode travels with the control because the executor refuses a
-    /// packet whose mode no longer matches (`C4Control.cpp:1015-1016`).
+    /// The landscape mode travels with the control because the executor
+    /// refuses a packet whose mode no longer matches
+    /// (`C4Control.cpp:1015-1016`).
     fn submit_editor_draw_tool(&mut self, control: clonk_engine::developer_tools::DrawControl) {
         use clonk_engine::developer_tools::DrawControl;
 
-        if !self.developer_console_editing() {
+        if !self.console_editing_ok() {
             return;
         }
         let Some(mode) = self.engine.landscape().map(|landscape| landscape.mode()) else {

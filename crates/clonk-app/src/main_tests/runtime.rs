@@ -5620,6 +5620,56 @@
         );
     }
 
+    // C4EditCursor.cpp:287-309,552,673-682 — `EditingOK` is not a predicate:
+    // refusing a stroke clears `Hold`, so the drag stops dead instead of
+    // retrying on every motion. And `LeftButtonUp` clears `Hold` whichever
+    // mode's finish ran, because C++ has one shared flag.
+    #[test]
+    fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Draw;
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+        // A console that cannot edit refuses the brush, says so, and drops the
+        // hold — so the following drag steps are silent too (`:677`).
+        app.developer_console_editing_enabled = false;
+        app.console_viewport_press(identity, (40, 10), 1.0, false, false);
+        assert!(commands.take_submitted_decided_controls().is_empty());
+        assert!(!app.developer_tools.holding(), "EditingOK clears Hold");
+        assert!(app
+            .developer_console
+            .log()
+            .text()
+            .contains("No editing while replaying."));
+        app.console_viewport_motion(identity, (70, 10), 1.0, false, false);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a refused stroke does not resume on the next motion"
+        );
+
+        // A mode change between press and release must not strand the hold:
+        // `LeftButtonUp` clears it unconditionally (`:300-304`).
+        app.developer_console_editing_enabled = true;
+        app.console_viewport_press(identity, (40, 10), 1.0, false, false);
+        assert!(app.developer_tools.holding());
+        let _ = commands.take_submitted_decided_controls();
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        app.console_viewport_release();
+        assert!(
+            !app.developer_tools.holding(),
+            "the release clears Hold even though the Draw finish did not run"
+        );
+    }
+
     // C4EditCursor.cpp:236,698-731,773-792 — the picker reads the landscape
     // into the tools instead of drawing, and Alt selects it temporarily.
     #[test]
@@ -5657,10 +5707,12 @@
         assert_eq!(app.developer_tools.tool(), Tool::Picker);
 
         // Sampling empty landscape selects the sky pseudo-material and leaves
-        // the texture alone (`:717`, `:727`).
+        // the texture alone (`:717`, `:727`) — set it away from its default
+        // first, so "unchanged" cannot be confused with "reset".
+        app.developer_tools.set_texture("Smooth");
         app.console_viewport_press(identity, (40, 10), 1.0, false, false);
         assert_eq!(app.developer_tools.material(), "Sky");
-        assert_eq!(app.developer_tools.texture(), "Rough");
+        assert_eq!(app.developer_tools.texture(), "Smooth");
         assert!(
             !app.developer_tools.holding(),
             "ApplyToolPicker ends with Hold = false (`:731`)"
@@ -5719,6 +5771,32 @@
             (after.target_x, after.target_y),
             "an unlocked viewport keeps where the scroll put it"
         );
+
+        // `UpdateViewPosition`'s clamp is gated on `fIsNoOwnerViewport`
+        // (`:1234-1254`): an *owned* viewport keeps whatever view position it
+        // was given and grows its borders instead. A locked viewport would
+        // instead re-derive the position from its player every frame, so
+        // scrolling far past the landscape edge and finding it still there is
+        // what pins the lock actually being off.
+        let (view_x, ..) = app
+            .graphics
+            .detached_viewport_view(identity)
+            .expect("the console viewport owns a camera");
+        assert_eq!(
+            app.graphics
+                .scroll_detached_viewport(identity, -(view_x + 400), 0),
+            Some((-400, after.target_y))
+        );
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        assert_eq!(
+            app.console_viewport_projections[&identity].target_x, -400,
+            "an owned viewport keeps a view position outside the landscape"
+        );
+        // And the next step moves relative to it rather than snapping back:
+        // the line buttons apply their step unclamped (`:127-128`).
+        assert!(app.scroll_console_viewport(identity, 4, 0));
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        assert_eq!(app.console_viewport_projections[&identity].target_x, -396);
 
         // Locking again needs a valid player, and hides the bars (`:263-265`).
         assert!(app.toggle_console_viewport_player_lock(identity));

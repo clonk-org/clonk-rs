@@ -911,16 +911,19 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   than a list index is what keeps duplicate-owner viewports from colliding.
   The lock and the scroll are now **wired**. `PhysicalViewportState` carries
   `C4Viewport::PlayerLock`, which starts set (`C4Viewport::Default`, `:1272`)
-  and travels into `ViewportInput`, and an unlocked *owned* viewport takes the
-  clip-only arm of `UpdateViewPosition` instead of the player-follow — that is
-  exactly C++'s `if (PlayerLock && ValidPlr(Player))` gate (`:1162`), and the
-  clip is the same one an ownerless viewport already ran. `GraphicsSystem::
-  scroll_detached_viewport` moves that camera's `ViewX`/`ViewY` the way
-  `WM_HSCROLL`/`WM_VSCROLL` assign them (`:125-146`), carrying `dViewX`/`dViewY`
-  with it so a later locked frame does not interpolate the scroll away, and
-  `GameApp::scroll_console_viewport` clamps the step into the range
-  `scroll_ranges` describes — a locked viewport refuses outright, because
-  `ScrollBarsByViewPosition` returns false before touching anything. Pinned by
+  and travels into `ViewportInput`, and an unlocked *owned* viewport skips the
+  player-follow — exactly C++'s `if (PlayerLock && ValidPlr(Player))` gate
+  (`:1162`) — and keeps the position it already had. It is **not** clamped
+  afterwards: `UpdateViewPosition`'s clamp block is gated on
+  `fIsNoOwnerViewport` (`:1234-1236`), so an owned viewport is allowed a view
+  outside the landscape and grows its borders around it instead (`:1256-1260`).
+  Clamping there would snap the view the moment the lock came off, which is how
+  the first cut of this got it wrong. `GraphicsSystem::scroll_detached_viewport`
+  moves that camera's `ViewX`/`ViewY` the way `WM_HSCROLL`/`WM_VSCROLL` assign
+  them (`:125-146`), carrying `dViewX`/`dViewY` with it so a later locked frame
+  does not interpolate the scroll away, and the step is applied **unclamped**,
+  as the line buttons do. `scroll_ranges` is the refusal: it returns `None`
+  exactly when `ScrollBarsByViewPosition` returns false. Pinned by
   `console_viewport_scrolls_only_once_its_player_lock_is_off`.
   The **presentation is invented**, and has to be: the reference macOS build
   compiles `TogglePlayerLock` and `ScrollBarsByViewPosition` as
@@ -1834,10 +1837,21 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (`C4EditCursor.cpp:227-231`); `ApplyToolPicker` writes its sample back into the
   tools and ends with `Hold = false` (`:731`), so a picker click never starts a
   drag; and Alt drives that picker from a viewport window's own
-  `ModifiersChanged`, which the shell never sees. Pinned by
+  `ModifiersChanged`, which the shell never sees.
+  Two shared-state details are easy to lose and are ported deliberately.
+  `EditingOK` is **not a predicate**: refusing a stroke drops `Hold` and reports
+  itself (`:673-682`), so a drag the console may not make stops at the first
+  stroke instead of re-asking on every pointer message — `C4Console::Message`
+  shows nothing at all on the reference build (`C4Console.cpp:841-853`), so the
+  console log is the port's own choice of surface. And `LeftButtonUp` clears
+  `Hold`/`DragFrame`/`DragLine` **unconditionally** after dispatching its finish
+  on the current mode (`:300-304`); because C++ has one `Hold` for both arms and
+  the port has two, a mode change between press and release would otherwise
+  strand the tools' gesture. Pinned by
   `console_viewport_draw_gestures_emit_landscape_tool_controls`,
-  `console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor`
-  and `console_draw_alt_picks_the_landscape_into_the_tools_without_drawing`.
+  `console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor`,
+  `console_draw_alt_picks_the_landscape_into_the_tools_without_drawing` and
+  `a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture`.
   **Still open:** the dialog chrome and its window host, gated on the keyed
   developer window-host registry — so tool, grade, IFT, material and texture are
   reachable only through the Alt picker and the ported defaults (Brush, grade 5,

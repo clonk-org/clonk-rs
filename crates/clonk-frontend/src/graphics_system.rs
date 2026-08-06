@@ -2826,16 +2826,14 @@ impl GraphicsSystem {
             }
         } else if !input.player_lock {
             // `C4Viewport::UpdateViewPosition` follows the player only under
-            // `if (PlayerLock && ValidPlr(Player))` (`C4Viewport.cpp:1162`).
-            // An unlocked viewport keeps whatever its scroll bars left behind
-            // and runs the same trailing clip every viewport runs (`:1234-1254`).
-            state.no_owner_position(
-                view_width,
-                view_height,
-                world_width,
-                world_height,
-                fullscreen,
-            )
+            // `if (PlayerLock && ValidPlr(Player))` (`C4Viewport.cpp:1162`), so
+            // an unlocked viewport keeps exactly where its scroll bars left it.
+            // Deliberately *not* the ownerless clamp two arms up: that block is
+            // gated on `fIsNoOwnerViewport` (`:1234-1236`), and an owned
+            // viewport is allowed a view outside the landscape — it grows its
+            // borders instead (`:1256-1260`). Clamping here would snap the view
+            // the moment the lock came off.
+            state.stationary_position(view_width, view_height)
         } else {
             state.update(
                 input.center.x,
