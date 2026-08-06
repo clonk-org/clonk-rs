@@ -2641,6 +2641,37 @@ fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
     assert_eq!(registrations[1].group.root(), origin_parent.as_path());
 }
 
+/// clonk-org/clonk-rs#186. C++ has one `ExePath`, so an `Origin` is read back
+/// against the directory it was written against: `C4GroupSet.cpp:297` opens it
+/// unprefixed, and `C4Config.cpp:1320-1321` forces the working directory to
+/// `ExePath`. This port spells that root two ways, and savegames already on
+/// disk carry the install-root spelling, so both must name the same group.
+#[test]
+fn loader_origin_relative_to_the_install_root_registers_the_same_parent() {
+    let root = tempdir().expect("install-root loader Origin fixture");
+    let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+    let origin_parent = content.join("Parent.c4f");
+    fs::create_dir(&origin_parent).expect("Origin parent group");
+    let scenario_path = root.path().join("Savegames.c4f").join("Saved.c4s");
+    let (scenario, scenario_group, head) =
+        loader_origin_fixture_scenario(&scenario_path, "content/Parent.c4f/Original.c4s");
+
+    let registrations = classic_loader_registrations(
+        &scenario,
+        &scenario_group,
+        &head,
+        &loader_fixture_definition_load(),
+        &paths,
+    )
+    .expect("install-root relative Origin resolves");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.group.root() == origin_parent.as_path()),
+        "the Origin parent is registered, not doubled below the content root"
+    );
+}
+
 #[test]
 fn loader_origin_explicit_empty_value_is_a_valid_no_op() {
     let root = tempdir().expect("empty loader Origin fixture");

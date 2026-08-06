@@ -1804,6 +1804,28 @@ pub(crate) fn cpp_loader_items_identical(left: &Path, right: &Path) -> Result<bo
     }
 }
 
+/// The data root a relative `Origin` is spelled against.
+///
+/// C++ needs no such choice: `C4GroupSet.cpp:297` opens the `Origin` unprefixed
+/// against the working directory `C4Config.cpp:1320-1321` forces to the single
+/// `ExePath`. This port splits that root, and a savegame keeps whichever
+/// spelling it was written with (`C4GameSave.cpp:96` keeps an assigned Origin),
+/// so the outermost parent it names decides which root it belongs to.
+fn loader_origin_data_root(origin: &Path, paths: &AppPaths) -> PathBuf {
+    if origin.is_absolute() {
+        return paths.executable_data_root().to_path_buf();
+    }
+    paths
+        .executable_data_roots()
+        .into_iter()
+        .find(|root| {
+            loader_parent_paths(&root.join(origin))
+                .first()
+                .is_some_and(|outer| outer.exists())
+        })
+        .unwrap_or_else(|| paths.executable_data_root().to_path_buf())
+}
+
 pub(crate) fn resolve_loader_origin(
     raw_origin: &str,
     scenario_path: &Path,
@@ -1811,14 +1833,14 @@ pub(crate) fn resolve_loader_origin(
 ) -> Result<Option<PathBuf>> {
     let normalized = raw_origin.replace('\\', "/");
     let origin = PathBuf::from(normalized);
-    let exe_data_root = paths.executable_data_root();
-    let candidate = absolute_loader_path(&origin, exe_data_root);
+    let exe_data_root = loader_origin_data_root(&origin, paths);
+    let candidate = absolute_loader_path(&origin, &exe_data_root);
     if loader_parent_paths(&candidate).is_empty() {
         // This includes the validated explicit empty value (`empty`):
         // RegisterParentFolders has no contiguous .c4f parent and is a no-op.
         return Ok(None);
     }
-    let scenario = absolute_loader_path(scenario_path, exe_data_root);
+    let scenario = absolute_loader_path(scenario_path, &exe_data_root);
     let identical = cpp_loader_items_identical(&candidate, &scenario)?;
     Ok((!identical).then_some(candidate))
 }
