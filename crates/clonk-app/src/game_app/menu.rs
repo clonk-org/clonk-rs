@@ -4396,6 +4396,19 @@ impl GameApp {
             MessageDialogContinuation::LeagueEndRejected => {
                 self.finish_pending_league_end_terminal()?;
             }
+            MessageDialogContinuation::LeagueStartRefused { message } => {
+                // `*pCancel = !fResult`: only Abort fails InitHost, and every
+                // other answer falls through to `NetIO.SetAcceptMode(true)`
+                // (src/C4Network2.cpp:265-274,2379-2384). An aborted host still
+                // unwinds through QuitGame carrying the message LeagueStart
+                // already logged.
+                if result != clonk_frontend::message_dialog::MessageDialogResult::Ok {
+                    self.finish_startup_network_failure(
+                        StartupNetworkPurpose::StagedHost,
+                        message,
+                    )?;
+                }
+            }
             MessageDialogContinuation::LeagueSignupCancelled => {
                 if let Some(mut continuation) = self.cancelled_league_signup_continuation.take() {
                     Self::reject_league_auth_continuation_player(&mut continuation);

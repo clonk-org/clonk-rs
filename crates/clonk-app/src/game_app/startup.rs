@@ -2434,6 +2434,14 @@ impl GameApp {
                         }
                     }
                 }
+                // The worker already ran the `DeinitLeague` half of a refused
+                // registration; this is `LeagueStart`'s modal, whose answer is
+                // all `pCancel` ever carried (src/C4Network2.cpp:259-272).
+                // Queueing it here is safe because the user answers it long
+                // after the session below is installed.
+                if let Some(error) = manager.take_league_start_failure() {
+                    self.present_refused_league_registration(error)?;
+                }
                 let needs_initial_host_league_auth = purpose == StartupNetworkPurpose::StagedHost
                     && authenticated_league_players.is_none()
                     && matches!(

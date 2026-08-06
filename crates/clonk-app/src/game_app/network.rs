@@ -7116,6 +7116,29 @@ impl GameApp {
         }
     }
 
+    /// Reports a league server that refused this host's `Start`.
+    ///
+    /// `C4Network2::LeagueStart` logs `IDS_NET_ERR_LEAGUE_REGGAME` and shows it
+    /// with btnOK|btnAbort, then hands the answer back through `pCancel`;
+    /// `InitHost` deinits the league and keeps hosting for every answer but
+    /// Abort (src/C4Network2.cpp:259-272,2363-2386). The worker has already
+    /// done the `DeinitLeague` half, so OK only has to leave the session alone.
+    pub(crate) fn present_refused_league_registration(
+        &mut self,
+        error: String,
+    ) -> Result<(), EngineError> {
+        let message = format_resource_string(
+            self.runtime_resource_text("IDS_NET_ERR_LEAGUE_REGGAME", "Could not register game: %s"),
+            &[&error],
+        );
+        tracing::error!(%message, "league server refused the host registration");
+        self.push_league_end_error_dialog(
+            message.clone(),
+            clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+            MessageDialogContinuation::LeagueStartRefused { message },
+        )
+    }
+
     fn league_end_error_message(&self, phase: LeagueEndFailurePhase, error: &str) -> String {
         let error = if error.is_empty() {
             self.runtime_resource_text("IDS_NET_ERR_LEAGUE_EMPTYREPLY", "Empty reply")
