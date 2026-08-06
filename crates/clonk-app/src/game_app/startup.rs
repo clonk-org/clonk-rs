@@ -5105,12 +5105,19 @@ impl GameApp {
             self.material_library = library;
             self.apply_material_library();
             if !self.console_mode
+                && !self.headless
                 && self.loading_state.is_none()
                 && !self.classic_loader_render_preconditions_ready()
             {
                 // A fast boot worker must not bypass a failed loader before
                 // the first redraw. Stay in Loading so render reports the
                 // logged typed boundary.
+                //
+                // A dedicated server has no loader screen to report on:
+                // `C4Application::PreInit` builds one only for a
+                // startup-dialog run (C4Application.cpp:239), and a
+                // `USE_CONSOLE` build has no `C4FontLoader` to build it with
+                // (C4Game.h:132-135).
                 return;
             }
             if self.auto_start_classic_command_line_scenario {

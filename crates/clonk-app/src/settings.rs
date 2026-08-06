@@ -43,6 +43,20 @@ impl Default for AudioOptions {
 }
 
 impl AudioOptions {
+    /// The audio a `USE_CONSOLE` build has: none. `ENABLE_SOUND` is a
+    /// dependent option forced OFF for that build (CMakeLists.txt:183-185), so
+    /// a dedicated server never opens a device — the configured volumes and
+    /// channel count are irrelevant behind four disabled flags.
+    pub fn silenced() -> Self {
+        Self {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..Self::default()
+        }
+    }
+
     pub fn load(paths: Option<&AppPaths>) -> Self {
         let mut options = Self::default();
         let Some(paths) = paths else {
@@ -255,6 +269,18 @@ impl DisplayMode {
 ))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silenced_audio_options_open_no_device_like_a_console_build() {
+        // `ENABLE_SOUND` is a dependent option forced OFF whenever
+        // `USE_CONSOLE` is set (CMakeLists.txt:183-185), so a dedicated server
+        // has no sound support compiled in at all — neither in-game nor menu.
+        let silenced = AudioOptions::silenced();
+        assert!(!silenced.sound_enabled);
+        assert!(!silenced.music_enabled);
+        assert!(!silenced.menu_sound_enabled);
+        assert!(!silenced.menu_music_enabled);
+    }
 
     #[test]
     fn audio_options_default_channel_count_matches_cpp() {

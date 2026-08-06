@@ -696,6 +696,13 @@ fn run() -> Result<()> {
         return run_menu_dump(dump_path, &cli.menu_view, app_paths.as_ref(), runtime);
     }
 
+    // Ahead of `validate_classic_loader_graphics_config` deliberately: the
+    // loader screen it checks is a rendered artifact, and a dedicated server
+    // never builds one — `C4Application::PreInit` only calls
+    // `InitLoaderScreen` for a startup-dialog run (C4Application.cpp:239).
+    if cli.headless {
+        return run_headless_server(&cli, &classic, app_paths.as_ref(), runtime);
+    }
     let audio_options = AudioOptions::load(app_paths.as_deref());
     if let Some(paths) = app_paths.as_deref() {
         validate_classic_loader_graphics_config(paths).map_err(|error| {
@@ -2361,6 +2368,7 @@ impl GameApp {
                 &[],
             )),
             console_mode: false,
+            headless: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,
             developer_selection: Default::default(),

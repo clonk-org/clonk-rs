@@ -187,6 +187,12 @@ pub(crate) struct Cli {
     pub(crate) sandbox: bool,
 
     #[arg(
+        long = "headless",
+        help = "Run as a dedicated server: no window, no render device and no sound, driven by the stdin console. Equivalent to [Graphics] Engine=3 (NoGfx), which is honoured on its own."
+    )]
+    pub(crate) headless: bool,
+
+    #[arg(
         long = "dump-frame",
         value_name = "PATH",
         help = "Headless: boot the sandbox, advance --test-frames frames, render one in-game frame to a PNG at PATH, and exit (no window). For visual rendering-parity checks."
@@ -573,6 +579,45 @@ pub(crate) fn spawn_console_stdin_reader() -> Result<Receiver<ConsoleInputEvent>
         })
         .context("failed to start console stdin reader")?;
     Ok(receiver)
+}
+
+/// Boots the dedicated server: no window, no render device, no sound.
+///
+/// `CStdNoGfx` owns neither a window nor a context — `Init` only records the
+/// application and every draw entry point returns success without touching one
+/// (StdNoGfx.cpp:20-41) — so a NoGfx engine reaches the game loop having
+/// created nothing a display server or GPU is needed for. The process is then
+/// driven entirely by the stdin console C++ compiles in for exactly this build
+/// (StdAppUnix.cpp:413-449, StdAppWin32.cpp:77-79 ->
+/// `C4Application::OnCommand`, C4Application.cpp:586).
+pub(crate) fn run_headless_server(
+    cli: &Cli,
+    classic: &ClassicCommandLine,
+    app_paths: Option<&Arc<AppPaths>>,
+    runtime: RuntimeConfig,
+) -> Result<()> {
+    // `CStdNoGfx::CreateDirectDraw` reports the configured resolution like any
+    // other renderer, so the logical surface keeps its ordinary size. Nothing
+    // presents it.
+    let (logical_width, logical_height) = DisplayOptions::default().actual_size();
+    let mut app = GameApp::new(
+        logical_width,
+        logical_height,
+        AudioOptions::silenced(),
+        app_paths.map(|paths| &**paths),
+        runtime,
+    )
+    .context("failed to initialise headless server state")?;
+    app.headless = true;
+    app.set_display_mode(DisplayMode::Window);
+    app.apply_classic_command_line(classic)?;
+    app.auto_start_sandbox = cli.sandbox;
+    app.launch_classic_command_line_join()
+        .context("failed to start command-line network join")?;
+    app.launch_classic_command_line_scenario()
+        .context("failed to start command-line scenario")?;
+    tracing::info!("running as a headless dedicated server; type /quit on stdin to stop");
+    run_console_event_loop(app, spawn_console_stdin_reader()?)
 }
 
 pub(crate) fn run_console_event_loop(

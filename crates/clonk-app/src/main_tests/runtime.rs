@@ -26,6 +26,43 @@
         assert!(Cli::try_parse_from(["clonk-app", "--future"]).is_err());
     }
 
+    /// C++ selects a dedicated server at build time
+    /// (`option(USE_CONSOLE ...)`, CMakeLists.txt:178), so it is fixed for the
+    /// life of the process and cannot be re-chosen mid-run. A single shipped
+    /// binary has no build flag, and the closest honest analogue is a `Cli`
+    /// switch: those are read once in `run()`, where classic arguments are
+    /// re-applied every round and are re-parsed at runtime by the console
+    /// `/open` command.
+    #[test]
+    fn headless_is_a_process_lifetime_switch_not_a_classic_argument() {
+        assert!(
+            !Cli::try_parse_from(["clonk-app"])
+                .expect("a bare invocation parses")
+                .headless
+        );
+
+        let cli = Cli::try_parse_from([
+            "clonk-app",
+            "--headless",
+            "HarpoonRace.c4s",
+            "/network",
+            "/lobby",
+        ])
+        .expect("classic positionals still follow a modern switch");
+        assert!(cli.headless);
+        let classic = parse_classic_command_line(&cli.classic_arguments);
+        assert_eq!(classic.scenario, Some(PathBuf::from("HarpoonRace.c4s")));
+        assert_eq!(classic.network_active, Some(true));
+
+        // Deliberately not a classic switch: `/open <params>` re-parses a
+        // classic command line into the running process, so a classic spelling
+        // would let a client-visible command turn headlessness on or off.
+        assert_eq!(
+            parse_classic_command_line(&[OsString::from("/headless")]),
+            ClassicCommandLine::default()
+        );
+    }
+
     #[test]
     fn classic_command_line_preserves_file_and_definition_order() {
         let classic = parse_classic_command_line(&[

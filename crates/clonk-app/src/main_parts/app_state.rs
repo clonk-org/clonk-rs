@@ -335,6 +335,19 @@ pub(crate) struct GameApp {
     /// Persistent developer-window policy selected by `/console`. Unlike
     /// per-round classic arguments, `/open` must not reset this.
     pub(crate) console_mode: bool,
+    /// Dedicated-server policy selected by `--headless`: no window, no render
+    /// device, no sound. C++ makes this a build (`USE_CONSOLE`,
+    /// CMakeLists.txt:178) whose `DDrawInit` compiles the OpenGL arm out
+    /// entirely (StdDDraw2.cpp:1305-1310), so it also implies
+    /// `lpDDraw->GetEngine() == GFXENGN_NOGFX`.
+    ///
+    /// Deliberately *not* `console_mode`: that grants developer-console
+    /// authority — it is the `Console.Active` argument behind
+    /// `ScriptControlPolicy::live`, i.e. "execute remote console-scope script
+    /// from any client" — which a server exposed to the internet must not
+    /// inherit. C++ reads the two separately too, and either alone makes the
+    /// lobby a console lobby (C4Network2.cpp:463).
+    pub(crate) headless: bool,
     pub(crate) developer_console: DeveloperConsole,
     pub(crate) developer_console_edit_mode: ConsoleEditMode,
     /// `C4EditCursor::Selection`. Shared by the viewport edit cursor, the
