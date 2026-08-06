@@ -5680,6 +5680,51 @@
         assert_eq!(app.developer_tools.tool(), Tool::Brush);
     }
 
+    // C4Viewport.cpp:125-146,250-284,1162 — a console viewport window scrolls
+    // only once its player lock is off, because the lock is what makes
+    // UpdateViewPosition re-centre on the player every frame.
+    #[test]
+    fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(Some(
+            app.local_owner,
+        ))])
+        .expect("console viewport for the local player");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+        // `C4Viewport::Default` starts locked, so a scroll request is refused
+        // outright — `ScrollBarsByViewPosition` returns false while locked
+        // (`:272`).
+        assert!(app.console_viewport_player_lock(identity));
+        assert!(!app.scroll_console_viewport(identity, 3, 0));
+
+        // Unlocking always succeeds and shows the bars again (`:253-259`).
+        assert!(!app.toggle_console_viewport_player_lock(identity));
+        assert!(!app.console_viewport_player_lock(identity));
+
+        let before = app.console_viewport_projections[&identity];
+        assert!(app.scroll_console_viewport(identity, 3, 0));
+        // The scroll lands in the camera, and the next draw is what publishes
+        // it as this window's projection (`cvp->Execute()` after the scroll).
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let after = app.console_viewport_projections[&identity];
+        assert_ne!(
+            (before.target_x, before.target_y),
+            (after.target_x, after.target_y),
+            "an unlocked viewport keeps where the scroll put it"
+        );
+
+        // Locking again needs a valid player, and hides the bars (`:263-265`).
+        assert!(app.toggle_console_viewport_player_lock(identity));
+        assert!(!app.scroll_console_viewport(identity, 3, 0));
+    }
+
     #[test]
     fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         // FinishDerive returns on the main thread before its forwarded

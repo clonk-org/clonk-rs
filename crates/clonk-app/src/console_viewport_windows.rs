@@ -205,6 +205,53 @@ pub(crate) fn handle_console_viewport_event(
         } => {
             windows.request_redraw(key);
         }
+        // The Win32 handler binds `VK_SCROLL` to this viewport's own lock and
+        // deliberately keeps it out of `Game.DoKeyboardInput`
+        // (`C4Viewport.cpp:83-86`).
+        Event::WindowEvent {
+            event:
+                WindowEvent::KeyboardInput {
+                    event:
+                        winit::event::KeyEvent {
+                            physical_key:
+                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ScrollLock),
+                            state: winit::event::ElementState::Pressed,
+                            repeat: false,
+                            ..
+                        },
+                    ..
+                },
+            ..
+        } => {
+            if let Some(identity) = windows.host(key).and_then(DeveloperHost::viewport_identity) {
+                app.toggle_console_viewport_player_lock(identity);
+                windows.request_redraw(key);
+            }
+        }
+        // Scrolling stands in for the native scroll bars this window does not
+        // have — see `developer_viewport::wheel_scroll_step`.
+        Event::WindowEvent {
+            event: WindowEvent::MouseWheel { delta, .. },
+            ..
+        } => {
+            use clonk_engine::developer_viewport::{wheel_scroll_step, WheelDelta};
+
+            let delta = match delta {
+                winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                    WheelDelta::Lines { x: *x, y: *y }
+                }
+                winit::event::MouseScrollDelta::PixelDelta(position) => WheelDelta::Pixels {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                },
+            };
+            let (dx, dy) = wheel_scroll_step(delta);
+            if let Some(identity) = windows.host(key).and_then(DeveloperHost::viewport_identity) {
+                if app.scroll_console_viewport(identity, dx, dy) {
+                    windows.request_redraw(key);
+                }
+            }
+        }
         // A focused viewport window is where the console's modifier state
         // comes from: the shell never sees these messages, and the edit
         // cursor reads Ctrl/Shift live on every click (`C4EditCursor.cpp:143,

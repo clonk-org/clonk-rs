@@ -2792,6 +2792,87 @@ impl GameApp {
         )
     }
 
+    /// `C4Viewport::PlayerLock` for one console viewport window.
+    pub(crate) fn console_viewport_player_lock(&self, identity: u64) -> bool {
+        self.physical_viewports
+            .iter()
+            .find(|viewport| viewport.physical_identity == identity)
+            .is_some_and(|viewport| viewport.player_lock)
+    }
+
+    /// `C4Viewport::TogglePlayerLock` (`C4Viewport.cpp:250-267`), returning the
+    /// lock the viewport now holds.
+    ///
+    /// The asymmetry is the whole point: unlocking always succeeds, while
+    /// locking needs `ValidPlr(Player)`, so an ownerless viewport can never be
+    /// locked and stays scrollable.
+    pub(crate) fn toggle_console_viewport_player_lock(&mut self, identity: u64) -> bool {
+        use clonk_engine::developer_viewport::toggle_player_lock;
+
+        let players = &self.snapshot.players;
+        let Some(viewport) = self
+            .physical_viewports
+            .iter_mut()
+            .find(|viewport| viewport.physical_identity == identity)
+        else {
+            return false;
+        };
+        let has_valid_player = viewport.displayed_player != clonk_engine::OWNER_NONE
+            && players
+                .iter()
+                .any(|state| state.id == viewport.displayed_player);
+        viewport.player_lock = toggle_player_lock(viewport.player_lock, has_valid_player).locked;
+        viewport.player_lock
+    }
+
+    /// One scroll step on a console viewport window, the way `WM_HSCROLL` and
+    /// `WM_VSCROLL` move `cvp->ViewX`/`ViewY` (`C4Viewport.cpp:125-146`).
+    ///
+    /// A locked viewport refuses, because `ScrollBarsByViewPosition` returns
+    /// false before it touches anything (`:272`) — there is no bar to drag.
+    /// The step is clamped into the range those bars would span, which is what
+    /// `scroll_ranges` models.
+    pub(crate) fn scroll_console_viewport(&mut self, identity: u64, dx: i32, dy: i32) -> bool {
+        use clonk_engine::developer_viewport::scroll_ranges;
+
+        if self.console_viewport_player_lock(identity) {
+            return false;
+        }
+        let Some((view_x, view_y, view_width, view_height)) =
+            self.graphics.detached_viewport_view(identity)
+        else {
+            return false;
+        };
+        let Some(landscape) = self.snapshot.landscape.as_ref() else {
+            return false;
+        };
+        let Some((horizontal, vertical)) = scroll_ranges(
+            false,
+            view_x,
+            view_y,
+            view_width,
+            view_height,
+            landscape.width() as i32,
+            // `GBackHgt`, which the renderer resolves the same way.
+            landscape.estimated_height().max(1),
+        ) else {
+            return false;
+        };
+        let clamp = |range: clonk_engine::developer_viewport::ScrollRange, delta: i32| {
+            // `SCROLLINFO` never scrolls past `nMax - nPage`, so the last page
+            // of the landscape is where a bar stops.
+            let limit = (range.max - range.page).max(range.min);
+            range.position.saturating_add(delta).clamp(range.min, limit) - range.position
+        };
+        let (dx, dy) = (clamp(horizontal, dx), clamp(vertical, dy));
+        if (dx, dy) == (0, 0) {
+            return false;
+        }
+        self.graphics
+            .scroll_detached_viewport(identity, dx, dy)
+            .is_some()
+    }
+
     /// `C4EditCursor::AltDown`/`AltUp` (`C4EditCursor.cpp:773-792`).
     ///
     /// Alt selects the picker for as long as it is held and restores the
