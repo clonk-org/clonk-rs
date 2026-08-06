@@ -6158,3 +6158,72 @@ fn synchronized_surrender_executes_only_for_the_runtime_player_owner() {
         .expect("local player")
         .surrendered());
 }
+
+#[test]
+fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
+    // C4Network2::LeagueStart reports a refused registration through a
+    // btnOK|btnAbort modal and hands the answer straight back as `pCancel`;
+    // InitHost then deinits the league and keeps hosting for every answer but
+    // Abort (src/C4Network2.cpp:259-272,2363-2386). The port has no `btnAbort`
+    // of its own — `push_league_end_error_dialog` already spells it Cancel.
+    let refusal = "league registration failed: league Start reply was rejected: \
+                   league Start response did not report Success";
+    let staged_host = || {
+        let mut app = new_menu_app(320, 200);
+        let (manager, _events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app
+    };
+
+    let mut app = staged_host();
+    app.present_refused_league_registration(refusal.to_string())
+        .expect("present the refused registration");
+    assert_eq!(app.message_dialogs.len(), 1);
+    let dialog = &app.message_dialogs[0];
+    assert_eq!(dialog.state.caption(), "League error");
+    assert_eq!(
+        dialog.state.message(),
+        format!("Could not register game: {refusal}")
+    );
+    assert_eq!(
+        dialog.state.buttons(),
+        clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL
+    );
+    assert_eq!(
+        dialog.state.icon(),
+        clonk_frontend::message_dialog::MessageDialogIcon::ERROR
+    );
+    assert!(matches!(
+        &dialog.continuation,
+        MessageDialogContinuation::LeagueStartRefused { message }
+            if message == &format!("Could not register game: {refusal}")
+    ));
+
+    app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
+        .expect("accept hosting without a registration");
+    assert!(
+        app.network.is_some(),
+        "OK keeps the unregistered host running, exactly as InitHost falls through"
+    );
+
+    let mut aborted = staged_host();
+    aborted
+        .present_refused_league_registration(refusal.to_string())
+        .expect("present the refused registration");
+    aborted
+        .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
+        .expect("abort the unregistered host");
+    assert!(
+        aborted.network.is_none(),
+        "Abort is the one answer that makes InitHost fail"
+    );
+    assert_eq!(
+        aborted.scenario_selector_mode,
+        ScenarioSelectorMode::NetworkHost
+    );
+}

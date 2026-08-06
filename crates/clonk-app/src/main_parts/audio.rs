@@ -4763,6 +4763,13 @@ pub(crate) enum MessageDialogContinuation {
     LeaguePlayerAuthCancelled,
     LeagueEndRetry,
     LeagueEndRejected,
+    /// `C4Network2::LeagueStart`'s btnOK|btnAbort report of a refused
+    /// registration. `InitHost` keeps hosting unless the answer was Abort
+    /// (src/C4Network2.cpp:259-272,2363-2386), which unwinds carrying the
+    /// message `LeagueStart` had already logged.
+    LeagueStartRefused {
+        message: String,
+    },
     LeagueSignupCancelled,
     LeagueVote {
         subject: LeagueVoteSubject,

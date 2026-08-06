@@ -667,6 +667,10 @@ struct NetworkWorkerReady {
     local_client_id: ClientId,
     control_send_time: clonk_network::ControlSendTimeSnapshot,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
+    /// Why this host is running unregistered, when the league server refused
+    /// the `Start` that `C4Network2::InitHost` survives
+    /// (src/C4Network2.cpp:259-272).
+    league_start_failure: Option<String>,
     league_runtime_available: bool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     network_io_statistics: clonk_network::NetworkIoStatistics,
@@ -1345,6 +1349,7 @@ pub struct NetworkManager {
     role: NetworkRole,
     client_status: ClientStatusState,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
+    league_start_failure: Option<String>,
     league_runtime_available: AtomicBool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     network_io_statistics: clonk_network::NetworkIoStatistics,
@@ -3174,6 +3179,7 @@ impl NetworkManager {
             role,
             client_status: ClientStatusState::default(),
             league_start_response: ready.league_start_response,
+            league_start_failure: ready.league_start_failure,
             league_runtime_available,
             league_record_runtime: ready.league_record_runtime,
             network_io_statistics: ready.network_io_statistics,
@@ -4211,6 +4217,18 @@ impl NetworkManager {
         self.league_start_response.take()
     }
 
+    /// Why this host is running unregistered, when the league server refused
+    /// its `Start`. `C4Network2::InitHost` survives that refusal and leaves the
+    /// decision to the user's modal answer (src/C4Network2.cpp:259-272).
+    pub fn take_league_start_failure(&mut self) -> Option<String> {
+        self.league_start_failure.take()
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_test_league_start_failure(&mut self, message: impl Into<String>) {
+        self.league_start_failure = Some(message.into());
+    }
+
     pub fn invalidate_league_reference(&self) -> Result<()> {
         if self.role != NetworkRole::Host || !self.league_runtime_available.load(Ordering::Acquire)
         {
@@ -4751,6 +4769,7 @@ impl NetworkManager {
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
+                league_start_failure: None,
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
@@ -4783,6 +4802,7 @@ impl NetworkManager {
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
+                league_start_failure: None,
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
@@ -4840,6 +4860,7 @@ impl NetworkManager {
                 },
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
+                league_start_failure: None,
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
@@ -5698,6 +5719,7 @@ async fn run_host_worker(
     let mut league_runtime = None;
     let mut league_record_runtime = None;
     let mut league_start_response = None;
+    let mut league_start_failure = None;
     let mut latest_league_reference = None;
     if let Some(prepared_host) = prepared.as_mut() {
         if let Some(league_config) = prepared_host.league_config().cloned() {
@@ -5717,79 +5739,92 @@ async fn run_host_worker(
                         return Err(anyhow!(message));
                     }
                 };
-            let (response, runtime) =
+            // A refused registration is not a refused game: C4Network2::InitHost
+            // answers a failed LeagueStart with DeinitLeague and keeps hosting,
+            // and returns false only for the modal's Abort — which is all
+            // `pCancel` reports — or a console build
+            // (src/C4Network2.cpp:259-272,2292-2400). The caller owns that
+            // choice, so the worker hosts unregistered and reports the refusal.
+            let registration =
                 match register_league_host(league_config, &reference, event_tx.clone()).await {
-                    Ok(result) => result,
+                    Ok(result) => Some(result),
                     Err(error) => {
                         let message = format!("league registration failed: {error}");
-                        let _ = local_id_tx.send(Err(message.clone().into()));
-                        return Err(anyhow!(message));
+                        tracing::error!(error = %message, "hosting without a league registration");
+                        league_start_failure = Some(message);
+                        None
                     }
                 };
-            let cleanup_reference =
-                match league_cleanup_reference_after_start(&reference, &response) {
-                    Ok(reference) => reference,
-                    Err(error) => {
-                        tracing::error!(
-                            %error,
-                            "falling back to the pre-Start league cleanup reference"
-                        );
-                        reference.clone()
-                    }
-                };
-            if let Err(error) = prepared_host.apply_league_start_response(&response) {
-                if let Err(cleanup_error) =
-                    finish_league_runtime(&runtime, cleanup_reference, None).await
-                {
-                    tracing::error!(%cleanup_error, "failed to end rejected league registration");
-                }
-                let message = format!("league Start settings are invalid: {error}");
-                let _ = local_id_tx.send(Err(message.clone().into()));
-                return Err(anyhow!(message));
-            }
-            let reference = match prepared_host
-                .initial_host_game_reference(false, &registration_addresses)
-            {
-                Ok(reference) => reference,
-                Err(error) => {
+            if let Some((response, runtime)) = registration {
+                let cleanup_reference =
+                    match league_cleanup_reference_after_start(&reference, &response) {
+                        Ok(reference) => reference,
+                        Err(error) => {
+                            tracing::error!(
+                                %error,
+                                "falling back to the pre-Start league cleanup reference"
+                            );
+                            reference.clone()
+                        }
+                    };
+                if let Err(error) = prepared_host.apply_league_start_response(&response) {
                     if let Err(cleanup_error) =
                         finish_league_runtime(&runtime, cleanup_reference, None).await
                     {
-                        tracing::error!(%cleanup_error, "failed to end unusable league registration");
+                        tracing::error!(%cleanup_error, "failed to end rejected league registration");
                     }
-                    let message = format!("cannot rebuild league Start reference: {error}");
+                    let message = format!("league Start settings are invalid: {error}");
                     let _ = local_id_tx.send(Err(message.clone().into()));
                     return Err(anyhow!(message));
                 }
-            };
-            if !prepared_host.stream_address().is_empty() {
-                let stream_address = clonk_resources::decode_legacy_script_text(
-                    prepared_host.stream_address().as_bytes(),
-                );
-                league_record_runtime = match spawn_league_record_runtime(
-                    stream_address,
-                    record_transport_config,
-                ) {
-                    Ok(runtime) => Some(runtime),
+                let reference = match prepared_host
+                    .initial_host_game_reference(false, &registration_addresses)
+                {
+                    Ok(reference) => reference,
                     Err(error) => {
                         if let Err(cleanup_error) =
-                            finish_league_runtime(&runtime, reference.clone(), None).await
+                            finish_league_runtime(&runtime, cleanup_reference, None).await
                         {
-                            tracing::error!(%cleanup_error, "failed to end league registration after stream setup failure");
+                            tracing::error!(%cleanup_error, "failed to end unusable league registration");
                         }
-                        let message =
-                            format!("cannot initialise league record HTTP transport: {error}");
+                        let message = format!("cannot rebuild league Start reference: {error}");
                         let _ = local_id_tx.send(Err(message.clone().into()));
                         return Err(anyhow!(message));
                     }
                 };
+                if !prepared_host.stream_address().is_empty() {
+                    let stream_address = clonk_resources::decode_legacy_script_text(
+                        prepared_host.stream_address().as_bytes(),
+                    );
+                    league_record_runtime = match spawn_league_record_runtime(
+                        stream_address,
+                        record_transport_config,
+                    ) {
+                        Ok(runtime) => Some(runtime),
+                        Err(error) => {
+                            if let Err(cleanup_error) =
+                                finish_league_runtime(&runtime, reference.clone(), None).await
+                            {
+                                tracing::error!(%cleanup_error, "failed to end league registration after stream setup failure");
+                            }
+                            let message =
+                                format!("cannot initialise league record HTTP transport: {error}");
+                            let _ = local_id_tx.send(Err(message.clone().into()));
+                            return Err(anyhow!(message));
+                        }
+                    };
+                }
+                league_start_response = Some(response);
+                latest_league_reference = Some(reference);
+                league_runtime = Some(runtime);
+            } else if let Err(error) = prepared_host.clear_live_league_registration() {
+                let message = format!("cannot clear the refused league registration: {error}");
+                let _ = local_id_tx.send(Err(message.clone().into()));
+                return Err(anyhow!(message));
             }
             host_config = prepared_host.host_config().clone();
             host_config.configured_tcp_port = Some(bound_addr.map_or(0, |address| address.port()));
             host_config.udp_bind_address = udp_bind_address;
-            league_start_response = Some(response);
-            latest_league_reference = Some(reference);
-            league_runtime = Some(runtime);
         }
     }
     if league_runtime.is_some() {
@@ -5841,6 +5876,7 @@ async fn run_host_worker(
         local_client_id: HOST_CLIENT_ID,
         control_send_time: host.control_send_time_snapshot(),
         league_start_response,
+        league_start_failure,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: league_record_runtime.clone(),
         network_io_statistics: host.io_statistics(),
@@ -7176,6 +7212,7 @@ async fn run_client_worker(
         local_client_id: client_id,
         control_send_time: client.control_send_time_snapshot(),
         league_start_response: None,
+        league_start_failure: None,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: None,
         network_io_statistics: client.io_statistics(),
@@ -10198,6 +10235,84 @@ Message=Server says Andr\xe9\r\n\
                 .windows(b"RandomSeed=305419896".len())
                 .any(|window| window == b"RandomSeed=305419896"),
             "cleanup must identify the Start-updated registration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_initial_start_keeps_hosting_without_a_registration() {
+        // C4Network2::InitHost answers a refused LeagueStart with DeinitLeague
+        // and keeps hosting: only the modal's Abort — which is what pCancel
+        // carries back — or a console build turns the refusal into a failed
+        // host init (src/C4Network2.cpp:259-272,2292-2400). There is also
+        // nothing to end, because the server committed no session.
+        let (endpoint, league_server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Failure\r\nMessage=already registered\r\n",
+        ]);
+        let settings = HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+                1,
+                0,
+                Some(PreparedLeagueHostConfig {
+                    endpoint,
+                    transport: clonk_network::LeagueHttpTransportConfig::default(),
+                    update_period_secs: 120,
+                    league_server_signup: false,
+                }),
+            )),
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                &mut control_performance_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+            )
+            .await
+        });
+
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("a refused registration must not fail the host session");
+        assert!(
+            !ready.league_runtime_available,
+            "a refused Start leaves no registration to update"
+        );
+        assert!(
+            ready
+                .league_start_failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("league Start reply was rejected")),
+            "the refusal is reported so the caller can present C++'s OK/Abort choice"
+        );
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("shut the unregistered host worker down");
+        worker
+            .await
+            .expect("join unregistered host worker")
+            .expect("an unregistered host still exits cleanly");
+
+        let bodies = league_server.join().expect("join league HTTP fixture");
+        assert_eq!(
+            bodies.len(),
+            1,
+            "a refused Start commits no session, so nothing may be ended"
         );
     }
 
