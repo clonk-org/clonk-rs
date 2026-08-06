@@ -308,6 +308,45 @@
         assert_eq!(control.by_client, 7);
     }
 
+    // C4EditCursor.cpp:551-556 — ApplyToolBrush routes the drawing tools
+    // through EMControl exactly as the object editors do, so a draw gesture is
+    // a queued control rather than a direct landscape write.
+    #[test]
+    fn draw_tool_gesture_queues_a_decided_em_draw_tool_control() {
+        let mut app = new_state_only_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+
+        app.submit_or_execute_editor_draw_tool(clonk_engine::EmDrawToolControlData {
+            action: clonk_engine::EMDT_BRUSH,
+            mode: clonk_engine::LANDSCAPE_MODE_EXACT,
+            x: 12,
+            y: 34,
+            grade: 5,
+            ift: true,
+            material: clonk_engine::LegacyCString::from_bytes(b"Earth".to_vec())
+                .expect("fixture material is NUL-free"),
+            texture: clonk_engine::LegacyCString::from_bytes(b"Rough".to_vec())
+                .expect("fixture texture is NUL-free"),
+            ..Default::default()
+        })
+        .expect("a draw gesture submits its control");
+
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(control), false)] = decided.as_slice()
+        else {
+            panic!("expected one queued draw-tool control, got {decided:?}");
+        };
+        assert_eq!(control.action, clonk_engine::EMDT_BRUSH);
+        assert_eq!((control.x, control.y), (12, 34));
+        assert_eq!(control.grade, 5);
+        assert!(control.ift);
+        assert_eq!(control.material.as_bytes(), b"Earth");
+        assert_eq!(control.texture.as_bytes(), b"Rough");
+        // The submitting client stamps itself, like every other decided
+        // editor control (`C4ControlPacket::SetByClient`).
+        assert_eq!(control.by_client, 7);
+    }
+
     #[test]
     fn classic_command_line_config_and_language_override_are_process_local() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -4704,6 +4704,27 @@ impl GameApp {
         self.apply_ready_controls(tick, vec![NetworkControl::EmMoveObject(control)])
     }
 
+    /// The landscape drawing tools' half of the same seam
+    /// (`C4EditCursor::ApplyToolBrush`, `C4EditCursor.cpp:551-556`).
+    ///
+    /// Drawing is a *control* for the same reason moving an object is: the
+    /// landscape is synchronized state, so every peer has to apply the same
+    /// edit at the same tick.
+    fn submit_or_execute_editor_draw_tool(
+        &mut self,
+        control: clonk_engine::EmDrawToolControlData,
+    ) -> Result<(), EngineError> {
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) = network.submit_decided_em_draw_tool_control(tick, control, sync) {
+                tracing::error!(%error, "failed to submit an editor draw tool");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(tick, vec![NetworkControl::EmDrawTool(control)])
+    }
+
     /// `C4EditCursor::In`, called by the separate property-dialog script
     /// entry. Selection ownership stays with the edit cursor; this snapshots
     /// its live C++-ordered object numbers into one `EMMO_Script` packet.
