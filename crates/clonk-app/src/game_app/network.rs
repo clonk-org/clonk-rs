@@ -5875,6 +5875,29 @@ impl GameApp {
         self.stage_network_host_scenario(scenario, definition_load);
     }
 
+    /// Ports the `C4Network2::Clear` that every torn-down round runs.
+    ///
+    /// Dropping the manager is what sends the league `End` and releases the
+    /// host sockets (src/C4Network2.cpp:746-763). A session that outlives its
+    /// round keeps this host registered — and its ports bound — while the next
+    /// `InitNetworkHost` is already asking the same league server to register
+    /// it again, which is how a restart earns a rejected `Start`
+    /// (src/C4Network2.cpp:259-272,2292-2303).
+    pub(crate) fn clear_live_network_session(&mut self) {
+        if self.network.is_none() {
+            return;
+        }
+        self.abandon_live_masterserver_signup();
+        self.network = None;
+        self.network_mode = None;
+        self.network_control_clock = None;
+        self.host_join_snapshot = None;
+        self.runtime_network_control_mode = None;
+        self.runtime_network_committed_control_mode = None;
+        self.runtime_network_committed_status = None;
+        self.runtime_network_join_allowed = None;
+    }
+
     pub(crate) fn catalog_host_preload_scenario(&self) -> Option<&FrontendScenario> {
         if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
             return None;

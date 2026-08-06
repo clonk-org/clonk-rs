@@ -4813,6 +4813,12 @@ impl GameApp {
         self.host_lobby_countdown = None;
         self.pending_local_lobby_countdown_echoes.clear();
         self.finish_recording();
+        // C4Game::Clear ends the network session for every round it tears
+        // down, after the evaluation and record work that still needs it and
+        // before the rest of the game state goes (src/C4Game.cpp:544-582).
+        // Leaving it to the lobby view below would strand a session torn down
+        // from inside a running round.
+        self.clear_live_network_session();
         self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;

@@ -664,6 +664,32 @@ fn host_round_restart_announces_itself_before_tearing_the_session_down() {
 }
 
 #[test]
+fn host_round_restart_clears_the_live_session_before_staging_the_next_host() {
+    // C4Network2StartWaitDlg::OnBtnRestart queues the next mission and closes
+    // its dialog as aborted; C4Network2::FinalInit answers that abort with
+    // C4Network2::Clear, which sends the league End and closes NetIO before
+    // the queued mission ever reaches InitNetworkHost and LeagueStart
+    // (src/C4Network2Dialogs.cpp:580-584; src/C4Network2.cpp:591-604,748-763).
+    // Dropping the manager is what sends that End here, so a session that
+    // survives the restart leaves this host registered while the next Start
+    // asks the same server to register it again.
+    let mut app = new_running_sandbox_app();
+    let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
+
+    app.restart_current_scenario()
+        .expect("host restart selects network lobby staging");
+
+    assert!(
+        app.network.is_none(),
+        "the abandoned host session must be torn down before the next one registers"
+    );
+    assert!(
+        app.network_mode.is_none(),
+        "a torn-down session leaves no host mode behind"
+    );
+}
+
+#[test]
 fn restart_restore_team_obeys_mask_user_and_equal_team_guards() {
     let submitted = |mask: i32, player_type: u8, live_team: i32, restore_team: i32| {
         let mut app = new_menu_app(640, 480);
