@@ -2871,16 +2871,22 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
     assert_eq!(pressed(&app, secondary) & (1 << clonk_engine::COM_LEFT), 0);
 }
 
+/// `C4GameSave::SaveCore` shortens the scenario path with
+/// `Config.ForceRelativePath` (`C4GameSave.cpp:99-100`), which strips the one
+/// `ExePath` holding the data groups (`C4Config.cpp:1438-1442`). A pristine
+/// C++ capture of that field is pinned in
+/// `clonk-engine/src/scenario/tests/part_01.rs`, and it carries no data-root
+/// segment — so a scenario inside the root and one outside it shorten alike.
 #[test]
 fn initial_record_origin_is_relative_to_cpp_executable_root() {
     let paths = AppPaths::discover().expect("discover repository install");
     let scenario = paths
-        .install_root()
-        .join("content/Missions.c4f/Deep/Game.c4s");
+        .executable_data_root()
+        .join("Missions.c4f/Deep/Game.c4s");
 
     assert_eq!(
         record_scenario_origin(&scenario, Some(&paths), "wrong-ui-identifier"),
-        "content/Missions.c4f/Deep/Game.c4s"
+        "Missions.c4f/Deep/Game.c4s"
     );
     assert_eq!(
         record_scenario_origin(
