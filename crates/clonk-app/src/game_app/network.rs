@@ -7255,6 +7255,29 @@ impl GameApp {
     }
 
     pub(crate) fn finish_game_over_after_league(&mut self) -> Result<(), EngineError> {
+        if self.headless {
+            // `C4Game::ShowGameOverDlg` builds no dialog in a console engine:
+            // it drains any pending stream and calls `Application.QuitGame()`
+            // directly (src/C4Game.cpp:3679-3690). Placed after the league
+            // transaction above rather than at the C++ position, because C++
+            // ends the league later still, from `Game.Clear()` on the way out
+            // of `QuitGame` (src/C4Game.cpp:581; src/C4Network2.cpp:746-763)
+            // — which `request_exit` also drives, through
+            // `clear_live_network_session`.
+            //
+            // `QuitGame` returns to the startup dialog only when one is in use
+            // (src/C4Application.cpp:373-405); a server was launched with a
+            // scenario, so it reaches `Quit()` and the process ends. Leaving
+            // the round paused behind an undrawable dialog instead would wedge
+            // it with no input able to dismiss it.
+            let title = self
+                .active_scenario
+                .as_ref()
+                .map_or("Scenario", |scenario| scenario.title.as_str());
+            tracing::info!(scenario = title, "round finished; quitting the server");
+            self.request_exit("the round ended on a headless server");
+            return Ok(());
+        }
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives

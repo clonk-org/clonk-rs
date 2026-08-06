@@ -6996,10 +6996,17 @@ impl GameApp {
 
     fn handle_game_over(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        self.assets
-            .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
-            .map_err(report_classic_parity_boundary)
-            .map_err(classic_parity_engine_error)?;
+        // The evaluation dialog's graphics are only needed to draw one. A
+        // console engine never builds it (C4Game.cpp:3679-3690), and a
+        // `USE_CONSOLE` build has no `C4FontLoader` to render it with
+        // (C4Game.h:132-135), so a server must not fail its round end on
+        // resources it will not use.
+        if !self.headless {
+            self.assets
+                .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
+                .map_err(report_classic_parity_boundary)
+                .map_err(classic_parity_engine_error)?;
+        }
         // DoGameOver calls C4Player::EvaluateLeague for every survivor,
         // which sets PIF_Won on the linked live C4PlayerInfo before the
         // reference or evaluation UI consumes it.
