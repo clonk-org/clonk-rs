@@ -424,6 +424,25 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open: **Quitting the application never sends the league `Action=End`.**
+  `C4Application::Quit` reaches `C4Game::Clear` → `Network.Clear()` →
+  `LeagueEnd(); DeinitLeague();` (`src/C4Game.cpp:581`;
+  `src/C4Network2.cpp:746-763`), so a native host always de-registers before the
+  process goes away. In the port the `End` is sent only by
+  `NetworkManager::drop`, and `Event::LoopExiting` deliberately releases just
+  the window registry: on macOS that event is dispatched from inside
+  `applicationWillTerminate:` and `run_app` never returns, so joining worker
+  threads there would run inside the OS quit (`crates/clonk-app/src/main.rs`,
+  the `LoopExiting` arm). Closing the window outside `AppMode::Running` takes
+  the same path (`game_app/render.rs`, `handle_window_close_requested`). A host
+  that quits therefore leaves its game registered on the league/masterserver
+  until that server times it out. Since
+  `fix: keep hosting when the league server refuses the registration` the
+  consequence is a dismissible dialog rather than a failed host, but the stale
+  registration itself is unfixed: it needs a teardown that can send `End`
+  without joining threads under `applicationWillTerminate:`. No gate covers it —
+  neither `parity verify` nor the snapshots reach process shutdown.
+
 - Open: **A `global func` body may read and write its declaring host's named
   `local`s.** C4Aul rejects that outright at parse time, in both the lvalue and
   the rvalue path — `else if (a->LocalNamed.GetItemNr(Idtf) != -1) { if
