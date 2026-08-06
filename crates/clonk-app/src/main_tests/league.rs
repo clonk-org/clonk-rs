@@ -6227,3 +6227,37 @@ fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
         ScenarioSelectorMode::NetworkHost
     );
 }
+
+#[test]
+fn requesting_the_application_exit_ends_the_league_registration() {
+    // `CStdApp::Quit` only latches a flag (src/StdAppUnix.cpp:256-259), and the
+    // unwind that follows reaches `C4Application::Clear` → `Game.Clear()` →
+    // `Network.Clear()` → `LeagueEnd(); DeinitLeague();`
+    // (src/C4Application.cpp:304-332; src/C4Game.cpp:581;
+    // src/C4Network2.cpp:746-763), so a native host always de-registers before
+    // the process goes away. Dropping the manager is what sends that `End`
+    // here, and `Event::LoopExiting` cannot do it: on macOS that event is
+    // dispatched from inside `applicationWillTerminate:`. The latch itself is
+    // the last point that still runs on an ordinary loop turn.
+    let mut app = new_menu_app(320, 200);
+    let (manager, _events) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+
+    app.request_exit("the main menu Quit item");
+
+    assert!(
+        app.network.is_none(),
+        "a quitting host must end its registration while the loop can still block on it"
+    );
+    assert!(app.network_mode.is_none());
+    assert!(
+        app.exit_requested,
+        "the teardown must not swallow the quit it was asked for"
+    );
+    assert_eq!(app.exit_reason, Some("the main menu Quit item"));
+}

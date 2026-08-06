@@ -5856,6 +5856,26 @@ impl GameApp {
     fn request_exit(&mut self, reason: &'static str) {
         self.exit_requested = true;
         self.exit_reason = Some(reason);
+        // `CStdApp::Quit` only latches a flag too (src/StdAppUnix.cpp:256-259),
+        // but the unwind behind it always reaches `C4Application::Clear` →
+        // `Game.Clear()` → `Network.Clear()` → `LeagueEnd(); DeinitLeague();`
+        // (src/C4Application.cpp:304-332; src/C4Game.cpp:581;
+        // src/C4Network2.cpp:746-763), so a native host never leaves its game
+        // registered behind it. The port has no such unwind — nothing drops
+        // `GameApp` — and `Event::LoopExiting` cannot stand in for one, because
+        // on macOS it is dispatched from inside `applicationWillTerminate:`.
+        // The latch is the last point that still runs on an ordinary loop turn,
+        // where blocking on the worker is safe.
+        //
+        // A quit against a dead league server does block: `finish_league_runtime`
+        // retries a failed send up to ten times, each bounded by the 20-second
+        // `C4HTTPQueryTimeout` (`clonk_network::LEAGUE_HTTP_TIMEOUT`). Native
+        // pays the same worst case at the same point — `LeagueEnd`'s
+        // `MAX_RETRIES = 10` loop `continue`s on a failed reply once
+        // `C4Game::Clear` has deleted `pGUI` (src/C4Network2.cpp:2513-2579;
+        // src/C4Game.cpp:576-581) — and every other teardown here already
+        // carries it, so this adds no new class of stall.
+        self.clear_live_network_session();
     }
 
     fn take_exit_request(&mut self) -> bool {
