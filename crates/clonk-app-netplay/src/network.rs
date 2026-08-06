@@ -10239,6 +10239,79 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutting_the_host_worker_down_ends_its_registration() {
+        // `C4Network2::Clear` ends whatever registration the session still
+        // holds (src/C4Network2.cpp:746-763), and dropping the manager — which
+        // queues this Shutdown and joins — is the port's only route to it.
+        // `GameApp::request_exit` now leans on that, so it is pinned here.
+        let (endpoint, league_server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\nMaxPlayers=4\r\n",
+            b"[Response]\r\nStatus=Success\r\n",
+        ]);
+        let settings = HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+                1,
+                0,
+                Some(PreparedLeagueHostConfig {
+                    endpoint,
+                    transport: clonk_network::LeagueHttpTransportConfig::default(),
+                    update_period_secs: 120,
+                    league_server_signup: false,
+                }),
+            )),
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                &mut control_performance_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+            )
+            .await
+        });
+
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("host worker readiness");
+        assert!(ready.league_runtime_available);
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("shut the registered host worker down");
+        worker
+            .await
+            .expect("join registered host worker")
+            .expect("registered host worker exits cleanly");
+
+        let bodies = league_server.join().expect("join league HTTP fixture");
+        assert_eq!(bodies.len(), 2, "shutdown must follow Start with End");
+        assert!(bodies[1]
+            .windows(b"Action=End".len())
+            .any(|window| window == b"Action=End"));
+        assert!(
+            bodies[1]
+                .windows(b"CSID=session".len())
+                .any(|window| window == b"CSID=session"),
+            "the End must name the session the Start committed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_initial_start_keeps_hosting_without_a_registration() {
         // C4Network2::InitHost answers a refused LeagueStart with DeinitLeague
         // and keeps hosting: only the modal's Abort — which is what pCancel

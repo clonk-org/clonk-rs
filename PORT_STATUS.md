@@ -424,24 +424,41 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- Open: **Quitting the application never sends the league `Action=End`.**
+- Open: **Two process-exit routes still skip the league `Action=End`.**
   `C4Application::Quit` reaches `C4Game::Clear` → `Network.Clear()` →
   `LeagueEnd(); DeinitLeague();` (`src/C4Game.cpp:581`;
-  `src/C4Network2.cpp:746-763`), so a native host always de-registers before the
-  process goes away. In the port the `End` is sent only by
-  `NetworkManager::drop`, and `Event::LoopExiting` deliberately releases just
-  the window registry: on macOS that event is dispatched from inside
-  `applicationWillTerminate:` and `run_app` never returns, so joining worker
-  threads there would run inside the OS quit (`crates/clonk-app/src/main.rs`,
-  the `LoopExiting` arm). Closing the window outside `AppMode::Running` takes
-  the same path (`game_app/render.rs`, `handle_window_close_requested`). A host
-  that quits therefore leaves its game registered on the league/masterserver
-  until that server times it out. Since
-  `fix: keep hosting when the league server refuses the registration` the
-  consequence is a dismissible dialog rather than a failed host, but the stale
-  registration itself is unfixed: it needs a teardown that can send `End`
-  without joining threads under `applicationWillTerminate:`. No gate covers it —
-  neither `parity verify` nor the snapshots reach process shutdown.
+  `src/C4Network2.cpp:746-763`) for *every* way the loop unwinds, so a native
+  host always de-registers. In the port the `End` is sent only by
+  `NetworkManager::drop`, and `GameApp::request_exit` now drops the session on
+  the way out, which covers every flagged quit — the main-menu Quit item, the
+  window close button, the developer console's `/quit`, the editor launch, the
+  update handoff and the configuration reset. Two routes remain:
+
+  - **macOS `terminate:`** — Cmd+Q, the Dock's Quit item and log-out all send
+    `-[NSApplication terminate:]`, which never delivers `CloseRequested`:
+    winit 0.30.13 implements only `applicationWillTerminate:`
+    (`winit-0.30.13/src/platform_impl/macos/app_state.rs:69-72`), never
+    `applicationShouldTerminate:`, so the app first hears about the quit from
+    inside AppKit's own terminate, where joining worker threads is exactly what
+    `Event::LoopExiting` is restricted from doing. SDL cancels that terminate
+    and re-posts it as `SDL_QUIT` (`src/StdAppUnix.cpp:809-815`), which is why
+    C++ is unaffected; matching it needs the port to own an
+    `applicationShouldTerminate:` of its own. Note the Cmd+Q in question is
+    winit's own default menu item
+    (`winit-0.30.13/src/platform_impl/macos/menu.rs:66-73`).
+  - **Fatal-error aborts** — the event loop's error arms call
+    `event_target.exit()` directly rather than `request_exit`
+    (`crates/clonk-app/src/main.rs`, the `tracing::error!` + `exit()` pairs).
+    Unlike `terminate:`, these unwind on a normal stack, so they are coverable;
+    they are simply not covered yet, and a single teardown at loop unwind would
+    close them and `terminate:` together if the macOS hook above lands first.
+
+  A host taking either route leaves its game registered until the server times
+  it out. The consequence is bounded: since
+  `fix: keep hosting when the league server refuses the registration`, a refused
+  `Start` on the next host is a dismissible dialog, not a failed host. No gate
+  covers this — neither `parity verify` nor the snapshots reach process
+  shutdown.
 
 - Open: **A `global func` body may read and write its declaring host's named
   `local`s.** C4Aul rejects that outright at parse time, in both the lvalue and
