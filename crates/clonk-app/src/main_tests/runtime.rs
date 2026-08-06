@@ -5433,6 +5433,253 @@
             .is_none());
     }
 
+    // C4EditCursor.cpp:224-236,551-572 — Draw mode routes the same viewport
+    // gestures into the landscape tools, and every stroke leaves as an
+    // EMDrawTool control rather than a direct raster write.
+    #[test]
+    fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
+        use clonk_engine::developer_tools::Tool;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Draw;
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        // Drawing is what publishes this window's own projection.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+        let mode = app
+            .engine
+            .landscape()
+            .expect("sandbox landscape")
+            .mode();
+        let world = |local: (i32, i32)| (projection.target_x + local.0, projection.target_y + local.1);
+
+        // `LeftButtonDown`'s Brush arm applies on the click itself (`:224`).
+        let pressed = (40, 10);
+        app.console_viewport_press(identity, pressed, 1.0, false, false);
+        assert!(
+            app.developer_tools.holding(),
+            "a draw press arms Hold like every other gesture"
+        );
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(brush), false)] = decided.as_slice()
+        else {
+            panic!("expected one brush control, got {decided:?}");
+        };
+        assert_eq!(brush.action, clonk_engine::EMDT_BRUSH);
+        assert_eq!((brush.x, brush.y), world(pressed));
+        // The mode travels with the control, because the executor refuses a
+        // packet whose mode no longer matches (`C4Control.cpp:1015-1016`).
+        assert_eq!(brush.mode, mode);
+        // `C4ToolsDlg::Default` — grade 5, IFT on, Earth over Rough.
+        assert_eq!(brush.grade, clonk_engine::developer_tools::GRADE_DEFAULT);
+        assert!(brush.ift);
+        assert_eq!(brush.material.as_bytes(), b"Earth");
+        assert_eq!(brush.texture.as_bytes(), b"Rough");
+        assert_eq!(brush.by_client, 7);
+
+        // The brush also draws on every drag step (`C4EditCursor::Move`:159).
+        let dragged = (70, 10);
+        app.console_viewport_motion(identity, dragged, 1.0, false, false);
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(dragging), false)] = decided.as_slice()
+        else {
+            panic!("expected one dragged brush control, got {decided:?}");
+        };
+        assert_eq!((dragging.x, dragging.y), world(dragged));
+
+        app.console_viewport_release();
+        assert!(!app.developer_tools.holding(), "the release clears Hold");
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "the brush emits nothing on release"
+        );
+
+        // Line records its anchor on the press and emits once on release,
+        // with the *live* cursor leading and the anchor second — C++'s own
+        // argument order, `C4ControlEMDrawTool(EMDT_Line, Mode, X, Y, X2, Y2)`
+        // (`:558`).
+        app.developer_tools.set_tool(Tool::Line, false);
+        let anchor = (12, 34);
+        app.console_viewport_press(identity, anchor, 1.0, false, false);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a line draws nothing until it is released"
+        );
+        let released = (56, 78);
+        app.console_viewport_motion(identity, released, 1.0, false, false);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a line draws nothing while it is dragged"
+        );
+        app.console_viewport_release();
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(line), false)] = decided.as_slice() else {
+            panic!("expected one line control, got {decided:?}");
+        };
+        assert_eq!(line.action, clonk_engine::EMDT_LINE);
+        assert_eq!((line.x, line.y), world(released));
+        assert_eq!((line.x2, line.y2), world(anchor));
+    }
+
+    // C4EditCursor.cpp:60-67,227-231,574-580 — Fill is the one tool that emits
+    // nothing on the click: it arms Hold and repeats from Execute, refusing
+    // outright while the game is halted.
+    #[test]
+    fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() {
+        use clonk_engine::developer_tools::Tool;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Draw;
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+        let world = |local: (i32, i32)| (projection.target_x + local.0, projection.target_y + local.1);
+        app.developer_tools.set_tool(Tool::Fill, false);
+
+        // Halted: the click is refused with IDS_CNS_FILLNOHALT and Hold is
+        // never armed, so the frame repeat cannot start either (`:227-231`).
+        app.network_control_running = false;
+        app.console_viewport_press(identity, (40, 10), 1.0, false, false);
+        assert!(!app.developer_tools.holding(), "a halted fill never holds");
+        assert!(app
+            .developer_console
+            .log()
+            .text()
+            .contains("The fill tool cannot be used in halt mode."));
+        app.console_edit_cursor_tick();
+        assert!(commands.take_submitted_decided_controls().is_empty());
+
+        // Running: the click still emits nothing, but arms the repeat.
+        app.network_control_running = true;
+        let pressed = (40, 10);
+        app.console_viewport_press(identity, pressed, 1.0, false, false);
+        assert!(app.developer_tools.holding());
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "fill emits nothing on the click itself"
+        );
+
+        app.console_edit_cursor_tick();
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(fill), false)] = decided.as_slice() else {
+            panic!("expected one fill control, got {decided:?}");
+        };
+        assert_eq!(fill.action, clonk_engine::EMDT_FILL);
+        assert_eq!((fill.x, fill.y), world(pressed));
+        // `ApplyToolFill` passes 0 for X2 and forces IFT false (`:579`).
+        assert_eq!(fill.x2, 0);
+        assert!(!fill.ift);
+
+        // Once per engine tick, not once per event-loop wake.
+        app.console_edit_cursor_tick();
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a second wake inside the same frame emits nothing"
+        );
+
+        // A held fill follows the cursor, because `ApplyToolFill` reads the
+        // same live X/Y every other tool does (`:579`).
+        let moved = (90, 60);
+        app.console_viewport_motion(identity, moved, 1.0, false, false);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "fill emits nothing on the drag itself"
+        );
+        // The repeat is keyed on the engine frame; clear the latch to stand in
+        // for the next one rather than running a whole simulation tick.
+        app.edit_cursor_tick_frame = None;
+        app.console_edit_cursor_tick();
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(fill), false)] = decided.as_slice() else {
+            panic!("expected one moved fill control, got {decided:?}");
+        };
+        assert_eq!((fill.x, fill.y), world(moved));
+
+        app.console_viewport_release();
+        app.edit_cursor_tick_frame = None;
+        app.console_edit_cursor_tick();
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "releasing stops the repeat"
+        );
+    }
+
+    // C4EditCursor.cpp:236,698-731,773-792 — the picker reads the landscape
+    // into the tools instead of drawing, and Alt selects it temporarily.
+    #[test]
+    fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
+        use clonk_engine::developer_tools::Tool;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Draw;
+        // `ApplyToolPicker` samples nothing outside Static and Exact.
+        app.apply_ready_controls(
+            1,
+            vec![NetworkControl::EmDrawTool(
+                clonk_engine::EmDrawToolControlData {
+                    action: clonk_engine::EMDT_SET_MODE,
+                    mode: clonk_engine::LANDSCAPE_MODE_EXACT,
+                    ..Default::default()
+                },
+            )],
+        )
+        .expect("the landscape switches to exact");
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+        // Alt overrides the tool only while it is held, and only in Draw mode
+        // (`C4EditCursor::AltDown`, `:773-780`).
+        app.update_console_editor_modifiers(ModifiersState::ALT);
+        assert_eq!(app.developer_tools.tool(), Tool::Picker);
+
+        // Sampling empty landscape selects the sky pseudo-material and leaves
+        // the texture alone (`:717`, `:727`).
+        app.console_viewport_press(identity, (40, 10), 1.0, false, false);
+        assert_eq!(app.developer_tools.material(), "Sky");
+        assert_eq!(app.developer_tools.texture(), "Rough");
+        assert!(
+            !app.developer_tools.holding(),
+            "ApplyToolPicker ends with Hold = false (`:731`)"
+        );
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "the picker never draws"
+        );
+
+        // Releasing Alt restores the tool the dialog had before.
+        app.update_console_editor_modifiers(ModifiersState::empty());
+        assert_eq!(app.developer_tools.tool(), Tool::Brush);
+
+        // Outside Draw mode Alt is inert.
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        app.update_console_editor_modifiers(ModifiersState::ALT);
+        assert_eq!(app.developer_tools.tool(), Tool::Brush);
+    }
+
     #[test]
     fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         // FinishDerive returns on the main thread before its forwarded

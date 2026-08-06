@@ -159,6 +159,11 @@ impl DeveloperTools {
         self.hold
     }
 
+    /// `C4EditCursor::X`/`Y` — where the last pointer message left the cursor.
+    pub fn cursor(&self) -> (i32, i32) {
+        self.cursor
+    }
+
     pub fn active(&self) -> bool {
         self.active
     }

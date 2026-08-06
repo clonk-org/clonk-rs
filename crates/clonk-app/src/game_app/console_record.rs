@@ -62,7 +62,7 @@ impl GameApp {
         }
     }
 
-    fn developer_console_editing(&self) -> bool {
+    pub(crate) fn developer_console_editing(&self) -> bool {
         self.console_mode && self.developer_console_editing_enabled
     }
 

@@ -205,6 +205,16 @@ pub(crate) fn handle_console_viewport_event(
         } => {
             windows.request_redraw(key);
         }
+        // A focused viewport window is where the console's modifier state
+        // comes from: the shell never sees these messages, and the edit
+        // cursor reads Ctrl/Shift live on every click (`C4EditCursor.cpp:143,
+        // 206`) while Alt drives the Draw-mode picker (`:773-792`).
+        Event::WindowEvent {
+            event: WindowEvent::ModifiersChanged(modifiers),
+            ..
+        } => {
+            app.update_console_editor_modifiers(modifiers.state());
+        }
         // `C4Viewport`'s pointer handlers convert the coordinates carried by
         // each message through this viewport's own ViewX/ViewY and scale
         // (`C4Viewport.cpp:181`). winit splits motion from button state, so
