@@ -4041,7 +4041,7 @@ fn discover_global_sound_libraries_for(
         // state, so this stays empty rather than guessing a root.
         return (Vec::new(), Vec::new());
     };
-    discover_global_sound_libraries_at(paths.content_dir().unwrap_or(paths.install_root()))
+    discover_global_sound_libraries_at(paths.executable_data_root())
 }
 
 pub(crate) fn discover_global_sound_libraries_at(

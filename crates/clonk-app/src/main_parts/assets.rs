@@ -1811,7 +1811,7 @@ pub(crate) fn resolve_loader_origin(
 ) -> Result<Option<PathBuf>> {
     let normalized = raw_origin.replace('\\', "/");
     let origin = PathBuf::from(normalized);
-    let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
+    let exe_data_root = paths.executable_data_root();
     let candidate = absolute_loader_path(&origin, exe_data_root);
     if loader_parent_paths(&candidate).is_empty() {
         // This includes the validated explicit empty value (`empty`):

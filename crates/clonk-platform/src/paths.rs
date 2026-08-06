@@ -122,6 +122,39 @@ impl AppPaths {
         self.content_dir.as_deref()
     }
 
+    /// The directory C++ resolves an `ExePath`-relative *data* path against.
+    ///
+    /// `C4Config::AtExePath` (`C4Config.cpp:1344-1349`) and its inverse
+    /// `ForceRelativePath` (`C4Config.cpp:1438-1459`) share one
+    /// `General.ExePath`, and the `.c4f`/`.c4d` groups sit directly in it.
+    /// A source checkout interposes `content/`, so that is the ExePath data
+    /// layout here; a packaged layout has none and uses the install root.
+    pub fn executable_data_root(&self) -> &Path {
+        self.content_dir.as_deref().unwrap_or(&self.install_root)
+    }
+
+    /// The data roots probed for an `ExePath`-relative group path, outermost
+    /// layout first.
+    ///
+    /// C++ has a single `ExePath`, so it needs no such list. This port splits
+    /// it across roots that a source checkout and a packaged install spell
+    /// differently, and a scenario `Origin` written under one of them has to
+    /// keep resolving under the others.
+    pub fn executable_data_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        for root in [
+            self.executable_data_root(),
+            self.planet_dir(),
+            self.install_root(),
+            self.system_group_path(),
+        ] {
+            if !roots.iter().any(|seen: &PathBuf| seen == root) {
+                roots.push(root.to_path_buf());
+            }
+        }
+        roots
+    }
+
     pub fn system_group_path(&self) -> &Path {
         &self.system_group
     }
