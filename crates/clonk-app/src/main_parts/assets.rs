@@ -1804,6 +1804,28 @@ pub(crate) fn cpp_loader_items_identical(left: &Path, right: &Path) -> Result<bo
     }
 }
 
+/// The data root a relative `Origin` is spelled against.
+///
+/// C++ needs no such choice: `C4GroupSet.cpp:297` opens the `Origin` unprefixed
+/// against the working directory `C4Config.cpp:1320-1321` forces to the single
+/// `ExePath`. This port splits that root, and a savegame keeps whichever
+/// spelling it was written with (`C4GameSave.cpp:96` keeps an assigned Origin),
+/// so the outermost parent it names decides which root it belongs to.
+fn loader_origin_data_root(origin: &Path, paths: &AppPaths) -> PathBuf {
+    if origin.is_absolute() {
+        return paths.executable_data_root().to_path_buf();
+    }
+    paths
+        .executable_data_roots()
+        .into_iter()
+        .find(|root| {
+            loader_parent_paths(&root.join(origin))
+                .first()
+                .is_some_and(|outer| outer.exists())
+        })
+        .unwrap_or_else(|| paths.executable_data_root().to_path_buf())
+}
+
 pub(crate) fn resolve_loader_origin(
     raw_origin: &str,
     scenario_path: &Path,
@@ -1811,14 +1833,14 @@ pub(crate) fn resolve_loader_origin(
 ) -> Result<Option<PathBuf>> {
     let normalized = raw_origin.replace('\\', "/");
     let origin = PathBuf::from(normalized);
-    let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
-    let candidate = absolute_loader_path(&origin, exe_data_root);
+    let exe_data_root = loader_origin_data_root(&origin, paths);
+    let candidate = absolute_loader_path(&origin, &exe_data_root);
     if loader_parent_paths(&candidate).is_empty() {
         // This includes the validated explicit empty value (`empty`):
         // RegisterParentFolders has no contiguous .c4f parent and is a no-op.
         return Ok(None);
     }
-    let scenario = absolute_loader_path(scenario_path, exe_data_root);
+    let scenario = absolute_loader_path(scenario_path, &exe_data_root);
     let identical = cpp_loader_items_identical(&candidate, &scenario)?;
     Ok((!identical).then_some(candidate))
 }
@@ -1827,17 +1849,29 @@ pub(crate) fn register_loader_origin_parents(
     origin_path: &Path,
     registrations: &mut Vec<LoaderGroupRegistration>,
     registration_order: &mut usize,
-) -> Result<()> {
+) {
     let parents = loader_parent_paths(origin_path);
     let Some((outer_path, inner_paths)) = parents.split_first() else {
-        return Ok(());
+        return;
     };
-    let mut group = open_group_path_for_folder_map(outer_path).with_context(|| {
-        format!(
-            "classic loader cannot open outer Origin parent {}",
-            outer_path.display()
-        )
-    })?;
+    // `C4Game::OpenScenario` discards this result (`C4Game.cpp:177-178`), and
+    // `RegisterParentFolders` registers each parent as it opens it
+    // (`C4GroupSet.cpp:310`) before reporting the first it cannot and
+    // returning null (`C4GroupSet.cpp:291-301`). An Origin naming a parent the
+    // install no longer holds therefore costs that parent and the groups below
+    // it, never the scenario.
+    let Some(mut group) = open_group_path_for_folder_map(outer_path)
+        .inspect_err(|error| {
+            tracing::warn!(
+                %error,
+                parent = %outer_path.display(),
+                "classic loader cannot open the outer Origin parent; registering none like C++"
+            );
+        })
+        .ok()
+    else {
+        return;
+    };
     registrations.push(LoaderGroupRegistration {
         priority: 100,
         registration_order: *registration_order,
@@ -1846,27 +1880,27 @@ pub(crate) fn register_loader_origin_parents(
     *registration_order = registration_order.saturating_add(1);
 
     for (inner_index, inner_path) in inner_paths.iter().enumerate() {
-        let name = inner_path.file_name().with_context(|| {
-            format!(
-                "classic loader Origin parent has no child name: {}",
-                inner_path.display()
-            )
-        })?;
-        group = open_child_flexible(&group, Path::new(name))
-            .with_context(|| {
-                format!(
-                    "classic loader cannot faithfully represent C++ partial Origin registration after opening {}: failed to inspect child {}",
-                    group.root().display(),
-                    inner_path.display()
-                )
-            })?
-            .with_context(|| {
-                format!(
-                    "classic loader cannot faithfully represent C++ partial Origin registration after opening {}: child {} is missing",
-                    group.root().display(),
-                    inner_path.display()
-                )
-            })?;
+        let child = inner_path.file_name().and_then(|name| {
+            open_child_flexible(&group, Path::new(name))
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        child = %inner_path.display(),
+                        "classic loader cannot inspect an Origin parent child"
+                    );
+                })
+                .ok()
+                .flatten()
+        });
+        let Some(child) = child else {
+            tracing::warn!(
+                opened = %group.root().display(),
+                child = %inner_path.display(),
+                "classic loader stopped at a missing Origin parent; keeping the parents already registered like C++"
+            );
+            return;
+        };
+        group = child;
         registrations.push(LoaderGroupRegistration {
             priority: 100 + i32::try_from(inner_index + 1).unwrap_or(i32::MAX),
             registration_order: *registration_order,
@@ -1874,7 +1908,6 @@ pub(crate) fn register_loader_origin_parents(
         });
         *registration_order = registration_order.saturating_add(1);
     }
-    Ok(())
 }
 
 fn effective_loader_definition_modules(
@@ -2048,7 +2081,7 @@ pub(crate) fn classic_loader_registrations(
                 &origin_path,
                 &mut registrations,
                 &mut registration_order,
-            )?;
+            );
         }
     }
 

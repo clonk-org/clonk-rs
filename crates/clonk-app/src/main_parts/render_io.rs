@@ -5267,7 +5267,7 @@ impl MusicResolver {
                 MusicCatalog::empty()
             }
         };
-        let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
+        let exe_data_root = paths.executable_data_root();
         let more_music_path = exe_data_root.join("MoreMusic.txt");
         if let Err(error) = load_more_music(&mut global, &more_music_path) {
             tracing::warn!(

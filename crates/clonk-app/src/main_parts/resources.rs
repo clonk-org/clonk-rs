@@ -506,15 +506,7 @@ impl InstallDefinitionResolver {
         let Some(paths) = self.app_paths.as_deref() else {
             return Vec::new();
         };
-        let mut bases = Vec::new();
-        if let Some(content) = paths.content_dir() {
-            bases.push(content.to_path_buf());
-        }
-        bases.extend([
-            paths.planet_dir().to_path_buf(),
-            paths.install_root().to_path_buf(),
-            paths.system_group_path().to_path_buf(),
-        ]);
+        let mut bases = paths.executable_data_roots();
         let mut seen = HashSet::new();
         bases.retain(|path| seen.insert(scenario_root_key(path)));
         bases
@@ -2075,7 +2067,7 @@ pub(crate) fn developer_console_definition_description_path(
     // Config.AtExeRelativePath is a raw prefix comparison against exactly
     // General.ExePath (content_dir when present, otherwise install_root). It
     // intentionally does not require a path-component boundary.
-    let root = paths.content_dir().unwrap_or(paths.install_root());
+    let root = paths.executable_data_root();
     let mut root = path_to_legacy_bytes(root);
     let separator = std::path::MAIN_SEPARATOR as u8;
     if !root.ends_with(&[separator]) {
@@ -2920,7 +2912,7 @@ pub(crate) fn startup_definition_paths(paths: &AppPaths) -> io::Result<StartupDe
         .map(|path| path_from_group_name_bytes(&normalize_legacy_path_bytes(path.clone())));
     // AppPaths maps an installed C++ ExePath data layout to `content/` in a
     // source checkout; packaged layouts fall back to the install root.
-    let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
+    let exe_data_root = paths.executable_data_root();
     let executable_prefix = path_with_trailing_native_separator(exe_data_root);
     let selector_root = configured_text
         .as_ref()
@@ -3678,7 +3670,7 @@ pub(crate) fn game_save_definition_paths(
     native_config: &[u8],
 ) -> (String, String) {
     let executable_path = paths
-        .map(|paths| paths.content_dir().unwrap_or(paths.install_root()))
+        .map(AppPaths::executable_data_root)
         .map(|path| {
             let mut path = path_as_legacy_text(path);
             if !path.ends_with(std::path::MAIN_SEPARATOR) {

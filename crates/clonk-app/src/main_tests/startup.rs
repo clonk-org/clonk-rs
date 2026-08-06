@@ -2641,6 +2641,37 @@ fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
     assert_eq!(registrations[1].group.root(), origin_parent.as_path());
 }
 
+/// clonk-org/clonk-rs#186. C++ has one `ExePath`, so an `Origin` is read back
+/// against the directory it was written against: `C4GroupSet.cpp:297` opens it
+/// unprefixed, and `C4Config.cpp:1320-1321` forces the working directory to
+/// `ExePath`. This port spells that root two ways, and savegames already on
+/// disk carry the install-root spelling, so both must name the same group.
+#[test]
+fn loader_origin_relative_to_the_install_root_registers_the_same_parent() {
+    let root = tempdir().expect("install-root loader Origin fixture");
+    let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+    let origin_parent = content.join("Parent.c4f");
+    fs::create_dir(&origin_parent).expect("Origin parent group");
+    let scenario_path = root.path().join("Savegames.c4f").join("Saved.c4s");
+    let (scenario, scenario_group, head) =
+        loader_origin_fixture_scenario(&scenario_path, "content/Parent.c4f/Original.c4s");
+
+    let registrations = classic_loader_registrations(
+        &scenario,
+        &scenario_group,
+        &head,
+        &loader_fixture_definition_load(),
+        &paths,
+    )
+    .expect("install-root relative Origin resolves");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.group.root() == origin_parent.as_path()),
+        "the Origin parent is registered, not doubled below the content root"
+    );
+}
+
 #[test]
 fn loader_origin_explicit_empty_value_is_a_valid_no_op() {
     let root = tempdir().expect("empty loader Origin fixture");
@@ -2720,8 +2751,12 @@ fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
     assert_eq!(registrations[2].priority, 101);
 }
 
+/// `C4GroupSet::RegisterParentFolders` registers each parent as it opens it
+/// (`C4GroupSet.cpp:310`) and only stops at the first it cannot open
+/// (`C4GroupSet.cpp:291-295`), so the groups above a missing child stay in the
+/// set. Partial registration is the C++ shape, not a boundary.
 #[test]
-fn unresolvable_packed_loader_origin_takes_typed_partial_boundary() {
+fn unresolvable_packed_loader_origin_keeps_the_parents_already_registered() {
     let root = tempdir().expect("ambiguous packed loader Origin fixture");
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let outer_path = content.join("Outer.c4f");
@@ -2739,12 +2774,32 @@ fn unresolvable_packed_loader_origin_takes_typed_partial_boundary() {
     let mut registrations = Vec::new();
     let mut registration_order = 0;
 
-    let error =
-        register_loader_origin_parents(&origin, &mut registrations, &mut registration_order)
-            .expect_err("missing logical packed child requires the typed loader boundary");
+    register_loader_origin_parents(&origin, &mut registrations, &mut registration_order);
     assert_eq!(registrations.len(), 1, "outer registration happens first");
     assert_eq!(registrations[0].group.root(), outer_path.as_path());
-    assert!(error.to_string().contains("partial Origin registration"));
+}
+
+/// `C4Game::OpenScenario` discards the `RegisterParentFolders` result
+/// (`C4Game.cpp:177-178`), so an Origin naming a parent the install no longer
+/// holds costs those groups and nothing else — the scenario still loads.
+#[test]
+fn loader_origin_naming_an_absent_parent_still_registers_the_scenario() {
+    let root = tempdir().expect("absent loader Origin parent fixture");
+    let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+    let scenario_path = content.join("Actual.c4s");
+    let (scenario, scenario_group, head) =
+        loader_origin_fixture_scenario(&scenario_path, "Gone.c4f/Original.c4s");
+
+    let registrations = classic_loader_registrations(
+        &scenario,
+        &scenario_group,
+        &head,
+        &loader_fixture_definition_load(),
+        &paths,
+    )
+    .expect("an absent Origin parent is not fatal");
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0].group.root(), scenario_path.as_path());
 }
 
 #[test]

@@ -1189,7 +1189,7 @@ pub(crate) fn record_scenario_origin(
     } else {
         app_paths.and_then(|paths| {
             scenario_path
-                .strip_prefix(paths.install_root())
+                .strip_prefix(paths.executable_data_root())
                 .ok()
                 .map(Path::to_path_buf)
         })
