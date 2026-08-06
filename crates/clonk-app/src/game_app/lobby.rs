@@ -3097,6 +3097,33 @@ impl GameApp {
         self.apply_lobby_countdown_presentation(packet);
     }
 
+    /// The countdown a dedicated engine has nowhere to draw goes to the log.
+    ///
+    /// C++ routes every countdown packet at `Game.Network.GetLobby()` and,
+    /// when there is no such dialog, logs it instead — on the opening packet
+    /// (src/C4GameLobby.cpp:1118-1127), on each broadcast second while the
+    /// timer is still running (`:1150-1157`), and on an abort, as
+    /// `IDS_PRC_STARTABORTED` (`:1183-1190`). Zero is deliberately not logged
+    /// here: the round either starts or aborts, and both say so themselves.
+    fn log_dialogless_lobby_countdown(
+        &mut self,
+        packet: clonk_network::LobbyCountdownPacket,
+        initial: bool,
+    ) {
+        if !(self.console_mode || self.headless) {
+            return;
+        }
+        let labels = self.classic_lobby_labels();
+        let message = if packet.is_abort() {
+            labels.start_aborted
+        } else if packet.countdown() == 0 {
+            return;
+        } else {
+            lobby_countdown_message(packet.countdown(), initial, &labels.countdown_template)
+        };
+        tracing::info!("{message}");
+    }
+
     pub(crate) fn apply_lobby_countdown_presentation(
         &mut self,
         packet: clonk_network::LobbyCountdownPacket,
@@ -3106,6 +3133,13 @@ impl GameApp {
         } else {
             clonk_frontend::game_lobby::LobbyCountdownPacket::Seconds(packet.countdown())
         };
+        // `MainDlg::OnCountdownPacket` passes `!fWasCountdown` as the packet's
+        // "initial" flag (src/C4GameLobby.cpp:415), so it must be read before
+        // the controller below consumes this packet.
+        let was_counting_down = self
+            .visible_classic_lobby_controller()
+            .is_some_and(|controller| controller.countdown().is_locked());
+        self.log_dialogless_lobby_countdown(packet, !was_counting_down);
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.apply_lobby_countdown(packet);
         }

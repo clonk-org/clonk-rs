@@ -1950,6 +1950,41 @@ fn classic_lobby_fair_crew_control_echoes_and_countdown_or_force_gate_it() {
     assert!(app.startup_view_flags.record);
 }
 
+/// `C4PacketCountdown::GetCountdownMsg` (src/C4GameLobby.cpp:50-60): under
+/// `AlmostStartCountdownTime` the message is a bare `"n..."`, but the *initial*
+/// packet is always the full `IDS_PRC_COUNTDOWN` sentence however small its
+/// value — `MainDlg::OnCountdownPacket` passes `!fWasCountdown` for that flag
+/// (`:415`), and a dedicated host with no dialog logs the same text
+/// (`:1125-1127`, `:1150-1157`).
+#[test]
+fn lobby_countdown_messages_shorten_only_after_the_opening_packet() {
+    let template = "Game starts in {seconds} seconds";
+
+    // The opening packet spells it out at every value, including 0 and 1.
+    for seconds in [0, 1, 9, 10, 30] {
+        assert_eq!(
+            lobby_countdown_message(seconds, true, template),
+            format!("Game starts in {seconds} seconds"),
+            "initial packet at {seconds}"
+        );
+    }
+
+    // Later packets shorten strictly below AlmostStartCountdownTime (10).
+    for seconds in [0, 1, 9] {
+        assert_eq!(
+            lobby_countdown_message(seconds, false, template),
+            format!("{seconds}...")
+        );
+    }
+    for seconds in [10, 11, 60] {
+        assert_eq!(
+            lobby_countdown_message(seconds, false, template),
+            format!("Game starts in {seconds} seconds"),
+            "the boundary is exclusive at {seconds}"
+        );
+    }
+}
+
 /// `C4GameLobby::Countdown::OnSec1Timer` at zero: a host with no lobby dialog
 /// — which is what a dedicated engine has, `fFullscreenLobby` being
 /// `!Console.Active && (lpDDraw->GetEngine() != GFXENGN_NOGFX)`

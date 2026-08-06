@@ -4575,6 +4575,20 @@ pub(crate) enum LobbyAction {
 pub(crate) const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
 pub(crate) const ALMOST_START_LOBBY_COUNTDOWN_SECONDS: i32 = 10;
 
+/// `C4PacketCountdown::GetCountdownMsg` (src/C4GameLobby.cpp:50-60): the last
+/// seconds are a bare `"n..."`, and everything else — including the very first
+/// message, whatever its value — is the full `IDS_PRC_COUNTDOWN` sentence.
+///
+/// `template` is the resolved resource with its `%d` already replaced by
+/// `{seconds}`, as `classic_lobby_labels` prepares it.
+pub(crate) fn lobby_countdown_message(seconds: i32, initial: bool, template: &str) -> String {
+    if seconds < ALMOST_START_LOBBY_COUNTDOWN_SECONDS && !initial {
+        format!("{seconds}...")
+    } else {
+        template.replace("{seconds}", &seconds.to_string())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MessageControlOutcome {
     pub(crate) rejected: bool,
