@@ -2238,6 +2238,7 @@ impl GameApp {
         self.network_lobby = None;
         self.network_start_wait = None;
         self.staged_network_host_scenario = None;
+        self.network_lobby_min_players = None;
         self.reinitialize_startup_loader_screen();
         self.abandon_live_masterserver_signup();
         self.clear_pending_league_player_auth();
@@ -4964,6 +4965,7 @@ impl GameApp {
             self.classic_host_lobby = None;
             self.network_start_wait = None;
             self.staged_network_host_scenario = None;
+            self.network_lobby_min_players = None;
             self.clear_lobby_preload();
             self.host_lobby_countdown = None;
             self.pending_local_lobby_countdown_echoes.clear();

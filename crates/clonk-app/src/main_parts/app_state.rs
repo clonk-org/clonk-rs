@@ -426,6 +426,14 @@ pub(crate) struct GameApp {
     /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
     pub(crate) host_lobby_countdown: Option<HostLobbyCountdown>,
+    /// `Game.C4S.GetMinPlayer()` for the round this lobby is staging.
+    ///
+    /// C++ reads it off the loaded `C4Scenario` when the countdown expires
+    /// (C4GameLobby.cpp:1163). The port has not applied a scenario while the
+    /// lobby runs, so the host retains the staged head value here. `None` is
+    /// "not known", and never aborts a round — an undetermined minimum must
+    /// not be able to quit a server.
+    pub(crate) network_lobby_min_players: Option<i32>,
     /// The live host session surfaces its locally submitted countdown once
     /// after broadcasting it. C++ instead applies that packet directly and
     /// excludes the host from the broadcast, so suppress exactly those echoes.

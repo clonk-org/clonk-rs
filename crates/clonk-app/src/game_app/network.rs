@@ -8015,6 +8015,9 @@ impl GameApp {
             }
         };
         let selected = staged.frontend.clone();
+        // Retained past the staged scenario's own lifetime: the countdown that
+        // reads it can expire after the round has been handed to the engine.
+        self.network_lobby_min_players = Some(staged.lobby.min_players);
         self.staged_network_host_scenario = Some(staged);
         let (_, configured_port) = load_network_startup_settings(self.app_paths.as_ref());
         let port = self
@@ -8150,6 +8153,9 @@ impl GameApp {
             nick,
             countdown_seconds,
             max_players: parameters.max_players(),
+            // `C4Scenario::GetMinPlayer`, retained beside its maximum for the
+            // dialogless countdown abort (C4GameLobby.cpp:1163).
+            min_players: metadata.head().min_players(),
             has_teams: metadata.teams().is_active(),
             fair_crew,
             fair_crew_forced: parameters.fair_crew_forced(),

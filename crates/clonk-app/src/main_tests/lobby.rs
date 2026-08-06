@@ -1950,6 +1950,62 @@ fn classic_lobby_fair_crew_control_echoes_and_countdown_or_force_gate_it() {
     assert!(app.startup_view_flags.record);
 }
 
+/// `C4GameLobby::Countdown::OnSec1Timer` at zero: a host with no lobby dialog
+/// — which is what a dedicated engine has, `fFullscreenLobby` being
+/// `!Console.Active && (lpDDraw->GetEngine() != GFXENGN_NOGFX)`
+/// (src/C4Network2.cpp:463) — logs `IDS_MSG_NOTENOUGHPLAYERSFORTHISRO` and
+/// quits the application rather than starting a round short of
+/// `Game.C4S.GetMinPlayer()` (src/C4GameLobby.cpp:1159-1170). A host that is
+/// showing a lobby dialog always starts, because a person is watching it.
+#[test]
+fn countdown_zero_quits_a_dialogless_host_that_is_short_of_min_players() {
+    let short_host = |dialogless: bool| {
+        let mut app = new_menu_app(640, 480);
+        let (events, commands) = install_classic_host_network_stub(&mut app);
+        app.headless = dialogless;
+        app.network_lobby_min_players = Some(2);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [clonk_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Lonely".to_vec()).unwrap(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(1));
+        (app, events, commands)
+    };
+
+    let (mut server, _events, _commands) = short_host(true);
+    server.tick_network_lobby_countdown();
+    assert!(
+        server.take_exit_request(),
+        "a dialogless host quits instead of starting a short round"
+    );
+    assert!(server.host_lobby_countdown.is_none());
+    assert_ne!(
+        server.mode,
+        AppMode::Loading,
+        "the aborted round must not begin loading"
+    );
+
+    // The same shortfall in front of a lobby dialog still starts: C++ gates
+    // the abort on `!Game.Network.GetLobby()` alone.
+    let (mut interactive, _events, _commands) = short_host(false);
+    interactive.tick_network_lobby_countdown();
+    assert!(!interactive.take_exit_request());
+
+    // And a dialogless host that has its minimum starts normally.
+    let (mut ready, _events, _commands) = short_host(true);
+    ready.network_lobby_min_players = Some(1);
+    ready.tick_network_lobby_countdown();
+    assert!(!ready.take_exit_request());
+}
+
 #[test]
 fn classic_host_configured_countdown_uses_sparse_packets_and_abort_unlocks_options() {
     let mut app = new_menu_app(640, 480);

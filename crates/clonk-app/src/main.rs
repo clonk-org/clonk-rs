@@ -2399,6 +2399,7 @@ impl GameApp {
             lobby_preload_artifact: None,
             network_start_wait: None,
             host_lobby_countdown: None,
+            network_lobby_min_players: None,
             pending_local_lobby_countdown_echoes: VecDeque::new(),
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
