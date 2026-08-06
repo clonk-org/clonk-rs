@@ -2751,8 +2751,12 @@ fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
     assert_eq!(registrations[2].priority, 101);
 }
 
+/// `C4GroupSet::RegisterParentFolders` registers each parent as it opens it
+/// (`C4GroupSet.cpp:310`) and only stops at the first it cannot open
+/// (`C4GroupSet.cpp:291-295`), so the groups above a missing child stay in the
+/// set. Partial registration is the C++ shape, not a boundary.
 #[test]
-fn unresolvable_packed_loader_origin_takes_typed_partial_boundary() {
+fn unresolvable_packed_loader_origin_keeps_the_parents_already_registered() {
     let root = tempdir().expect("ambiguous packed loader Origin fixture");
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let outer_path = content.join("Outer.c4f");
@@ -2770,12 +2774,32 @@ fn unresolvable_packed_loader_origin_takes_typed_partial_boundary() {
     let mut registrations = Vec::new();
     let mut registration_order = 0;
 
-    let error =
-        register_loader_origin_parents(&origin, &mut registrations, &mut registration_order)
-            .expect_err("missing logical packed child requires the typed loader boundary");
+    register_loader_origin_parents(&origin, &mut registrations, &mut registration_order);
     assert_eq!(registrations.len(), 1, "outer registration happens first");
     assert_eq!(registrations[0].group.root(), outer_path.as_path());
-    assert!(error.to_string().contains("partial Origin registration"));
+}
+
+/// `C4Game::OpenScenario` discards the `RegisterParentFolders` result
+/// (`C4Game.cpp:177-178`), so an Origin naming a parent the install no longer
+/// holds costs those groups and nothing else — the scenario still loads.
+#[test]
+fn loader_origin_naming_an_absent_parent_still_registers_the_scenario() {
+    let root = tempdir().expect("absent loader Origin parent fixture");
+    let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+    let scenario_path = content.join("Actual.c4s");
+    let (scenario, scenario_group, head) =
+        loader_origin_fixture_scenario(&scenario_path, "Gone.c4f/Original.c4s");
+
+    let registrations = classic_loader_registrations(
+        &scenario,
+        &scenario_group,
+        &head,
+        &loader_fixture_definition_load(),
+        &paths,
+    )
+    .expect("an absent Origin parent is not fatal");
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0].group.root(), scenario_path.as_path());
 }
 
 #[test]
