@@ -1163,6 +1163,46 @@ impl GraphicsSystem {
         });
     }
 
+    /// Move one detached console viewport's own view origin, the way
+    /// `WM_HSCROLL`/`WM_VSCROLL` assign `cvp->ViewX`/`ViewY` directly
+    /// (`C4Viewport.cpp:125-146`).
+    ///
+    /// The smoothing accumulator moves with it: `dViewX`/`dViewY` are what the
+    /// player-follow interpolates from, so leaving them behind would drag the
+    /// view back on the next locked frame. Returns the position the camera
+    /// now holds, before the next render's clip, or `None` when that identity
+    /// has no camera yet.
+    pub fn scroll_detached_viewport(
+        &mut self,
+        identity: u64,
+        dx: i32,
+        dy: i32,
+    ) -> Option<(i32, i32)> {
+        let state = self
+            .camera_states
+            .get_mut(&CameraKey::Physical { identity, slot: 0 })?;
+        state.view_x = state.view_x.saturating_add(dx);
+        state.view_y = state.view_y.saturating_add(dy);
+        state.d_view_x = itofix(state.view_x);
+        state.d_view_y = itofix(state.view_y);
+        Some((state.view_x, state.view_y))
+    }
+
+    /// The extent a detached console viewport's camera currently shows, which
+    /// is what `ScrollBarsByViewPosition` ranges its bars over
+    /// (`C4Viewport.cpp:270-284`). `None` when that identity has no camera.
+    pub fn detached_viewport_view(&self, identity: u64) -> Option<(i32, i32, i32, i32)> {
+        let state = self
+            .camera_states
+            .get(&CameraKey::Physical { identity, slot: 0 })?;
+        Some((
+            state.view_x,
+            state.view_y,
+            state.view_width,
+            state.view_height,
+        ))
+    }
+
     /// Apply one direct C4MouseControl scroll step to an unassigned
     /// fullscreen observer viewport. Temporary film-view player assignment
     /// does not change this physical classification. A primary scroll queued
@@ -2426,6 +2466,7 @@ impl GraphicsSystem {
             // its fIsNoOwnerViewport classification.
             is_no_owner_viewport: active.is_no_owner_viewport,
             scrolling: false,
+            player_lock: true,
         };
         let owner_colors = Self::collect_owner_colors(&capture);
 
@@ -2783,6 +2824,16 @@ impl GraphicsSystem {
             } else {
                 state.stationary_position(view_width, view_height)
             }
+        } else if !input.player_lock {
+            // `C4Viewport::UpdateViewPosition` follows the player only under
+            // `if (PlayerLock && ValidPlr(Player))` (`C4Viewport.cpp:1162`), so
+            // an unlocked viewport keeps exactly where its scroll bars left it.
+            // Deliberately *not* the ownerless clamp two arms up: that block is
+            // gated on `fIsNoOwnerViewport` (`:1234-1236`), and an owned
+            // viewport is allowed a view outside the landscape — it grows its
+            // borders instead (`:1256-1260`). Clamping here would snap the view
+            // the moment the lock came off.
+            state.stationary_position(view_width, view_height)
         } else {
             state.update(
                 input.center.x,

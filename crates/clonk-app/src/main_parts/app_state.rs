@@ -341,6 +341,11 @@ pub(crate) struct GameApp {
     /// property panel and the object tree, so a write from one is visible
     /// to the others (`C4EditCursor.h:39`).
     pub(crate) developer_selection: clonk_engine::developer_selection::DeveloperSelection,
+    /// `C4Console::ToolsDlg` — the retained tool, grade, IFT, material and
+    /// texture the Draw-mode gestures read, plus their own `Hold`/anchor.
+    /// Away from Win32 and GTK this state *is* the tools dialog: `Open`
+    /// creates no window at all on the reference build (`C4ToolsDlg.cpp:262`).
+    pub(crate) developer_tools: clonk_engine::developer_tools::DeveloperTools,
     /// The projection each console viewport window was last drawn with,
     /// keyed by physical identity. `GraphicsSystem::active_viewports` holds
     /// the *fullscreen* layout, which console mode never renders, so a

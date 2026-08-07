@@ -1403,6 +1403,10 @@ pub(crate) struct PhysicalViewportState {
     /// while switching the displayed player's center/focus.
     pub(crate) preserved_zoom: f32,
     pub(crate) preserved_offset: Vector2,
+    /// `C4Viewport::PlayerLock`, set by `C4Viewport::Default`
+    /// (`C4Viewport.cpp:1272`). Clearing it is how a console viewport window
+    /// stops following its player so its scroll bars can move the view.
+    pub(crate) player_lock: bool,
 }
 
 impl PhysicalViewportState {
@@ -1420,6 +1424,7 @@ impl PhysicalViewportState {
             uses_live_player_presentation: true,
             preserved_zoom: 1.0,
             preserved_offset: Vector2::ZERO,
+            player_lock: true,
         }
     }
 
@@ -1433,6 +1438,7 @@ impl PhysicalViewportState {
             uses_live_player_presentation: false,
             preserved_zoom: 1.0,
             preserved_offset: Vector2::ZERO,
+            player_lock: true,
         }
     }
 
@@ -1671,6 +1677,7 @@ fn physical_player_viewport_input<'a>(
     Ok(input
         .with_offset(offset)
         .with_scrolling(state.view_mode == PLAYER_VIEW_MODE_SCROLLING)
+        .with_player_lock(physical.player_lock)
         .with_physical_camera_identity(physical.physical_identity, slot))
 }
 

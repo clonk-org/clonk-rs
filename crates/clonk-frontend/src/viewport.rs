@@ -996,6 +996,10 @@ pub struct ViewportInput<'a> {
     /// `C4PVM_Scrolling` removes the normal camera dead zone and enables the
     /// fixed fullscreen scroll border in C4Viewport::AdjustPosition.
     pub(crate) scrolling: bool,
+    /// `C4Viewport::PlayerLock`, which starts set (`C4Viewport::Default`,
+    /// `C4Viewport.cpp:1272`). Only a console viewport window ever clears it,
+    /// and clearing it is what stops the view following its player.
+    pub(crate) player_lock: bool,
 }
 
 impl<'a> ViewportInput<'a> {
@@ -1009,6 +1013,7 @@ impl<'a> ViewportInput<'a> {
             camera_identity: None,
             is_no_owner_viewport: owner == OWNER_NONE,
             scrolling: false,
+            player_lock: true,
         }
     }
 
@@ -1025,6 +1030,7 @@ impl<'a> ViewportInput<'a> {
             camera_identity: None,
             is_no_owner_viewport: true,
             scrolling: false,
+            player_lock: true,
         }
     }
 
@@ -1041,6 +1047,7 @@ impl<'a> ViewportInput<'a> {
             camera_identity: None,
             is_no_owner_viewport: false,
             scrolling: false,
+            player_lock: true,
         }
     }
 
@@ -1073,6 +1080,14 @@ impl<'a> ViewportInput<'a> {
         self.scrolling = scrolling;
     }
 
+    /// `C4Viewport::PlayerLock`. An unlocked viewport stops following its
+    /// player and keeps the position its scroll bars left
+    /// (`C4Viewport.cpp:1162`).
+    pub fn with_player_lock(mut self, player_lock: bool) -> Self {
+        self.player_lock = player_lock;
+        self
+    }
+
     pub fn from_focus(focus: &'a ObjectSnapshot) -> Self {
         Self {
             owner: focus.owner,
@@ -1083,6 +1098,7 @@ impl<'a> ViewportInput<'a> {
             camera_identity: None,
             is_no_owner_viewport: focus.owner == OWNER_NONE,
             scrolling: false,
+            player_lock: true,
         }
     }
 }

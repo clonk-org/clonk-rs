@@ -909,8 +909,32 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   viewport is `Viewport0` and player 0 is `Viewport1`, stored under the
   **`Console`** config subkey with `storeSize` set. Keying on the player rather
   than a list index is what keeps duplicate-owner viewports from colliding.
-  **Still open:** actually opening those windows, which needs a second live
-  record in `clonk-app::developer_windows` alongside the console shell.
+  The lock and the scroll are now **wired**. `PhysicalViewportState` carries
+  `C4Viewport::PlayerLock`, which starts set (`C4Viewport::Default`, `:1272`)
+  and travels into `ViewportInput`, and an unlocked *owned* viewport skips the
+  player-follow — exactly C++'s `if (PlayerLock && ValidPlr(Player))` gate
+  (`:1162`) — and keeps the position it already had. It is **not** clamped
+  afterwards: `UpdateViewPosition`'s clamp block is gated on
+  `fIsNoOwnerViewport` (`:1234-1236`), so an owned viewport is allowed a view
+  outside the landscape and grows its borders around it instead (`:1256-1260`).
+  Clamping there would snap the view the moment the lock came off, which is how
+  the first cut of this got it wrong. `GraphicsSystem::scroll_detached_viewport`
+  moves that camera's `ViewX`/`ViewY` the way `WM_HSCROLL`/`WM_VSCROLL` assign
+  them (`:125-146`), carrying `dViewX`/`dViewY` with it so a later locked frame
+  does not interpolate the scroll away, and the step is applied **unclamped**,
+  as the line buttons do. `scroll_ranges` is the refusal: it returns `None`
+  exactly when `ScrollBarsByViewPosition` returns false. Pinned by
+  `console_viewport_scrolls_only_once_its_player_lock_is_off`.
+  The **presentation is invented**, and has to be: the reference macOS build
+  compiles `TogglePlayerLock` and `ScrollBarsByViewPosition` as
+  `{ return false; }` (`:634-635`), so there are no bars to port. A wheel notch
+  is mapped onto the one step size C++ does define, `ViewportScrollSpeed = 10`
+  (`:57`, and GTK's `step_increment` at `:316,328`), and Scroll Lock toggles the
+  lock as the Win32 handler binds `VK_SCROLL` (`:83-86`). Pinned by
+  `developer_viewport::wheel_scroll_step`'s cases in
+  `console_viewport_windows_route_redraw_resize_close_and_input_by_window_id`.
+  **Still open:** drawn scroll bars, and the `Viewport{Player + 1}` geometry
+  persistence, which is Windows-only behaviour (see the frame-selection card).
 
 - **Component-host edit model landed; the editors themselves open.**
   `clonk-engine::developer_components` ports `C4ComponentHost`'s commit and save
@@ -1772,7 +1796,16 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   (`C4ToolsDlg.cpp:732-737`). The per-tool cadence matches
   `C4EditCursor.cpp:74,159,234,301-304` exactly: Brush emits on click *and*
   every drag step, Line/Rect record an anchor and emit once on release with both
-  coordinate pairs, and Fill emits nothing on the click — it arms `Hold` and
+  coordinate pairs **in C++'s argument order** — the *live* cursor first and the
+  press anchor second, because `Move` overwrites `X`/`Y` on every pointer
+  message before it dispatches on the mode (`:119-121`) while `LeftButtonDown`
+  freezes `X2`/`Y2` (`:225-226`), and `ApplyToolLine` passes `(X, Y, X2, Y2)`
+  (`:558`). The port had the two pairs the other way round until 2026-08-06;
+  nothing drew differently, because `ForLine` and `DrawBox` normalize their
+  endpoints, but the bytes on the wire and in a record did. The same fix moved
+  Fill onto the live cursor — `ApplyToolFill` reads the same `X`/`Y` (`:579`),
+  so a held fill follows the pointer instead of staying at the press. Fill emits
+  nothing on the click — it arms `Hold` and
   repeats from `Execute` every frame while the game runs, refusing while halted
   or when the console is not editing. Alt selects the Picker temporarily in Draw
   mode only and restores the previous tool on release
@@ -1788,8 +1821,42 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   re-confirmed. Pinned by
   `console_draw_mode_routes_pointer_gestures_through_tools_state`. The material
   and texture catalogue and the picker itself already exist in
-  `developer_landscape`. **Still open:** the dialog chrome and its window host,
-  gated on the keyed developer window-host registry.
+  `developer_landscape`.
+  Draw mode is now **reachable**. `GameApp` holds the `DeveloperTools` — away
+  from Win32 and GTK that state *is* the dialog, since `C4ToolsDlg::Open`
+  creates no window at all on the reference build (`C4ToolsDlg.cpp:262`) — and
+  a console viewport window's press, motion and release route into it whenever
+  the console is in Draw mode, alongside the Edit arm they already fed. Each
+  `DrawControl` is packed into `C4ControlEMDrawTool` carrying the live landscape
+  mode (the executor refuses a packet whose mode no longer matches,
+  `C4Control.cpp:1015-1016`) and submitted through the same decided-control seam
+  `EMMO_Script` uses, so a network game applies every stroke in lockstep. Four
+  details ride with it: the per-frame Fill repeat runs from the console tick,
+  once per **engine frame** rather than once per event-loop wake; a halted game
+  refuses the Fill click with `IDS_CNS_FILLNOHALT` and never arms `Hold`
+  (`C4EditCursor.cpp:227-231`); `ApplyToolPicker` writes its sample back into the
+  tools and ends with `Hold = false` (`:731`), so a picker click never starts a
+  drag; and Alt drives that picker from a viewport window's own
+  `ModifiersChanged`, which the shell never sees.
+  Two shared-state details are easy to lose and are ported deliberately.
+  `EditingOK` is **not a predicate**: refusing a stroke drops `Hold` and reports
+  itself (`:673-682`), so a drag the console may not make stops at the first
+  stroke instead of re-asking on every pointer message — `C4Console::Message`
+  shows nothing at all on the reference build (`C4Console.cpp:841-853`), so the
+  console log is the port's own choice of surface. And `LeftButtonUp` clears
+  `Hold`/`DragFrame`/`DragLine` **unconditionally** after dispatching its finish
+  on the current mode (`:300-304`); because C++ has one `Hold` for both arms and
+  the port has two, a mode change between press and release would otherwise
+  strand the tools' gesture. Pinned by
+  `console_viewport_draw_gestures_emit_landscape_tool_controls`,
+  `console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor`,
+  `console_draw_alt_picks_the_landscape_into_the_tools_without_drawing` and
+  `a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture`.
+  **Still open:** the dialog chrome and its window host, gated on the keyed
+  developer window-host registry — so tool, grade, IFT, material and texture are
+  reachable only through the Alt picker and the ported defaults (Brush, grade 5,
+  IFT on, Earth over Rough), and `EMDT_SetMode` still has no emitter, which
+  leaves a Dynamic landscape undrawable from the console.
 
 - Closed 2026-07-29: **Options control sheets draw the classic facets.**
   `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text

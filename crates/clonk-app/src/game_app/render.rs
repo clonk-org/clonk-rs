@@ -2616,9 +2616,12 @@ impl GameApp {
         use clonk_engine::developer_cursor::{edit_press, edit_target, SelectionEdit};
         use clonk_engine::developer_selection::SelectionWriter;
 
-        // Edit-mode only. Play routes to ordinary mouse control and Draw to the
-        // tools, both of which are their own paths
-        // (`developer_viewport::route_viewport_event`).
+        // Play routes to ordinary mouse control; Edit and Draw are the two
+        // editor arms (`developer_viewport::route_viewport_event`).
+        if self.developer_console_edit_mode == ConsoleEditMode::Draw {
+            self.console_draw_press(identity, local, scale);
+            return None;
+        }
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
             return None;
         }
@@ -2669,6 +2672,10 @@ impl GameApp {
     ) {
         use clonk_engine::developer_cursor::edit_target;
 
+        if self.developer_console_edit_mode == ConsoleEditMode::Draw {
+            self.console_draw_motion(identity, local, scale);
+            return;
+        }
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
             return;
         }
@@ -2725,6 +2732,21 @@ impl GameApp {
         let drop_target = self.edit_cursor_drop_target.take();
         self.edit_cursor_hold = false;
         self.edit_cursor_last_world = None;
+        // `LeftButtonUp` dispatches its finish on the *current* mode but then
+        // clears `Hold`, `DragFrame` and `DragLine` unconditionally
+        // (`C4EditCursor.cpp:300-304`) — and C++ has one `Hold` for both arms.
+        // So the tools' gesture ends here whatever the mode is now; only the
+        // Line or Rect it finished is mode-dependent. The release carries no
+        // coordinates of its own: C++ reads the `X`/`Y` the window's preceding
+        // motion message already stored.
+        let (x, y) = self.developer_tools.cursor();
+        let finished_stroke = self.developer_tools.release(x, y);
+        if self.developer_console_edit_mode == ConsoleEditMode::Draw {
+            if let Some(control) = finished_stroke {
+                self.submit_editor_draw_tool(control);
+            }
+            return None;
+        }
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
             return None;
         }
@@ -2763,6 +2785,255 @@ impl GameApp {
             }
         }
         result
+    }
+
+    /// This window's pointer position in world coordinates, through the
+    /// projection it was last drawn with (`C4Viewport.cpp:181`).
+    fn console_viewport_world(
+        &self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+    ) -> Option<(i32, i32)> {
+        let projection = self.console_viewport_projections.get(&identity)?;
+        Some(
+            projection
+                .pointer_projection(scale)
+                .world_position(local.0, local.1),
+        )
+    }
+
+    /// `C4Viewport::PlayerLock` for one console viewport window.
+    pub(crate) fn console_viewport_player_lock(&self, identity: u64) -> bool {
+        self.physical_viewports
+            .iter()
+            .find(|viewport| viewport.physical_identity == identity)
+            .is_some_and(|viewport| viewport.player_lock)
+    }
+
+    /// `C4Viewport::TogglePlayerLock` (`C4Viewport.cpp:250-267`), returning the
+    /// lock the viewport now holds.
+    ///
+    /// The asymmetry is the whole point: unlocking always succeeds, while
+    /// locking needs `ValidPlr(Player)`, so an ownerless viewport can never be
+    /// locked and stays scrollable.
+    pub(crate) fn toggle_console_viewport_player_lock(&mut self, identity: u64) -> bool {
+        use clonk_engine::developer_viewport::toggle_player_lock;
+
+        let players = &self.snapshot.players;
+        let Some(viewport) = self
+            .physical_viewports
+            .iter_mut()
+            .find(|viewport| viewport.physical_identity == identity)
+        else {
+            return false;
+        };
+        let has_valid_player = viewport.displayed_player != clonk_engine::OWNER_NONE
+            && players
+                .iter()
+                .any(|state| state.id == viewport.displayed_player);
+        viewport.player_lock = toggle_player_lock(viewport.player_lock, has_valid_player).locked;
+        viewport.player_lock
+    }
+
+    /// One scroll step on a console viewport window, the way `WM_HSCROLL` and
+    /// `WM_VSCROLL` move `cvp->ViewX`/`ViewY` (`C4Viewport.cpp:125-146`).
+    ///
+    /// A locked viewport refuses, because `ScrollBarsByViewPosition` returns
+    /// false before it touches anything (`:272`) — there is no bar to move.
+    /// The step itself is applied **unclamped**, exactly as the line buttons
+    /// do (`ViewX -= ViewportScrollSpeed`, `:127-128,140-141`). An owned
+    /// viewport is allowed a view outside the landscape — `UpdateViewPosition`
+    /// clamps only `fIsNoOwnerViewport` (`:1234-1236`) and everything else just
+    /// grows its borders — so clamping the step would be stricter than C++.
+    pub(crate) fn scroll_console_viewport(&mut self, identity: u64, dx: i32, dy: i32) -> bool {
+        use clonk_engine::developer_viewport::scroll_ranges;
+
+        let Some((view_x, view_y, view_width, view_height)) =
+            self.graphics.detached_viewport_view(identity)
+        else {
+            return false;
+        };
+        let Some(landscape) = self.snapshot.landscape.as_ref() else {
+            return false;
+        };
+        // The refusal is the whole of `scroll_ranges`' role here: it returns
+        // `None` exactly when `ScrollBarsByViewPosition` returns false.
+        if scroll_ranges(
+            self.console_viewport_player_lock(identity),
+            view_x,
+            view_y,
+            view_width,
+            view_height,
+            landscape.width() as i32,
+            // `GBackHgt`, which the renderer resolves the same way.
+            landscape.estimated_height().max(1),
+        )
+        .is_none()
+        {
+            return false;
+        }
+        if (dx, dy) == (0, 0) {
+            return false;
+        }
+        self.graphics
+            .scroll_detached_viewport(identity, dx, dy)
+            .is_some()
+    }
+
+    /// `C4EditCursor::AltDown`/`AltUp` (`C4EditCursor.cpp:773-792`).
+    ///
+    /// Alt selects the picker for as long as it is held and restores the
+    /// previous tool on release. Both arms are no-ops outside Draw mode, so a
+    /// mode switch mid-hold can never strand the override.
+    pub(crate) fn update_console_editor_modifiers(
+        &mut self,
+        modifiers: winit::keyboard::ModifiersState,
+    ) {
+        self.keyboard_modifiers = modifiers;
+        if self.developer_console_edit_mode != ConsoleEditMode::Draw {
+            return;
+        }
+        if modifiers.alt_key() {
+            self.developer_tools.press_alt(true);
+        } else {
+            self.developer_tools.release_alt();
+        }
+    }
+
+    /// `C4EditCursor::LeftButtonDown`'s Draw arm (`C4EditCursor.cpp:220-236`).
+    ///
+    /// Brush applies on the click itself, Line and Rect only record their
+    /// anchor, Fill arms the per-frame repeat, and the picker samples the
+    /// landscape into the tools instead of drawing at all.
+    fn console_draw_press(&mut self, identity: u64, local: (i32, i32), scale: f32) {
+        use clonk_engine::developer_tools::Tool;
+
+        let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
+            return;
+        };
+        match self.developer_tools.tool() {
+            // `ApplyToolPicker` ends with `Hold = false` (`:731`), so a picker
+            // click never arms a drag — press, sample, release.
+            Tool::Picker => {
+                self.developer_tools.press(x, y);
+                self.console_apply_tool_picker(x, y);
+                self.developer_tools.release(x, y);
+            }
+            // A halted game refuses Fill outright and says so, clearing Hold
+            // with it so the frame repeat never starts (`:227-231`).
+            Tool::Fill if self.runtime_halt_active() => {
+                let message = self.runtime_resource_text(
+                    "IDS_CNS_FILLNOHALT",
+                    "The fill tool cannot be used in halt mode.",
+                );
+                self.developer_console.out(&message);
+            }
+            _ => {
+                if let Some(control) = self.developer_tools.press(x, y) {
+                    self.submit_editor_draw_tool(control);
+                }
+            }
+        }
+    }
+
+    /// `C4EditCursor::Move`'s Draw arm (`C4EditCursor.cpp:145-154`). Only the
+    /// brush draws while the button is down; every tool still moves the cursor.
+    fn console_draw_motion(&mut self, identity: u64, local: (i32, i32), scale: f32) {
+        let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
+            return;
+        };
+        if let Some(control) = self.developer_tools.drag(x, y) {
+            self.submit_editor_draw_tool(control);
+        }
+    }
+
+    /// `C4EditCursor::LeftButtonUp`'s Draw arm (`C4EditCursor.cpp:297-306`).
+    ///
+    /// The release carries no coordinates of its own: C++ reads the `X`/`Y`
+    /// the window's preceding motion message already stored, which is exactly
+    /// what the tools' retained cursor holds.
+    /// `C4EditCursor::ApplyToolPicker` (`C4EditCursor.cpp:698-731`) — what the
+    /// picker samples goes into the tools dialog, not onto the landscape.
+    fn console_apply_tool_picker(&mut self, x: i32, y: i32) {
+        if let Some(pick) = self.engine.developer_tool_pick(x, y) {
+            self.developer_tools.apply_pick(&pick);
+        }
+    }
+
+    /// `C4EditCursor::EditingOK` (`C4EditCursor.cpp:673-682`), which every
+    /// `ApplyTool*` opens with.
+    ///
+    /// It is not a predicate: a refusal drops `Hold` and reports itself, so a
+    /// drag the console may not make stops at the first stroke instead of
+    /// asking again on every pointer message. `C4Console::Message` shows
+    /// nothing at all on the reference build — both its arms sit behind
+    /// `_WIN32`/`WITH_DEVELOPER_MODE` (`C4Console.cpp:841-853`) — so the log is
+    /// the port's own choice of surface, the one the save and reload notices
+    /// already use.
+    fn console_editing_ok(&mut self) -> bool {
+        if self.developer_console_editing() {
+            return true;
+        }
+        self.developer_tools.clear_hold();
+        let message =
+            self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
+        self.developer_console.out(&message);
+        false
+    }
+
+    /// Pack one finished gesture into `C4ControlEMDrawTool` and queue it
+    /// (`C4EditCursor::ApplyToolBrush` and its siblings, `:551-580`).
+    ///
+    /// The landscape mode travels with the control because the executor
+    /// refuses a packet whose mode no longer matches
+    /// (`C4Control.cpp:1015-1016`).
+    fn submit_editor_draw_tool(&mut self, control: clonk_engine::developer_tools::DrawControl) {
+        use clonk_engine::developer_tools::DrawControl;
+
+        if !self.console_editing_ok() {
+            return;
+        }
+        let Some(mode) = self.engine.landscape().map(|landscape| landscape.mode()) else {
+            return;
+        };
+        let Some(material) =
+            clonk_engine::LegacyCString::from_bytes(self.developer_tools.material().into())
+        else {
+            tracing::warn!("the selected draw material contained an embedded NUL");
+            return;
+        };
+        let Some(texture) =
+            clonk_engine::LegacyCString::from_bytes(self.developer_tools.texture().into())
+        else {
+            tracing::warn!("the selected draw texture contained an embedded NUL");
+            return;
+        };
+        let ift = self.developer_tools.ift();
+        let (action, x, y, x2, y2, ift) = match control {
+            DrawControl::Brush { x, y } => (clonk_engine::EMDT_BRUSH, x, y, 0, 0, ift),
+            DrawControl::Line { x, y, x2, y2 } => (clonk_engine::EMDT_LINE, x, y, x2, y2, ift),
+            DrawControl::Rect { x, y, x2, y2 } => (clonk_engine::EMDT_RECT, x, y, x2, y2, ift),
+            // Fill passes `0` for X2 and forces IFT false (`:579`).
+            DrawControl::Fill { x, y, y2 } => (clonk_engine::EMDT_FILL, x, y, 0, y2, false),
+        };
+        if let Err(error) =
+            self.submit_or_execute_editor_draw_tool(clonk_engine::EmDrawToolControlData {
+                action,
+                mode,
+                x,
+                y,
+                x2,
+                y2,
+                grade: self.developer_tools.grade(),
+                ift,
+                material,
+                texture,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor draw tool");
+        }
     }
 
     /// `C4EditCursor::MoveSelection` — `EMMoveObject(EMMO_Move, xoff, yoff,
@@ -2865,6 +3136,9 @@ impl GameApp {
     /// `C4EditCursor::Execute`'s Edit arm (`C4EditCursor.cpp:65-69`) — while
     /// `Hold` is set it re-issues a **zero-offset** `EMMO_Move` every tick, so
     /// a stationary held selection still produces control traffic.
+    ///
+    /// Draw mode has its own arm in the same switch (`:60-67`): the Fill tool
+    /// alone repeats, and only while the game runs and the console can edit.
     pub(crate) fn console_edit_cursor_tick(&mut self) {
         use clonk_engine::developer_cursor::{edit_tick_move, CursorMode};
 
@@ -2873,6 +3147,10 @@ impl GameApp {
             ConsoleEditMode::Edit => CursorMode::Edit,
             ConsoleEditMode::Draw => CursorMode::Draw,
         };
+        if mode == CursorMode::Draw {
+            self.console_draw_tools_tick();
+            return;
+        }
         if edit_tick_move(mode, self.edit_cursor_hold).is_none() {
             self.edit_cursor_tick_frame = None;
             return;
@@ -2901,6 +3179,25 @@ impl GameApp {
         {
             tracing::error!(%error, "failed to submit the held editor move");
         }
+    }
+
+    /// `C4EditCursor::Execute`'s Draw arm — `case C4TLS_Fill: if (Hold) if
+    /// (!Game.HaltCount) if (Console.Editing) ApplyToolFill();` (`:60-67`).
+    fn console_draw_tools_tick(&mut self) {
+        let halted = self.runtime_halt_active();
+        let editing = self.developer_console_editing();
+        let Some(control) = self.developer_tools.execute_frame(halted, editing) else {
+            self.edit_cursor_tick_frame = None;
+            return;
+        };
+        // Once per engine tick, not once per event-loop wake: `C4Console::
+        // Execute` runs the edit cursor exactly once per application tick.
+        let frame = self.engine.frame();
+        if self.edit_cursor_tick_frame == Some(frame) {
+            return;
+        }
+        self.edit_cursor_tick_frame = Some(frame);
+        self.submit_editor_draw_tool(control);
     }
 
     /// `Config.Developer.AutoFileReload`, defaulting true (`C4Config.cpp:434`).

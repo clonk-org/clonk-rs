@@ -44,12 +44,20 @@ pub const GRADE_KEY_STEP: i32 = 5;
 pub enum DrawControl {
     /// `EMDT_Brush` at the pointer; the second coordinate pair is unused.
     Brush { x: i32, y: i32 },
-    /// `EMDT_Line` with both pairs, emitted once on release.
+    /// `EMDT_Line`, emitted once on release. The first pair is the **live
+    /// cursor** and the second the press anchor — that is C++'s argument
+    /// order, `C4ControlEMDrawTool(EMDT_Line, Mode, X, Y, X2, Y2, ...)`
+    /// (`:558`), and the two are not interchangeable on the wire even though
+    /// `ForLine` normalizes them before drawing.
     Line { x: i32, y: i32, x2: i32, y2: i32 },
-    /// `EMDT_Rect` with both pairs, emitted once on release.
+    /// `EMDT_Rect`, emitted once on release, in the same order as
+    /// [`Self::Line`] (`:566`).
     Rect { x: i32, y: i32, x2: i32, y2: i32 },
-    /// `EMDT_Fill`. C++ passes `0` for `X2` and the drag's `Y2`, and forces
-    /// IFT false (`:589`).
+    /// `EMDT_Fill` at the live cursor, with `X2` forced to `0` and IFT to
+    /// false (`:579`). C++ passes its retained `Y2` for the third field, which
+    /// is whatever a previous Line or Rect drag left there; nothing reads it,
+    /// because the `EMDT_Fill` executor uses only `iX`, `iY` and `iGrade`
+    /// (`C4Control.cpp:1035-1047`).
     Fill { x: i32, y: i32, y2: i32 },
 }
 
@@ -66,7 +74,11 @@ pub struct DeveloperTools {
     ift: bool,
     /// `C4EditCursor::Hold` — set while the button is down.
     hold: bool,
-    /// Where the current gesture began.
+    /// `C4EditCursor::X`/`Y`. `Move` overwrites these on every pointer message
+    /// before it looks at the mode (`C4EditCursor.cpp:119-121`), so every
+    /// emitted control reads the *live* cursor, not where the gesture began.
+    cursor: (i32, i32),
+    /// `C4EditCursor::X2`/`Y2` — where the current gesture began.
     anchor: Option<(i32, i32)>,
     /// `C4ToolsDlg::Material`, defaulting to `"Earth"`.
     material: String,
@@ -122,6 +134,7 @@ impl Default for DeveloperTools {
             grade: GRADE_DEFAULT,
             ift: true,
             hold: false,
+            cursor: (0, 0),
             anchor: None,
             material: DEFAULT_MATERIAL.to_owned(),
             texture: DEFAULT_TEXTURE.to_owned(),
@@ -144,6 +157,53 @@ impl DeveloperTools {
 
     pub fn holding(&self) -> bool {
         self.hold
+    }
+
+    /// `C4EditCursor::X`/`Y` — where the last pointer message left the cursor.
+    pub fn cursor(&self) -> (i32, i32) {
+        self.cursor
+    }
+
+    /// `C4EditCursor::EditingOK`'s refusal arm (`C4EditCursor.cpp:677`).
+    ///
+    /// It is not a predicate: refusing a stroke drops `Hold`, so `Move`'s
+    /// `if (Hold) ApplyToolBrush()` stays quiet for the rest of the drag
+    /// rather than asking again on every pointer message. The anchor survives,
+    /// because C++ leaves `DragLine`/`DragFrame` alone — a later release
+    /// re-asks and is refused the same way.
+    pub fn clear_hold(&mut self) {
+        self.hold = false;
+    }
+
+    /// The dialog writes `C4EditCursor::ApplyToolPicker` makes with what it
+    /// sampled (`C4EditCursor.cpp:698-731`).
+    ///
+    /// Each mode writes a different amount, and the difference is the whole
+    /// point: Static resolves a full material/texture pair plus the IFT bit
+    /// (`:706-714`), Exact has no texture to offer so it writes material and
+    /// IFT only (`:722-726`), and an unresolved pixel selects the sky
+    /// pseudo-material and leaves **both** texture and IFT exactly as they
+    /// were (`:717`, `:728`) — C++ reaches those `SelectTexture`/`SetIFT`
+    /// calls only inside the resolved arms.
+    pub fn apply_pick(&mut self, pick: &crate::developer_landscape::ToolPick) {
+        use crate::developer_landscape::{ToolPick, TOOL_SKY_MATERIAL};
+
+        match pick {
+            ToolPick::MaterialTexture {
+                material,
+                texture,
+                ift,
+            } => {
+                self.set_material(material.clone());
+                self.set_texture(texture.clone());
+                self.set_ift(*ift);
+            }
+            ToolPick::Material { material, ift } => {
+                self.set_material(material.clone());
+                self.set_ift(*ift);
+            }
+            ToolPick::Sky => self.set_material(TOOL_SKY_MATERIAL),
+        }
     }
 
     pub fn active(&self) -> bool {
@@ -237,6 +297,7 @@ impl DeveloperTools {
     /// record their anchor and emit on release (`:301-304`).
     pub fn press(&mut self, x: i32, y: i32) -> Option<DrawControl> {
         self.hold = true;
+        self.cursor = (x, y);
         self.anchor = Some((x, y));
         match self.tool {
             Tool::Brush => Some(DrawControl::Brush { x, y }),
@@ -245,29 +306,35 @@ impl DeveloperTools {
     }
 
     /// `C4EditCursor::Move` — `if (Hold) ApplyToolBrush()` (`:159`). Only the
-    /// brush draws while dragging.
+    /// brush draws while dragging, but the cursor moves for every tool: `Move`
+    /// assigns X/Y before it dispatches on the mode at all (`:119-121`).
     pub fn drag(&mut self, x: i32, y: i32) -> Option<DrawControl> {
+        self.cursor = (x, y);
         (self.hold && self.tool == Tool::Brush).then_some(DrawControl::Brush { x, y })
     }
 
-    /// `C4EditCursor::LeftButtonUp` — Line and Rect emit once, with the anchor
-    /// and the release point (`:301-304`).
+    /// `C4EditCursor::LeftButtonUp` — Line and Rect emit once (`:301-304`).
+    ///
+    /// The release point leads and the anchor follows, because that is the
+    /// order `ApplyToolLine`/`ApplyToolRect` pass them: X/Y are the live
+    /// cursor the window's release message already moved (`:558`, `:566`).
     pub fn release(&mut self, x: i32, y: i32) -> Option<DrawControl> {
+        self.cursor = (x, y);
         let anchor = self.anchor.take();
         self.hold = false;
         let (ax, ay) = anchor?;
         match self.tool {
             Tool::Line => Some(DrawControl::Line {
-                x: ax,
-                y: ay,
-                x2: x,
-                y2: y,
+                x,
+                y,
+                x2: ax,
+                y2: ay,
             }),
             Tool::Rect => Some(DrawControl::Rect {
-                x: ax,
-                y: ay,
-                x2: x,
-                y2: y,
+                x,
+                y,
+                x2: ax,
+                y2: ay,
             }),
             Tool::Brush | Tool::Fill | Tool::Picker => None,
         }
@@ -276,11 +343,14 @@ impl DeveloperTools {
     /// `C4EditCursor::Execute` — `if (Hold) if (!Game.HaltCount) if (Console.Editing)
     /// ApplyToolFill()` (`:74`). Fill repeats every frame while the button is
     /// held and the game is running; a halted game refuses to arm it.
+    ///
+    /// It fills wherever the cursor *now* is, not where the drag began —
+    /// `ApplyToolFill` reads the same live X/Y every other tool does (`:579`).
     pub fn execute_frame(&self, halted: bool, editing: bool) -> Option<DrawControl> {
         if !self.hold || self.tool != Tool::Fill || halted || !editing {
             return None;
         }
-        let (x, y) = self.anchor?;
+        let (x, y) = self.cursor;
         Some(DrawControl::Fill { x, y, y2: y })
     }
 
@@ -442,17 +512,21 @@ mod tests {
         );
         assert_eq!(tools.drag(13, 23), None, "no drag emission once released");
 
-        // Line and Rect emit once on release, carrying both coordinate pairs.
+        // Line and Rect emit once on release, carrying both coordinate pairs
+        // in C++'s argument order: `ApplyToolLine` passes the *live* cursor
+        // first and the press anchor second (`C4EditCursor.cpp:558,566`),
+        // because `Move` overwrites X/Y on every motion (`:119-121`) while
+        // `LeftButtonDown` freezes X2/Y2 at the press (`:225-226`).
         tools.set_tool(Tool::Line, false);
         assert_eq!(tools.press(1, 2), None);
         assert_eq!(tools.drag(5, 6), None, "line does not draw while dragging");
         assert_eq!(
             tools.release(7, 8),
             Some(DrawControl::Line {
-                x: 1,
-                y: 2,
-                x2: 7,
-                y2: 8
+                x: 7,
+                y: 8,
+                x2: 1,
+                y2: 2
             })
         );
         tools.set_tool(Tool::Rect, false);
@@ -460,10 +534,10 @@ mod tests {
         assert_eq!(
             tools.release(7, 8),
             Some(DrawControl::Rect {
-                x: 1,
-                y: 2,
-                x2: 7,
-                y2: 8
+                x: 7,
+                y: 8,
+                x2: 1,
+                y2: 2
             })
         );
 
@@ -482,15 +556,72 @@ mod tests {
             fill,
             "fill repeats every frame while held"
         );
+        // `ApplyToolFill` reads the live X/Y too, so a held fill follows the
+        // cursor rather than staying at the press point (`:579`).
+        assert_eq!(tools.drag(50, 60), None, "fill emits nothing on the drag");
+        assert_eq!(
+            tools.execute_frame(false, true),
+            Some(DrawControl::Fill {
+                x: 50,
+                y: 60,
+                y2: 60
+            }),
+            "a held fill tracks the cursor"
+        );
         // A halted game refuses it, as does a non-editing console (:74).
         assert_eq!(tools.execute_frame(true, true), None);
         assert_eq!(tools.execute_frame(false, false), None);
-        tools.release(4, 9);
+        tools.release(50, 60);
         assert_eq!(
             tools.execute_frame(false, true),
             None,
             "releasing stops the repeat"
         );
+
+        // C4EditCursor.cpp:698-731 — what the picker writes back differs per
+        // landscape mode, and a sky pick writes the least of the three.
+        {
+            use crate::developer_landscape::ToolPick;
+
+            let mut picked = DeveloperTools::default();
+            picked.apply_pick(&ToolPick::MaterialTexture {
+                material: "Granite".to_owned(),
+                texture: "Smooth".to_owned(),
+                ift: false,
+            });
+            assert_eq!(
+                (picked.material(), picked.texture(), picked.ift()),
+                ("Granite", "Smooth", false),
+                "Static resolves the whole pair plus the IFT bit"
+            );
+
+            // Exact has no texture to offer, so it leaves the one it had.
+            picked.apply_pick(&ToolPick::Material {
+                material: "Water".to_owned(),
+                ift: true,
+            });
+            assert_eq!(
+                (picked.material(), picked.texture(), picked.ift()),
+                ("Water", "Smooth", true)
+            );
+
+            // Sky writes the pseudo-material and *nothing else*: C++ reaches
+            // SelectTexture/SetIFT only inside the resolved arms.
+            picked.apply_pick(&ToolPick::Sky);
+            assert_eq!(
+                (picked.material(), picked.texture(), picked.ift()),
+                ("Sky", "Smooth", true)
+            );
+        }
+
+        // `EditingOK`'s refusal drops Hold so the drag stops dead (`:677`),
+        // while the anchor survives for a release that is refused in turn.
+        tools.set_tool(Tool::Brush, false);
+        tools.press(3, 4);
+        assert!(tools.holding());
+        tools.clear_hold();
+        assert!(!tools.holding());
+        assert_eq!(tools.drag(5, 6), None, "a refused stroke does not resume");
 
         // Alt selects Picker temporarily, in Draw mode only.
         tools.set_tool(Tool::Rect, false);

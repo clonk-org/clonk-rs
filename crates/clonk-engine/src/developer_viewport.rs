@@ -151,6 +151,39 @@ pub fn viewport_window_spec(
     }
 }
 
+/// `ViewportScrollSpeed` (`C4Viewport.cpp:57`) — one scroll-bar line step,
+/// and GTK's `step_increment` for the same bars (`:316,328`).
+pub const VIEWPORT_SCROLL_SPEED: i32 = 10;
+
+/// The scroll step one mouse-wheel message asks for.
+///
+/// This is presentation the port has to **invent**: C++ scrolls a console
+/// viewport through its window's native scroll bars, and the reference macOS
+/// build has neither — `TogglePlayerLock` and `ScrollBarsByViewPosition` are
+/// both `{ return false; }` there (`C4Viewport.cpp:634-635`). A wheel notch is
+/// therefore mapped onto the one step size C++ does define, `ViewportScrollSpeed`,
+/// so the feel matches the Win32 and GTK bars' line buttons.
+///
+/// Lines scroll vertically and a horizontal wheel scrolls horizontally, both
+/// away from the reader: a notch "down" raises `ViewY`, matching `SB_LINEDOWN`
+/// (`:141`). Pixel deltas — trackpads — arrive pre-scaled and pass through.
+pub fn wheel_scroll_step(delta: WheelDelta) -> (i32, i32) {
+    match delta {
+        WheelDelta::Lines { x, y } => (
+            (-x * VIEWPORT_SCROLL_SPEED as f32) as i32,
+            (-y * VIEWPORT_SCROLL_SPEED as f32) as i32,
+        ),
+        WheelDelta::Pixels { x, y } => (-x as i32, -y as i32),
+    }
+}
+
+/// One wheel message, in whichever unit the platform reports.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WheelDelta {
+    Lines { x: f32, y: f32 },
+    Pixels { x: f32, y: f32 },
+}
+
 /// Where a viewport window's input goes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ViewportEventRoute {
@@ -235,6 +268,22 @@ mod tests {
                 page: 250,
                 position: 20
             }
+        );
+
+        // A wheel notch is worth one scroll-bar line step, away from the
+        // reader: scrolling down raises ViewY like `SB_LINEDOWN` (:141).
+        assert_eq!(
+            wheel_scroll_step(WheelDelta::Lines { x: 0.0, y: -1.0 }),
+            (0, VIEWPORT_SCROLL_SPEED)
+        );
+        assert_eq!(
+            wheel_scroll_step(WheelDelta::Lines { x: 1.0, y: 0.0 }),
+            (-VIEWPORT_SCROLL_SPEED, 0)
+        );
+        // Trackpad deltas already carry their own distance.
+        assert_eq!(
+            wheel_scroll_step(WheelDelta::Pixels { x: 0.0, y: -7.0 }),
+            (0, 7)
         );
 
         // C4Viewport.cpp:1350-1351 — the window a viewport materialises with.
