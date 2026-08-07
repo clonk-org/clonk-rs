@@ -43,6 +43,44 @@
         assert!(boot.boot_loading.is_none());
     }
 
+    /// A dedicated server has no loader screen to fail on:
+    /// `C4Application::PreInit` calls `InitLoaderScreen` only for a
+    /// startup-dialog run (C4Application.cpp:239), and a `USE_CONSOLE` build
+    /// has no `C4FontLoader` at all (C4Game.h:132-135) yet still reaches
+    /// `C4AS_Startup` (C4Application.cpp:422-429). Headless must therefore
+    /// leave `Loading` on the same terms `/console` does — and must do so
+    /// without claiming console authority, which is a separate flag.
+    #[test]
+    fn headless_boot_leaves_loading_without_a_loader_screen_or_console_authority() {
+        let finished_boot_app = || {
+            let mut app = new_state_only_menu_app(320, 200);
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(BootLoadingEvent::Finished(None))
+                .expect("finish headless boot worker");
+            app.boot_loading = Some(BootLoadingState::new(receiver));
+            app.mode = AppMode::Loading;
+            app.loader_screen = None;
+            app
+        };
+
+        // The gate is real: an ordinary windowed boot stays in Loading so the
+        // next redraw can report the typed loader boundary.
+        let mut windowed = finished_boot_app();
+        windowed.poll_boot_loading();
+        assert_eq!(windowed.mode, AppMode::Loading);
+
+        let mut server = finished_boot_app();
+        server.headless = true;
+        server.poll_boot_loading();
+        assert_eq!(server.mode, AppMode::Menu);
+        assert!(server.boot_loading.is_none());
+        assert!(
+            !server.console_mode,
+            "headless must not grant developer-console authority"
+        );
+    }
+
     /// `CStdApp::Execute` abandons a deadline more than two seconds overdue -
     /// `LastExecute = tv` - and then fires `pWindow->Sec1Timer()` at most once,
     /// on a plain `seconds != LastExecute.tv_sec` comparison that cannot queue a

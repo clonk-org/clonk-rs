@@ -335,6 +335,19 @@ pub(crate) struct GameApp {
     /// Persistent developer-window policy selected by `/console`. Unlike
     /// per-round classic arguments, `/open` must not reset this.
     pub(crate) console_mode: bool,
+    /// Dedicated-server policy selected by `--headless`: no window, no render
+    /// device, no sound. C++ makes this a build (`USE_CONSOLE`,
+    /// CMakeLists.txt:178) whose `DDrawInit` compiles the OpenGL arm out
+    /// entirely (StdDDraw2.cpp:1305-1310), so it also implies
+    /// `lpDDraw->GetEngine() == GFXENGN_NOGFX`.
+    ///
+    /// Deliberately *not* `console_mode`: that grants developer-console
+    /// authority — it is the `Console.Active` argument behind
+    /// `ScriptControlPolicy::live`, i.e. "execute remote console-scope script
+    /// from any client" — which a server exposed to the internet must not
+    /// inherit. C++ reads the two separately too, and either alone makes the
+    /// lobby a console lobby (C4Network2.cpp:463).
+    pub(crate) headless: bool,
     pub(crate) developer_console: DeveloperConsole,
     pub(crate) developer_console_edit_mode: ConsoleEditMode,
     /// `C4EditCursor::Selection`. Shared by the viewport edit cursor, the
@@ -418,6 +431,14 @@ pub(crate) struct GameApp {
     /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
     pub(crate) host_lobby_countdown: Option<HostLobbyCountdown>,
+    /// `Game.C4S.GetMinPlayer()` for the round this lobby is staging.
+    ///
+    /// C++ reads it off the loaded `C4Scenario` when the countdown expires
+    /// (C4GameLobby.cpp:1163). The port has not applied a scenario while the
+    /// lobby runs, so the host retains the staged head value here. `None` is
+    /// "not known", and never aborts a round — an undetermined minimum must
+    /// not be able to quit a server.
+    pub(crate) network_lobby_min_players: Option<i32>,
     /// The live host session surfaces its locally submitted countdown once
     /// after broadcasting it. C++ instead applies that packet directly and
     /// excludes the host from the broadcast, so suppress exactly those echoes.
@@ -4558,6 +4579,20 @@ pub(crate) enum LobbyAction {
 
 pub(crate) const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
 pub(crate) const ALMOST_START_LOBBY_COUNTDOWN_SECONDS: i32 = 10;
+
+/// `C4PacketCountdown::GetCountdownMsg` (src/C4GameLobby.cpp:50-60): the last
+/// seconds are a bare `"n..."`, and everything else — including the very first
+/// message, whatever its value — is the full `IDS_PRC_COUNTDOWN` sentence.
+///
+/// `template` is the resolved resource with its `%d` already replaced by
+/// `{seconds}`, as `classic_lobby_labels` prepares it.
+pub(crate) fn lobby_countdown_message(seconds: i32, initial: bool, template: &str) -> String {
+    if seconds < ALMOST_START_LOBBY_COUNTDOWN_SECONDS && !initial {
+        format!("{seconds}...")
+    } else {
+        template.replace("{seconds}", &seconds.to_string())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MessageControlOutcome {

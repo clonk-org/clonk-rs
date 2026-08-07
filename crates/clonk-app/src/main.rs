@@ -448,7 +448,7 @@ fn main() -> Result<()> {
             let mut sink = native_startup_dialog_sink();
             clonk_platform::startup_dialog::report_startup_failure(
                 &mut sink,
-                false,
+                clonk_platform::startup_dialog::headless_run_was_requested(),
                 &format!("{error:#}"),
             );
         }
@@ -561,6 +561,13 @@ fn run() -> Result<()> {
     // Must precede any output: the GUI subsystem starts with stdio detached.
     clonk_platform::attach_parent_console();
     let cli = Cli::parse();
+    // The startup-failure reporter in `main` is installed before this point
+    // and has no access to the parsed command line. A dedicated server must
+    // never wait on a modal acknowledgement, so latch the choice as soon as it
+    // is known.
+    if cli.headless {
+        clonk_platform::startup_dialog::note_headless_run();
+    }
     let update_notice_detail = update_download::take_update_notice_detail();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
@@ -696,6 +703,13 @@ fn run() -> Result<()> {
         return run_menu_dump(dump_path, &cli.menu_view, app_paths.as_ref(), runtime);
     }
 
+    // Ahead of `validate_classic_loader_graphics_config` deliberately: the
+    // loader screen it checks is a rendered artifact, and a dedicated server
+    // never builds one — `C4Application::PreInit` only calls
+    // `InitLoaderScreen` for a startup-dialog run (C4Application.cpp:239).
+    if cli.headless {
+        return run_headless_server(&cli, &classic, app_paths.as_ref(), runtime);
+    }
     let audio_options = AudioOptions::load(app_paths.as_deref());
     if let Some(paths) = app_paths.as_deref() {
         validate_classic_loader_graphics_config(paths).map_err(|error| {
@@ -2361,6 +2375,7 @@ impl GameApp {
                 &[],
             )),
             console_mode: false,
+            headless: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,
             developer_selection: Default::default(),
@@ -2392,6 +2407,7 @@ impl GameApp {
             lobby_preload_artifact: None,
             network_start_wait: None,
             host_lobby_countdown: None,
+            network_lobby_min_players: None,
             pending_local_lobby_countdown_echoes: VecDeque::new(),
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
@@ -7009,10 +7025,17 @@ impl GameApp {
 
     fn handle_game_over(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        self.assets
-            .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
-            .map_err(report_classic_parity_boundary)
-            .map_err(classic_parity_engine_error)?;
+        // The evaluation dialog's graphics are only needed to draw one. A
+        // console engine never builds it (C4Game.cpp:3679-3690), and a
+        // `USE_CONSOLE` build has no `C4FontLoader` to render it with
+        // (C4Game.h:132-135), so a server must not fail its round end on
+        // resources it will not use.
+        if !self.headless {
+            self.assets
+                .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
+                .map_err(report_classic_parity_boundary)
+                .map_err(classic_parity_engine_error)?;
+        }
         // DoGameOver calls C4Player::EvaluateLeague for every survivor,
         // which sets PIF_Won on the linked live C4PlayerInfo before the
         // reference or evaluation UI consumes it.

@@ -1160,6 +1160,39 @@ fn abort_action_opens_confirmation_with_control_host_restart() {
     assert!(matches!(app.mode, AppMode::Running));
 }
 
+/// `C4Game::ShowGameOverDlg` builds no dialog in a console engine — it waits
+/// out any pending stream and calls `Application.QuitGame()` directly
+/// (src/C4Game.cpp:3679-3690), where the graphical build instead shows
+/// `C4GameOverDlg` and pauses behind it. An unattended server has no renderer
+/// to draw that dialog and no input to dismiss it, so pausing there would
+/// wedge the round forever.
+#[test]
+fn headless_round_end_quits_instead_of_pausing_behind_an_evaluation_dialog() {
+    // The graphical path is the control: it does open the dialog and pause.
+    let mut windowed = running_browser_sandbox(ScenarioSelectorMode::Local);
+    windowed
+        .handle_game_over()
+        .expect("open the windowed evaluation dialog");
+    assert!(windowed.game_over_dialog.is_some());
+    assert!(windowed.runtime_halt_active());
+    assert!(!windowed.take_exit_request());
+
+    let mut server = running_browser_sandbox(ScenarioSelectorMode::Local);
+    server.headless = true;
+    server
+        .handle_game_over()
+        .expect("end the headless round without a dialog");
+    assert!(
+        server.game_over_dialog.is_none(),
+        "a dedicated server draws no evaluation dialog"
+    );
+    assert!(
+        !server.runtime_halt_active(),
+        "and must not pause behind the dialog it never drew"
+    );
+    assert!(server.take_exit_request());
+}
+
 #[test]
 fn local_round_abort_and_evaluation_end_restore_fresh_browser() {
     let mut aborted = running_browser_sandbox(ScenarioSelectorMode::Local);

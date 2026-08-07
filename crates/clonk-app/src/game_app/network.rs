@@ -7255,6 +7255,29 @@ impl GameApp {
     }
 
     pub(crate) fn finish_game_over_after_league(&mut self) -> Result<(), EngineError> {
+        if self.headless {
+            // `C4Game::ShowGameOverDlg` builds no dialog in a console engine:
+            // it drains any pending stream and calls `Application.QuitGame()`
+            // directly (src/C4Game.cpp:3679-3690). Placed after the league
+            // transaction above rather than at the C++ position, because C++
+            // ends the league later still, from `Game.Clear()` on the way out
+            // of `QuitGame` (src/C4Game.cpp:581; src/C4Network2.cpp:746-763)
+            // — which `request_exit` also drives, through
+            // `clear_live_network_session`.
+            //
+            // `QuitGame` returns to the startup dialog only when one is in use
+            // (src/C4Application.cpp:373-405); a server was launched with a
+            // scenario, so it reaches `Quit()` and the process ends. Leaving
+            // the round paused behind an undrawable dialog instead would wedge
+            // it with no input able to dismiss it.
+            let title = self
+                .active_scenario
+                .as_ref()
+                .map_or("Scenario", |scenario| scenario.title.as_str());
+            tracing::info!(scenario = title, "round finished; quitting the server");
+            self.request_exit("the round ended on a headless server");
+            return Ok(());
+        }
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives
@@ -8015,6 +8038,9 @@ impl GameApp {
             }
         };
         let selected = staged.frontend.clone();
+        // Retained past the staged scenario's own lifetime: the countdown that
+        // reads it can expire after the round has been handed to the engine.
+        self.network_lobby_min_players = Some(staged.lobby.min_players);
         self.staged_network_host_scenario = Some(staged);
         let (_, configured_port) = load_network_startup_settings(self.app_paths.as_ref());
         let port = self
@@ -8150,6 +8176,9 @@ impl GameApp {
             nick,
             countdown_seconds,
             max_players: parameters.max_players(),
+            // `C4Scenario::GetMinPlayer`, retained beside its maximum for the
+            // dialogless countdown abort (C4GameLobby.cpp:1163).
+            min_players: metadata.head().min_players(),
             has_teams: metadata.teams().is_active(),
             fair_crew,
             fair_crew_forced: parameters.fair_crew_forced(),

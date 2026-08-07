@@ -3097,6 +3097,33 @@ impl GameApp {
         self.apply_lobby_countdown_presentation(packet);
     }
 
+    /// The countdown a dedicated engine has nowhere to draw goes to the log.
+    ///
+    /// C++ routes every countdown packet at `Game.Network.GetLobby()` and,
+    /// when there is no such dialog, logs it instead — on the opening packet
+    /// (src/C4GameLobby.cpp:1118-1127), on each broadcast second while the
+    /// timer is still running (`:1150-1157`), and on an abort, as
+    /// `IDS_PRC_STARTABORTED` (`:1183-1190`). Zero is deliberately not logged
+    /// here: the round either starts or aborts, and both say so themselves.
+    fn log_dialogless_lobby_countdown(
+        &mut self,
+        packet: clonk_network::LobbyCountdownPacket,
+        initial: bool,
+    ) {
+        if !(self.console_mode || self.headless) {
+            return;
+        }
+        let labels = self.classic_lobby_labels();
+        let message = if packet.is_abort() {
+            labels.start_aborted
+        } else if packet.countdown() == 0 {
+            return;
+        } else {
+            lobby_countdown_message(packet.countdown(), initial, &labels.countdown_template)
+        };
+        tracing::info!("{message}");
+    }
+
     pub(crate) fn apply_lobby_countdown_presentation(
         &mut self,
         packet: clonk_network::LobbyCountdownPacket,
@@ -3106,6 +3133,13 @@ impl GameApp {
         } else {
             clonk_frontend::game_lobby::LobbyCountdownPacket::Seconds(packet.countdown())
         };
+        // `MainDlg::OnCountdownPacket` passes `!fWasCountdown` as the packet's
+        // "initial" flag (src/C4GameLobby.cpp:415), so it must be read before
+        // the controller below consumes this packet.
+        let was_counting_down = self
+            .visible_classic_lobby_controller()
+            .is_some_and(|controller| controller.countdown().is_locked());
+        self.log_dialogless_lobby_countdown(packet, !was_counting_down);
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.apply_lobby_countdown(packet);
         }
@@ -7096,12 +7130,57 @@ impl GameApp {
             self.submit_and_apply_lobby_countdown(clonk_network::LobbyCountdownPacket::new(next));
         }
         if next == 0 {
+            if self.abort_dialogless_round_short_of_min_players() {
+                return broadcast;
+            }
             if let Err(error) = self.start_network_game_now() {
                 tracing::error!(%error, "failed to start network game after lobby countdown");
                 self.status_text = format!("Unable to start network game: {error}");
             }
         }
         broadcast
+    }
+
+    /// The dedicated-server arm of a countdown that reached zero: quit rather
+    /// than start a round the scenario cannot be played with.
+    ///
+    /// ```cpp
+    /// if (!Game.Network.GetLobby() && (Game.PlayerInfos.GetPlayerCount() < Game.C4S.GetMinPlayer()))
+    /// {
+    ///     Log(C4ResStrTableKey::IDS_MSG_NOTENOUGHPLAYERSFORTHISRO);
+    ///     Application.Quit();
+    /// }
+    /// ```
+    ///
+    /// (src/C4GameLobby.cpp:1163-1168.) `GetLobby()` is null exactly when the
+    /// lobby is not a dialog, which `fFullscreenLobby =
+    /// !Console.Active && (lpDDraw->GetEngine() != GFXENGN_NOGFX)` decides
+    /// (src/C4Network2.cpp:463) — so the console engine and the dedicated one
+    /// both take this arm, and a windowed host never does. Returns whether the
+    /// round was aborted.
+    fn abort_dialogless_round_short_of_min_players(&mut self) -> bool {
+        if !(self.console_mode || self.headless) {
+            return false;
+        }
+        // An undetermined minimum never quits a running server.
+        let Some(minimum) = self.network_lobby_min_players else {
+            return false;
+        };
+        let players =
+            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX);
+        if players >= minimum {
+            return false;
+        }
+        let message = self.runtime_resource_text(
+            "IDS_MSG_NOTENOUGHPLAYERSFORTHISRO",
+            "Not enough players for this round.",
+        );
+        // C++ leaves this one on the log deliberately — "it would also be nice
+        // to send this message to all clients..." (C4GameLobby.cpp:1167).
+        tracing::warn!(%message, players, minimum, "aborting the round");
+        self.status_text = message;
+        self.request_exit("too few players for the round at countdown zero");
+        true
     }
 
     pub(crate) fn publish_lobby_game_option_reference(

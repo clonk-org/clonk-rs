@@ -62,6 +62,21 @@ pub fn window_was_created() -> bool {
     WINDOW_CREATED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Set once the command line has selected a dedicated server. The failure
+/// reporter is installed before the command line is parsed, so this is latched
+/// rather than passed down.
+static HEADLESS_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records that this process runs headless, and must never wait on a dialog.
+pub fn note_headless_run() {
+    HEADLESS_RUN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether this process runs headless.
+pub fn headless_run_was_requested() -> bool {
+    HEADLESS_RUN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Whether a startup failure should try to open a dialog at all.
 ///
 /// A headless run must not block on an acknowledgement, which is the
@@ -164,6 +179,13 @@ mod tests {
         assert!(headless.0.is_empty());
         assert!(!should_present_startup_dialog(true));
         assert!(should_present_startup_dialog(false));
+
+        // The gate is latched from the command line, which is parsed long
+        // after the failure reporter is installed, so it defaults to "not
+        // headless" and only a dedicated server flips it.
+        assert!(!headless_run_was_requested());
+        note_headless_run();
+        assert!(headless_run_was_requested());
 
         // A platform with no backend reports "not shown" rather than failing;
         // the caller's stderr output and exit status are unaffected.

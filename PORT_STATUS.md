@@ -2090,10 +2090,11 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   coverage:** only Windows has a real sink, mirroring C++ where the Unix dialog
   exists solely under `WITH_DEVELOPER_MODE`; macOS and Linux select
   `NoStartupDialog` and stay stderr-only, which is deterministic and cannot
-  block. `report_startup_failure` also takes a `headless` gate — tested, but
-  currently always passed `false` from `main`, because the port has no headless
-  signal resolved that early; the platform sink is what makes the fallback
-  deterministic today.
+  block. `report_startup_failure` also takes a `headless` gate. It was passed a
+  constant `false` until 2026-08-06, when `--headless` gave the port a signal
+  resolved early enough to latch: `Cli::parse` now calls
+  `startup_dialog::note_headless_run`, and `main` reads it back, so a dedicated
+  server never waits on a modal acknowledgement no operator is there to give.
 
 - Closed 2026-07-29: **Recording and screenshot output-folder semantics.**
   `clonk-app::output_folders` now carries C++'s rules. The record root gains the
@@ -2391,6 +2392,63 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   no alternate stack from anyone, so their overflows stay mute; that limit is
   std's too. Signals outside the C++ set of 8 (`SIGHUP`, `SIGTRAP`, `SIGXCPU`,
   `SIGSYS`) still terminate with no banner, deliberately.
+
+- Closed 2026-08-06: **Headless dedicated-server mode** (clonk-org/clonk-rs#120).
+  The port could already host a player-less network round and drive it from
+  stdin, but `/console` still built a winit window and a wgpu device before the
+  stdin reader existed, so it could not run where there is no display server or
+  usable adapter. `--headless` now boots `run_headless_server`
+  (`main_parts/assets.rs`) instead: no window, no device, `AudioOptions::silenced`
+  (C++ forces `ENABLE_SOUND` off for `USE_CONSOLE`, `CMakeLists.txt:183-185`),
+  handing straight to the already-complete-but-uncalled `run_console_event_loop`.
+  `poll_boot_loading` no longer holds a server in `Loading` waiting on a loader
+  screen it never builds — `C4Application::PreInit` builds one only for a
+  startup-dialog run (`C4Application.cpp:239`) and a `USE_CONSOLE` build has no
+  `C4FontLoader` at all (`C4Game.h:132-135`).
+
+  **The signal is a `Cli` switch, deliberately not `Graphics.Engine = NoGfx`.**
+  C++ has two mechanisms and they are not interchangeable: `USE_CONSOLE` is a
+  build (`CMakeLists.txt:178`) and `GFXENGN_NOGFX` is only the runtime renderer
+  `DDrawInit` picks (`StdDDraw2.cpp:1301-1310`). The stdin console is compiled
+  in *solely* for `USE_CONSOLE` (`StdAppUnix.cpp:413-449`;
+  `StdAppWin32.cpp:77-79`), so a graphical build carrying `Engine=3` is a blind
+  interactive app with no way to command it — not a server. A build flag is also
+  fixed for the life of the process, which a `Cli` field is and a classic
+  argument is not: `/open <params>` re-parses a classic command line into the
+  running process (`game_app/console_record.rs`). `headless` is likewise a
+  separate `GameApp` field from `console_mode`, which carries developer-console
+  authority — it is the `Console.Active` argument behind `ScriptControlPolicy`,
+  i.e. "execute remote console-scope script from any client" — that a server on
+  the internet must not inherit. C++ reads the two separately as well, and
+  either alone makes the lobby a console lobby (`C4Network2.cpp:463`).
+
+  Unattended round handling came with it. At countdown zero a host with no lobby
+  dialog that is short of `C4Scenario::GetMinPlayer` logs
+  `IDS_MSG_NOTENOUGHPLAYERSFORTHISRO` and quits rather than starting
+  (`C4GameLobby.cpp:1163-1168`); the minimum rides on `ClassicHostLobbyProjection`
+  beside the maximum it already carried, and an undetermined minimum never quits.
+  Round end takes `C4Game::ShowGameOverDlg`'s console arm — quit directly
+  (`C4Game.cpp:3679-3690`) — instead of pausing behind an evaluation dialog that
+  a headless process cannot draw and no input can dismiss. The countdown itself
+  reaches the log when no dialog consumes it (`C4GameLobby.cpp:1118-1127`,
+  `:1150-1157`, `:1183-1190`).
+
+  **Still open.** (a) `C4Game::ShowGameOverDlg`'s console arm first drains a
+  pending network stream before quitting (`C4Game.cpp:3680-3687`); the port
+  quits without that wait, so a stream can lose its tail. (b) No auto-rehost or
+  scenario rotation — C++ has none either, parking in `C4AS_Startup` for the
+  operator's next `/open` (`C4Application.cpp:428`), and the port's process
+  simply exits, so a persistent server needs a supervisor restart.
+  `clonk-network::host_restart`'s `PID_PORT_HOST_RESTARTING` is unused by this
+  path. (c) The masterserver/league host signup is not exercised headlessly by
+  any test. (d) The remaining `!console_mode` gates that a headless run also
+  arguably wants — `failed_open_game_returns_to_startup` (`game_app/startup.rs`),
+  `failed_record_stream_exits` (`game_app/console_record.rs`) and the savegame
+  thumbnail capture (`game_app/saves.rs`) — are unchanged; each is reachable only
+  from a render or interactive path a headless process does not take, and they
+  were left rather than changed blind. (e) The graphics stack is still linked
+  into the server binary; only a Cargo feature or a separate `clonk-server`
+  binary would drop winit/wgpu/audio from its dependency graph.
 
 - Closed 2026-08-05: **Session-shutdown diagnostics** (clonk-org/clonk-rs#40).
   Nothing marked a shutdown, so a session log that stopped mid-stream read

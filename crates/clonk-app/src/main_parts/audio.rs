@@ -4988,6 +4988,9 @@ pub(crate) struct ClassicHostLobbyProjection {
     pub(crate) nick: String,
     pub(crate) countdown_seconds: i32,
     pub(crate) max_players: i32,
+    /// `C4Scenario::GetMinPlayer` for this round, read by the countdown's
+    /// dialogless abort (C4GameLobby.cpp:1163).
+    pub(crate) min_players: i32,
     pub(crate) has_teams: bool,
     pub(crate) fair_crew: bool,
     pub(crate) fair_crew_forced: bool,
