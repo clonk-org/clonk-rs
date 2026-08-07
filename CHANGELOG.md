@@ -4,6 +4,13 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-07
+
+### Features
+
+- Run a headless dedicated server with no window or render device (#199)
+- Wire console Draw mode and viewport scrolling into the running app (#198)
+
 ## [0.8.2] - 2026-08-06
 
 ### Bug fixes
