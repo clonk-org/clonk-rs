@@ -1901,6 +1901,45 @@ fn dialup_sample_nanos(samples: &[Duration]) -> Vec<u64> {
 }
 
 #[cfg(test)]
+struct DialupAdaptiveBaseline {
+    pooled: u64,
+    seeds: [(&'static str, u64); 20],
+}
+
+#[cfg(test)]
+fn dialup_adaptive_baseline_total_p50_ns() -> DialupAdaptiveBaseline {
+    // These medians were recorded with this byte-identical harness immediately
+    // before the single-send policy replaced adaptive immediate copies. Keep the
+    // fixture here so a squash merge does not make the comparison depend on an
+    // otherwise unreachable intermediate commit or a local target artifact.
+    DialupAdaptiveBaseline {
+        pooled: 878_000_000,
+        seeds: [
+            ("0x0000000000000001", 811_000_000),
+            ("0x0000000000000002", 943_000_000),
+            ("0x0000000000000003", 939_000_000),
+            ("0x0000000000000005", 908_000_000),
+            ("0x0000000000000008", 722_000_000),
+            ("0x000000000000000d", 819_000_000),
+            ("0x0000000000000015", 1_004_000_000),
+            ("0x0000000000000022", 994_000_000),
+            ("0x0000000000000037", 790_000_000),
+            ("0x0000000000000059", 697_000_000),
+            ("0x0000000000000090", 797_000_000),
+            ("0x00000000000000e9", 929_000_000),
+            ("0x0000000000000179", 885_000_000),
+            ("0x0000000000000262", 989_000_000),
+            ("0x00000000000003db", 782_000_000),
+            ("0x000000000000063d", 928_000_000),
+            ("0x0000000000000a18", 780_000_000),
+            ("0x0000000000001055", 948_000_000),
+            ("0x0000000000001a6d", 782_000_000),
+            ("0x0000000000002ac2", 945_000_000),
+        ],
+    }
+}
+
+#[cfg(test)]
 fn dialup_benchmark_report_json() -> String {
     const SEEDS: [u64; 20] = [
         0x0000_0000_0000_0001,
@@ -2161,19 +2200,38 @@ mod dialup_control_tests {
     }
 
     #[test]
-    fn single_copy_halves_pooled_dialup_control_delay() {
-        // The byte-identical parent harness at c02cbc405 measured 878 ms.
-        const BASELINE_TOTAL_P50_NS: u64 = 878_000_000;
+    fn single_copy_halves_each_paired_dialup_seed() {
+        let baseline = dialup_adaptive_baseline_total_p50_ns();
         let report: serde_json::Value = serde_json::from_str(&dialup_benchmark_report_json())
             .expect("the deterministic benchmark report is valid JSON");
-        let candidate = report["pooled"]["total_p50_ns"]
+        let pooled_candidate = report["pooled"]["total_p50_ns"]
             .as_u64()
             .expect("the report contains a total median");
 
         assert!(
-            candidate.saturating_mul(2) <= BASELINE_TOTAL_P50_NS,
-            "total median must fall by at least 50%: {BASELINE_TOTAL_P50_NS} -> {candidate} ns"
+            pooled_candidate.saturating_mul(2) <= baseline.pooled,
+            "pooled total median must fall by at least 50%: {} -> {pooled_candidate} ns",
+            baseline.pooled
         );
+        let candidate_seeds = report["seeds"]
+            .as_array()
+            .expect("the report contains per-seed results");
+        assert_eq!(candidate_seeds.len(), baseline.seeds.len());
+        for (candidate, (expected_seed, baseline_p50)) in candidate_seeds.iter().zip(baseline.seeds)
+        {
+            let seed = candidate["seed"]
+                .as_str()
+                .expect("the seed identifier is a string");
+            let candidate_p50 = candidate["total_p50_ns"]
+                .as_u64()
+                .expect("the seed report contains a total median");
+
+            assert_eq!(seed, expected_seed);
+            assert!(
+                candidate_p50.saturating_mul(2) <= baseline_p50,
+                "seed {seed} total median must fall by at least 50%: {baseline_p50} -> {candidate_p50} ns"
+            );
+        }
     }
 
     #[test]
