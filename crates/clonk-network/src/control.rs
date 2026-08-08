@@ -1,9 +1,25 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{ClientId, Tick};
+
+#[cfg(test)]
+thread_local! {
+    static BACKLOG_PRUNE_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_backlog_prune_passes() {
+    BACKLOG_PRUNE_PASSES.set(0);
+}
+
+#[cfg(test)]
+fn backlog_prune_passes() -> usize {
+    BACKLOG_PRUNE_PASSES.get()
+}
 
 /// Error cases that can occur when coordinating control packets.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -20,13 +36,46 @@ pub enum ControlError {
 /// `payload` is the serialized `C4Control` list, including its final
 /// `PID_None` byte. `client_id` and `tick` are the packet's outer fields and
 /// must not be repeated in the payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ControlPacket {
     client_id: ClientId,
     tick: Tick,
     timestamp_ms: u64,
     payload: Vec<u8>,
+    #[serde(skip)]
+    decoded: ControlPacketDecodeCache,
 }
+
+#[derive(Clone, Default)]
+struct ControlPacketDecodeCache(Arc<OnceLock<CachedControlList>>);
+
+struct CachedControlList {
+    controls: Vec<clonk_engine::ControlPacket>,
+    consumed: usize,
+}
+
+impl std::fmt::Debug for ControlPacket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControlPacket")
+            .field("client_id", &self.client_id)
+            .field("tick", &self.tick)
+            .field("timestamp_ms", &self.timestamp_ms)
+            .field("payload", &self.payload)
+            .finish()
+    }
+}
+
+impl PartialEq for ControlPacket {
+    fn eq(&self, other: &Self) -> bool {
+        self.client_id == other.client_id
+            && self.tick == other.tick
+            && self.timestamp_ms == other.timestamp_ms
+            && self.payload == other.payload
+    }
+}
+
+impl Eq for ControlPacket {}
 
 impl ControlPacket {
     pub fn builder(client_id: ClientId, tick: Tick) -> ControlPacketBuilder {
@@ -52,6 +101,31 @@ impl ControlPacket {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    pub(crate) fn decoded_control_list(
+        &self,
+    ) -> Result<(&[clonk_engine::ControlPacket], usize), crate::LegacyControlError> {
+        if let Some(decoded) = self.decoded.0.get() {
+            return Ok((&decoded.controls, decoded.consumed));
+        }
+        if self.payload.is_empty() {
+            return Err(crate::LegacyControlError::EmptyPayload);
+        }
+        let (controls, consumed) = crate::decode_control_list_prefix(&self.payload)?;
+        let decoded = self
+            .decoded
+            .0
+            .get_or_init(|| CachedControlList { controls, consumed });
+        Ok((&decoded.controls, decoded.consumed))
+    }
+
+    pub(crate) fn prime_decoded_control_list(
+        &self,
+        controls: Vec<clonk_engine::ControlPacket>,
+        consumed: usize,
+    ) {
+        let _ = self.decoded.0.set(CachedControlList { controls, consumed });
+    }
 }
 
 /// Builder for [`ControlPacket`]. Keeps construction ergonomic while enforcing
@@ -75,6 +149,7 @@ impl ControlPacketBuilder {
             tick: self.tick,
             timestamp_ms: self.timestamp_ms,
             payload: payload.into(),
+            decoded: ControlPacketDecodeCache::default(),
         }
     }
 }
@@ -149,10 +224,13 @@ impl ControlCoordinator {
             return Ok(ControlOutcome::stale());
         }
 
+        let current_tick = self.current_tick;
         let status = state.register_packet(packet);
         let missing = self.compute_missing(client_id);
         let ready = self.collect_ready();
-        self.enforce_backlog();
+        if self.current_tick != current_tick {
+            self.enforce_backlog();
+        }
 
         Ok(ControlOutcome {
             status,
@@ -313,6 +391,8 @@ impl ControlCoordinator {
         if self.backlog_limit == 0 {
             return;
         }
+        #[cfg(test)]
+        BACKLOG_PRUNE_PASSES.set(BACKLOG_PRUNE_PASSES.get() + 1);
         let threshold = self.current_tick.saturating_sub(self.backlog_limit as Tick);
         for state in self.clients.values_mut() {
             state.pending.retain(|&tick, _| tick >= threshold);
@@ -496,6 +576,23 @@ mod tests {
         assert_eq!(batch.tick(), 0);
         assert_eq!(batch.packets().len(), 2);
         assert_eq!(coord.current_tick(), 1);
+    }
+
+    #[test]
+    fn same_tick_contributions_prune_the_coordinator_backlog_once() {
+        let mut coordinator = ControlCoordinator::with_start_tick(2, 10);
+        for client_id in 1..=24 {
+            coordinator.register_client(client_id).unwrap();
+        }
+        reset_backlog_prune_passes();
+
+        for client_id in 1..=24 {
+            coordinator
+                .ingest(packet(client_id, 10, b"control"))
+                .unwrap();
+        }
+
+        assert_eq!(backlog_prune_passes(), 1);
     }
 
     #[test]

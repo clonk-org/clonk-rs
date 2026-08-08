@@ -1002,15 +1002,16 @@ fn retain_lobby_chat_message(
 /// C++ typed packet unpack rejects unknown control IDs, so every queued frame
 /// reaching the coordinator is fully decoded and checked here.
 pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String> {
-    let frame = crate::decode_control_packet(packet)
+    let (controls, _) = packet
+        .decoded_control_list()
         .map_err(|error| format!("invalid control packet: {error}"))?;
-    let expected_author = i32::try_from(frame.client_id).map_err(|_| {
+    let expected_author = i32::try_from(packet.client_id()).map_err(|_| {
         format!(
             "queued control packet has unsupported author id {}",
-            frame.client_id
+            packet.client_id()
         )
     })?;
-    for control in &frame.controls {
+    for control in controls {
         let (name, author) = match control {
             clonk_engine::ControlPacket::ClientJoin(control) => {
                 ("CID_ClientJoin", control.by_client)
@@ -1396,9 +1397,10 @@ pub(crate) fn validate_peer_control_packet(
     validate_control_envelope(packet)
         .map_err(|error| format!("invalid control packet: {error}"))?;
     validate_queued_control_authors(packet)?;
-    let frame = crate::decode_control_packet(packet)
+    let (controls, _) = packet
+        .decoded_control_list()
         .map_err(|error| format!("invalid control packet: {error}"))?;
-    if frame.controls.iter().any(control_requires_host_ingress) {
+    if controls.iter().any(control_requires_host_ingress) {
         return Err("peer control contribution contains a host-authority control".to_string());
     }
     Ok(())

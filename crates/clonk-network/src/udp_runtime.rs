@@ -37,17 +37,28 @@ pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// short enough to follow a link that changes.
 const REDUNDANCY_REVIEW_FRAGMENTS: u32 = 128;
 
+#[cfg(test)]
+thread_local! {
+    static NEXT_DEADLINE_PEER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_next_deadline_peer_visits() {
+    NEXT_DEADLINE_PEER_VISITS.set(0);
+}
+
+#[cfg(test)]
+fn next_deadline_peer_visits() -> usize {
+    NEXT_DEADLINE_PEER_VISITS.get()
+}
+
 pub const RELIABLE_UDP_OUTGOING_PACKET_CAPACITY: usize = 10_000;
 
-/// How long one datagram may hold the shared reliable-UDP hub before it is
-/// dropped and left to the reliable layer, the way C++ drops on EWOULDBLOCK
-/// (oracle-src-pinned src/C4NetIO.cpp:1772-1790). See `send_planned_datagram`.
+/// Maximum wait for the driver's one-time Tokio writable-interest setup.
 ///
-/// A writable socket never reaches this: `send_to` completes on its first poll
-/// and the timer is dropped unfired. It only bounds the pathological case, so
-/// it is sized to be invisible against the 28 ms simulation tick while still
-/// tolerating a brief kernel-buffer spike rather than dropping on the first
-/// sign of pressure.
+/// The interest remains registered for the socket's lifetime, so later sends
+/// never recreate this timeout: they make one immediate `try_send_to` attempt
+/// and drop on `WouldBlock`, matching C++ C4NetIO.cpp:1772-1790.
 pub const RELIABLE_UDP_SEND_BUDGET: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -535,6 +546,7 @@ impl ReliableUdpPeer {
 pub struct ReliableUdpEndpointCore {
     peers: BTreeMap<SocketAddr, ReliableUdpPeer>,
     next_check_at: Duration,
+    next_connect_deadline: Option<Duration>,
     topology_epoch: u64,
 }
 
@@ -556,22 +568,50 @@ impl ReliableUdpEndpointCore {
         Self {
             peers: BTreeMap::new(),
             next_check_at: now + RELIABLE_UDP_CHECK_INTERVAL,
+            next_connect_deadline: None,
             topology_epoch: 0,
         }
     }
 
     fn insert_peer(&mut self, address: SocketAddr, peer: ReliableUdpPeer) {
+        let connect_deadline = peer.connect_deadline;
         if self.peers.insert(address, peer).is_none() {
             self.topology_epoch = self.topology_epoch.wrapping_add(1);
+            if let Some(deadline) = connect_deadline {
+                self.next_connect_deadline = Some(
+                    self.next_connect_deadline
+                        .map_or(deadline, |current| current.min(deadline)),
+                );
+            }
+        } else {
+            self.refresh_next_connect_deadline();
         }
     }
 
     fn remove_peer(&mut self, address: &SocketAddr) -> Option<ReliableUdpPeer> {
         let removed = self.peers.remove(address);
-        if removed.is_some() {
+        if let Some(peer) = &removed {
             self.topology_epoch = self.topology_epoch.wrapping_add(1);
+            if peer
+                .connect_deadline
+                .is_some_and(|deadline| Some(deadline) == self.next_connect_deadline)
+            {
+                self.refresh_next_connect_deadline();
+            }
         }
         removed
+    }
+
+    fn refresh_next_connect_deadline(&mut self) {
+        self.next_connect_deadline = self
+            .peers
+            .values()
+            .inspect(|_| {
+                #[cfg(test)]
+                NEXT_DEADLINE_PEER_VISITS.set(NEXT_DEADLINE_PEER_VISITS.get() + 1);
+            })
+            .filter_map(|peer| peer.connect_deadline)
+            .min();
     }
 
     fn topology_epoch(&self) -> u64 {
@@ -656,12 +696,23 @@ impl ReliableUdpEndpointCore {
             if kind == ReliableUdpPacketKind::AddAddress && wire[0] & 0x80 == 0 {
                 return self.receive_add_address(source, wire);
             }
-            let peer = self
-                .peers
-                .get_mut(&peer_key)
-                .expect("resolved reliable-UDP peer exists");
-            let step = peer.receive(wire, now);
-            if peer.status == ReliableUdpPeerStatus::Closed {
+            let (step, deadline_changed, closed) = {
+                let peer = self
+                    .peers
+                    .get_mut(&peer_key)
+                    .expect("resolved reliable-UDP peer exists");
+                let previous_deadline = peer.connect_deadline;
+                let step = peer.receive(wire, now);
+                (
+                    step,
+                    peer.connect_deadline != previous_deadline,
+                    peer.status == ReliableUdpPeerStatus::Closed,
+                )
+            };
+            if deadline_changed {
+                self.refresh_next_connect_deadline();
+            }
+            if closed {
                 self.remove_peer(&peer_key);
             }
             return step;
@@ -721,12 +772,9 @@ impl ReliableUdpEndpointCore {
 
     pub fn timer_at(&mut self, now: Duration) -> ReliableUdpStep {
         let check_due = now >= self.next_check_at;
-        let connect_due = self.peers.values().any(|peer| {
-            peer.status == ReliableUdpPeerStatus::Connecting
-                && peer
-                    .connect_deadline
-                    .is_some_and(|deadline| now >= deadline)
-        });
+        let connect_due = self
+            .next_connect_deadline
+            .is_some_and(|deadline| now >= deadline);
         if !check_due && !connect_due {
             return ReliableUdpStep::default();
         }
@@ -768,6 +816,9 @@ impl ReliableUdpEndpointCore {
             if peer.status == ReliableUdpPeerStatus::Closed {
                 self.remove_peer(&address);
             }
+        }
+        if connect_due {
+            self.refresh_next_connect_deadline();
         }
         step
     }
@@ -824,10 +875,10 @@ impl ReliableUdpEndpointCore {
     }
 
     pub fn next_deadline(&self) -> Duration {
-        self.peers
-            .values()
-            .filter_map(|peer| peer.connect_deadline)
-            .fold(self.next_check_at, Duration::min)
+        self.next_connect_deadline
+            .map_or(self.next_check_at, |deadline| {
+                deadline.min(self.next_check_at)
+            })
     }
 }
 
@@ -870,7 +921,15 @@ pub struct ReliableUdpSocketDriver {
     statistics_topology_epoch: u64,
     started_at: Instant,
     receive_buffer: Vec<u8>,
+    protocol_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
     last_send: Option<ReliableUdpLastSend>,
+    socket_writability_established: bool,
+    #[cfg(test)]
+    protocol_timer_arms: usize,
+    #[cfg(test)]
+    socket_writability_establishments: usize,
+    #[cfg(test)]
+    force_next_planned_send_would_block: bool,
 }
 
 #[derive(Debug)]
@@ -1066,7 +1125,15 @@ impl ReliableUdpSocketDriver {
             statistics_topology_epoch: 0,
             started_at,
             receive_buffer: vec![0; u16::MAX as usize + 1],
+            protocol_timer: None,
             last_send: None,
+            socket_writability_established: false,
+            #[cfg(test)]
+            protocol_timer_arms: 0,
+            #[cfg(test)]
+            socket_writability_establishments: 0,
+            #[cfg(test)]
+            force_next_planned_send_would_block: false,
         })
     }
 
@@ -1285,6 +1352,20 @@ impl ReliableUdpSocketDriver {
     /// queued unless it completes and this future returns it to the caller.
     pub(crate) async fn wait_ready(&mut self) -> ReliableUdpPollReady {
         let deadline = self.started_at + self.core.next_deadline();
+        let needs_timer_arm = self
+            .protocol_timer
+            .as_ref()
+            .is_none_or(|timer| timer.deadline() != deadline);
+        #[cfg(test)]
+        if needs_timer_arm {
+            self.protocol_timer_arms += 1;
+        }
+        let protocol_timer = self
+            .protocol_timer
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+        if needs_timer_arm && protocol_timer.deadline() != deadline {
+            protocol_timer.as_mut().reset(deadline);
+        }
         tokio::select! {
             result = self.socket.recv_from(&mut self.receive_buffer) => {
                 match result {
@@ -1292,7 +1373,7 @@ impl ReliableUdpSocketDriver {
                     Err(error) => ReliableUdpPollReady::SocketError(error),
                 }
             }
-            _ = tokio::time::sleep_until(deadline) => ReliableUdpPollReady::Timer,
+            _ = protocol_timer.as_mut() => ReliableUdpPollReady::Timer,
         }
     }
 
@@ -1546,26 +1627,68 @@ impl ReliableUdpSocketDriver {
         // behind whichever peer is congested, turning one bad uplink into a
         // stall for the whole session.
         //
-        // `try_send_to` is NOT the way to express this — tokio's `try_*` does
-        // not register interest, so it answers WouldBlock until readiness has
-        // been established and would silently drop every early datagram.
-        // Bounding the real `send_to` keeps its readiness handling and still
-        // refuses to let one peer own the hub: a writable socket completes on
-        // the first poll without the timer ever arming, and a congested one is
-        // dropped like C++ once the budget expires.
+        // Establish Tokio's lifetime WRITABLE interest once, then preserve the
+        // native single-attempt behavior with immediate sends. PollEvented
+        // keeps that reactor interest after cached readiness is consumed.
         let result = match self.socket_destination(datagram.destination) {
-            Ok(destination) => match tokio::time::timeout(
-                RELIABLE_UDP_SEND_BUDGET,
-                self.socket.send_to(&datagram.payload, destination),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_elapsed) => Ok(datagram.payload.len()),
-            },
+            Ok(destination) => self
+                .establish_socket_writability()
+                .await
+                .and_then(|()| self.try_send_planned_payload(&datagram.payload, destination)),
             Err(error) => Err(error),
         };
         (peer, peer_backed, result)
+    }
+
+    fn try_send_planned_payload(
+        &mut self,
+        payload: &[u8],
+        destination: SocketAddr,
+    ) -> io::Result<usize> {
+        #[cfg(test)]
+        let result = if std::mem::take(&mut self.force_next_planned_send_would_block) {
+            Err(io::ErrorKind::WouldBlock.into())
+        } else {
+            self.socket.try_send_to(payload, destination)
+        };
+        #[cfg(not(test))]
+        let result = self.socket.try_send_to(payload, destination);
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(payload.len()),
+            result => result,
+        }
+    }
+
+    async fn establish_socket_writability(&mut self) -> io::Result<()> {
+        if self.socket_writability_established {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            self.socket_writability_establishments += 1;
+        }
+        let readiness =
+            tokio::time::timeout(RELIABLE_UDP_SEND_BUDGET, self.socket.writable()).await;
+        // Polling `writable` once installs lifetime WRITABLE interest in
+        // PollEvented. Even when this small first-send budget expires, the
+        // reactor can repopulate cached readiness for a later immediate send.
+        self.socket_writability_established = true;
+        readiness.unwrap_or(Ok(()))
+    }
+
+    #[cfg(test)]
+    fn protocol_timer_arms(&self) -> usize {
+        self.protocol_timer_arms
+    }
+
+    #[cfg(test)]
+    fn socket_writability_establishments(&self) -> usize {
+        self.socket_writability_establishments
+    }
+
+    #[cfg(test)]
+    fn force_next_planned_send_would_block(&mut self) {
+        self.force_next_planned_send_would_block = true;
     }
 
     async fn flush_step(&mut self, mut step: ReliableUdpStep) -> io::Result<Vec<ReliableUdpEvent>> {
@@ -1700,6 +1823,15 @@ mod tests {
         .unwrap()
     }
 
+    async fn poll_driver_ready_once(driver: &mut ReliableUdpSocketDriver) {
+        let mut ready = Box::pin(driver.wait_ready());
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(ready.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
     async fn recv_spy_kind(
         spy: &UdpSocket,
         buffer: &mut [u8],
@@ -1816,6 +1948,114 @@ mod tests {
                 .kind(),
             io::ErrorKind::NetworkUnreachable
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_waits_reuse_the_original_protocol_timer() {
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+
+        poll_driver_ready_once(&mut driver).await;
+        tokio::time::advance(RELIABLE_UDP_CHECK_INTERVAL / 2).await;
+        poll_driver_ready_once(&mut driver).await;
+
+        assert_eq!(driver.protocol_timer_arms(), 1);
+
+        tokio::time::advance(RELIABLE_UDP_CHECK_INTERVAL / 2).await;
+        assert!(matches!(
+            driver.wait_ready().await,
+            ReliableUdpPollReady::Timer
+        ));
+    }
+
+    #[tokio::test]
+    async fn lossless_datagram_sends_reuse_socket_writability() {
+        // C++ performs one non-blocking send attempt per datagram without
+        // waiting between them (oracle-src-pinned src/C4NetIO.cpp:1772-1790).
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let destination = spy.local_addr().unwrap();
+        let payloads = [b"first".as_slice(), b"second".as_slice()];
+
+        for payload in payloads {
+            let datagram = ReliableUdpDatagram {
+                destination,
+                payload: payload.to_vec(),
+            };
+            assert_eq!(
+                driver.send_planned_datagram(&datagram).await.2.unwrap(),
+                payload.len()
+            );
+        }
+
+        let mut buffer = [0; 16];
+        for payload in payloads {
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buffer[..length], payload);
+        }
+        assert_eq!(driver.socket_writability_establishments(), 1);
+    }
+
+    #[tokio::test]
+    async fn would_block_drops_without_rewaiting_and_later_sends_resume_in_order() {
+        // Native reports EWOULDBLOCK as success and immediately continues with
+        // later datagrams (oracle-src-pinned src/C4NetIO.cpp:1772-1790).
+        let mut driver =
+            ReliableUdpSocketDriver::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let destination = spy.local_addr().unwrap();
+        let datagram = |payload: &[u8]| ReliableUdpDatagram {
+            destination,
+            payload: payload.to_vec(),
+        };
+
+        let before = datagram(b"before");
+        assert_eq!(
+            driver.send_planned_datagram(&before).await.2.unwrap(),
+            before.payload.len()
+        );
+        driver.force_next_planned_send_would_block();
+        let dropped = datagram(b"dropped");
+        assert_eq!(
+            driver.send_planned_datagram(&dropped).await.2.unwrap(),
+            dropped.payload.len()
+        );
+        for payload in [b"after-one".as_slice(), b"after-two".as_slice()] {
+            let later = datagram(payload);
+            assert_eq!(
+                driver.send_planned_datagram(&later).await.2.unwrap(),
+                later.payload.len()
+            );
+        }
+
+        let mut buffer = [0; 16];
+        for payload in [
+            b"before".as_slice(),
+            b"after-one".as_slice(),
+            b"after-two".as_slice(),
+        ] {
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buffer[..length], payload);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), spy.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
+        assert_eq!(driver.socket_writability_establishments(), 1);
     }
 
     #[tokio::test]
@@ -2435,6 +2675,20 @@ mod tests {
             }]
         );
         assert_eq!(endpoint.peer_status(peer), None);
+    }
+
+    #[test]
+    fn steady_deadline_reads_do_not_rescan_connected_peers() {
+        let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
+        for last in 1..=24 {
+            endpoint.connect_at(address(last, 11_111), Duration::ZERO);
+        }
+        reset_next_deadline_peer_visits();
+
+        assert_eq!(endpoint.next_deadline(), Duration::from_secs(1));
+        assert_eq!(endpoint.next_deadline(), Duration::from_secs(1));
+
+        assert_eq!(next_deadline_peer_visits(), 0);
     }
 
     #[test]

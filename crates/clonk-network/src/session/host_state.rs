@@ -527,8 +527,28 @@ pub(crate) fn broadcast_host_message(
         }
     }
 
-    let mut sent = Vec::with_capacity(preferred.len());
-    for (client_id, (_, _, outbound)) in preferred {
+    let selected = preferred
+        .into_iter()
+        .map(|(client_id, (_, _, outbound))| (client_id, outbound))
+        .collect::<Vec<_>>();
+    if let Some(results) = HostOutboundSender::try_send_many(
+        &selected
+            .iter()
+            .map(|(_, outbound)| outbound.clone())
+            .collect::<Vec<_>>(),
+        message.clone(),
+    ) {
+        let mut sent = Vec::with_capacity(selected.len());
+        for ((client_id, _), accepted) in selected.into_iter().zip(results) {
+            if accepted || try_send_host_message(state, client_id, traffic, message.clone()) {
+                sent.push(client_id);
+            }
+        }
+        return sent;
+    }
+
+    let mut sent = Vec::with_capacity(selected.len());
+    for (client_id, outbound) in selected {
         match outbound.try_send(message.clone()) {
             Ok(()) => sent.push(client_id),
             Err(mpsc::error::SendError(HostOutboundMessage::Message(message))) => {
