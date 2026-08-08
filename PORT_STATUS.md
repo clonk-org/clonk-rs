@@ -3845,14 +3845,16 @@ an ordered-map model gap.
   every 56 ms through a 33,600 bit/s, 300 ms RTT link with independent 2% loss,
   a 4,200-byte drop-tail queue, 32 charged UDP/IP bytes per datagram and a paced
   20,000 charged-wire-bit/s client upload. It runs 256 warm-up controls and
-  2,049 measured controls for each of 20 fixed seeds. Against the byte-identical
-  parent harness, pooled client-to-host total-delay p50 falls 878 ms -> 220 ms
+  2,049 measured controls for each of 20 fixed seeds. Against the checked-in
+  medians recorded by the byte-identical pre-change harness, pooled
+  client-to-host total-delay p50 falls 878 ms -> 220 ms
   (74.9%) and propagation-excluded p50 falls 728 ms -> 70 ms (90.4%). All
   46,100 controls arrive exactly once and in order with matching payload digest,
   both peers remain `Working`, and no disconnect occurs. Every paired seed also
   clears the 50% total-delay target. The ordinary test
-  `single_copy_halves_pooled_dialup_control_delay` pins the threshold; the
-  ignored `dialup_20_seed_report` emits all 40,980 raw measured samples.
+  `single_copy_halves_each_paired_dialup_seed` pins the pooled and per-seed
+  thresholds. The ignored `dialup_20_seed_report` emits all 40,980 raw measured
+  samples.
 
   The background is deliberately a paced charged-wire load, not a simulated
   resource-protocol transfer: it shares queue and serialization capacity but
