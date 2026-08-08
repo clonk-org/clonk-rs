@@ -2730,7 +2730,7 @@ mod tests {
     fn missing_fragment_is_repaired_without_changing_the_single_send_policy() {
         // C4NetIOUDP::Peer::Send sends a fragment once; a later Check resends
         // that byte-identical fragment (oracle-src-pinned
-        // src/C4NetIO.cpp:2789-2809,2973-3031).
+        // src/C4NetIO.cpp:2789-2809,2973-3031,3124-3144,3261-3285).
         let (_, b_address, mut a, _) = handshake_pair();
         let original = a.send_packet(b_address, b"control").unwrap();
         assert_eq!(original.datagrams.len(), 1);
