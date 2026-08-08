@@ -771,40 +771,12 @@ pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
     })
 }
 
-/// Extra copies of a data packet to put on the wire beyond the original.
-///
-/// C++ sends each fragment once and repairs a loss after a `Check`. Immediate
-/// copies can mask loss on a fast link, but on a narrow shared uplink their UDP
-/// and IP framing can saturate the link and delay the original packets that
-/// drive lockstep. Keep the native one-send policy for every packet size.
-pub(crate) const REDUNDANT_DATA_PACKET_COPIES: usize = 0;
-
-/// Inner-packet size at or below which a data packet is sent redundantly.
-///
-/// Control packets are tens of bytes; a resource chunk is orders of magnitude
-/// larger and fragments into full 499-byte datagrams. Keying on the inner
-/// packet's total size therefore separates the latency-critical stream from the
-/// bulk one without needing the traffic class down here, and a control packet
-/// that somehow exceeded this simply falls back to today's repair behavior.
-const REDUNDANT_DATA_PACKET_LIMIT: u32 = 256;
-
 /// Returns the number of extra physical sends for an outgoing datagram.
 ///
 /// The native policy is one physical send followed by reliable repair, so this
-/// returns zero. The packet classification remains here because callers use the
-/// function as the stable policy seam.
-pub fn reliable_udp_redundant_copies(wire: &[u8]) -> usize {
-    if wire
-        .first()
-        .map(|status| status & INTERNAL_PACKET_TYPE_MASK)
-        != Some(IPID_DATA)
-    {
-        return 0;
-    }
-    wire.get(9..13)
-        .and_then(|size| size.try_into().ok())
-        .filter(|size| u32::from_ne_bytes(*size) <= REDUNDANT_DATA_PACKET_LIMIT)
-        .map_or(0, |_| REDUNDANT_DATA_PACKET_COPIES)
+/// returns zero. The function remains as the stable public policy seam.
+pub fn reliable_udp_redundant_copies(_wire: &[u8]) -> usize {
+    0
 }
 
 /// Splits one inner packet into packed C++ reliable-UDP data datagrams.
