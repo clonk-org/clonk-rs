@@ -2102,6 +2102,30 @@ mod dialup_control_tests {
     }
 
     #[test]
+    fn single_copy_control_and_background_fit_the_charged_uplink() {
+        let profile = dialup_control_profile();
+        let total_controls = profile.warmup_controls + profile.measured_controls;
+        let duration_ns = profile.control_period.as_nanos() * total_controls as u128;
+        let control_wire_bytes = (0..total_controls as u32)
+            .map(|tick| {
+                let fragments =
+                    crate::encode_reliable_udp_data_fragments(0, &dialup_control_body(tick))
+                        .expect("the benchmark control is encodable");
+                assert_eq!(fragments.len(), 1);
+                fragments[0].len() + profile.wire_overhead_bytes
+            })
+            .sum::<usize>() as u128;
+        let background_bit_ns = u128::from(profile.background_wire_bps).saturating_mul(duration_ns);
+        let control_bit_ns = control_wire_bytes
+            .saturating_mul(8)
+            .saturating_mul(1_000_000_000);
+        let capacity_bit_ns = u128::from(profile.link_bps).saturating_mul(duration_ns);
+
+        assert!(background_bit_ns + control_bit_ns <= capacity_bit_ns);
+        assert!(background_bit_ns + control_bit_ns * 2 > capacity_bit_ns);
+    }
+
+    #[test]
     fn dialup_run_preserves_control_integrity_and_raw_samples() {
         let profile = dialup_control_profile();
         let report = run_dialup_control(0x5eed_1234);
@@ -2134,6 +2158,22 @@ mod dialup_control_tests {
             .iter()
             .zip(&report.added_samples)
             .all(|(total, added)| *added == total.saturating_sub(profile.one_way_delay)));
+    }
+
+    #[test]
+    fn single_copy_halves_pooled_dialup_control_delay() {
+        // The byte-identical parent harness at c02cbc405 measured 878 ms.
+        const BASELINE_TOTAL_P50_NS: u64 = 878_000_000;
+        let report: serde_json::Value = serde_json::from_str(&dialup_benchmark_report_json())
+            .expect("the deterministic benchmark report is valid JSON");
+        let candidate = report["pooled"]["total_p50_ns"]
+            .as_u64()
+            .expect("the report contains a total median");
+
+        assert!(
+            candidate.saturating_mul(2) <= BASELINE_TOTAL_P50_NS,
+            "total median must fall by at least 50%: {BASELINE_TOTAL_P50_NS} -> {candidate} ns"
+        );
     }
 
     #[test]

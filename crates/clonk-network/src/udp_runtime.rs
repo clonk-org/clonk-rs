@@ -2565,6 +2565,12 @@ mod tests {
             a.peer_status(b_address),
             Some(ReliableUdpPeerStatus::Working)
         );
+        let control = a.send_packet(b_address, b"after reconnect").unwrap();
+        assert_eq!(control.datagrams.len(), 1);
+        assert_eq!(
+            a.redundant_copies_for(b_address, &control.datagrams[0].payload),
+            0
+        );
     }
 
     #[test]
@@ -2717,6 +2723,39 @@ mod tests {
         assert_eq!(
             canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
             a_address
+        );
+    }
+
+    #[test]
+    fn missing_fragment_is_repaired_without_changing_the_single_send_policy() {
+        // C4NetIOUDP::Peer::Send sends a fragment once; a later Check resends
+        // that byte-identical fragment (oracle-src-pinned
+        // src/C4NetIO.cpp:2789-2809,2973-3031).
+        let (_, b_address, mut a, _) = handshake_pair();
+        let original = a.send_packet(b_address, b"control").unwrap();
+        assert_eq!(original.datagrams.len(), 1);
+        assert_eq!(
+            a.redundant_copies_for(b_address, &original.datagrams[0].payload),
+            0
+        );
+        let check = encode_reliable_udp_check(&ReliableUdpCheck {
+            packet_number: 0,
+            next_expected_packet_number: 0,
+            next_expected_multicast_packet_number: 0,
+            missing_packet_numbers: vec![0],
+            missing_multicast_packet_numbers: Vec::new(),
+        })
+        .unwrap();
+
+        let repair = a.receive_at(b_address, &check, Duration::ZERO);
+
+        assert_eq!(repair.datagrams.len(), 1);
+        assert_eq!(repair.datagrams[0].payload, original.datagrams[0].payload);
+        let next = a.send_packet(b_address, b"next control").unwrap();
+        assert_eq!(next.datagrams.len(), 1);
+        assert_eq!(
+            a.redundant_copies_for(b_address, &next.datagrams[0].payload),
+            0
         );
     }
 
