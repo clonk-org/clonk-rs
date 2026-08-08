@@ -103,19 +103,45 @@ fallback remains valid gameplay behavior. The retained
 startup-to-PlayerInfo timing includes process and asset loading and must not be
 reported as network latency.
 
-The separate socket harness reports client-observed host-route RTT and control
-contribution over a same-process Tokio loopback topology. Its cadence follows
-the C++ 28 ms game tick times `ControlRate=2`, or 56 ms per control tick.
+The separate socket harness reports native client-observed host-route ping,
+microsecond application round trips, and control contribution over a
+same-process Tokio loopback topology. After its control-measurement window it
+runs eight sequential host `Ready(client_id)` request/addressed-client
+echo/host receipt rounds for each of the 24 clients over the selected message
+routes. That loaded 24-client fanout and native integer-millisecond ping remain
+diagnostics. After the loaded session shuts down cleanly, the harness creates a
+fresh same-topology one-host/one-client session. It completes the join/status
+handshake, warms 128 two-message ReadyCheck exchanges, and measures 256 more;
+this isolated microsecond application RTT is the high-resolution target metric.
+Loaded-session and isolated-session cleanup are separate fail-closed gates.
+The harness cadence follows the C++ 28 ms game tick times `ControlRate=2`, or
+56 ms per control tick.
 C++'s network `TargetFPS=38` is retained only for PreSend calculation and is
-not used as a simulation clock. Its authoritative default run continuously
+not used as a simulation clock. The harness's default-duration run continuously
 samples for 60 seconds and retains raw aggregate/per-client RTT and
 control-completion series, so it provides sustained loopback-transport evidence
 that the rendered clients' one-shot endpoint snapshot cannot. The socket
 harness does not launch HarpoonRace, run rendered clients, or execute `/set`,
 so those results are not general fleet/network RTT measurements.
 
-Run the authoritative 24-player socket harness over exact full-mesh reliable
-UDP with:
+For a performance comparison, use
+`scripts/run_network_load_benchmark.py` instead of treating one ignored-test
+invocation as a benchmark suite. Only its direct prebuilt-binary comparison can
+establish the performance target: one runner process executes an exact,
+predeclared 20-pair schedule in a randomized, balanced ten-AB/ten-BA order.
+Separately collected cohorts remain exploratory. The runner preserves failed
+runs, validates binary-bound build provenance, and compares within-pair ratios
+of per-run p50 values.
+`scripts/NETWORK_LOAD_BENCHMARK.md` documents the exact commands, artifacts,
+provenance preparation, distribution-free paired-median target assessment, and
+fixed-warmup limitation. The runner derives all report summaries again from
+the retained raw samples and independently checks measured tick/delivery
+counts and the exact selected route topology before comparison. Native
+integer-millisecond ping and loaded application fanout stay diagnostic; the
+fresh isolated application round trip supplies target evidence.
+
+Run the default-duration 24-player socket harness over exact full-mesh
+reliable UDP with:
 
 ```sh
 LC_NETWORK_LOAD_TOPOLOGY=udp \

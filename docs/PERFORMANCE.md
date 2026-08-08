@@ -934,6 +934,23 @@ every client against a per-player mesh and frame-cadence contract.
 acceptance gates, and the overrides; it needs an interactive desktop session on
 otherwise idle hardware.
 
+The transport-only companion has a repeated, fingerprint-checked runner in
+`scripts/run_network_load_benchmark.py`. See
+`scripts/NETWORK_LOAD_BENCHMARK.md` for its optimized build-once workflow,
+provenance-bound binaries, raw artifacts, and baseline/candidate comparison.
+Only a direct same-runner experiment with an exact, predeclared 20-pair,
+randomized ten-AB/ten-BA schedule can establish its target; separately collected
+cohorts are exploratory. The authoritative decision uses a distribution-free
+paired-median interval and exact sign evidence, while bootstrap intervals are
+descriptive. Its target metrics are control-completion wait and the microsecond
+application ReadyCheck round trip from a fresh, warmed one-host/one-client
+session created only after the loaded 24-player session shuts down cleanly.
+The loaded 24-client application fanout and native integer-millisecond ping are
+diagnostic; the latter's quantization cannot establish a 50% latency change
+near zero. The runner recomputes every report percentile from raw samples and
+checks measured counts, route topology, and both cleanup gates independently
+of the harness's own overall result.
+
 ## Reproducing render measurements
 
 Render one explicit replay snapshot:
