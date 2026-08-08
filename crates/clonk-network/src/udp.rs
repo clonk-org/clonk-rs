@@ -774,7 +774,8 @@ pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
 /// Returns the number of extra physical sends for an outgoing datagram.
 ///
 /// The native policy is one physical send followed by reliable repair, so this
-/// returns zero. The function remains as the stable public policy seam.
+/// returns zero. This remains the shared internal policy seam behind
+/// [`ReliableUdpEndpointCore::redundant_copies_for`].
 pub fn reliable_udp_redundant_copies(_wire: &[u8]) -> usize {
     0
 }
@@ -1503,8 +1504,9 @@ mod tests {
     /// C++ sends each reliable-UDP fragment once and repairs losses on request.
     #[test]
     fn reliable_udp_data_uses_the_cpp_single_send_policy() {
-        // C4NetIOUDP::Peer::Send calls SendDirect once for each fragment
-        // (oracle-src-pinned src/C4NetIO.cpp:2789-2809,3128).
+        // C4NetIOUDP::Peer::Send queues one logical send, and SendDirect forwards
+        // each fragment once (oracle-src-pinned src/C4NetIO.cpp:2789-2809,
+        // 3124-3144,3261-3285).
         let control = encode_reliable_udp_data_fragments(7, &[0_u8; 40]).expect("encode control");
         assert_eq!(control.len(), 1);
         assert_eq!(reliable_udp_redundant_copies(&control[0]), 0);

@@ -3831,7 +3831,8 @@ an ordered-map model gap.
 - **Reliable-UDP data now uses C++'s one-send policy**
   (`crates/clonk-network/src/udp.rs`, `reliable_udp_redundant_copies`;
   C++ `C4NetIOUDP::Peer::Send` and `SendDirect`, LegacyClonk 7d43b47
-  `src/C4NetIO.cpp:2789-2809`, `:3128`). Approved 2026-08-08.
+  `src/C4NetIO.cpp:2789-2809`, `:3124-3144`, `:3261-3285`). Approved
+  2026-08-08.
   Every data fragment is sent once and a missing fragment is repaired after a
   `Check`. Immediate byte-identical copies hid random loss on fast links, but
   their UDP/IP framing became positive feedback on a narrow shared uplink: two
@@ -3860,9 +3861,11 @@ an ordered-map model gap.
   resource-protocol transfer: it shares queue and serialization capacity but
   does not enter reliable packet numbering or repair. Resource head-of-line
   behavior remains covered separately by the bulk-stream tests. Packet numbers,
-  delivered bytes, ordering, packet logs and the public API are unchanged; this
-  removes a Rust-only physical-send divergence and leaves the existing 250 ms
-  re-ask damping in place.
+  delivered bytes, ordering and packet logs are unchanged. The public API
+  surface and signatures remain unchanged;
+  `ReliableUdpEndpointCore::redundant_copies_for` deliberately now reports zero
+  extra sends. This removes a Rust-only physical-send divergence and leaves the
+  existing 250 ms re-ask damping in place.
 
 - **The host stops extending the async deadline for a persistent straggler**
   (`crates/clonk-network/src/session/host_loop.rs`, `force_expired_async_control`;
