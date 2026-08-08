@@ -158,6 +158,10 @@ impl C4StringValue {
         }
     }
 
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     pub(crate) fn downgrade(&self) -> std::sync::Weak<C4StringValueInner> {
         Arc::downgrade(&self.0)
     }
@@ -655,24 +659,30 @@ pub fn cnv_fn(from: C4VType, to: C4VType) -> CnvFn {
 /// `IndexMap` provides the same externally visible behavior: replacing an
 /// existing key keeps its position, while removing and reinserting appends it.
 #[derive(Clone, Default)]
-pub struct ValueMap(
-    IndexMap<Value, Value>,
+struct ValueMapStorage {
+    entries: IndexMap<Value, Value>,
     // C4ValueHash allocates mapped C4Value slots separately from its hash
     // entries. Removing an entry retains that slot in emptyValues, including
     // any value left behind when the key itself became nil. New keys reuse
     // the most recently removed slot.
-    Vec<Value>,
-);
+    empty_values: Vec<Value>,
+}
+
+#[derive(Clone, Default)]
+pub struct ValueMap(Arc<ValueMapStorage>);
 
 impl fmt::Debug for ValueMap {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("ValueMap").field(&self.0).finish()
+        formatter
+            .debug_tuple("ValueMap")
+            .field(&self.0.entries)
+            .finish()
     }
 }
 
 impl PartialEq for ValueMap {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.0.entries == other.0.entries
     }
 }
 
@@ -680,39 +690,42 @@ impl Eq for ValueMap {}
 
 impl ValueMap {
     pub fn new() -> Self {
-        Self(IndexMap::new(), Vec::new())
+        Self::default()
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self(IndexMap::with_capacity(capacity), Vec::new())
+        Self(Arc::new(ValueMapStorage {
+            entries: IndexMap::with_capacity(capacity),
+            empty_values: Vec::new(),
+        }))
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.0.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.entries.is_empty()
     }
 
     pub fn iter(&self) -> indexmap::map::Iter<'_, Value, Value> {
-        self.0.iter()
+        self.0.entries.iter()
     }
 
     pub fn iter_mut(&mut self) -> indexmap::map::IterMut<'_, Value, Value> {
-        self.0.iter_mut()
+        Arc::make_mut(&mut self.0).entries.iter_mut()
     }
 
     pub fn keys(&self) -> indexmap::map::Keys<'_, Value, Value> {
-        self.0.keys()
+        self.0.entries.keys()
     }
 
     pub fn values(&self) -> indexmap::map::Values<'_, Value, Value> {
-        self.0.values()
+        self.0.entries.values()
     }
 
     pub fn values_mut(&mut self) -> indexmap::map::ValuesMut<'_, Value, Value> {
-        self.0.values_mut()
+        Arc::make_mut(&mut self.0).entries.values_mut()
     }
 
     /// Values retained in native `C4ValueHash::emptyValues` slot-reuse order.
@@ -720,29 +733,37 @@ impl ValueMap {
     /// destruction and therefore participate in C4String enumeration.
     #[doc(hidden)]
     pub fn hidden_values(&self) -> impl DoubleEndedIterator<Item = &Value> {
-        self.1.iter().rev()
+        self.0.empty_values.iter().rev()
     }
 
     /// String-property lookup (`map.foo` and the overwhelmingly common engine
     /// access pattern) without allocating a temporary [`Value::String`].
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.0.get(&StringQuery(key)).or_else(|| {
-            c4_string_literal_query(key).and_then(|key| self.0.get(&StringQuery(key.as_ref())))
+        self.0.entries.get(&StringQuery(key)).or_else(|| {
+            c4_string_literal_query(key)
+                .and_then(|key| self.0.entries.get(&StringQuery(key.as_ref())))
         })
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        if self.0.contains_key(&StringQuery(key)) {
-            return self.0.get_mut(&StringQuery(key));
+        if self.0.entries.contains_key(&StringQuery(key)) {
+            return Arc::make_mut(&mut self.0)
+                .entries
+                .get_mut(&StringQuery(key));
         }
         let key = c4_string_literal_query(key)?;
-        self.0.get_mut(&StringQuery(key.as_ref()))
+        if !self.0.entries.contains_key(&StringQuery(key.as_ref())) {
+            return None;
+        }
+        Arc::make_mut(&mut self.0)
+            .entries
+            .get_mut(&StringQuery(key.as_ref()))
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        self.0.contains_key(&StringQuery(key))
+        self.0.entries.contains_key(&StringQuery(key))
             || c4_string_literal_query(key)
-                .is_some_and(|key| self.0.contains_key(&StringQuery(key.as_ref())))
+                .is_some_and(|key| self.0.entries.contains_key(&StringQuery(key.as_ref())))
     }
 
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
@@ -766,43 +787,54 @@ impl ValueMap {
     }
 
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
-        if self.0.contains_key(&StringQuery(key)) {
-            return self.0.shift_remove(&StringQuery(key));
+        if self.0.entries.contains_key(&StringQuery(key)) {
+            return Arc::make_mut(&mut self.0)
+                .entries
+                .shift_remove(&StringQuery(key));
         }
         let key = c4_string_literal_query(key)?;
-        self.0.shift_remove(&StringQuery(key.as_ref()))
+        if !self.0.entries.contains_key(&StringQuery(key.as_ref())) {
+            return None;
+        }
+        Arc::make_mut(&mut self.0)
+            .entries
+            .shift_remove(&StringQuery(key.as_ref()))
     }
 
     pub fn get_key(&self, key: &Value) -> Option<&Value> {
-        self.0.get(key)
+        self.0.entries.get(key)
     }
 
     pub fn get_key_mut(&mut self, key: &Value) -> Option<&mut Value> {
-        self.0.get_mut(key)
+        if !self.0.entries.contains_key(key) {
+            return None;
+        }
+        Arc::make_mut(&mut self.0).entries.get_mut(key)
     }
 
     pub fn contains_value_key(&self, key: &Value) -> bool {
-        self.0.contains_key(key)
+        self.0.entries.contains_key(key)
     }
 
     pub fn insert_key(&mut self, key: Value, value: Value) -> Option<Value> {
-        if let Some(current) = self.0.get_mut(&key) {
+        let storage = Arc::make_mut(&mut self.0);
+        if let Some(current) = storage.entries.get_mut(&key) {
             return Some(std::mem::replace(current, value));
         }
 
-        if let Some(recycled) = self.1.pop() {
+        if let Some(recycled) = storage.empty_values.pop() {
             // operator[] first attaches the recycled mapped slot to the new
             // key and only then assigns. A nonnil recycled value assigned nil
             // therefore clears the slot and immediately removes the new key;
             // an already-nil slot takes C4Value::Set's unchanged-value return
             // and leaves a visible nil entry behind.
             if matches!(value, Value::Nil) && !matches!(recycled, Value::Nil) {
-                self.recycle_value_slot(Value::Nil);
+                storage.empty_values.push(Value::Nil);
                 return None;
             }
         }
 
-        self.0.insert(key, value)
+        storage.entries.insert(key, value)
     }
 
     /// Retain one removed C4ValueHash mapped slot for native-order reuse.
@@ -812,7 +844,7 @@ impl ValueMap {
     /// map's `emptyValues` pool until another key reuses it or the map dies.
     #[doc(hidden)]
     pub fn recycle_value_slot(&mut self, value: Value) {
-        self.1.push(value);
+        Arc::make_mut(&mut self.0).empty_values.push(value);
     }
 
     /// Arbitrary-key form of [`Self::assign`].
@@ -837,25 +869,27 @@ impl ValueMap {
     pub(crate) fn assign_key_zero_c4id(&mut self, key: Value) {
         if self
             .0
+            .entries
             .get(&key)
             .is_some_and(|current| matches!(current, Value::C4Id(id) if c4_id_raw(id) == 0))
         {
             return;
         }
 
-        if self.0.shift_remove(&key).is_some() {
-            self.1.push(Value::Nil);
+        if self.shift_remove_key(&key).is_some() {
+            self.recycle_value_slot(Value::Nil);
             return;
         }
 
-        if let Some(recycled) = self.1.pop() {
+        let storage = Arc::make_mut(&mut self.0);
+        if let Some(recycled) = storage.empty_values.pop() {
             if matches!(&recycled, Value::C4Id(id) if c4_id_raw(id) == 0) {
-                self.0.insert(key, recycled);
+                storage.entries.insert(key, recycled);
             } else {
-                self.1.push(Value::Nil);
+                storage.empty_values.push(Value::Nil);
             }
         } else {
-            self.1.push(Value::Nil);
+            storage.empty_values.push(Value::Nil);
         }
     }
 
@@ -870,14 +904,17 @@ impl ValueMap {
             return;
         }
         if self.shift_remove(&key).is_some() {
-            self.1.push(Value::Nil);
+            self.recycle_value_slot(Value::Nil);
             return;
         }
         self.assign_key_zero_c4id(Value::from(key));
     }
 
     pub fn shift_remove_key(&mut self, key: &Value) -> Option<Value> {
-        self.0.shift_remove(key)
+        if !self.0.entries.contains_key(key) {
+            return None;
+        }
+        Arc::make_mut(&mut self.0).entries.shift_remove(key)
     }
 }
 
@@ -933,7 +970,10 @@ impl IntoIterator for ValueMap {
     type IntoIter = indexmap::map::IntoIter<Value, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        match Arc::try_unwrap(self.0) {
+            Ok(storage) => storage.entries.into_iter(),
+            Err(storage) => storage.entries.clone().into_iter(),
+        }
     }
 }
 
@@ -942,7 +982,7 @@ impl<'a> IntoIterator for &'a ValueMap {
     type IntoIter = indexmap::map::Iter<'a, Value, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.0.entries.iter()
     }
 }
 
@@ -951,7 +991,7 @@ impl<'a> IntoIterator for &'a mut ValueMap {
     type IntoIter = indexmap::map::IterMut<'a, Value, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter_mut()
+        Arc::make_mut(&mut self.0).entries.iter_mut()
     }
 }
 
@@ -1705,6 +1745,52 @@ mod map_tests {
     use super::*;
 
     #[test]
+    fn cloned_maps_share_backing_until_mutation_without_sharing_map_state() {
+        let mut original = ValueMap::from([
+            ("first".to_string(), Value::Int(1)),
+            ("second".to_string(), Value::Int(2)),
+        ]);
+        original.recycle_value_slot(Value::String("retained".into()));
+
+        let mut cloned = original.clone();
+        assert!(Arc::ptr_eq(&original.0, &cloned.0));
+
+        *cloned
+            .get_mut("first")
+            .expect("cloned entry remains mutable") = Value::Int(10);
+        assert!(!Arc::ptr_eq(&original.0, &cloned.0));
+        cloned.recycle_value_slot(Value::Nil);
+        assert_eq!(cloned.shift_remove("first"), Some(Value::Int(10)));
+        cloned.insert("third".to_string(), Value::Int(3));
+
+        assert_eq!(original.get("first"), Some(&Value::Int(1)));
+        assert_eq!(
+            original.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                Value::String("first".into()),
+                Value::String("second".into())
+            ]
+        );
+        assert_eq!(
+            original.hidden_values().cloned().collect::<Vec<_>>(),
+            vec![Value::String("retained".into())]
+        );
+        assert_eq!(
+            cloned.hidden_values().cloned().collect::<Vec<_>>(),
+            vec![Value::String("retained".into())]
+        );
+
+        assert_eq!(Arc::strong_count(&cloned.0), 1);
+        assert_eq!(
+            cloned.into_iter().collect::<Vec<_>>(),
+            vec![
+                (Value::String("second".into()), Value::Int(2)),
+                (Value::String("third".into()), Value::Int(3)),
+            ]
+        );
+    }
+
+    #[test]
     fn raw_bool_keeps_union_payload_but_hashes_native_truth_value() {
         assert_eq!(Value::from_c4_bool_raw(0), Value::Bool(false));
         assert_eq!(Value::from_c4_bool_raw(1), Value::Bool(true));
@@ -1803,19 +1889,19 @@ mod map_tests {
 
         map.insert_key(Value::Int(1), Value::Int(10));
         assert_eq!(map.get_key(&Value::Int(1)), Some(&Value::Int(10)));
-        assert_eq!(map.1, vec![Value::String("older".into())]);
+        assert_eq!(map.0.empty_values, vec![Value::String("older".into())]);
 
         // Reusing a nonnil slot and assigning nil changes that slot to nil,
         // which immediately removes the just-created entry again.
         map.assign_key(Value::Int(2), Value::Nil);
         assert!(!map.contains_value_key(&Value::Int(2)));
-        assert_eq!(map.1, vec![Value::Nil]);
+        assert_eq!(map.0.empty_values, vec![Value::Nil]);
 
         // Reusing an already-nil slot takes C4Value::Set's early return, so
         // the nil entry remains present and the pool is consumed.
         map.assign_key(Value::Int(3), Value::Nil);
         assert_eq!(map.get_key(&Value::Int(3)), Some(&Value::Nil));
-        assert!(map.1.is_empty());
+        assert!(map.0.empty_values.is_empty());
     }
 
     #[test]
@@ -1897,6 +1983,16 @@ mod map_tests {
 #[cfg(test)]
 mod c4_string_tests {
     use super::*;
+
+    #[test]
+    fn runtime_string_identity_is_stable_across_handles() {
+        let value = C4StringValue::new("shared".to_string());
+        let same = value.clone();
+        let distinct = C4StringValue::new("shared".to_string());
+
+        assert_eq!(value.identity(), same.identity());
+        assert_ne!(value.identity(), distinct.identity());
+    }
 
     #[test]
     fn native_byte_view_borrows_text_and_decodes_only_raw_byte_escapes() {
