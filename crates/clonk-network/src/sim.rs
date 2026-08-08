@@ -1908,7 +1908,7 @@ struct DialupAdaptiveBaseline {
 }
 
 #[cfg(test)]
-fn dialup_adaptive_baseline_total_p50_ns() -> DialupAdaptiveBaseline {
+fn dialup_adaptive_baseline() -> DialupAdaptiveBaseline {
     // These medians were recorded with this byte-identical harness immediately
     // before the single-send policy replaced adaptive immediate copies. Keep the
     // fixture here so a squash merge does not make the comparison depend on an
@@ -2203,7 +2203,7 @@ mod dialup_control_tests {
 
     #[test]
     fn single_copy_halves_each_paired_dialup_seed() {
-        let baseline = dialup_adaptive_baseline_total_p50_ns();
+        let baseline = dialup_adaptive_baseline();
         let report: serde_json::Value = serde_json::from_str(&dialup_benchmark_report_json())
             .expect("the deterministic benchmark report is valid JSON");
         let pooled_candidate = report["pooled"]["total_p50_ns"]
