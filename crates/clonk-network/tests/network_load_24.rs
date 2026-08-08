@@ -28,6 +28,14 @@ const NATIVE_GAME_TICK: Duration = Duration::from_millis(28);
 const CONTROL_RATE: u32 = 2;
 const WARMUP_SECONDS: u32 = 2;
 const DEFAULT_MEASUREMENT_SECONDS: u64 = 60;
+const NETWORK_LOAD_REPORT_SCHEMA_VERSION: u32 = 6;
+const APPLICATION_RTT_ROUNDS_PER_CLIENT: usize = 8;
+const APPLICATION_RTT_BUDGET: Duration = Duration::from_secs(30);
+const ISOLATED_RTT_WARMUP_SAMPLES: usize = 128;
+const ISOLATED_RTT_MEASURED_SAMPLES: usize = 256;
+const ISOLATED_RTT_CLIENT_ID: u32 = 1;
+const ISOLATED_RTT_LOGICAL_MESSAGES_PER_SAMPLE: usize = 2;
+const ISOLATED_RTT_SETUP_AND_PING_BUDGET: Duration = Duration::from_secs(30);
 const CLEANUP_GRACE: Duration = Duration::from_secs(30);
 const EVENT_WAIT: Duration = Duration::from_secs(10);
 const MESH_WAIT: Duration = Duration::from_secs(30);
@@ -39,8 +47,32 @@ const LOAD_WORKLOAD_SCOPE: &str =
     "HarpoonRace-shaped lobby/control parameters only; no scenario/resource loading or game simulation";
 const LOAD_SEQUENCE: &str =
     "synthetic max_players=24 JoinData -> 24 PlayerInfo joins -> activate all -> GO";
+const LOAD_APPLICATION_RTT_SEQUENCE: &str =
+    "diagnostic loaded 24-client fanout after control measurement: sequential host Ready(client_id) broadcast -> addressed client Ready echo -> host receipt over selected message routes";
+const LOAD_ISOLATED_RTT_SEQUENCE: &str =
+    "loaded-session shutdown -> fresh same-topology one-host/one-client join/status handshake -> 128 warmup + 256 measured sequential exchanges: host ReadyCheck(Other(index+2)) -> client ActivationRequest(index+2) -> matching host receipt; exactly two logical messages per exchange";
 const LOAD_RTT_SCOPE: &str =
-    "client-to-host ping samples only; all endpoints run in one Tokio process over IPv4 loopback";
+    "native ping and loaded 24-client ReadyCheck fanout are diagnostics; primary RTT is a fresh one-host/one-client post-shutdown application exchange in the same Tokio process over IPv4 loopback";
+
+const fn application_round_trip_packet(client_id: u32) -> clonk_network::ReadyCheckPacket {
+    clonk_network::ReadyCheckPacket {
+        client_id: client_id as i32,
+        data: clonk_network::ReadyCheckData::Ready,
+    }
+}
+
+fn isolated_round_trip_messages(sample_index: usize) -> (clonk_network::ReadyCheckPacket, i32) {
+    let token = i32::try_from(sample_index)
+        .map(|index| index.saturating_add(2))
+        .unwrap_or(i32::MAX);
+    (
+        clonk_network::ReadyCheckPacket {
+            client_id: ISOLATED_RTT_CLIENT_ID as i32,
+            data: clonk_network::ReadyCheckData::Other(token),
+        },
+        token,
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -160,6 +192,12 @@ struct NetworkLoadReport {
     workload_scope: &'static str,
     sequence: &'static str,
     round_trip_scope: &'static str,
+    application_round_trip_sequence: &'static str,
+    application_round_trip_rounds_per_client: usize,
+    isolated_application_round_trip_sequence: &'static str,
+    isolated_application_round_trip_warmup_samples: usize,
+    isolated_application_round_trip_samples: usize,
+    isolated_application_round_trip_client_id: u32,
     authoritative_duration: bool,
     topology: LoadTopology,
     preferred_message_protocol: &'static str,
@@ -183,9 +221,13 @@ struct NetworkLoadReport {
     mesh_establishment_us: Option<i64>,
     final_route_peers: Vec<(u32, Vec<u32>)>,
     final_preferred_message_routes: Vec<PreferredMessageRoute>,
+    isolated_application_round_trip_preferred_message_routes: Vec<PreferredMessageRoute>,
     join_duration: MetricSeries,
     client_to_host_round_trip: MetricSeries,
     client_to_host_round_trip_by_client: Vec<ClientMetricSeries>,
+    client_to_host_application_round_trip: MetricSeries,
+    client_to_host_application_round_trip_by_client: Vec<ClientMetricSeries>,
+    client_to_host_isolated_application_round_trip: MetricSeries,
     control_completion_wait: MetricSeries,
     participant_ready: MetricSeries,
     cadence_lateness: MetricSeries,
@@ -203,15 +245,38 @@ struct LoadAssertion {
     detail: String,
 }
 
+fn session_cleanup_assertion(name: &str, result: Result<(), String>) -> LoadAssertion {
+    let (passed, detail) = result.map_or_else(
+        |error| (false, error),
+        |()| (true, "all host/client tasks joined".to_string()),
+    );
+    LoadAssertion {
+        name: name.to_string(),
+        passed,
+        detail,
+    }
+}
+
 #[derive(Debug)]
 enum ProbeEvent {
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    ReadyCheck {
+        packet: clonk_network::ReadyCheckPacket,
+    },
     Ready {
         packet: ControlPacket,
         observed_at: Instant,
     },
     Failure(String),
+}
+
+fn probe_ready_check_event(
+    client_id: u32,
+    packet: clonk_network::ReadyCheckPacket,
+) -> Option<ProbeEvent> {
+    (i32::try_from(client_id).ok() == Some(packet.client_id))
+        .then_some(ProbeEvent::ReadyCheck { packet })
 }
 
 struct ClientProbe {
@@ -259,6 +324,9 @@ impl ClientProbe {
                     }
                     ClientEvent::Status(status) => Some(ProbeEvent::Status(status)),
                     ClientEvent::StatusAck(status) => Some(ProbeEvent::StatusAck(status)),
+                    ClientEvent::ReadyCheck { packet } => {
+                        probe_ready_check_event(client_id, packet)
+                    }
                     ClientEvent::Ready { packet } => Some(ProbeEvent::Ready {
                         packet,
                         observed_at: Instant::now(),
@@ -347,6 +415,10 @@ impl ClientProbe {
         }
     }
 
+    async fn wait_for_ready_check(&mut self, expected: clonk_network::ReadyCheckPacket) {
+        wait_for_client_ready_check(self.client_id, &mut self.events, expected).await;
+    }
+
     fn clear_rtt_samples(&self) {
         self.rtt_samples_ms
             .lock()
@@ -391,6 +463,22 @@ struct TickMeasurement {
     ready_us: Vec<i64>,
 }
 
+#[derive(Debug)]
+struct IsolatedApplicationRoundTripMeasurement {
+    warmup_samples: usize,
+    client_id: u32,
+    preferred_message_routes: Vec<PreferredMessageRoute>,
+    raw_samples_us: Vec<i64>,
+}
+
+struct IsolatedPingSession {
+    host: clonk_network::HostHandle,
+    host_events: mpsc::Receiver<HostEvent>,
+    client: ClientHandle,
+    client_events: mpsc::Receiver<ClientEvent>,
+    initial_status: NetworkStatus,
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "explicit 24-player real-socket load benchmark; takes at least 62 seconds"]
 async fn harpoonrace_shaped_24_player_control_transport_sustains_lockstep() {
@@ -408,6 +496,9 @@ async fn harpoonrace_shaped_24_player_control_transport_sustains_lockstep() {
     let total_budget = setup_budget
         + Duration::from_secs(u64::from(WARMUP_SECONDS))
         + Duration::from_secs(measurement_seconds)
+        + APPLICATION_RTT_BUDGET
+        + CLEANUP_GRACE
+        + ISOLATED_RTT_SETUP_AND_PING_BUDGET
         + CLEANUP_GRACE;
 
     timeout(
@@ -709,18 +800,88 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         .iter()
         .flat_map(|series| series.metrics.raw_samples.iter().copied())
         .collect::<Vec<_>>();
+    eprintln!(
+        "LC_NETWORK_LOAD_24 phase=application_rtt rounds_per_client={APPLICATION_RTT_ROUNDS_PER_CLIENT}"
+    );
+    let client_to_host_application_round_trip_by_client = timeout(
+        APPLICATION_RTT_BUDGET,
+        measure_application_round_trips(&host, &mut host_events, &mut probes),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("application RTT workload exceeded its bounded {APPLICATION_RTT_BUDGET:?} budget")
+    });
+    let application_round_trip_us = client_to_host_application_round_trip_by_client
+        .iter()
+        .flat_map(|series| series.metrics.raw_samples.iter().copied())
+        .collect::<Vec<_>>();
     let final_preferred_message_routes = preferred_message_routes(&host, &probes).await;
     let final_route_peers = route_peers(&final_preferred_message_routes);
     let measured_ticks = control_completion_us.len();
     let requested_measurement = Duration::from_secs(measurement_seconds);
     let minimum_native_control_ticks = minimum_native_control_ticks(requested_measurement);
     let expected_ready_deliveries = measured_ticks * (PLAYER_COUNT + 1);
+
+    eprintln!("LC_NETWORK_LOAD_24 phase=loaded_cleanup");
+    drop(host_events);
+    let loaded_cleanup_result = match timeout(CLEANUP_GRACE, shutdown_session(host, probes)).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "loaded network session cleanup exceeded {CLEANUP_GRACE:?}"
+        )),
+    };
+    let loaded_cleanup_succeeded = loaded_cleanup_result.is_ok();
+    let (isolated_measurement, isolated_cleanup_result) = if loaded_cleanup_succeeded {
+        eprintln!("LC_NETWORK_LOAD_24 phase=isolated_ping_setup topology={topology:?}");
+        let (isolated_measurement, isolated_session) =
+            timeout(ISOLATED_RTT_SETUP_AND_PING_BUDGET, async {
+                let mut isolated_session = start_isolated_ping_session(topology).await;
+                let isolated_measurement =
+                    measure_isolated_application_round_trips(&mut isolated_session, topology).await;
+                (isolated_measurement, isolated_session)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                "isolated ping setup/measurement exceeded {ISOLATED_RTT_SETUP_AND_PING_BUDGET:?}"
+            )
+            });
+        eprintln!("LC_NETWORK_LOAD_24 phase=isolated_ping_cleanup");
+        let isolated_cleanup_result = match timeout(
+            CLEANUP_GRACE,
+            shutdown_isolated_ping_session(isolated_session),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "isolated ping session cleanup exceeded {CLEANUP_GRACE:?}"
+            )),
+        };
+        (isolated_measurement, isolated_cleanup_result)
+    } else {
+        (
+            IsolatedApplicationRoundTripMeasurement {
+                warmup_samples: 0,
+                client_id: HOST_CLIENT_ID,
+                preferred_message_routes: Vec::new(),
+                raw_samples_us: Vec::new(),
+            },
+            Err("isolated ping not started because loaded session cleanup failed".to_string()),
+        )
+    };
     let mut report = NetworkLoadReport {
-        schema_version: 4,
+        schema_version: NETWORK_LOAD_REPORT_SCHEMA_VERSION,
         workload: LOAD_WORKLOAD,
         workload_scope: LOAD_WORKLOAD_SCOPE,
         sequence: LOAD_SEQUENCE,
         round_trip_scope: LOAD_RTT_SCOPE,
+        application_round_trip_sequence: LOAD_APPLICATION_RTT_SEQUENCE,
+        application_round_trip_rounds_per_client: APPLICATION_RTT_ROUNDS_PER_CLIENT,
+        isolated_application_round_trip_sequence: LOAD_ISOLATED_RTT_SEQUENCE,
+        isolated_application_round_trip_warmup_samples: isolated_measurement.warmup_samples,
+        isolated_application_round_trip_samples: isolated_measurement.raw_samples_us.len(),
+        isolated_application_round_trip_client_id: isolated_measurement.client_id,
         authoritative_duration: measurement_seconds >= DEFAULT_MEASUREMENT_SECONDS,
         topology,
         preferred_message_protocol: protocol_name(topology.preferred_message_protocol()),
@@ -742,9 +903,20 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         mesh_establishment_us,
         final_route_peers,
         final_preferred_message_routes,
+        isolated_application_round_trip_preferred_message_routes: isolated_measurement
+            .preferred_message_routes,
         join_duration: MetricSeries::new("microseconds", join_duration_us),
         client_to_host_round_trip: MetricSeries::new("milliseconds", round_trip_ms),
         client_to_host_round_trip_by_client,
+        client_to_host_application_round_trip: MetricSeries::new(
+            "microseconds",
+            application_round_trip_us,
+        ),
+        client_to_host_application_round_trip_by_client,
+        client_to_host_isolated_application_round_trip: MetricSeries::new(
+            "microseconds",
+            isolated_measurement.raw_samples_us,
+        ),
         control_completion_wait: MetricSeries::new("microseconds", control_completion_us),
         participant_ready: MetricSeries::new("microseconds", participant_ready_us),
         cadence_lateness: MetricSeries::new("microseconds", cadence_lateness_us),
@@ -760,27 +932,19 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         measurement_wall_elapsed,
         topology,
     );
-    eprintln!("LC_NETWORK_LOAD_24 phase=cleanup");
-    drop(host_events);
-    let cleanup = timeout(CLEANUP_GRACE, shutdown_session(host, probes)).await;
-    let (cleanup_passed, cleanup_detail) = match cleanup {
-        Ok(Ok(())) => (true, "all host/client tasks joined".to_string()),
-        Ok(Err(error)) => (false, error),
-        Err(_) => (
-            false,
-            format!("network load cleanup exceeded {CLEANUP_GRACE:?}"),
-        ),
-    };
-    report.assertions.push(LoadAssertion {
-        name: "clean-shutdown".to_string(),
-        passed: cleanup_passed,
-        detail: cleanup_detail,
-    });
+    report.assertions.push(session_cleanup_assertion(
+        "loaded-session-clean-shutdown",
+        loaded_cleanup_result,
+    ));
+    report.assertions.push(session_cleanup_assertion(
+        "isolated-ping-clean-shutdown",
+        isolated_cleanup_result,
+    ));
     eprintln!("LC_NETWORK_LOAD_24 phase=complete");
     report.result = load_assertion_result(&report.assertions);
     let report_path = write_report(&report);
     println!(
-        "LC_NETWORK_LOAD_24 report={} result={} players={} ticks={} wall_elapsed_ms={} join_p99_ms={:.3} client_host_rtt_p99_ms={} control_wait_p99_ms={:.3}",
+        "LC_NETWORK_LOAD_24 report={} result={} players={} ticks={} wall_elapsed_ms={} join_p99_ms={:.3} native_client_host_rtt_p99_ms={} loaded_fanout_application_rtt_p99_ms={:.3} isolated_application_rtt_p99_ms={:.3} control_wait_p99_ms={:.3}",
         report_path.display(),
         report.result,
         report.player_profiles_joined,
@@ -788,6 +952,13 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         report.measurement_wall_elapsed_ms,
         micros_to_millis(report.join_duration.summary.p99),
         report.client_to_host_round_trip.summary.p99.unwrap_or(-1),
+        micros_to_millis(report.client_to_host_application_round_trip.summary.p99),
+        micros_to_millis(
+            report
+                .client_to_host_isolated_application_round_trip
+                .summary
+                .p99,
+        ),
         micros_to_millis(report.control_completion_wait.summary.p99),
     );
     let failed = report
@@ -884,6 +1055,195 @@ async fn drive_tick(
             })
             .collect(),
     }
+}
+
+async fn measure_application_round_trips(
+    host: &clonk_network::HostHandle,
+    host_events: &mut mpsc::Receiver<HostEvent>,
+    probes: &mut [ClientProbe],
+) -> Vec<ClientMetricSeries> {
+    let mut samples = probes
+        .iter()
+        .map(|probe| {
+            (
+                probe.client_id,
+                Vec::with_capacity(APPLICATION_RTT_ROUNDS_PER_CLIENT),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for _ in 0..APPLICATION_RTT_ROUNDS_PER_CLIENT {
+        for (probe, (_, client_samples)) in probes.iter_mut().zip(samples.iter_mut()) {
+            let packet = application_round_trip_packet(probe.client_id);
+            let started_at = Instant::now();
+            host.submit_ready_check(packet)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "broadcast application RTT request for client {}: {error}",
+                        probe.client_id
+                    )
+                });
+            probe.wait_for_ready_check(packet).await;
+            probe
+                .handle
+                .submit_ready_check(packet)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "echo application RTT request from client {}: {error}",
+                        probe.client_id
+                    )
+                });
+            let observed_at = wait_for_host_ready_check(host_events, packet).await;
+            client_samples.push(duration_us(
+                observed_at.saturating_duration_since(started_at),
+            ));
+        }
+    }
+
+    samples
+        .into_iter()
+        .map(|(client_id, raw_samples)| ClientMetricSeries {
+            client_id,
+            metrics: MetricSeries::new("microseconds", raw_samples),
+        })
+        .collect()
+}
+
+async fn start_isolated_ping_session(topology: LoadTopology) -> IsolatedPingSession {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind isolated ping host");
+    let host_address = listener.local_addr().expect("isolated ping host address");
+    let mut host_config = HostConfig {
+        max_players: 1,
+        ..HostConfig::default()
+    };
+    configure_host_transport(&mut host_config, topology);
+    let host_name = legacy_string("IsolatedRttHost");
+    host_config.local_core.name = host_name.clone();
+    host_config.local_core.nick = host_name;
+    if let Some(join_snapshot) = host_config.initial_join_snapshot.as_mut() {
+        join_snapshot.parameters.max_players = 1;
+        join_snapshot.parameters.clients.clients[0] = host_config.local_core.clone();
+    }
+    let mut host = clonk_network::start_host(listener, host_config)
+        .await
+        .expect("start isolated ping host");
+    let host_events = host.take_event_receiver();
+    let client_config = configure_client_transport(
+        ClientConfig::new("IsolatedRttClient", ParticipantKind::Player),
+        topology,
+    );
+    let mut client = timeout(EVENT_WAIT, async {
+        match topology {
+            LoadTopology::Udp => {
+                let udp_address = host
+                    .udp_local_addr()
+                    .expect("isolated UDP ping host has a reliable-UDP listener");
+                connect_dual_client(host_address, udp_address, client_config).await
+            }
+            LoadTopology::Tcp | LoadTopology::Relay => {
+                connect_client(host_address, client_config).await
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("isolated ping client connect exceeded {EVENT_WAIT:?}"))
+    .unwrap_or_else(|error| panic!("connect isolated ping client: {error}"));
+    assert_eq!(
+        client.client_id(),
+        ISOLATED_RTT_CLIENT_ID,
+        "fresh isolated host must allocate client ID one"
+    );
+    let initial_status = client
+        .take_join_data()
+        .expect("isolated ping client retains initial JoinData")
+        .status;
+    let client_events = client.take_event_receiver();
+    IsolatedPingSession {
+        host,
+        host_events,
+        client,
+        client_events,
+        initial_status,
+    }
+}
+
+async fn measure_isolated_application_round_trips(
+    session: &mut IsolatedPingSession,
+    topology: LoadTopology,
+) -> IsolatedApplicationRoundTripMeasurement {
+    wait_for_host_join(&mut session.host_events, ISOLATED_RTT_CLIENT_ID).await;
+    session
+        .client
+        .submit_status_ack(session.initial_status)
+        .await
+        .expect("acknowledge isolated ping JoinData status");
+    wait_for_host_status_ack(
+        &mut session.host_events,
+        ISOLATED_RTT_CLIENT_ID,
+        session.initial_status,
+    )
+    .await;
+    wait_for_isolated_status_ack(&mut session.client_events, session.initial_status).await;
+    wait_for_isolated_preferred_message_routes(&session.host, &session.client, topology).await;
+
+    for sample_index in 0..ISOLATED_RTT_WARMUP_SAMPLES {
+        let _ = measure_one_isolated_application_round_trip(session, sample_index).await;
+    }
+    let mut raw_samples_us = Vec::with_capacity(ISOLATED_RTT_MEASURED_SAMPLES);
+    for sample_index in
+        ISOLATED_RTT_WARMUP_SAMPLES..ISOLATED_RTT_WARMUP_SAMPLES + ISOLATED_RTT_MEASURED_SAMPLES
+    {
+        raw_samples_us
+            .push(measure_one_isolated_application_round_trip(session, sample_index).await);
+    }
+
+    let preferred_message_routes =
+        isolated_preferred_message_routes(&session.host, &session.client).await;
+    assert_eq!(
+        preferred_message_routes,
+        expected_isolated_preferred_message_routes(topology),
+        "isolated ping routes changed during measurement"
+    );
+    IsolatedApplicationRoundTripMeasurement {
+        warmup_samples: ISOLATED_RTT_WARMUP_SAMPLES,
+        client_id: session.client.client_id(),
+        preferred_message_routes,
+        raw_samples_us,
+    }
+}
+
+async fn measure_one_isolated_application_round_trip(
+    session: &mut IsolatedPingSession,
+    sample_index: usize,
+) -> i64 {
+    // The host-authored ReadyCheck and client ActivationRequest are the two
+    // logical messages used by the native handlers (oracle
+    // src/C4Network2.cpp:949-953,982-991,2143;
+    // src/C4Network2IO.cpp:395-431).
+    let (ready_check, activation_tick) = isolated_round_trip_messages(sample_index);
+    let started_at = Instant::now();
+    session
+        .host
+        .submit_ready_check(ready_check)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("send isolated ping ReadyCheck token {activation_tick}: {error}")
+        });
+    wait_for_isolated_ready_check(&mut session.client_events, ready_check).await;
+    session
+        .client
+        .request_activation(activation_tick)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("send isolated ping ActivationRequest token {activation_tick}: {error}")
+        });
+    let observed_at =
+        wait_for_isolated_activation_request(&mut session.host_events, activation_tick).await;
+    duration_us(observed_at.saturating_duration_since(started_at))
 }
 
 fn control_contribution(client_id: u32, tick: Tick) -> ControlPacket {
@@ -1084,6 +1444,112 @@ async fn wait_for_host_ready(
             Ok(Some(_)) => continue,
             Ok(None) => panic!("host event stream ended before Ready({expected_tick})"),
             Err(_) => panic!("timed out waiting for host Ready({expected_tick})"),
+        }
+    }
+}
+
+async fn wait_for_client_ready_check(
+    client_id: u32,
+    events: &mut mpsc::UnboundedReceiver<ProbeEvent>,
+    expected: clonk_network::ReadyCheckPacket,
+) {
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(ProbeEvent::ReadyCheck { packet })) if packet == expected => return,
+            Ok(Some(ProbeEvent::Failure(error))) => panic!("{error}"),
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("client {client_id} probe stream ended before {expected:?}"),
+            Err(_) => panic!("timed out waiting for client {client_id} {expected:?}"),
+        }
+    }
+}
+
+async fn wait_for_host_ready_check(
+    events: &mut mpsc::Receiver<HostEvent>,
+    expected: clonk_network::ReadyCheckPacket,
+) -> Instant {
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(HostEvent::ReadyCheck { packet })) if packet == expected => {
+                return Instant::now();
+            }
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error before host received {expected:?}: {error}")
+            }
+            Ok(Some(HostEvent::ClientLeft { client_id }))
+            | Ok(Some(HostEvent::ClientConnectionFailed { client_id })) => {
+                panic!("client {client_id} left before host received {expected:?}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("host event stream ended before receiving {expected:?}"),
+            Err(_) => panic!("timed out waiting for host to receive {expected:?}"),
+        }
+    }
+}
+
+async fn wait_for_isolated_ready_check(
+    events: &mut mpsc::Receiver<ClientEvent>,
+    expected: clonk_network::ReadyCheckPacket,
+) {
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(ClientEvent::ReadyCheck { packet })) if packet == expected => return,
+            Ok(Some(ClientEvent::Disconnected { reason })) => {
+                panic!("isolated ping client disconnected before {expected:?}: {reason:?}")
+            }
+            Ok(Some(ClientEvent::UnhandledPacket { packet_type })) => panic!(
+                "isolated ping client received unhandled packet type {packet_type:#04x} before {expected:?}"
+            ),
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("isolated ping client event stream ended before {expected:?}"),
+            Err(_) => panic!("timed out waiting for isolated ping client {expected:?}"),
+        }
+    }
+}
+
+async fn wait_for_isolated_activation_request(
+    events: &mut mpsc::Receiver<HostEvent>,
+    expected_tick: i32,
+) -> Instant {
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(HostEvent::ActivationRequest {
+                client_id, tick, ..
+            })) if client_id == ISOLATED_RTT_CLIENT_ID && tick == expected_tick => {
+                return Instant::now();
+            }
+            Ok(Some(HostEvent::TransportError { error, .. }))
+            | Ok(Some(HostEvent::FatalError { error })) => {
+                panic!("isolated ping transport failed before token {expected_tick}: {error}")
+            }
+            Ok(Some(HostEvent::ClientLeft { client_id }))
+            | Ok(Some(HostEvent::ClientConnectionFailed { client_id })) => {
+                panic!("client {client_id} left before isolated ping token {expected_tick}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                panic!("isolated ping host event stream ended before token {expected_tick}")
+            }
+            Err(_) => panic!("timed out waiting for isolated ping token {expected_tick}"),
+        }
+    }
+}
+
+async fn wait_for_isolated_status_ack(
+    events: &mut mpsc::Receiver<ClientEvent>,
+    expected: NetworkStatus,
+) {
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(ClientEvent::StatusAck(status))) if status == expected => return,
+            Ok(Some(ClientEvent::Disconnected { reason })) => panic!(
+                "isolated ping client disconnected before status acknowledgement: {reason:?}"
+            ),
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                panic!("isolated ping client event stream ended before status acknowledgement")
+            }
+            Err(_) => panic!("isolated ping status acknowledgement exceeded {EVENT_WAIT:?}"),
         }
     }
 }
@@ -1346,6 +1812,70 @@ async fn preferred_message_routes(
     routes
 }
 
+async fn isolated_preferred_message_routes(
+    host: &clonk_network::HostHandle,
+    client: &ClientHandle,
+) -> Vec<PreferredMessageRoute> {
+    let mut routes = host
+        .runtime_connections()
+        .await
+        .expect("inspect isolated host routes")
+        .into_iter()
+        .filter(|route| route.usage.contains("Msg"))
+        .map(|route| PreferredMessageRoute {
+            process_client_id: HOST_CLIENT_ID,
+            peer_client_id: route.client_id,
+            protocol: protocol_name(route.protocol).to_string(),
+        })
+        .collect::<Vec<_>>();
+    routes.extend(
+        client
+            .runtime_connections()
+            .await
+            .expect("inspect isolated client routes")
+            .into_iter()
+            .filter(|route| route.usage.contains("Msg"))
+            .map(|route| PreferredMessageRoute {
+                process_client_id: ISOLATED_RTT_CLIENT_ID,
+                peer_client_id: route.client_id,
+                protocol: protocol_name(route.protocol).to_string(),
+            }),
+    );
+    routes.sort_unstable_by(|left, right| {
+        (
+            left.process_client_id,
+            left.peer_client_id,
+            left.protocol.as_str(),
+        )
+            .cmp(&(
+                right.process_client_id,
+                right.peer_client_id,
+                right.protocol.as_str(),
+            ))
+    });
+    routes
+}
+
+async fn wait_for_isolated_preferred_message_routes(
+    host: &clonk_network::HostHandle,
+    client: &ClientHandle,
+    topology: LoadTopology,
+) {
+    let expected = expected_isolated_preferred_message_routes(topology);
+    let deadline = Instant::now() + MESH_WAIT;
+    loop {
+        let observed = isolated_preferred_message_routes(host, client).await;
+        if observed == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "isolated ping session did not establish {expected:?} in {MESH_WAIT:?}; observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn route_peers(routes: &[PreferredMessageRoute]) -> Vec<(u32, Vec<u32>)> {
     let mut peers = (0..=PLAYER_COUNT as u32)
         .map(|process_client_id| (process_client_id, Vec::new()))
@@ -1383,6 +1913,43 @@ async fn shutdown_session(
             Ok(Ok(())) => {}
             Ok(Err(error)) => failures.push(error),
             Err(error) => failures.push(format!("network shutdown task panicked: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+async fn shutdown_isolated_ping_session(session: IsolatedPingSession) -> Result<(), String> {
+    let IsolatedPingSession {
+        host,
+        host_events,
+        client,
+        client_events,
+        ..
+    } = session;
+    drop(host_events);
+    drop(client_events);
+    let mut shutdowns = tokio::task::JoinSet::new();
+    shutdowns.spawn(async move {
+        host.shutdown()
+            .await
+            .map_err(|error| format!("isolated host shutdown failed: {error}"))
+    });
+    shutdowns.spawn(async move {
+        client
+            .shutdown()
+            .await
+            .map_err(|error| format!("isolated client shutdown failed: {error}"))
+    });
+    let mut failures = Vec::new();
+    while let Some(result) = shutdowns.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => failures.push(error),
+            Err(error) => failures.push(format!("isolated shutdown task panicked: {error}")),
         }
     }
     if failures.is_empty() {
@@ -1466,6 +2033,24 @@ fn expected_preferred_message_routes(topology: LoadTopology) -> Vec<PreferredMes
         .collect()
 }
 
+fn expected_isolated_preferred_message_routes(
+    topology: LoadTopology,
+) -> Vec<PreferredMessageRoute> {
+    let protocol = protocol_name(topology.preferred_message_protocol()).to_string();
+    vec![
+        PreferredMessageRoute {
+            process_client_id: HOST_CLIENT_ID,
+            peer_client_id: ISOLATED_RTT_CLIENT_ID,
+            protocol: protocol.clone(),
+        },
+        PreferredMessageRoute {
+            process_client_id: ISOLATED_RTT_CLIENT_ID,
+            peer_client_id: HOST_CLIENT_ID,
+            protocol,
+        },
+    ]
+}
+
 const fn protocol_name(protocol: NetworkProtocol) -> &'static str {
     match protocol {
         NetworkProtocol::Tcp => "tcp",
@@ -1487,6 +2072,145 @@ fn unix_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as u64
+}
+
+fn has_exact_application_round_trip_workload(series: &[ClientMetricSeries]) -> bool {
+    series.len() == PLAYER_COUNT
+        && series
+            .iter()
+            .zip(1..=PLAYER_COUNT as u32)
+            .all(|(series, expected_client_id)| {
+                series.client_id == expected_client_id
+                    && series.metrics.raw_samples.len() == APPLICATION_RTT_ROUNDS_PER_CLIENT
+            })
+}
+
+fn has_exact_isolated_application_round_trip(series: &MetricSeries) -> bool {
+    series.unit == "microseconds"
+        && series.raw_samples.len() == ISOLATED_RTT_MEASURED_SAMPLES
+        && series.summary.samples == ISOLATED_RTT_MEASURED_SAMPLES
+}
+
+fn evaluate_application_round_trip_assertions(
+    aggregate: &MetricSeries,
+    by_client: &[ClientMetricSeries],
+) -> Vec<LoadAssertion> {
+    let mut assertions = Vec::new();
+    let mut push = |name: String, passed: bool, detail: String| {
+        assertions.push(LoadAssertion {
+            name,
+            passed,
+            detail,
+        });
+    };
+    let expected_samples = PLAYER_COUNT * APPLICATION_RTT_ROUNDS_PER_CLIENT;
+    push(
+        "aggregate-application-rtt-samples".to_string(),
+        aggregate.raw_samples.len() == expected_samples,
+        format!(
+            "observed {} samples, expected {expected_samples}",
+            aggregate.raw_samples.len()
+        ),
+    );
+    push(
+        "per-client-application-rtt-series".to_string(),
+        has_exact_application_round_trip_workload(by_client),
+        format!(
+            "observed client IDs and sample counts {:?}, expected clients 1..={PLAYER_COUNT} with {APPLICATION_RTT_ROUNDS_PER_CLIENT} samples each",
+            by_client
+                .iter()
+                .map(|series| (series.client_id, series.metrics.raw_samples.len()))
+                .collect::<Vec<_>>()
+        ),
+    );
+    for client in by_client {
+        push(
+            format!("client-{}-application-rtt-samples", client.client_id),
+            client.metrics.raw_samples.len() == APPLICATION_RTT_ROUNDS_PER_CLIENT,
+            format!(
+                "observed {} samples, expected {APPLICATION_RTT_ROUNDS_PER_CLIENT}",
+                client.metrics.raw_samples.len()
+            ),
+        );
+        push(
+            format!("client-{}-application-rtt-p99", client.client_id),
+            client
+                .metrics
+                .summary
+                .p99
+                .is_some_and(|p99| p99 < LOOPBACK_P99_LIMIT_US),
+            format!(
+                "p99={:?}, exclusive limit={}us",
+                client.metrics.summary.p99, LOOPBACK_P99_LIMIT_US
+            ),
+        );
+    }
+    push(
+        "aggregate-application-rtt-p99".to_string(),
+        aggregate
+            .summary
+            .p99
+            .is_some_and(|p99| p99 < LOOPBACK_P99_LIMIT_US),
+        format!(
+            "p99={:?}, exclusive limit={}us",
+            aggregate.summary.p99, LOOPBACK_P99_LIMIT_US
+        ),
+    );
+    assertions
+}
+
+fn evaluate_isolated_application_round_trip_assertions(
+    metric: &MetricSeries,
+    warmup_samples: usize,
+    client_id: u32,
+    preferred_message_routes: &[PreferredMessageRoute],
+    topology: LoadTopology,
+) -> Vec<LoadAssertion> {
+    let mut assertions = Vec::new();
+    let mut push = |name: &str, passed: bool, detail: String| {
+        assertions.push(LoadAssertion {
+            name: name.to_string(),
+            passed,
+            detail,
+        });
+    };
+    push(
+        "isolated-application-rtt-warmup-samples",
+        warmup_samples == ISOLATED_RTT_WARMUP_SAMPLES,
+        format!("observed {warmup_samples}, expected {ISOLATED_RTT_WARMUP_SAMPLES}"),
+    );
+    push(
+        "isolated-application-rtt-samples",
+        has_exact_isolated_application_round_trip(metric),
+        format!(
+            "observed {} {} samples, expected {ISOLATED_RTT_MEASURED_SAMPLES} microseconds samples",
+            metric.raw_samples.len(),
+            metric.unit
+        ),
+    );
+    push(
+        "isolated-application-rtt-client-id",
+        client_id == ISOLATED_RTT_CLIENT_ID,
+        format!("observed {client_id}, expected {ISOLATED_RTT_CLIENT_ID}"),
+    );
+    let expected_routes = expected_isolated_preferred_message_routes(topology);
+    push(
+        "isolated-application-rtt-preferred-message-routes",
+        preferred_message_routes == expected_routes,
+        format!("observed {preferred_message_routes:?}, expected {expected_routes:?}"),
+    );
+    push(
+        "isolated-application-rtt-p99",
+        metric
+            .summary
+            .p99
+            .is_some_and(|p99| p99 < LOOPBACK_P99_LIMIT_US),
+        format!(
+            "p99={:?}, exclusive limit={}us",
+            metric.summary.p99, LOOPBACK_P99_LIMIT_US
+        ),
+    );
+    assertions
 }
 
 fn evaluate_load_assertions(
@@ -1608,6 +2332,17 @@ fn evaluate_load_assertions(
             report.control_completion_wait.summary.p99, LOOPBACK_P99_LIMIT_US
         ),
     );
+    assertions.extend(evaluate_application_round_trip_assertions(
+        &report.client_to_host_application_round_trip,
+        &report.client_to_host_application_round_trip_by_client,
+    ));
+    assertions.extend(evaluate_isolated_application_round_trip_assertions(
+        &report.client_to_host_isolated_application_round_trip,
+        report.isolated_application_round_trip_warmup_samples,
+        report.isolated_application_round_trip_client_id,
+        &report.isolated_application_round_trip_preferred_message_routes,
+        topology,
+    ));
     assertions
 }
 
@@ -1724,9 +2459,250 @@ fn load_report_metadata_limits_harpoonrace_and_rtt_claims_to_measured_transport(
     );
     assert_eq!(
         LOAD_RTT_SCOPE,
-        "client-to-host ping samples only; all endpoints run in one Tokio process over IPv4 loopback"
+        "native ping and loaded 24-client ReadyCheck fanout are diagnostics; primary RTT is a fresh one-host/one-client post-shutdown application exchange in the same Tokio process over IPv4 loopback"
     );
     assert!(!LOAD_SEQUENCE.contains("/set"));
+}
+
+#[test]
+fn application_rtt_workload_is_fixed_post_measurement_selected_route_echo() {
+    assert_eq!(APPLICATION_RTT_ROUNDS_PER_CLIENT, 8);
+    assert_eq!(
+        LOAD_APPLICATION_RTT_SEQUENCE,
+        "diagnostic loaded 24-client fanout after control measurement: sequential host Ready(client_id) broadcast -> addressed client Ready echo -> host receipt over selected message routes"
+    );
+    assert_eq!(
+        application_round_trip_packet(7),
+        clonk_network::ReadyCheckPacket {
+            client_id: 7,
+            data: clonk_network::ReadyCheckData::Ready,
+        }
+    );
+}
+
+#[test]
+fn application_rtt_sample_shape_requires_every_addressed_client_and_round() {
+    let make_exact = || {
+        (1..=PLAYER_COUNT as u32)
+            .map(|client_id| ClientMetricSeries {
+                client_id,
+                metrics: MetricSeries::new(
+                    "microseconds",
+                    vec![1; APPLICATION_RTT_ROUNDS_PER_CLIENT],
+                ),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut samples = make_exact();
+    assert!(has_exact_application_round_trip_workload(&samples));
+
+    samples[0].metrics.raw_samples.pop();
+    assert!(!has_exact_application_round_trip_workload(&samples));
+
+    let mut samples = make_exact();
+    samples[0].client_id = HOST_CLIENT_ID;
+    assert!(!has_exact_application_round_trip_workload(&samples));
+}
+
+#[test]
+fn application_rtt_assertions_pin_aggregate_and_every_client_sample_count() {
+    let by_client = (1..=PLAYER_COUNT as u32)
+        .map(|client_id| ClientMetricSeries {
+            client_id,
+            metrics: MetricSeries::new("microseconds", vec![1; APPLICATION_RTT_ROUNDS_PER_CLIENT]),
+        })
+        .collect::<Vec<_>>();
+    let aggregate = MetricSeries::new(
+        "microseconds",
+        by_client
+            .iter()
+            .flat_map(|series| series.metrics.raw_samples.iter().copied())
+            .collect(),
+    );
+    let assertions = evaluate_application_round_trip_assertions(&aggregate, &by_client);
+
+    assert_eq!(assertions.len(), 2 + PLAYER_COUNT * 2 + 1);
+    assert_eq!(assertions[0].name, "aggregate-application-rtt-samples");
+    assert_eq!(assertions[1].name, "per-client-application-rtt-series");
+    assert_eq!(assertions[2].name, "client-1-application-rtt-samples");
+    assert_eq!(assertions[3].name, "client-1-application-rtt-p99");
+    assert_eq!(
+        assertions.last().map(|assertion| assertion.name.as_str()),
+        Some("aggregate-application-rtt-p99")
+    );
+    assert!(assertions.iter().all(|assertion| assertion.passed));
+}
+
+#[tokio::test]
+async fn application_rtt_client_wait_filters_ready_checks_for_other_clients() {
+    let expected = application_round_trip_packet(7);
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    event_tx
+        .send(ProbeEvent::ReadyCheck {
+            packet: application_round_trip_packet(6),
+        })
+        .unwrap();
+    event_tx
+        .send(ProbeEvent::ReadyCheck { packet: expected })
+        .unwrap();
+
+    wait_for_client_ready_check(7, &mut events, expected).await;
+}
+
+#[test]
+fn application_rtt_probe_collects_only_ready_checks_addressed_to_it() {
+    assert!(probe_ready_check_event(7, application_round_trip_packet(6)).is_none());
+    assert!(matches!(
+        probe_ready_check_event(7, application_round_trip_packet(7)),
+        Some(ProbeEvent::ReadyCheck { packet }) if packet == application_round_trip_packet(7)
+    ));
+}
+
+#[test]
+fn isolated_ping_contract_pins_schema_sequence_samples_and_two_message_token() {
+    // ReadyCheck retains Other(int32_t), and ActivationRequest carries its
+    // signed tick unchanged (oracle src/C4Network2.h:480-502;
+    // src/C4Network2.cpp:949-953,982-991).
+    assert_eq!(NETWORK_LOAD_REPORT_SCHEMA_VERSION, 6);
+    assert_eq!(ISOLATED_RTT_WARMUP_SAMPLES, 128);
+    assert_eq!(ISOLATED_RTT_MEASURED_SAMPLES, 256);
+    assert_eq!(ISOLATED_RTT_CLIENT_ID, 1);
+    assert_eq!(ISOLATED_RTT_LOGICAL_MESSAGES_PER_SAMPLE, 2);
+    assert_eq!(
+        LOAD_ISOLATED_RTT_SEQUENCE,
+        "loaded-session shutdown -> fresh same-topology one-host/one-client join/status handshake -> 128 warmup + 256 measured sequential exchanges: host ReadyCheck(Other(index+2)) -> client ActivationRequest(index+2) -> matching host receipt; exactly two logical messages per exchange"
+    );
+
+    let (ready_check, activation_tick) = isolated_round_trip_messages(17);
+    assert_eq!(
+        ready_check,
+        clonk_network::ReadyCheckPacket {
+            client_id: ISOLATED_RTT_CLIENT_ID as i32,
+            data: clonk_network::ReadyCheckData::Other(19),
+        }
+    );
+    assert_eq!(activation_tick, 19);
+}
+
+#[test]
+fn isolated_ping_metric_requires_exactly_256_microsecond_samples() {
+    let exact = MetricSeries::new("microseconds", vec![7; ISOLATED_RTT_MEASURED_SAMPLES]);
+    assert!(has_exact_isolated_application_round_trip(&exact));
+
+    let short = MetricSeries::new("microseconds", vec![7; ISOLATED_RTT_MEASURED_SAMPLES - 1]);
+    assert!(!has_exact_isolated_application_round_trip(&short));
+
+    let wrong_unit = MetricSeries::new("milliseconds", vec![7; ISOLATED_RTT_MEASURED_SAMPLES]);
+    assert!(!has_exact_isolated_application_round_trip(&wrong_unit));
+}
+
+#[test]
+fn loaded_and_isolated_session_cleanups_are_independent_fail_closed_assertions() {
+    let loaded = session_cleanup_assertion("loaded-session-clean-shutdown", Ok(()));
+    let isolated = session_cleanup_assertion(
+        "isolated-ping-clean-shutdown",
+        Err("client shutdown failed".to_string()),
+    );
+
+    assert_eq!(loaded.name, "loaded-session-clean-shutdown");
+    assert!(loaded.passed);
+    assert_eq!(loaded.detail, "all host/client tasks joined");
+    assert_eq!(isolated.name, "isolated-ping-clean-shutdown");
+    assert!(!isolated.passed);
+    assert_eq!(isolated.detail, "client shutdown failed");
+}
+
+#[test]
+fn isolated_ping_requires_exact_two_way_preferred_message_routes_for_topology() {
+    for (topology, protocol) in [
+        (LoadTopology::Tcp, "tcp"),
+        (LoadTopology::Udp, "udp"),
+        (LoadTopology::Relay, "tcp"),
+    ] {
+        assert_eq!(
+            expected_isolated_preferred_message_routes(topology),
+            vec![
+                PreferredMessageRoute {
+                    process_client_id: HOST_CLIENT_ID,
+                    peer_client_id: ISOLATED_RTT_CLIENT_ID,
+                    protocol: protocol.to_string(),
+                },
+                PreferredMessageRoute {
+                    process_client_id: ISOLATED_RTT_CLIENT_ID,
+                    peer_client_id: HOST_CLIENT_ID,
+                    protocol: protocol.to_string(),
+                },
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn isolated_ping_waits_for_exact_client_and_host_token_events() {
+    let (expected_ready_check, expected_tick) = isolated_round_trip_messages(17);
+    let (client_tx, mut client_events) = mpsc::channel(4);
+    client_tx
+        .send(ClientEvent::ReadyCheck {
+            packet: isolated_round_trip_messages(16).0,
+        })
+        .await
+        .unwrap();
+    client_tx
+        .send(ClientEvent::ReadyCheck {
+            packet: expected_ready_check,
+        })
+        .await
+        .unwrap();
+    wait_for_isolated_ready_check(&mut client_events, expected_ready_check).await;
+
+    let (host_tx, mut host_events) = mpsc::channel(4);
+    host_tx
+        .send(HostEvent::ActivationRequest {
+            client_id: ISOLATED_RTT_CLIENT_ID,
+            tick: expected_tick - 1,
+            waited_for: false,
+            ping_ms: 0,
+        })
+        .await
+        .unwrap();
+    host_tx
+        .send(HostEvent::ActivationRequest {
+            client_id: ISOLATED_RTT_CLIENT_ID,
+            tick: expected_tick,
+            waited_for: false,
+            ping_ms: 0,
+        })
+        .await
+        .unwrap();
+    wait_for_isolated_activation_request(&mut host_events, expected_tick).await;
+}
+
+#[test]
+fn isolated_ping_assertions_pin_warmup_samples_client_routes_and_p99() {
+    let metric = MetricSeries::new("microseconds", vec![7; ISOLATED_RTT_MEASURED_SAMPLES]);
+    let routes = expected_isolated_preferred_message_routes(LoadTopology::Udp);
+    let assertions = evaluate_isolated_application_round_trip_assertions(
+        &metric,
+        ISOLATED_RTT_WARMUP_SAMPLES,
+        ISOLATED_RTT_CLIENT_ID,
+        &routes,
+        LoadTopology::Udp,
+    );
+
+    assert_eq!(
+        assertions
+            .iter()
+            .map(|assertion| assertion.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "isolated-application-rtt-warmup-samples",
+            "isolated-application-rtt-samples",
+            "isolated-application-rtt-client-id",
+            "isolated-application-rtt-preferred-message-routes",
+            "isolated-application-rtt-p99",
+        ]
+    );
+    assert!(assertions.iter().all(|assertion| assertion.passed));
 }
 
 #[test]
