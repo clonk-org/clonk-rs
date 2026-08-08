@@ -671,18 +671,29 @@ impl Engine {
     }
 
     pub(crate) fn active_solid_mask_indices(&self) -> Vec<usize> {
+        let definitions_have_solid_masks = self
+            .definitions
+            .values()
+            .any(|definition| definition.solid_mask().is_some());
         self.objects
             .iter()
             .enumerate()
             .filter(|(_, object)| {
-                object
+                if object
                     .state
                     .solid_mask_override
                     .is_some_and(|rect| rect.width > 0 && rect.height > 0)
-                    || self
-                        .definitions
-                        .get(&object.definition_id)
-                        .is_some_and(|definition| definition.solid_mask().is_some())
+                {
+                    return true;
+                }
+                if !definitions_have_solid_masks {
+                    return false;
+                }
+                #[cfg(test)]
+                SOLID_MASK_DEFINITION_LOOKUPS.with(|count| count.set(count.get() + 1));
+                self.definitions
+                    .get(&object.definition_id)
+                    .is_some_and(|definition| definition.solid_mask().is_some())
             })
             .map(|(index, _)| index)
             .collect()

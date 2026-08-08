@@ -799,7 +799,12 @@
     #[test]
     fn effect_context_is_cleared_and_dropped_when_callback_panics() {
         let world = HostWorldContext::default();
-        let world_lifetime = Rc::downgrade(&world.master_order);
+        let world_lifetime = Rc::downgrade(
+            world
+                .master_order
+                .get()
+                .expect("fixture master order is initialized"),
+        );
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = with_effect_context(None, &[], world, 1, || -> Result<(), RuntimeError> {
                 panic!("effect callback panic probe")

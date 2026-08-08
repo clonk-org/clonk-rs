@@ -343,7 +343,9 @@ use std::sync::{Arc, OnceLock};
 std::thread_local! {
     static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
 }
 
 use crate::math::{

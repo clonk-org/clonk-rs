@@ -515,6 +515,46 @@ impl Engine {
             .map(crate::compat::landscape_extent)
     }
 
+    /// Snapshot `Game.Objects` from First -> Next only when a host API needs
+    /// ordering. Seeded objects may be exclusively borrowed by the callback,
+    /// so their copied status is authoritative and their source entry is not
+    /// dereferenced.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::lazy_host_world_object`].
+    unsafe fn lazy_host_world_master_order(
+        source: *const (),
+        seeded_statuses: &HashMap<ObjectId, ObjectStatus>,
+        excluded: &HashSet<usize>,
+    ) -> Vec<ObjectId> {
+        #[cfg(test)]
+        HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let engine = source.cast::<Self>();
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let exec_list = unsafe { &*std::ptr::addr_of!((*engine).exec_list) };
+        let mut statuses = seeded_statuses.clone();
+        for index in 0..objects.len() {
+            if excluded.contains(&index) {
+                continue;
+            }
+            // SAFETY: object-vector shape is frozen for the synchronous call,
+            // and every exclusively borrowed entry is excluded above.
+            let object = unsafe { &*objects.as_ptr().add(index) };
+            statuses.insert(object.id, object.state.status);
+        }
+        exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                statuses
+                    .get(id)
+                    .is_some_and(|status| *status != ObjectStatus::Inactive)
+            })
+            .collect()
+    }
+
     /// Build the shared/static portion of a script host context without
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
@@ -608,15 +648,6 @@ impl Engine {
             self.base_auto_sell_enabled,
             self.host_crew_info_state(),
         )
-        // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
-        // execution. FindBase is one of the APIs that explicitly walks the
-        // forward master list (C4Game.cpp:1582,3732-3744). Inactive objects
-        // live only in C4GameObjects::InactiveObjects and never enter this
-        // list (C4GameObjects.cpp:54-67).
-        .with_master_order(self.exec_list.iter().rev().copied().filter(|&id| {
-            self.find_object_index(id)
-                .is_some_and(|index| self.objects[index].state.status != ObjectStatus::Inactive)
-        }))
         .with_particle_defs(self.particle_system.def_names())
         .with_particle_reloads(
             self.particle_system.reloadable_def_names(),
@@ -709,6 +740,10 @@ impl Engine {
                 Self::lazy_host_world_objects,
                 Self::lazy_host_world_landscape,
             )
+            // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
+            // execution. APIs such as FindBase walk the forward list, but
+            // most callbacks never inspect it, so snapshot it on first use.
+            .with_master_order(Self::lazy_host_world_master_order)
             .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
             .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
