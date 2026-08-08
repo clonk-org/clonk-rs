@@ -3282,11 +3282,11 @@ mod tests {
         let (second_length, _) =
             recv_spy_kind(&second, &mut second_wire, ReliableUdpPacketKind::Data).await;
         assert!(statistics.generate_statistics(2_002));
-        // Both payloads are control-sized, so each went out three times. The
-        // redundant copies are real bandwidth and are accounted as such -- see
-        // `reliable_udp_redundant_copies`.
-        let first_output = normalize(udp_accounted_bytes(first_length) * 3);
-        let second_output = normalize(udp_accounted_bytes(second_length) * 3);
+        // C++ sends each reliable fragment once; the physical accounting must
+        // therefore charge each route exactly once too
+        // (oracle-src-pinned src/C4NetIO.cpp:2789-2809,3128).
+        let first_output = normalize(udp_accounted_bytes(first_length));
+        let second_output = normalize(udp_accounted_bytes(second_length));
         assert_eq!(
             statistics
                 .connection_statistics(first_key)

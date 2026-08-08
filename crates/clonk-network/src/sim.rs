@@ -2125,6 +2125,10 @@ mod dialup_control_tests {
         );
         assert!(report.disconnects.is_empty());
         assert_eq!(report.initial_copy_counts.len(), total_controls);
+        assert!(
+            report.initial_copy_counts.iter().all(|copies| *copies == 1),
+            "C++ sends one physical reliable-UDP fragment before repair"
+        );
         assert!(report
             .total_samples
             .iter()

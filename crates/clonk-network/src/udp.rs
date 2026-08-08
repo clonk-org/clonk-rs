@@ -771,18 +771,13 @@ pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
     })
 }
 
-/// Extra copies of a control-sized data packet to put on the wire beyond the
-/// original.
+/// Extra copies of a data packet to put on the wire beyond the original.
 ///
-/// Chosen by measurement, not by intuition: `link_impairment` over 32 seeds
-/// with `LC_PRESEND=adaptive`. Under independent loss the third copy is where
-/// the lossy links collapse — a 250ms/10% link falls 12.22% -> 1.85% frozen
-/// time and a 200ms/5% link 2.16% -> 1.14%, because it takes losing *three*
-/// copies to cost a repair round trip. Under correlated burst loss
-/// (`LC_BURST_MS=60`) every copy count measures the same within noise, so the
-/// extra copies are never worse, only sometimes better. A fourth copy adds
-/// almost nothing over the third.
-pub(crate) const REDUNDANT_DATA_PACKET_COPIES: usize = 2;
+/// C++ sends each fragment once and repairs a loss after a `Check`. Immediate
+/// copies can mask loss on a fast link, but on a narrow shared uplink their UDP
+/// and IP framing can saturate the link and delay the original packets that
+/// drive lockstep. Keep the native one-send policy for every packet size.
+pub(crate) const REDUNDANT_DATA_PACKET_COPIES: usize = 0;
 
 /// Inner-packet size at or below which a data packet is sent redundantly.
 ///
@@ -793,22 +788,11 @@ pub(crate) const REDUNDANT_DATA_PACKET_COPIES: usize = 2;
 /// that somehow exceeded this simply falls back to today's repair behavior.
 const REDUNDANT_DATA_PACKET_LIMIT: u32 = 256;
 
-/// Whether an outgoing datagram should be put on the wire a second time.
+/// Returns the number of extra physical sends for an outgoing datagram.
 ///
-/// **Deliberate divergence from the oracle.** C++ sends each data datagram
-/// once and recovers a loss with a repair round trip
-/// (oracle-src-pinned src/C4NetIO.cpp:3128). Reliable-UDP delivery is strictly
-/// ordered, so a single lost control datagram withholds *every* later control
-/// tick from the game loop until that repair completes — the whole session
-/// freezes, not just the peer that dropped it. Re-sending a control-sized
-/// packet immediately costs a few hundred bytes per second and removes the
-/// round trip for any loss that does not take both copies.
-///
-/// This is invisible on the wire: the copy is byte-identical, so it carries the
-/// same packet number, and both engines discard a duplicate fragment they have
-/// already stored — Rust at `ReliableUdpPartialPacket::add_fragment` and C++ at
-/// `C4NetIOUDP::Packet::AddFragment` (oracle-src-pinned src/C4NetIO.cpp:2615).
-/// A C++ peer therefore needs no knowledge of it.
+/// The native policy is one physical send followed by reliable repair, so this
+/// returns zero. The packet classification remains here because callers use the
+/// function as the stable policy seam.
 pub fn reliable_udp_redundant_copies(wire: &[u8]) -> usize {
     if wire
         .first()
@@ -1544,14 +1528,14 @@ mod tests {
         );
     }
 
-    /// The redundancy discriminator must catch real control traffic and must
-    /// not multiply the cost of a resource transfer.
+    /// C++ sends each reliable-UDP fragment once and repairs losses on request.
     #[test]
-    fn redundant_copy_covers_control_packets_but_not_bulk_transfer() {
-        // A player-control sized inner packet: one small datagram, re-sent.
+    fn reliable_udp_data_uses_the_cpp_single_send_policy() {
+        // C4NetIOUDP::Peer::Send calls SendDirect once for each fragment
+        // (oracle-src-pinned src/C4NetIO.cpp:2789-2809,3128).
         let control = encode_reliable_udp_data_fragments(7, &[0_u8; 40]).expect("encode control");
         assert_eq!(control.len(), 1);
-        assert_eq!(reliable_udp_redundant_copies(&control[0]), 2);
+        assert_eq!(reliable_udp_redundant_copies(&control[0]), 0);
 
         // A resource chunk: many full fragments, none of them re-sent.
         let bulk = encode_reliable_udp_data_fragments(7, &[0_u8; 8_192]).expect("encode bulk");
