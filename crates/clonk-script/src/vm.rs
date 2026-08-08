@@ -79,6 +79,12 @@ thread_local! {
     static CALL_PARAMETER_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     #[cfg(test)]
     static CALL_ARG_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static COMPILED_FUNCTION_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static EXTERNAL_ARGUMENT_PRE_SET_CLONES: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -86,6 +92,36 @@ fn record_call_arg_heap_spill(spilled: bool) {
     if spilled {
         CALL_ARG_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
     }
+}
+
+#[cfg(test)]
+fn reset_compiled_function_execution_count() {
+    COMPILED_FUNCTION_EXECUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn compiled_function_execution_count() -> usize {
+    COMPILED_FUNCTION_EXECUTIONS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_runtime_container_registration_traversals() {
+    RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn runtime_container_registration_traversals() -> usize {
+    RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_external_argument_pre_set_clones() {
+    EXTERNAL_ARGUMENT_PRE_SET_CLONES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn external_argument_pre_set_clones() -> usize {
+    EXTERNAL_ARGUMENT_PRE_SET_CLONES.with(Cell::get)
 }
 
 struct ValueStackReservation {
@@ -3054,6 +3090,28 @@ pub struct Vm<'a> {
     constant_identities: RefCell<HashMap<String, RawIdentityCell>>,
 }
 
+#[derive(Clone, Copy)]
+struct ScriptFunctionTarget<'a> {
+    function: &'a Function,
+    validate_compiled_source: bool,
+}
+
+impl<'a> ScriptFunctionTarget<'a> {
+    fn installed(function: &'a Function) -> Self {
+        Self {
+            function,
+            validate_compiled_source: false,
+        }
+    }
+
+    fn validated(function: &'a Function) -> Self {
+        Self {
+            function,
+            validate_compiled_source: true,
+        }
+    }
+}
+
 impl<'a> Vm<'a> {
     pub(crate) fn new(
         functions: &'a FxHashMap<String, Function>,
@@ -3557,7 +3615,7 @@ impl<'a> Vm<'a> {
         maybe_grow(|| {
             self.invoke_script_function(
                 &function.name,
-                function,
+                ScriptFunctionTarget::validated(function),
                 args.into_iter().collect(),
                 depth,
                 ObjectState::default(),
@@ -3584,7 +3642,7 @@ impl<'a> Vm<'a> {
         maybe_grow(|| {
             self.invoke_script_function(
                 &function.name,
-                function,
+                ScriptFunctionTarget::validated(function),
                 args,
                 depth,
                 cells.state.clone(),
@@ -3941,9 +3999,14 @@ impl<'a> Vm<'a> {
 
         maybe_grow(|| {
             if let Some(function) = self.engine_script_function(name) {
+                let target = if self.global_functions.is_some() {
+                    ScriptFunctionTarget::validated(function)
+                } else {
+                    ScriptFunctionTarget::installed(function)
+                };
                 return self.invoke_script_function(
                     name,
-                    function,
+                    target,
                     args,
                     depth,
                     object_state,
@@ -4029,9 +4092,14 @@ impl<'a> Vm<'a> {
 
         maybe_grow(|| {
             if let Some(function) = self.engine_global_script_function(name) {
+                let target = if self.global_functions.is_some() {
+                    ScriptFunctionTarget::validated(function)
+                } else {
+                    ScriptFunctionTarget::installed(function)
+                };
                 return self.invoke_script_function(
                     name,
-                    function,
+                    target,
                     args,
                     depth,
                     ObjectState::default(),
@@ -4163,7 +4231,7 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.own_script_function(name) {
                 return self.invoke_script_function(
                     name,
-                    function,
+                    ScriptFunctionTarget::installed(function),
                     args,
                     depth,
                     object_state,
@@ -4181,7 +4249,7 @@ impl<'a> Vm<'a> {
             {
                 return self.invoke_script_function(
                     name,
-                    function,
+                    ScriptFunctionTarget::validated(function),
                     args,
                     depth,
                     object_state,
@@ -4219,12 +4287,13 @@ impl<'a> Vm<'a> {
     fn invoke_script_function(
         &self,
         name: &str,
-        function: &Function,
+        target: ScriptFunctionTarget<'_>,
         args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
     ) -> Result<ReturnValue, RuntimeError> {
+        let function = target.function;
         // C4AulScriptFunc inherits GetParCount()==10. These are the caller's
         // balanced argument slots and become the callee's parameter frame;
         // cross-host AB_CALL may provide the same count through the one-shot
@@ -4268,7 +4337,8 @@ impl<'a> Vm<'a> {
         if caller.is_none() {
             for arg in &mut args {
                 if let CallArg::Value(tracked) = arg {
-                    *tracked = tracked.clone().set_copy();
+                    let owned = std::mem::replace(tracked, TrackedValue::runtime(Value::Nil));
+                    *tracked = owned.set_copy();
                 }
             }
         }
@@ -4279,6 +4349,10 @@ impl<'a> Vm<'a> {
             .fold(0_u16, |mask, (index, arg)| {
                 mask | (u16::from(matches!(arg, CallArg::Reference(_))) << index)
             });
+        let compiled = function
+            .compiled
+            .get_or_init(|| CompiledFunctionCache::new(function))
+            .validated(function, target.validate_compiled_source);
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -4320,7 +4394,13 @@ impl<'a> Vm<'a> {
         // like parameters, precede object locals in C4Aul's named-variable
         // table (C4AulParse.cpp:2709-2729). Hoist them first so an effect
         // callback's `var pClonk` cannot alias MART's persistent `pClonk`.
-        hoist_function_vars(&function.body, &mut env);
+        if let Some(compiled) = compiled {
+            for name in &compiled.function_vars {
+                env.declare_hoisted(name);
+            }
+        } else {
+            hoist_function_vars(&function.body, &mut env);
+        }
         let function_var_count = env.function_vars.borrow().len();
         value_stack.grow(function_var_count)?;
 
@@ -4358,8 +4438,23 @@ impl<'a> Vm<'a> {
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
 
-        let result =
-            self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?;
+        let result = if let Some(compiled) = compiled {
+            match compiled.execute(self, &env)? {
+                Some(result) => {
+                    #[cfg(test)]
+                    COMPILED_FUNCTION_EXECUTIONS.with(|count| count.set(count.get() + 1));
+                    result
+                }
+                None => self.execute_statements(
+                    &function.body,
+                    &mut env,
+                    depth,
+                    function.returns_reference,
+                )?,
+            }
+        } else {
+            self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?
+        };
         let value = match result {
             ControlFlow::Return(v) => v,
             ControlFlow::Normal => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
@@ -5015,6 +5110,10 @@ impl<'a> Vm<'a> {
     }
 
     fn register_runtime_value(&self, value: &Value) {
+        #[cfg(test)]
+        if matches!(value, Value::Array(_) | Value::Proplist(_)) {
+            RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(|count| count.set(count.get() + 1));
+        }
         if let Some(registrations) = self.string_registrations {
             crate::engine::register_c4_value_strings(registrations, value);
         }
@@ -5735,7 +5834,7 @@ impl<'a> Vm<'a> {
                             }
                             self.invoke_script_function(
                                 &target.name.clone(),
-                                &target,
+                                ScriptFunctionTarget::validated(&target),
                                 evaluated_args,
                                 depth + 1,
                                 env.object_state.clone(),
@@ -9036,24 +9135,40 @@ impl<'a> Vm<'a> {
         property: &str,
         env: &Environment,
     ) -> Result<ReturnValue, RuntimeError> {
+        self.property_reference_or_value_with_hook_stack(base, property, env, None)
+    }
+
+    fn property_reference_or_value_with_hook_stack(
+        &self,
+        base: ReturnValue,
+        property: &str,
+        env: &Environment,
+        hook_stack_slots: Option<usize>,
+    ) -> Result<ReturnValue, RuntimeError> {
         match base {
             ReturnValue::Value(value) if matches!(value.value, Value::Nil | Value::Object(0)) => {
                 Err(RuntimeError::new(
                     "map access with .: map expected, but got nil!",
                 ))
             }
-            ReturnValue::Value(value) => self
-                .eval_property_tracked(value, property, env)
-                .map(ReturnValue::Value),
+            ReturnValue::Value(value) => {
+                let _hook_stack = compiled_object_hook_stack(&value.value, hook_stack_slots)?;
+                self.eval_property_tracked(value, property, env)
+                    .map(ReturnValue::Value)
+            }
             ReturnValue::Reference(reference) => {
                 if let Some(resolved) = reference.resolved_legacy_value() {
+                    let _hook_stack =
+                        compiled_object_hook_stack(&resolved.value, hook_stack_slots)?;
                     return self
                         .eval_property_tracked(resolved, property, env)
                         .map(ReturnValue::Value);
                 }
                 if !legacy_path_pin_creation_active() {
+                    let value = reference.read_tracked()?;
+                    let _hook_stack = compiled_object_hook_stack(&value.value, hook_stack_slots)?;
                     return self
-                        .eval_property_tracked(reference.read_tracked()?, property, env)
+                        .eval_property_tracked(value, property, env)
                         .map(ReturnValue::Value);
                 }
                 if matches!(&reference, LValueRef::HostPath { .. }) {
@@ -9068,6 +9183,7 @@ impl<'a> Vm<'a> {
                     ));
                 }
                 if matches!(collection, Value::Object(_)) {
+                    let _hook_stack = compiled_object_hook_stack(&collection, hook_stack_slots)?;
                     let cell = self
                         .object_local_cell(env, &collection, property)
                         .unwrap_or_else(|| value_cell(Value::Nil));
@@ -9091,6 +9207,25 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
         let (index, _index_slot) = self.evaluate_index_operand(index_operand, env, depth)?;
+        self.index_value_reference_or_value(base, index, env)
+    }
+
+    fn index_value_reference_or_value(
+        &self,
+        base: ReturnValue,
+        index: Value,
+        env: &Environment,
+    ) -> Result<ReturnValue, RuntimeError> {
+        self.index_value_reference_or_value_with_hook_stack(base, index, env, None)
+    }
+
+    fn index_value_reference_or_value_with_hook_stack(
+        &self,
+        base: ReturnValue,
+        index: Value,
+        env: &Environment,
+        hook_stack_slots: Option<usize>,
+    ) -> Result<ReturnValue, RuntimeError> {
         if !legacy_path_pin_creation_active() {
             let base = match base {
                 ReturnValue::Value(value) => value,
@@ -9109,6 +9244,7 @@ impl<'a> Vm<'a> {
                     "indexed access [index]: array, map or string expected, but got nil",
                 ));
             }
+            let _hook_stack = compiled_object_hook_stack(&base.value, hook_stack_slots)?;
             return self
                 .eval_index_tracked(base, index, env)
                 .map(ReturnValue::Value);
@@ -9119,11 +9255,15 @@ impl<'a> Vm<'a> {
                     "indexed access [index]: array, map or string expected, but got nil",
                 ))
             }
-            ReturnValue::Value(value) => self
-                .eval_index_tracked(value, index, env)
-                .map(ReturnValue::Value),
+            ReturnValue::Value(value) => {
+                let _hook_stack = compiled_object_hook_stack(&value.value, hook_stack_slots)?;
+                self.eval_index_tracked(value, index, env)
+                    .map(ReturnValue::Value)
+            }
             ReturnValue::Reference(reference) => {
                 if let Some(resolved) = reference.resolved_legacy_value() {
+                    let _hook_stack =
+                        compiled_object_hook_stack(&resolved.value, hook_stack_slots)?;
                     return self
                         .eval_index_tracked(resolved, index, env)
                         .map(ReturnValue::Value);
@@ -9140,14 +9280,17 @@ impl<'a> Vm<'a> {
                             "indexed access on object: only string keys are allowed",
                         ));
                     };
+                    let _hook_stack = compiled_object_hook_stack(&collection, hook_stack_slots)?;
                     let cell = self
                         .object_local_cell(env, &collection, name)
                         .unwrap_or_else(|| value_cell(Value::Nil));
                     return Ok(ReturnValue::Reference(self.tracked_cell(cell)));
                 }
                 if matches!(collection, Value::String(_)) {
+                    let value = reference.read_tracked()?;
+                    let _hook_stack = compiled_object_hook_stack(&value.value, hook_stack_slots)?;
                     return self
-                        .eval_index_tracked(reference.read_tracked()?, index, env)
+                        .eval_index_tracked(value, index, env)
                         .map(ReturnValue::Value);
                 }
                 if legacy_path_pin_creation_active() {
@@ -9474,6 +9617,897 @@ enum ControlFlow {
     Return(ReturnValue),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum CompiledSlotKind {
+    Bare,
+    FunctionVar,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompiledSlot {
+    name: String,
+    kind: CompiledSlotKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CompiledPathSegment {
+    Property(String),
+    EmbeddedIndex(String),
+    LiteralIndex(Literal),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CompiledInstruction {
+    Literal(Literal),
+    Load(usize),
+    LoadPath {
+        slot: usize,
+        segments: Vec<CompiledPathSegment>,
+    },
+    Store(usize),
+    Unary(UnaryOp),
+    Binary(BinaryOp),
+    MakeArray(usize),
+    MakeProplist(usize),
+    Pop,
+    JumpIfFalse(usize),
+    Jump(usize),
+    Return,
+    Finish,
+}
+
+/// A conservative, slot-resolved instruction stream for local scalar script
+/// code. Any dynamic/reference-bearing construct keeps using the full AST VM.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompiledFunction {
+    slots: Vec<CompiledSlot>,
+    function_vars: Vec<String>,
+    instructions: Vec<CompiledInstruction>,
+    max_stack: usize,
+}
+
+pub(crate) struct CompiledFunctionCache {
+    params: Vec<Parameter>,
+    body: Vec<Stmt>,
+    strict_level: Option<u8>,
+    returns_reference: bool,
+    compiled: Option<Arc<CompiledFunction>>,
+}
+
+impl CompiledFunctionCache {
+    fn new(function: &Function) -> Self {
+        Self {
+            params: function.params.clone(),
+            body: function.body.clone(),
+            strict_level: function.strict_level,
+            returns_reference: function.returns_reference,
+            compiled: CompiledFunction::compile(function).map(Arc::new),
+        }
+    }
+
+    fn validated(&self, function: &Function, validate_source: bool) -> Option<&CompiledFunction> {
+        (!validate_source
+            || self.params == function.params
+                && self.body == function.body
+                && self.strict_level == function.strict_level
+                && self.returns_reference == function.returns_reference)
+            .then_some(self.compiled.as_deref())
+            .flatten()
+    }
+}
+
+struct CompiledFunctionBuilder {
+    slots: Vec<CompiledSlot>,
+    bare_slots: FxHashMap<String, usize>,
+    function_var_slots: FxHashMap<String, usize>,
+    function_vars: Vec<String>,
+    instructions: Vec<CompiledInstruction>,
+    stack_depth: usize,
+    max_stack: usize,
+}
+
+impl CompiledFunctionBuilder {
+    fn new(function: &Function) -> Option<Self> {
+        if function.returns_reference || function.params.iter().any(|param| param.is_reference) {
+            return None;
+        }
+
+        let mut builder = Self {
+            slots: Vec::new(),
+            bare_slots: FxHashMap::default(),
+            function_var_slots: FxHashMap::default(),
+            function_vars: Vec::new(),
+            instructions: Vec::new(),
+            stack_depth: 0,
+            max_stack: 0,
+        };
+
+        for parameter in &function.params {
+            let slot = builder.slots.len();
+            builder.slots.push(CompiledSlot {
+                name: parameter.name.clone(),
+                kind: CompiledSlotKind::Bare,
+            });
+            // C4Aul's named parameter table keeps the last duplicate.
+            builder.bare_slots.insert(parameter.name.clone(), slot);
+        }
+
+        let mut function_vars = Vec::new();
+        collect_function_var_names(&function.body, &mut function_vars);
+        for name in function_vars {
+            if builder.function_var_slots.contains_key(&name) {
+                continue;
+            }
+            let slot = builder.slots.len();
+            builder.slots.push(CompiledSlot {
+                name: name.clone(),
+                kind: CompiledSlotKind::FunctionVar,
+            });
+            builder.function_var_slots.insert(name.clone(), slot);
+            builder.bare_slots.entry(name.clone()).or_insert(slot);
+            builder.function_vars.push(name);
+        }
+
+        Some(builder)
+    }
+
+    fn push_instruction(&mut self, instruction: CompiledInstruction) {
+        self.instructions.push(instruction);
+        self.stack_depth += 1;
+        self.max_stack = self.max_stack.max(self.stack_depth);
+    }
+
+    fn pop_instruction(&mut self, instruction: CompiledInstruction) -> Option<()> {
+        self.stack_depth = self.stack_depth.checked_sub(1)?;
+        self.instructions.push(instruction);
+        Some(())
+    }
+
+    fn binary_instruction(&mut self, operation: BinaryOp) -> Option<()> {
+        self.stack_depth = self.stack_depth.checked_sub(1)?;
+        self.instructions
+            .push(CompiledInstruction::Binary(operation));
+        Some(())
+    }
+
+    fn collection_instruction(
+        &mut self,
+        operand_count: usize,
+        instruction: CompiledInstruction,
+    ) -> Option<()> {
+        self.stack_depth = self
+            .stack_depth
+            .checked_sub(operand_count)?
+            .checked_add(1)?;
+        self.instructions.push(instruction);
+        self.max_stack = self.max_stack.max(self.stack_depth);
+        Some(())
+    }
+
+    fn local_path(&self, expression: &Expr) -> Option<(usize, Vec<CompiledPathSegment>)> {
+        fn collect(
+            builder: &CompiledFunctionBuilder,
+            expression: &Expr,
+            segments: &mut Vec<CompiledPathSegment>,
+        ) -> Option<usize> {
+            match expression {
+                Expr::Variable(name) => builder.bare_slots.get(name).copied(),
+                Expr::Property(base, property) => {
+                    let slot = collect(builder, base, segments)?;
+                    segments.push(CompiledPathSegment::Property(property.clone()));
+                    Some(slot)
+                }
+                Expr::Index(base, index) => {
+                    let slot = collect(builder, base, segments)?;
+                    segments.push(match index {
+                        IndexOperand::EmbeddedString(value) => {
+                            CompiledPathSegment::EmbeddedIndex(value.clone())
+                        }
+                        IndexOperand::Dynamic(index) => match index.as_ref() {
+                            Expr::Literal(literal) => {
+                                CompiledPathSegment::LiteralIndex(literal.clone())
+                            }
+                            _ => return None,
+                        },
+                    });
+                    Some(slot)
+                }
+                _ => None,
+            }
+        }
+
+        let mut segments = Vec::new();
+        let slot = collect(self, expression, &mut segments)?;
+        let mut saw_index = false;
+        for segment in &segments {
+            match segment {
+                CompiledPathSegment::Property(_) if saw_index => return None,
+                CompiledPathSegment::Property(_) => {}
+                CompiledPathSegment::EmbeddedIndex(_) | CompiledPathSegment::LiteralIndex(_) => {
+                    saw_index = true
+                }
+            }
+        }
+        (!segments.is_empty()).then_some((slot, segments))
+    }
+
+    fn compile_expression(&mut self, expression: &Expr) -> Option<()> {
+        if let Some((slot, segments)) = self.local_path(expression) {
+            let dynamic_index_slot = usize::from(
+                segments
+                    .iter()
+                    .any(|segment| matches!(segment, CompiledPathSegment::LiteralIndex(_))),
+            );
+            self.max_stack = self
+                .max_stack
+                .max(self.stack_depth + 1 + dynamic_index_slot);
+            self.push_instruction(CompiledInstruction::LoadPath { slot, segments });
+            return Some(());
+        }
+
+        match expression {
+            Expr::Literal(literal) => {
+                self.push_instruction(CompiledInstruction::Literal(literal.clone()));
+            }
+            Expr::Variable(name) => {
+                let slot = *self.bare_slots.get(name)?;
+                self.push_instruction(CompiledInstruction::Load(slot));
+            }
+            Expr::LegacyParameterList {
+                args,
+                forward_rest: false,
+            } if args.len() == 1 => {
+                self.compile_expression(&args[0])?;
+            }
+            Expr::Unary(operation, value) => {
+                self.compile_expression(value)?;
+                self.instructions
+                    .push(CompiledInstruction::Unary(operation.clone()));
+            }
+            Expr::Binary(left, operation, right)
+                if !matches!(
+                    operation,
+                    BinaryOp::Concat
+                        | BinaryOp::Equal
+                        | BinaryOp::NotEqual
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                        | BinaryOp::NilCoalescing
+                        | BinaryOp::StringEqual
+                        | BinaryOp::KeywordStringEqual
+                        | BinaryOp::KeywordStringNotEqual
+                ) =>
+            {
+                self.compile_expression(left)?;
+                self.compile_expression(right)?;
+                self.binary_instruction(operation.clone())?;
+            }
+            Expr::Array(elements) => {
+                for element in elements {
+                    self.compile_expression(element)?;
+                }
+                self.collection_instruction(
+                    elements.len(),
+                    CompiledInstruction::MakeArray(elements.len()),
+                )?;
+            }
+            Expr::Proplist(entries) => {
+                for (key, value) in entries {
+                    self.compile_expression(key)?;
+                    self.compile_expression(value)?;
+                }
+                self.collection_instruction(
+                    entries.len().checked_mul(2)?,
+                    CompiledInstruction::MakeProplist(entries.len()),
+                )?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn compile_statements(&mut self, statements: &[Stmt]) -> Option<()> {
+        for statement in statements {
+            match statement {
+                Stmt::VarDecl { name, init } => {
+                    let Some(initializer) = init else {
+                        continue;
+                    };
+                    self.compile_expression(initializer)?;
+                    let slot = *self.function_var_slots.get(name)?;
+                    self.pop_instruction(CompiledInstruction::Store(slot))?;
+                }
+                Stmt::Assignment {
+                    target: AssignmentTarget::Variable(name),
+                    value,
+                } => {
+                    self.compile_expression(value)?;
+                    let slot = *self.bare_slots.get(name)?;
+                    self.pop_instruction(CompiledInstruction::Store(slot))?;
+                }
+                Stmt::Return(expression) => {
+                    match expression {
+                        Some(expression) => self.compile_expression(expression)?,
+                        None => self.push_instruction(CompiledInstruction::Literal(Literal::Nil)),
+                    }
+                    self.pop_instruction(CompiledInstruction::Return)?;
+                }
+                Stmt::Expr(expression) => {
+                    self.compile_expression(expression)?;
+                    self.pop_instruction(CompiledInstruction::Pop)?;
+                }
+                Stmt::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    self.compile_expression(condition)?;
+                    let false_jump = self.instructions.len();
+                    self.pop_instruction(CompiledInstruction::JumpIfFalse(usize::MAX))?;
+                    self.compile_statements(then_branch)?;
+                    if let Some(else_branch) = else_branch {
+                        let end_jump = self.instructions.len();
+                        self.instructions
+                            .push(CompiledInstruction::Jump(usize::MAX));
+                        let else_start = self.instructions.len();
+                        self.instructions[false_jump] =
+                            CompiledInstruction::JumpIfFalse(else_start);
+                        self.compile_statements(else_branch)?;
+                        let end = self.instructions.len();
+                        self.instructions[end_jump] = CompiledInstruction::Jump(end);
+                    } else {
+                        let end = self.instructions.len();
+                        self.instructions[false_jump] = CompiledInstruction::JumpIfFalse(end);
+                    }
+                }
+                Stmt::While { condition, body } => {
+                    let start = self.instructions.len();
+                    self.compile_expression(condition)?;
+                    let end_jump = self.instructions.len();
+                    self.pop_instruction(CompiledInstruction::JumpIfFalse(usize::MAX))?;
+                    self.compile_statements(body)?;
+                    self.instructions.push(CompiledInstruction::Jump(start));
+                    let end = self.instructions.len();
+                    self.instructions[end_jump] = CompiledInstruction::JumpIfFalse(end);
+                }
+                Stmt::Block(statements) | Stmt::Sequence(statements) => {
+                    self.compile_statements(statements)?;
+                }
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+
+    fn finish(mut self, body: &[Stmt]) -> Option<CompiledFunction> {
+        self.compile_statements(body)?;
+        if self.stack_depth != 0 {
+            return None;
+        }
+        self.instructions.push(CompiledInstruction::Finish);
+        Some(CompiledFunction {
+            slots: self.slots,
+            function_vars: self.function_vars,
+            instructions: self.instructions,
+            max_stack: self.max_stack,
+        })
+    }
+}
+
+fn compiled_object_hook_stack(
+    value: &Value,
+    hook_stack_slots: Option<usize>,
+) -> Result<ValueStackReservation, RuntimeError> {
+    match (value, hook_stack_slots) {
+        (Value::Object(object), Some(slots)) if *object != 0 => {
+            ValueStackReservation::reserve(slots)
+        }
+        _ => Ok(ValueStackReservation::empty()),
+    }
+}
+
+fn read_compiled_path(
+    vm: &Vm<'_>,
+    env: &Environment,
+    binding: &Binding,
+    segments: &[CompiledPathSegment],
+    register_root: bool,
+    retained_operands: usize,
+) -> Result<TrackedValue, RuntimeError> {
+    match binding {
+        Binding::Direct { value, identity } => {
+            let identity = legacy_identity_for_value_copy(value, &[], identity.borrow().clone());
+            let value = value.borrow();
+            if register_root {
+                vm.register_runtime_value(&value);
+            }
+            read_compiled_path_value(
+                vm,
+                env,
+                &value,
+                identity,
+                segments,
+                env.strict_level,
+                retained_operands,
+            )
+        }
+        Binding::Reference(reference) => {
+            let root = reference.read_tracked()?.set_copy();
+            if register_root {
+                vm.register_runtime_value(&root.value);
+            }
+            read_compiled_path_value(
+                vm,
+                env,
+                &root.value,
+                root.identity,
+                segments,
+                env.strict_level,
+                retained_operands,
+            )
+        }
+    }
+}
+
+fn read_compiled_indexed_path(
+    vm: &Vm<'_>,
+    env: &Environment,
+    binding: &Binding,
+    segments: &[CompiledPathSegment],
+    strict_level: Option<u8>,
+    retained_operands: usize,
+) -> Result<TrackedValue, RuntimeError> {
+    let _pin_creation = LegacyPathPinCreationGuard::suspend();
+    let mut current = ReturnValue::Reference(binding.lvalue());
+    for segment in segments {
+        current = match segment {
+            CompiledPathSegment::Property(property) => vm
+                .property_reference_or_value_with_hook_stack(
+                    current,
+                    property,
+                    env,
+                    Some(retained_operands + 1),
+                )?,
+            CompiledPathSegment::EmbeddedIndex(value) => vm
+                .index_value_reference_or_value_with_hook_stack(
+                    current,
+                    Value::String(vm.literal_string(value)),
+                    env,
+                    Some(retained_operands + 1),
+                )?,
+            CompiledPathSegment::LiteralIndex(literal) => {
+                let index = TrackedValue::literal(vm.literal_value(literal, strict_level), literal)
+                    .set_copy();
+                vm.register_runtime_value(&index.value);
+                vm.index_value_reference_or_value_with_hook_stack(
+                    current,
+                    index.value,
+                    env,
+                    Some(retained_operands + 2),
+                )?
+            }
+        };
+    }
+    let value = current.into_tracked()?.set_copy();
+    vm.register_runtime_value(&value.value);
+    Ok(value)
+}
+
+fn read_compiled_path_value(
+    vm: &Vm<'_>,
+    env: &Environment,
+    current: &Value,
+    identity: Option<RawIdentity>,
+    segments: &[CompiledPathSegment],
+    strict_level: Option<u8>,
+    retained_operands: usize,
+) -> Result<TrackedValue, RuntimeError> {
+    if c4_set_copy_is_zero_id(current) {
+        return read_compiled_path_value(
+            vm,
+            env,
+            &Value::Nil,
+            None,
+            segments,
+            strict_level,
+            retained_operands,
+        );
+    }
+    let Some((segment, remaining)) = segments.split_first() else {
+        return Ok(TrackedValue {
+            value: current.clone(),
+            identity,
+        });
+    };
+
+    match segment {
+        CompiledPathSegment::Property(property) => {
+            let path_segment = PathSegment::Property(property.clone());
+            let child_identity = identity
+                .as_ref()
+                .and_then(|identity| identity.identity_at(&path_segment));
+            match current {
+                Value::Proplist(entries) => {
+                    let nil = Value::Nil;
+                    let child = entries.get(property).unwrap_or(&nil);
+                    read_compiled_path_value(
+                        vm,
+                        env,
+                        child,
+                        child_identity,
+                        remaining,
+                        strict_level,
+                        retained_operands,
+                    )
+                }
+                Value::Object(0) => Err(RuntimeError::new(
+                    "map access with .: map expected, but got nil!",
+                )),
+                target @ Value::Object(_) => {
+                    let _hook_stack =
+                        compiled_object_hook_stack(target, Some(retained_operands + 1))?;
+                    let child = vm.object_local_tracked(env, target, property).set_copy();
+                    vm.register_runtime_value(&child.value);
+                    read_compiled_path_value(
+                        vm,
+                        env,
+                        &child.value,
+                        child.identity,
+                        remaining,
+                        strict_level,
+                        retained_operands,
+                    )
+                }
+                other => Err(RuntimeError::new(format!(
+                    "cannot access property '{property}' on value of type {}",
+                    other.type_name()
+                ))),
+            }
+        }
+        CompiledPathSegment::EmbeddedIndex(value)
+        | CompiledPathSegment::LiteralIndex(Literal::String(value)) => {
+            let index = Value::String(vm.literal_string(value));
+            if matches!(segment, CompiledPathSegment::LiteralIndex(_)) {
+                vm.register_runtime_value(&index);
+            }
+            read_compiled_index(
+                vm,
+                env,
+                current,
+                identity,
+                index,
+                remaining,
+                strict_level,
+                retained_operands,
+                matches!(segment, CompiledPathSegment::LiteralIndex(_)),
+            )
+        }
+        CompiledPathSegment::LiteralIndex(literal) => {
+            let index = c4_set_copy_value(vm.literal_value(literal, strict_level));
+            vm.register_runtime_value(&index);
+            read_compiled_index(
+                vm,
+                env,
+                current,
+                identity,
+                index,
+                remaining,
+                strict_level,
+                retained_operands,
+                true,
+            )
+        }
+    }
+}
+
+// Keep path-recursion state explicit: grouping these borrowed values only to
+// satisfy the generic argument-count threshold obscures which fields change
+// at each segment and adds no domain abstraction.
+#[allow(clippy::too_many_arguments)]
+fn read_compiled_index(
+    vm: &Vm<'_>,
+    env: &Environment,
+    current: &Value,
+    identity: Option<RawIdentity>,
+    index: Value,
+    remaining: &[CompiledPathSegment],
+    strict_level: Option<u8>,
+    retained_operands: usize,
+    dynamic_index_slot: bool,
+) -> Result<TrackedValue, RuntimeError> {
+    let path_segment = PathSegment::Index(index.clone());
+    let child_identity = identity
+        .as_ref()
+        .and_then(|identity| identity.identity_at(&path_segment));
+    match current {
+        Value::Nil | Value::Object(0) => Err(RuntimeError::new(
+            "indexed access [index]: array, map or string expected, but got nil",
+        )),
+        Value::Array(elements) => {
+            let index = array_index(&index)?;
+            let nil = Value::Nil;
+            let child = elements.get(index).unwrap_or(&nil);
+            read_compiled_path_value(
+                vm,
+                env,
+                child,
+                child_identity,
+                remaining,
+                strict_level,
+                retained_operands,
+            )
+        }
+        Value::Proplist(entries) => {
+            let nil = Value::Nil;
+            let child = entries.get_key(&index).unwrap_or(&nil);
+            read_compiled_path_value(
+                vm,
+                env,
+                child,
+                child_identity,
+                remaining,
+                strict_level,
+                retained_operands,
+            )
+        }
+        Value::String(text) => {
+            let child = TrackedValue::runtime(string_index(text, &index)?).set_copy();
+            vm.register_runtime_value(&child.value);
+            read_compiled_path_value(
+                vm,
+                env,
+                &child.value,
+                child.identity,
+                remaining,
+                strict_level,
+                retained_operands,
+            )
+        }
+        target @ Value::Object(_) => {
+            let _hook_stack = compiled_object_hook_stack(
+                target,
+                Some(retained_operands + 1 + usize::from(dynamic_index_slot)),
+            )?;
+            let child = vm.eval_index_tracked(
+                TrackedValue {
+                    value: target.clone(),
+                    identity,
+                },
+                index,
+                env,
+            )?;
+            vm.register_runtime_value(&child.value);
+            read_compiled_path_value(
+                vm,
+                env,
+                &child.value,
+                child.identity,
+                remaining,
+                strict_level,
+                retained_operands,
+            )
+        }
+        other => Err(RuntimeError::new(format!(
+            "cannot index value of type {}",
+            other.type_name()
+        ))),
+    }
+}
+
+impl CompiledFunction {
+    fn compile(function: &Function) -> Option<Self> {
+        CompiledFunctionBuilder::new(function)?.finish(&function.body)
+    }
+
+    fn bindings(&self, env: &Environment) -> Option<Vec<Binding>> {
+        self.slots
+            .iter()
+            .map(|slot| match slot.kind {
+                CompiledSlotKind::Bare => env.binding(&slot.name),
+                CompiledSlotKind::FunctionVar => env.function_var_binding(&slot.name),
+            })
+            .collect()
+    }
+
+    fn execute(&self, vm: &Vm<'_>, env: &Environment) -> Result<Option<ControlFlow>, RuntimeError> {
+        let Some(bindings) = self.bindings(env) else {
+            return Ok(None);
+        };
+        if ValueStackReservation::check(self.max_stack).is_err() {
+            return Ok(None);
+        }
+        let mut stack = Vec::with_capacity(self.max_stack);
+        let mut registered_slots = vec![false; bindings.len()];
+        let mut instruction = 0;
+        loop {
+            match &self.instructions[instruction] {
+                CompiledInstruction::Literal(literal) => {
+                    let value =
+                        TrackedValue::literal(vm.literal_value(literal, env.strict_level), literal)
+                            .set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(value);
+                }
+                CompiledInstruction::Load(slot) => {
+                    let value = bindings[*slot].read_tracked()?.set_copy();
+                    if !registered_slots[*slot] {
+                        vm.register_runtime_value(&value.value);
+                        registered_slots[*slot] = true;
+                    }
+                    stack.push(value);
+                }
+                CompiledInstruction::LoadPath { slot, segments } => {
+                    let has_index = segments.iter().any(|segment| {
+                        matches!(
+                            segment,
+                            CompiledPathSegment::EmbeddedIndex(_)
+                                | CompiledPathSegment::LiteralIndex(_)
+                        )
+                    });
+                    let needs_reference_path = segments.iter().any(|segment| {
+                        matches!(
+                            segment,
+                            CompiledPathSegment::LiteralIndex(Literal::Int(index)) if *index < 0
+                        ) || matches!(segment, CompiledPathSegment::LiteralIndex(Literal::C4Id(_)))
+                    });
+                    let value = if needs_reference_path {
+                        read_compiled_indexed_path(
+                            vm,
+                            env,
+                            &bindings[*slot],
+                            segments,
+                            env.strict_level,
+                            stack.len(),
+                        )?
+                    } else {
+                        let value = read_compiled_path(
+                            vm,
+                            env,
+                            &bindings[*slot],
+                            segments,
+                            !has_index && !registered_slots[*slot],
+                            stack.len(),
+                        )?;
+                        if has_index {
+                            vm.register_runtime_value(&value.value);
+                        } else {
+                            registered_slots[*slot] = true;
+                        }
+                        value
+                    };
+                    stack.push(value);
+                }
+                CompiledInstruction::Store(slot) => {
+                    let value = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    bindings[*slot].write_tracked(value)?;
+                    registered_slots[*slot] = true;
+                }
+                CompiledInstruction::Unary(operation) => {
+                    let value = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let value =
+                        TrackedValue::runtime(vm.eval_unary(operation, value.value)?).set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(value);
+                }
+                CompiledInstruction::Binary(operation) => {
+                    let right = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let left = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let value = TrackedValue::runtime(vm.eval_binary(
+                        left.value,
+                        operation,
+                        right.value,
+                        env.strict_level,
+                        None,
+                    )?)
+                    .set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(value);
+                }
+                CompiledInstruction::MakeArray(element_count) => {
+                    let start = stack
+                        .len()
+                        .checked_sub(*element_count)
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let value = TrackedValue::array(stack.split_off(start)).set_copy();
+                    stack.push(value);
+                }
+                CompiledInstruction::MakeProplist(entry_count) => {
+                    let value_count = entry_count.checked_mul(2).ok_or_else(|| {
+                        RuntimeError::new("internal compiled proplist size overflow")
+                    })?;
+                    let start = stack
+                        .len()
+                        .checked_sub(value_count)
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let mut values = stack.split_off(start).into_iter();
+                    let mut entries = Vec::with_capacity(*entry_count);
+                    while let Some(key) = values.next() {
+                        let value = values.next().ok_or_else(|| {
+                            RuntimeError::new("internal compiled proplist value missing")
+                        })?;
+                        entries.push((key.value, value));
+                    }
+                    let value = TrackedValue::proplist(entries).set_copy();
+                    stack.push(value);
+                }
+                CompiledInstruction::Pop => {
+                    stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                }
+                CompiledInstruction::JumpIfFalse(target) => {
+                    let condition = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    if !condition.value.as_bool() {
+                        instruction = *target;
+                        continue;
+                    }
+                }
+                CompiledInstruction::Jump(target) => {
+                    instruction = *target;
+                    continue;
+                }
+                CompiledInstruction::Return => {
+                    let value = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    return Ok(Some(ControlFlow::Return(ReturnValue::Value(value))));
+                }
+                CompiledInstruction::Finish => return Ok(Some(ControlFlow::Normal)),
+            }
+            instruction += 1;
+        }
+    }
+}
+
+fn collect_function_var_names(body: &[Stmt], names: &mut Vec<String>) {
+    for statement in body {
+        match statement {
+            Stmt::VarDecl { name, .. } => names.push(name.clone()),
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_function_var_names(then_branch, names);
+                if let Some(else_branch) = else_branch {
+                    collect_function_var_names(else_branch, names);
+                }
+            }
+            Stmt::While { body, .. } => collect_function_var_names(body, names),
+            Stmt::For { init, body, .. } => {
+                if let Some(ForInit::VarDecls(declarations)) = init {
+                    names.extend(declarations.iter().map(|(name, _)| name.clone()));
+                }
+                collect_function_var_names(body, names);
+            }
+            Stmt::ForIn {
+                variable,
+                value_variable,
+                body,
+                ..
+            } => {
+                names.push(variable.clone());
+                names.extend(value_variable.iter().cloned());
+                collect_function_var_names(body, names);
+            }
+            Stmt::Block(inner) | Stmt::Sequence(inner) => {
+                collect_function_var_names(inner, names);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Collect every `var` name in a function body (all nesting levels) and
 /// pre-declare it nil: C4Aul vars are FUNCTION-scoped — the parser fills
 /// Fn->VarNamed before execution, so a read before the `var` statement is
@@ -9713,6 +10747,17 @@ impl Environment {
         Ok(None)
     }
 
+    fn binding(&self, name: &str) -> Option<Binding> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn function_var_binding(&self, name: &str) -> Option<Binding> {
+        self.function_vars.borrow().get(name).cloned()
+    }
+
     fn lvalue(&self, name: &str) -> Option<LValueRef> {
         for scope in self.scopes.iter().rev() {
             if let Some(value) = scope.get(name) {
@@ -9769,6 +10814,496 @@ mod tests {
         let var_decls: Vec<VarDecl> = Vec::new();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         vm.call(entry_point, args)
+    }
+
+    #[test]
+    fn local_scalar_control_flow_uses_compiled_executor() {
+        reset_compiled_function_execution_count();
+
+        let result = execute_script(
+            r#"
+                func SumLoop(iterations) {
+                    var acc = 0;
+                    var index = 0;
+                    while (index < iterations) {
+                        acc = acc + (index % 7);
+                        index = index + 1;
+                    }
+                    return acc;
+                }
+            "#,
+            "SumLoop",
+            &[Value::Int(128)],
+        )
+        .expect("slot-resolved scalar loop runs");
+
+        assert_eq!(result, Value::Int(379));
+        assert_eq!(compiled_function_execution_count(), 1);
+    }
+
+    #[test]
+    fn cloned_function_does_not_reuse_a_plan_for_mutated_source() {
+        let script = Parser::new("func Probe() { return 1; }")
+            .parse_script()
+            .expect("first source parses");
+        let functions: FxHashMap<String, Function> = script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        Vm::new(&functions, &host_functions, &var_decls, None)
+            .call_pinned_args(&functions["Probe"], Vec::new())
+            .expect("original function warms its plan");
+
+        let replacement = Parser::new("func Probe() { return 2; }")
+            .parse_script()
+            .expect("replacement source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("replacement function exists");
+        let mut cloned = functions["Probe"].clone();
+        cloned.body = replacement.body;
+        let cloned_functions = FxHashMap::from_iter([(cloned.name.clone(), cloned)]);
+
+        let value = Vm::new(&cloned_functions, &host_functions, &var_decls, None)
+            .call("Probe", &[])
+            .expect("mutated clone executes");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn warmed_function_does_not_reuse_a_plan_after_in_place_mutation() {
+        let script = Parser::new("func Probe() { return 1; }")
+            .parse_script()
+            .expect("first source parses");
+        let mut functions: FxHashMap<String, Function> = script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        Vm::new(&functions, &host_functions, &var_decls, None)
+            .call("Probe", &[])
+            .expect("original function warms its plan");
+
+        let replacement = Parser::new("func Probe() { return 2; }")
+            .parse_script()
+            .expect("replacement source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("replacement function exists");
+        functions
+            .get_mut("Probe")
+            .expect("original function remains owned")
+            .body = replacement.body;
+
+        let value = Vm::new(&functions, &host_functions, &var_decls, None)
+            .call_pinned_args(&functions["Probe"], Vec::new())
+            .expect("mutated function executes");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn inherited_function_does_not_reuse_a_plan_after_in_place_mutation() {
+        let inherited = Parser::new("func Probe() { return 1; }")
+            .parse_script()
+            .expect("inherited source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("inherited function exists");
+        let mut function = Parser::new("#strict 2\nfunc Probe() { return inherited(); }")
+            .parse_script()
+            .expect("overriding source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("overriding function exists");
+        function.overloaded = Some(std::sync::Arc::new(inherited));
+        let mut functions = FxHashMap::from_iter([(function.name.clone(), function)]);
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        Vm::new(&functions, &host_functions, &var_decls, None)
+            .call("Probe", &[])
+            .expect("inherited function warms its plan");
+
+        let replacement = Parser::new("func Probe() { return 2; }")
+            .parse_script()
+            .expect("replacement source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("replacement function exists");
+        std::sync::Arc::get_mut(
+            functions
+                .get_mut("Probe")
+                .expect("overriding function remains owned")
+                .overloaded
+                .as_mut()
+                .expect("inherited function remains installed"),
+        )
+        .expect("inherited function remains uniquely owned")
+        .body = replacement.body;
+
+        let value = Vm::new(&functions, &host_functions, &var_decls, None)
+            .call_pinned_args(&functions["Probe"], Vec::new())
+            .expect("mutated inherited function executes");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn global_function_does_not_reuse_a_plan_after_in_place_mutation() {
+        let global = Parser::new("global func Probe() { return 1; }")
+            .parse_script()
+            .expect("global source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("global function exists");
+        let functions = FxHashMap::default();
+        let mut global_functions = FxHashMap::from_iter([(global.name.clone(), global)]);
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        Vm::new(&functions, &host_functions, &var_decls, None)
+            .with_optional_globals(Some(&global_functions))
+            .call("Probe", &[])
+            .expect("global function warms its plan");
+
+        let replacement = Parser::new("global func Probe() { return 2; }")
+            .parse_script()
+            .expect("replacement source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("replacement function exists");
+        global_functions
+            .get_mut("Probe")
+            .expect("global function remains owned")
+            .body = replacement.body;
+
+        let value = Vm::new(&functions, &host_functions, &var_decls, None)
+            .with_optional_globals(Some(&global_functions))
+            .call("Probe", &[])
+            .expect("mutated global function executes");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn linked_function_does_not_reuse_a_caller_warmed_plan() {
+        let mut function = Parser::new("global func Probe() { return 1; }")
+            .parse_script()
+            .expect("linked source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("linked function exists");
+        let functions = FxHashMap::from_iter([(function.name.clone(), function.clone())]);
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        Vm::new(&functions, &host_functions, &var_decls, None)
+            .call_pinned_args(&function, Vec::new())
+            .expect("caller-owned function warms its plan");
+
+        let replacement = Parser::new("global func Probe() { return 2; }")
+            .parse_script()
+            .expect("replacement source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("replacement function exists");
+        function.body = replacement.body;
+
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("global func Probe() { return 0; }")
+            .expect("destination link parses");
+        assert!(engine.link_global_access_function("Probe", function));
+        assert_eq!(
+            engine.call("Probe", &[]).expect("linked function executes"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn function_debug_omits_the_derived_compilation_cache() {
+        let function = Parser::new("func Probe() { return 1; }")
+            .parse_script()
+            .expect("source parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("function exists");
+
+        assert!(!format!("{function:?}").contains("compiled"));
+    }
+
+    #[test]
+    fn compiled_repeated_path_reads_register_composite_parameter_once() {
+        reset_runtime_container_registration_traversals();
+        let state = Value::Proplist(ValueMap::from([
+            ("a".to_string(), Value::Int(1)),
+            ("b".to_string(), Value::Int(2)),
+            ("c".to_string(), Value::Int(3)),
+        ]));
+
+        let result = execute_script(
+            "#strict 3\nfunc Probe(state) { return state.a + state.b + state.c; }",
+            "Probe",
+            &[state],
+        )
+        .expect("compiled property reads run");
+
+        assert_eq!(result, Value::Int(6));
+        assert_eq!(runtime_container_registration_traversals(), 1);
+    }
+
+    #[test]
+    fn compiled_negative_index_grows_a_referenced_empty_array() {
+        reset_compiled_function_execution_count();
+        let result = execute_script(
+            "#strict 3\nfunc Probe() { var state = []; var ignored = state[0xffffffff]; return state; }",
+            "Probe",
+            &[],
+        )
+        .expect("negative index follows native array growth");
+
+        assert_eq!(result, Value::Array(vec![Value::Nil]));
+        assert_eq!(compiled_function_execution_count(), 1);
+    }
+
+    #[test]
+    fn compiled_indexed_path_preserves_ast_string_registration_order() {
+        fn run(source: &str) -> (Value, Vec<Vec<u8>>, usize) {
+            let script = Parser::new(source).parse_script().expect("source parses");
+            let functions: FxHashMap<String, Function> = script
+                .functions
+                .into_iter()
+                .map(|function| (function.name.clone(), function))
+                .collect();
+            let host_functions = FxHashMap::default();
+            let var_decls = Vec::new();
+            let registrations = crate::engine::new_string_registrations();
+            let state = Value::Proplist(ValueMap::from([
+                ("text".to_string(), Value::from("Zulu")),
+                ("other".to_string(), Value::from("Other")),
+            ]));
+            reset_compiled_function_execution_count();
+            let result = Vm::new(&functions, &host_functions, &var_decls, None)
+                .with_string_registrations(Some(&registrations))
+                .call("Probe", &[state])
+                .expect("probe executes");
+            let order = crate::engine::enumerate_c4_strings(&registrations, &[]);
+            (result, order, compiled_function_execution_count())
+        }
+
+        let compiled = run("#strict 3\nfunc Probe(state) { return [state.text[0], state.other]; }");
+        let ast =
+            run("#strict 3\nfunc Probe(state) { return [state.text[0], state.other]; Unknown(); }");
+
+        assert_eq!(compiled.0, ast.0);
+        assert_eq!(compiled.1, ast.1);
+        assert_eq!(compiled.2, 1);
+        assert_eq!(ast.2, 0);
+    }
+
+    #[test]
+    fn compiled_stack_overflow_falls_back_before_observable_execution() {
+        fn run(source: &str) -> (String, Vec<Vec<u8>>) {
+            let script = Parser::new(source).parse_script().expect("source parses");
+            let functions: FxHashMap<String, Function> = script
+                .functions
+                .into_iter()
+                .map(|function| (function.name.clone(), function))
+                .collect();
+            let host_functions = FxHashMap::default();
+            let var_decls = Vec::new();
+            let registrations = crate::engine::new_string_registrations();
+            let state = Value::Proplist(ValueMap::from([(
+                "other".to_string(),
+                Value::from("Observed"),
+            )]));
+            let live_state = state.clone();
+            let error = Vm::new(&functions, &host_functions, &var_decls, None)
+                .with_string_registrations(Some(&registrations))
+                .call("Probe", &[state])
+                .expect_err("oversized value stack errors")
+                .to_string();
+            let order = crate::engine::enumerate_c4_strings(&registrations, &[]);
+            drop(live_state);
+            (error, order)
+        }
+
+        let elements = std::iter::repeat_n("0", MAX_VALUE_STACK + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        let compiled = run(&format!(
+            "#strict 3\nfunc Probe(state) {{ var earlier = state.other; return [{elements}]; }}"
+        ));
+        let ast = run(&format!(
+            "#strict 3\nfunc Probe(state) {{ var earlier = state.other; return [{elements}]; Unknown(); }}"
+        ));
+
+        assert_eq!(compiled.0, ast.0);
+        assert_eq!(compiled.1, ast.1);
+        assert!(!ast.1.is_empty());
+    }
+
+    #[test]
+    fn compiled_object_path_hook_observes_the_ast_value_stack_depth() {
+        fn run(source: &str) -> (Value, usize, usize) {
+            let script = Parser::new(source).parse_script().expect("source parses");
+            let functions: FxHashMap<String, Function> = script
+                .functions
+                .into_iter()
+                .map(|function| (function.name.clone(), function))
+                .collect();
+            let host_functions = FxHashMap::default();
+            let var_decls = Vec::new();
+            let observed_depth = Rc::new(Cell::new(0));
+            let hook_depth = Rc::clone(&observed_depth);
+            let hook: crate::engine::LocalCellHook = Rc::new(move |target, name| {
+                if target == &Value::Object(7) && name == "value" {
+                    hook_depth.set(VALUE_STACK_SIZE.with(Cell::get));
+                    Some(value_cell(Value::Int(42)))
+                } else {
+                    None
+                }
+            });
+            reset_compiled_function_execution_count();
+            let value = Vm::new(&functions, &host_functions, &var_decls, None)
+                .with_local_cell_hook(Some(&hook))
+                .call("Probe", &[Value::Object(7)])
+                .expect("object property probe executes");
+            (
+                value,
+                observed_depth.get(),
+                compiled_function_execution_count(),
+            )
+        }
+
+        let compiled = run("#strict 3\nfunc Probe(target) { return target.value; }");
+        let ast =
+            run("#strict 3\nfunc Probe(target) { return target.value; UnknownAfterReturn(); }");
+
+        assert_eq!(compiled.0, ast.0);
+        assert_eq!(compiled.1, ast.1);
+        assert_eq!(compiled.2, 1);
+        assert_eq!(ast.2, 0);
+    }
+
+    #[test]
+    fn callerless_external_argument_set_moves_owned_slots() {
+        reset_external_argument_pre_set_clones();
+        let value = Value::Proplist(ValueMap::from([(
+            "nested".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        )]));
+
+        let result = execute_script(
+            "func Identity(value) { return value; }",
+            "Identity",
+            &[value],
+        )
+        .expect("external argument round-trips");
+
+        assert_eq!(
+            result,
+            Value::Proplist(ValueMap::from([(
+                "nested".to_string(),
+                Value::Array(vec![Value::Int(1), Value::Int(2)]),
+            )]))
+        );
+        assert_eq!(external_argument_pre_set_clones(), 0);
+    }
+
+    #[test]
+    fn compiled_aggregate_construction_does_not_reregister_children() {
+        reset_runtime_container_registration_traversals();
+        let state = Value::Proplist(ValueMap::from([("value".to_string(), Value::Int(7))]));
+
+        let result = execute_script(
+            "#strict 3\nfunc Wrap(state) { return { copy = state }; }",
+            "Wrap",
+            std::slice::from_ref(&state),
+        )
+        .expect("compiled aggregate construction runs");
+
+        assert_eq!(
+            result,
+            Value::Proplist(ValueMap::from([("copy".to_string(), state)]))
+        );
+        assert_eq!(runtime_container_registration_traversals(), 1);
+    }
+
+    #[test]
+    fn local_container_reads_and_result_building_use_compiled_executor() {
+        reset_compiled_function_execution_count();
+        let state = Value::Proplist(ValueMap::from([
+            (
+                "position".to_string(),
+                Value::Array(vec![Value::Int(40), Value::Int(20)]),
+            ),
+            (
+                "velocity".to_string(),
+                Value::Array(vec![Value::Int(2), Value::Int(0)]),
+            ),
+            ("energy".to_string(), Value::Int(100)),
+        ]));
+
+        let result = execute_script(
+            r#"
+                #strict 3
+                func Step(state, frame, random) {
+                    var vx = state.velocity[0];
+                    var vy = state.velocity[1] + 1;
+                    var x = state.position[0] + vx;
+                    var y = state.position[1] + vy;
+
+                    if (y > 96) {
+                        y = 96;
+                        vy = -vy / 2;
+                    }
+                    if (x > 480) {
+                        x = 480;
+                        vx = -vx;
+                    }
+                    if (x < 0) {
+                        x = 0;
+                        vx = -vx;
+                    }
+
+                    return {
+                        position = [x, y],
+                        velocity = [vx, vy],
+                        energy = state.energy - 1,
+                    };
+                }
+            "#,
+            "Step",
+            &[state, Value::Int(0), Value::Int(0)],
+        )
+        .expect("slot-resolved container computation runs");
+
+        assert_eq!(
+            result,
+            Value::Proplist(ValueMap::from([
+                (
+                    "position".to_string(),
+                    Value::Array(vec![Value::Int(42), Value::Int(21)])
+                ),
+                (
+                    "velocity".to_string(),
+                    Value::Array(vec![Value::Int(2), Value::Int(1)])
+                ),
+                ("energy".to_string(), Value::Int(99)),
+            ]))
+        );
+        assert_eq!(compiled_function_execution_count(), 1);
     }
 
     #[test]

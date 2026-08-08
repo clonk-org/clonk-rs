@@ -5,6 +5,11 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static SOLID_MASK_MOVEMENT_CANDIDATE_VISITS: Cell<usize> = const { Cell::new(0) };
+}
+
 impl Engine {
     fn solid_mask_pixels_for_object(
         &self,
@@ -964,6 +969,8 @@ impl Engine {
         }
         let mut masks = Vec::new();
         for &index in candidate_indices {
+            #[cfg(test)]
+            SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(|count| count.set(count.get() + 1));
             let Some(object) = self.objects.get(index) else {
                 continue;
             };
@@ -1169,7 +1176,7 @@ impl Engine {
         if self.solid_mask_grid_mode() {
             return Vec::new();
         }
-        let indices: Vec<usize> = (0..self.objects.len()).collect();
+        let indices = self.active_solid_mask_indices();
         self.solid_masks_for_movement(&indices)
     }
 
@@ -2762,5 +2769,77 @@ impl Engine {
         // ObjectActionThrow ignores Exit's boolean (including callback
         // re-entry) and reports success once SetAction succeeded.
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocf_overlay_skips_objects_without_solid_masks() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        for _ in 0..2 {
+            engine
+                .spawn_object(SpawnConfig::new("Plain"))
+                .expect("plain object spawns");
+        }
+
+        SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(|count| count.set(0));
+        SOLID_MASK_DEFINITION_LOOKUPS.with(|count| count.set(0));
+        assert!(engine.ocf_solid_mask_overlay().is_empty());
+        assert!(engine.ocf_solid_mask_overlay().is_empty());
+        assert_eq!(SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(Cell::get), 0);
+        assert_eq!(SOLID_MASK_DEFINITION_LOOKUPS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn ocf_overlay_observes_direct_runtime_override() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("plain object spawns");
+        assert!(engine.ocf_solid_mask_overlay().is_empty());
+
+        engine.objects[0].state.solid_mask_override =
+            Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0));
+        SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(|count| count.set(0));
+
+        assert_eq!(engine.ocf_solid_mask_overlay().len(), 1);
+        assert_eq!(SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(Cell::get), 1);
+
+        engine.objects[0].state.solid_mask_override =
+            Some(DefinitionTargetRect::new(0, 0, 0, 0, 0, 0));
+        assert!(engine.ocf_solid_mask_overlay().is_empty());
+    }
+
+    #[test]
+    fn ocf_overlay_observes_reloaded_definition_mask() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("plain object spawns");
+        assert!(engine.ocf_solid_mask_overlay().is_empty());
+
+        assert!(engine.remove_definition("Plain"));
+        let mut definition =
+            Definition::from_script("Plain", "Plain", "").expect("definition compiles");
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine
+            .register_definition(definition)
+            .expect("replacement definition registers");
+
+        SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(|count| count.set(0));
+        assert_eq!(engine.ocf_solid_mask_overlay().len(), 1);
+        assert_eq!(SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(Cell::get), 1);
     }
 }

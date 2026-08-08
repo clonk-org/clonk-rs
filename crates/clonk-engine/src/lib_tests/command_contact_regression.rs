@@ -273,6 +273,7 @@ protected func QueryWorld()
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
     HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+    HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(|count| count.set(0));
     SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
     assert_eq!(
         engine
@@ -295,6 +296,23 @@ protected func QueryWorld()
         0,
         "an object-local callback never clones the landscape"
     );
+    assert_eq!(
+        HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "an object-local callback never copies the master order"
+    );
+
+    let world = engine.host_world_context();
+    assert_eq!(HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(Cell::get), 0);
+    assert_eq!(world.master_object_ids().len(), engine.objects.len());
+    assert_eq!(HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(Cell::get), 1);
+    assert_eq!(world.master_object_ids().len(), engine.objects.len());
+    assert_eq!(
+        HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "one callback world materializes its master order at most once"
+    );
+    drop(world);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
     HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
@@ -322,6 +340,51 @@ protected func QueryWorld()
         Some(&Value::Bool(true)),
         "the lazy landscape preserves object-relative GBackSolid behavior"
     );
+}
+
+#[test]
+fn lazy_master_order_ignores_stale_object_index_cache() {
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition("ORDR", "Order", "")
+        .expect("definition registers");
+    let ids = (0..3)
+        .map(|_| {
+            engine
+                .spawn_object(SpawnConfig::new("ORDR"))
+                .expect("object spawns")
+        })
+        .collect::<Vec<_>>();
+    for id in &ids {
+        assert!(engine.find_object_index(*id).is_some());
+    }
+
+    engine.objects.swap(1, 2);
+    let inactive = ids[1];
+    engine
+        .objects
+        .iter_mut()
+        .find(|object| object.id == inactive)
+        .expect("inactive object remains stored")
+        .state
+        .status = ObjectStatus::Inactive;
+    let expected = engine
+        .exec_list
+        .iter()
+        .rev()
+        .copied()
+        .filter(|id| {
+            engine
+                .objects
+                .iter()
+                .find(|object| object.id == *id)
+                .is_some_and(|object| object.state.status != ObjectStatus::Inactive)
+        })
+        .collect::<Vec<_>>();
+
+    let world = engine.host_world_context();
+
+    assert_eq!(world.master_object_ids(), expected);
 }
 
 #[test]

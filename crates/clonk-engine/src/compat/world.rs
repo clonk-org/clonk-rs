@@ -1744,6 +1744,9 @@ pub(crate) struct LazyHostWorldProvider {
     object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
     objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
+    master_order: Option<
+        unsafe fn(*const (), &HashMap<ObjectId, ObjectStatus>, &HashSet<usize>) -> Vec<ObjectId>,
+    >,
     /// Landscape extent without the shell copy. `C4LSectors::Update` sizes its
     /// grid from Width/Height alone (oracle-src-pinned src/C4Sector.cpp:107),
     /// so a provider that can answer those two integers directly spares the
@@ -1783,10 +1786,31 @@ impl LazyHostWorldProvider {
             object,
             objects,
             landscape,
+            master_order: None,
             landscape_dimensions: None,
             landscape_borrow: None,
             legacy_find_object: None,
         }
+    }
+
+    /// Supply the source's callback-entry forward master list without copying
+    /// it for callbacks that never inspect object ordering.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`]. `seeded_statuses`
+    /// contains callback-local copies of objects that the provider must not
+    /// dereference through its source.
+    pub(crate) unsafe fn with_master_order(
+        mut self,
+        master_order: unsafe fn(
+            *const (),
+            &HashMap<ObjectId, ObjectStatus>,
+            &HashSet<usize>,
+        ) -> Vec<ObjectId>,
+    ) -> Self {
+        self.master_order = Some(master_order);
+        self
     }
 
     /// Supply the landscape extent without materializing the shell.
@@ -1847,6 +1871,16 @@ impl LazyHostWorldProvider {
         unsafe { (self.landscape)(self.source) }
     }
 
+    fn master_order(
+        self,
+        seeded_statuses: &HashMap<ObjectId, ObjectStatus>,
+        excluded: &HashSet<usize>,
+    ) -> Option<Vec<ObjectId>> {
+        // SAFETY: see `object`; seeded objects are resolved from their
+        // callback-local status and are never dereferenced through the source.
+        Some(unsafe { (self.master_order?)(self.source, seeded_statuses, excluded) })
+    }
+
     fn landscape_dimensions(self) -> Option<(i32, i32)> {
         // SAFETY: see `object`.
         unsafe { (self.landscape_dimensions?)(self.source) }
@@ -1897,7 +1931,7 @@ pub struct HostWorldContext {
     /// `Game.Objects` from First -> Next. The engine's `exec_list` is this
     /// order reversed; only APIs such as C4Game::FindBase explicitly walk
     /// the forward master list (C4Game.cpp:3732-3744).
-    pub(crate) master_order: Rc<Vec<ObjectId>>,
+    pub(crate) master_order: OnceCell<Rc<Vec<ObjectId>>>,
     /// Uninitialized until a host API actually reads or mutates terrain.
     landscape: OnceCell<Option<Rc<Landscape>>>,
     /// Fully defaulted, post-load `Game.C4S` reflection data. This remains
@@ -2163,7 +2197,7 @@ impl Default for HostWorldContext {
                 ..HostWorldObjectStore::default()
             })),
             lazy_world: None,
-            master_order: Rc::new(Vec::new()),
+            master_order: OnceCell::from(Rc::new(Vec::new())),
             landscape: OnceCell::new(),
             scenario_values: Rc::new(ScenarioValueStore::default()),
             scenario_sections: Rc::new(HashSet::new()),
@@ -2274,6 +2308,7 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
+        let _ = self.master_object_ids();
         let objects = objects.into_iter().collect::<Vec<HostWorldObject>>();
         let mut store = HostWorldObjectStore {
             objects: HashMap::with_capacity(objects.len()),
@@ -2305,6 +2340,9 @@ impl HostWorldContext {
     /// remain complete; only engine callback contexts opt into this state.
     pub(crate) fn with_lazy_world_provider(mut self, provider: LazyHostWorldProvider) -> Self {
         self.lazy_world = Some(provider);
+        if provider.master_order.is_some() {
+            self.master_order = OnceCell::new();
+        }
         Rc::make_mut(self.object_store.get_mut()).complete = false;
         if self.landscape.get().is_some_and(Option::is_none) {
             self.landscape = OnceCell::new();
@@ -2541,7 +2579,7 @@ impl HostWorldContext {
                 complete: true,
             })),
             lazy_world: None,
-            master_order: Rc::clone(&order),
+            master_order: OnceCell::from(Rc::clone(&order)),
             landscape: OnceCell::from(landscape.map(Rc::new)),
             scenario_values,
             scenario_sections: Rc::new(HashSet::new()),
@@ -3479,6 +3517,9 @@ impl HostWorldContext {
     /// cloned host world must therefore seed the next callback from the
     /// preceding callback's final geometry and graphics state.
     pub(crate) fn preview_object_update(&mut self, id: ObjectId, update: &ObjectUpdate) {
+        if update.status.is_some() {
+            let _ = self.master_object_ids();
+        }
         if let Some(definition_id) = update.change_def.as_deref() {
             self.preview_object_change_def(id, definition_id);
         }
@@ -3588,6 +3629,7 @@ impl HostWorldContext {
     }
 
     pub(crate) fn preview_object_destroyed(&mut self, id: ObjectId) {
+        let _ = self.master_object_ids();
         let store = Rc::make_mut(self.object_store.get_mut());
         store.objects.remove(&id);
         // Keep the storage index as a provider exclusion even after the
@@ -3595,7 +3637,12 @@ impl HostWorldContext {
         // this entry through an exclusive borrow for the rest of the call.
         store.order.retain(|object_id| *object_id != id);
         store.removed.insert(id);
-        Rc::make_mut(&mut self.master_order).retain(|object_id| *object_id != id);
+        Rc::make_mut(
+            self.master_order
+                .get_mut()
+                .expect("master order was initialized above"),
+        )
+        .retain(|object_id| *object_id != id);
         self.solid_mask_instance_sequences.borrow_mut().remove(&id);
     }
 
@@ -3605,14 +3652,30 @@ impl HostWorldContext {
     }
 
     pub(crate) fn master_object_ids(&self) -> &[ObjectId] {
-        self.master_order.as_ref().as_slice()
+        self.master_order
+            .get_or_init(|| {
+                let store = self.object_store.borrow();
+                let statuses = store
+                    .objects
+                    .iter()
+                    .map(|(&id, object)| (id, object.status))
+                    .collect();
+                let excluded = store.indices.values().copied().collect();
+                drop(store);
+                Rc::new(
+                    self.lazy_world
+                        .and_then(|provider| provider.master_order(&statuses, &excluded))
+                        .unwrap_or_default(),
+                )
+            })
+            .as_slice()
     }
 
     pub(crate) fn with_master_order<I>(mut self, order: I) -> Self
     where
         I: IntoIterator<Item = ObjectId>,
     {
-        self.master_order = Rc::new(order.into_iter().collect());
+        self.master_order = OnceCell::from(Rc::new(order.into_iter().collect()));
         self
     }
 
@@ -4286,7 +4349,7 @@ impl HostWorldContext {
             // (contained/inactive) keep their storage order behind it.
             let mut seen = HashSet::with_capacity(store.order.len());
             let ordered = self
-                .master_order
+                .master_object_ids()
                 .iter()
                 .chain(store.order.iter())
                 .filter(|id| seen.insert(**id))
