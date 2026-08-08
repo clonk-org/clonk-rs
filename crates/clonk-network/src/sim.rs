@@ -689,6 +689,13 @@ pub fn mean(samples: &[Duration]) -> Duration {
 /// Drives two real reliable-UDP endpoints across an impaired link at the live
 /// control cadence and replays the resulting lockstep playout.
 pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
+    run_control_delivery_in_direction(config, false)
+}
+
+fn run_control_delivery_in_direction(
+    config: &ControlDeliveryConfig,
+    client_to_host: bool,
+) -> LinkReport {
     let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 40_000);
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 40_001);
 
@@ -730,17 +737,22 @@ pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
     let duplicates = config.duplicates.max(1);
 
     while now <= deadline {
-        // The host emits one control packet per control tick.
+        // The selected sender emits one control packet per control tick.
         if tick < config.ticks as u32 && now >= next_control_at {
             let payload = tick.to_le_bytes().to_vec();
-            if let Ok(step) = host.send_packet(client_addr, &payload) {
+            let step = if client_to_host {
+                client.send_packet(host_addr, &payload)
+            } else {
+                host.send_packet(client_addr, &payload)
+            };
+            if let Ok(step) = step {
                 sent_at.insert(tick, now);
                 for datagram in step.datagrams {
                     // Each copy draws loss independently, which is the property
                     // that makes redundancy worth its bandwidth.
                     for copy in 0..duplicates {
                         let stagger = Duration::from_millis(config.duplicate_delay_ms * copy);
-                        link.enqueue(now + stagger, false, datagram.payload.clone());
+                        link.enqueue(now + stagger, client_to_host, datagram.payload.clone());
                     }
                 }
             }
@@ -751,9 +763,14 @@ pub fn run_control_delivery(config: &ControlDeliveryConfig) -> LinkReport {
         // A resource chunk on the same ordered stream as control.
         if config.bulk_packet_bytes > 0 && now >= next_bulk_at {
             let chunk = vec![0u8; config.bulk_packet_bytes];
-            if let Ok(step) = host.send_packet(client_addr, &chunk) {
+            let step = if client_to_host {
+                client.send_packet(host_addr, &chunk)
+            } else {
+                host.send_packet(client_addr, &chunk)
+            };
+            if let Ok(step) = step {
                 for datagram in step.datagrams {
-                    link.enqueue(now, false, datagram.payload);
+                    link.enqueue(now, client_to_host, datagram.payload);
                 }
             }
             next_bulk_at += config.bulk_interval;
