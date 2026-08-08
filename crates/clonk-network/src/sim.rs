@@ -1902,7 +1902,8 @@ fn dialup_sample_nanos(samples: &[Duration]) -> Vec<u64> {
 
 #[cfg(test)]
 struct DialupAdaptiveBaseline {
-    pooled: u64,
+    pooled_total: u64,
+    pooled_added: u64,
     seeds: [(&'static str, u64); 20],
 }
 
@@ -1913,7 +1914,8 @@ fn dialup_adaptive_baseline_total_p50_ns() -> DialupAdaptiveBaseline {
     // fixture here so a squash merge does not make the comparison depend on an
     // otherwise unreachable intermediate commit or a local target artifact.
     DialupAdaptiveBaseline {
-        pooled: 878_000_000,
+        pooled_total: 878_000_000,
+        pooled_added: 728_000_000,
         seeds: [
             ("0x0000000000000001", 811_000_000),
             ("0x0000000000000002", 943_000_000),
@@ -2209,9 +2211,17 @@ mod dialup_control_tests {
             .expect("the report contains a total median");
 
         assert!(
-            pooled_candidate.saturating_mul(2) <= baseline.pooled,
+            pooled_candidate.saturating_mul(2) <= baseline.pooled_total,
             "pooled total median must fall by at least 50%: {} -> {pooled_candidate} ns",
-            baseline.pooled
+            baseline.pooled_total
+        );
+        let pooled_added_candidate = report["pooled"]["added_p50_ns"]
+            .as_u64()
+            .expect("the report contains a propagation-excluded median");
+        assert!(
+            pooled_added_candidate.saturating_mul(2) <= baseline.pooled_added,
+            "pooled propagation-excluded median must fall by at least 50%: {} -> {pooled_added_candidate} ns",
+            baseline.pooled_added
         );
         let candidate_seeds = report["seeds"]
             .as_array()
