@@ -1,5 +1,5 @@
-use rustc_hash::FxHashMap;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use indexmap::IndexMap;
@@ -219,6 +219,21 @@ pub struct StringRegistrationLedger {
     state: Mutex<StringRegistrationLedgerState>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static STRING_REGISTRATION_MUTABLE_BORROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_string_registration_mutable_borrows() {
+    STRING_REGISTRATION_MUTABLE_BORROWS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn string_registration_mutable_borrows() -> usize {
+    STRING_REGISTRATION_MUTABLE_BORROWS.with(std::cell::Cell::get)
+}
+
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct StringRegistrationLedgerState {
@@ -226,7 +241,7 @@ pub struct StringRegistrationLedgerState {
     /// Non-owning O(1) membership for the ordered registration list. Each
     /// indexed pointer still has its Weak in `entries`, keeping the Arc
     /// control-block address reserved until both are pruned together.
-    registered_identities: HashSet<usize>,
+    registered_identities: FxHashSet<usize>,
     /// Parse-time literal identities by their parser spelling.
     ///
     /// C++ stores the resolved `C4String *` directly in each AB_STRING
@@ -234,13 +249,13 @@ pub struct StringRegistrationLedgerState {
     /// scans the table again. Keep this index weak: a cache handle must not
     /// increment `C4String::iRefCnt` and make an otherwise unreferenced Hold
     /// string eligible for save enumeration.
-    literal_cache: HashMap<String, std::sync::Weak<C4StringValueInner>>,
+    literal_cache: FxHashMap<String, std::sync::Weak<C4StringValueInner>>,
     /// Identities unregistered by C4StringTable::Clear while an external
     /// C4Value still owns them. They remain valid strings, but pTable is null
     /// in C++ and later live-value traversal must not silently re-register
     /// the same pointer.
     detached: Vec<std::sync::Weak<C4StringValueInner>>,
-    detached_identities: HashSet<usize>,
+    detached_identities: FxHashSet<usize>,
 }
 
 impl StringRegistrationLedgerState {
@@ -320,6 +335,8 @@ impl StringRegistrationLedger {
     /// the old `borrow_mut` call sites and makes mutation intent explicit.
     #[doc(hidden)]
     pub fn borrow_mut(&self) -> MutexGuard<'_, StringRegistrationLedgerState> {
+        #[cfg(test)]
+        STRING_REGISTRATION_MUTABLE_BORROWS.with(|count| count.set(count.get() + 1));
         self.borrow()
     }
 }
@@ -421,28 +438,38 @@ pub fn clear_c4_string_holds(registrations: &StringRegistrationLedger) {
     registrations.rebuild_detached_identities();
 }
 
-pub fn register_c4_string(registrations: &StringRegistrationLedger, value: &C4StringValue) {
-    let mut registrations = registrations.borrow_mut();
-    let value_identity = value.downgrade();
-    let identity = StringRegistrationLedgerState::identity(&value_identity);
-    if registrations.detached_identities.contains(&identity)
-        || registrations.registered_identities.contains(&identity)
+fn register_c4_string_locked(
+    registrations: &mut StringRegistrationLedgerState,
+    value: &C4StringValue,
+    pruned: &mut bool,
+) {
+    let identity = value.identity();
+    if registrations.registered_identities.contains(&identity)
+        || registrations.detached_identities.contains(&identity)
     {
         return;
     }
-    registrations.retain_live_detached();
-    if registrations.detached_identities.contains(&identity) {
-        return;
-    }
-    registrations.retain_live_entries();
-    if registrations.registered_identities.contains(&identity) {
-        return;
+    if !*pruned {
+        registrations.retain_live_detached();
+        if registrations.detached_identities.contains(&identity) {
+            return;
+        }
+        registrations.retain_live_entries();
+        if registrations.registered_identities.contains(&identity) {
+            return;
+        }
+        *pruned = true;
     }
     registrations.push_entry(StringRegistration {
         value: value.downgrade(),
         held: None,
         untouched_loaded: None,
     });
+}
+
+pub fn register_c4_string(registrations: &StringRegistrationLedger, value: &C4StringValue) {
+    let mut registrations = registrations.borrow_mut();
+    register_c4_string_locked(&mut registrations, value, &mut false);
 }
 
 /// Register or reuse a non-Hold string-table entry. The C++ parser uses this
@@ -654,29 +681,46 @@ pub fn enumerate_c4_strings(
 /// The VM invokes this as expressions materialize; embedders also use it for
 /// values entering synchronized state without passing through the VM.
 pub fn register_c4_value_strings(registrations: &StringRegistrationLedger, value: &Value) {
-    match value {
-        Value::String(value) => register_c4_string(registrations, value),
-        Value::Array(values) => {
-            for value in values {
-                register_c4_value_strings(registrations, value);
-            }
-        }
-        Value::Proplist(values) => {
-            for (key, value) in values {
-                register_c4_value_strings(registrations, key);
-                register_c4_value_strings(registrations, value);
-            }
-            for value in values.hidden_values() {
-                register_c4_value_strings(registrations, value);
-            }
-        }
-        Value::Int(_)
-        | Value::Bool(_)
-        | Value::RawBool(_)
-        | Value::C4Id(_)
-        | Value::Object(_)
-        | Value::Nil => {}
+    if !matches!(
+        value,
+        Value::String(_) | Value::Array(_) | Value::Proplist(_)
+    ) {
+        return;
     }
+
+    fn register_value(
+        registrations: &mut StringRegistrationLedgerState,
+        value: &Value,
+        pruned: &mut bool,
+    ) {
+        match value {
+            Value::String(value) => register_c4_string_locked(registrations, value, pruned),
+            Value::Array(values) => {
+                for value in values {
+                    register_value(registrations, value, pruned);
+                }
+            }
+            Value::Proplist(values) => {
+                for (key, value) in values {
+                    register_value(registrations, key, pruned);
+                    register_value(registrations, value, pruned);
+                }
+                for value in values.hidden_values() {
+                    register_value(registrations, value, pruned);
+                }
+            }
+            Value::Int(_)
+            | Value::Bool(_)
+            | Value::RawBool(_)
+            | Value::C4Id(_)
+            | Value::Object(_)
+            | Value::Nil => {}
+        }
+    }
+
+    let mut registrations = registrations.borrow_mut();
+    let mut pruned = false;
+    register_value(&mut registrations, value, &mut pruned);
 }
 
 pub fn new_global_slots() -> GlobalSlots {
@@ -1601,13 +1645,14 @@ impl Engine {
     /// the function lives on the script engine while a `FnLink` remains in
     /// the original script (C4AulParse.cpp:1603-1610). The linked function
     /// carries the engine overload chain used by `inherited()`.
-    pub fn link_global_access_function(&mut self, name: &str, function: Function) -> bool {
+    pub fn link_global_access_function(&mut self, name: &str, mut function: Function) -> bool {
         let Some(local) = self.functions.get(name) else {
             return false;
         };
         if local.access != crate::ast::AccessLevel::Global {
             return false;
         }
+        function.reset_compiled_cache();
         self.functions.insert(name.to_string(), function);
         true
     }
@@ -2781,10 +2826,51 @@ impl Default for Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::rc::Rc;
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn string_registration_membership_uses_fixed_seed_hashing() {
+        fn assert_fx_set<T>(_: &rustc_hash::FxHashSet<T>) {}
+        fn assert_fx_map<K, V>(_: &rustc_hash::FxHashMap<K, V>) {}
+
+        let registrations = StringRegistrationLedger::default();
+        let state = registrations.borrow();
+        assert_fx_set(&state.registered_identities);
+        assert_fx_set(&state.detached_identities);
+        assert_fx_map(&state.literal_cache);
+    }
+
+    #[test]
+    fn composite_string_registration_holds_the_ledger_once() {
+        let registrations = StringRegistrationLedger::default();
+        let value = Value::Array(vec![
+            Value::from("Alpha"),
+            Value::Array(vec![Value::from("Beta"), Value::from("Gamma")]),
+        ]);
+
+        reset_string_registration_mutable_borrows();
+        register_c4_value_strings(&registrations, &value);
+
+        assert_eq!(string_registration_mutable_borrows(), 1);
+        assert_eq!(
+            enumerate_c4_strings(&registrations, &[]),
+            [b"Alpha".to_vec(), b"Beta".to_vec(), b"Gamma".to_vec()]
+        );
+    }
+
+    #[test]
+    fn scalar_registration_does_not_borrow_the_string_ledger() {
+        let registrations = StringRegistrationLedger::default();
+
+        reset_string_registration_mutable_borrows();
+        register_c4_value_strings(&registrations, &Value::Int(7));
+
+        assert_eq!(string_registration_mutable_borrows(), 0);
+    }
 
     fn compile(source: &str) -> Script {
         Script::compile(source).expect("test script compiles")

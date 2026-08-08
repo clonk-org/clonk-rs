@@ -303,6 +303,7 @@ impl<'a> Parser<'a> {
             // Linked when a later script or an #include overload collides.
             overloaded: None,
             hard_inherited_line: self.hard_inherited_line.take(),
+            compiled: std::sync::OnceLock::new(),
         })
     }
 
@@ -372,6 +373,7 @@ impl<'a> Parser<'a> {
                 global_link_host: None,
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
+                compiled: std::sync::OnceLock::new(),
             },
             error,
         ))
@@ -415,6 +417,7 @@ impl<'a> Parser<'a> {
             global_link_host: None,
             overloaded: None,
             hard_inherited_line: self.hard_inherited_line.take(),
+            compiled: std::sync::OnceLock::new(),
         })
     }
 
@@ -493,6 +496,7 @@ impl<'a> Parser<'a> {
                 global_link_host: None,
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
+                compiled: std::sync::OnceLock::new(),
             },
             error,
         ))

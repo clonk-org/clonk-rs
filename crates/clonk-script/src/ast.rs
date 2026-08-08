@@ -147,7 +147,6 @@ impl Parameter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub name: String,
     pub params: Vec<Parameter>,
@@ -191,9 +190,76 @@ pub struct Function {
     /// records the site here and runs the same check once the overload tables
     /// exist. The failsafe `_inherited` spelling never sets it.
     pub(crate) hard_inherited_line: Option<usize>,
+    /// Lazily lowered local-only instruction stream. This is derived state:
+    /// function equality remains solely a property of the parsed script.
+    pub(crate) compiled: std::sync::OnceLock<crate::vm::CompiledFunctionCache>,
+}
+
+impl std::fmt::Debug for Function {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Function")
+            .field("name", &self.name)
+            .field("params", &self.params)
+            .field("body", &self.body)
+            .field("access", &self.access)
+            .field("returns_reference", &self.returns_reference)
+            .field("description", &self.description)
+            .field("strict_level", &self.strict_level)
+            .field("source_host", &self.source_host)
+            .field("source_name", &self.source_name)
+            .field("source_line", &self.source_line)
+            .field("global_link_host", &self.global_link_host)
+            .field("overloaded", &self.overloaded)
+            .field("hard_inherited_line", &self.hard_inherited_line)
+            .finish()
+    }
+}
+
+impl Clone for Function {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            params: self.params.clone(),
+            body: self.body.clone(),
+            access: self.access,
+            returns_reference: self.returns_reference,
+            description: self.description.clone(),
+            strict_level: self.strict_level,
+            source_host: self.source_host,
+            source_name: self.source_name.clone(),
+            source_line: self.source_line,
+            global_link_host: self.global_link_host,
+            overloaded: self.overloaded.clone(),
+            hard_inherited_line: self.hard_inherited_line,
+            compiled: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for Function {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.params == other.params
+            && self.body == other.body
+            && self.access == other.access
+            && self.returns_reference == other.returns_reference
+            && self.description == other.description
+            && self.strict_level == other.strict_level
+            && self.source_host == other.source_host
+            && self.source_name == other.source_name
+            && self.source_line == other.source_line
+            && self.global_link_host == other.global_link_host
+            && self.overloaded == other.overloaded
+            && self.hard_inherited_line == other.hard_inherited_line
+    }
 }
 
 impl Function {
+    pub(crate) fn reset_compiled_cache(&mut self) {
+        self.compiled = std::sync::OnceLock::new();
+    }
+
     /// First named local candidate in this overload chain. Rust keeps
     /// declarations under their source name, while C4Aul represents every
     /// global declaration with an unnamed link in that source host; skip
