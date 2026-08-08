@@ -1352,3 +1352,789 @@ mod bulk_stream_tests {
         assert!(quiet_worst < tight_worst, "bulk still costs something");
     }
 }
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DialupControlProfile {
+    control_period: Duration,
+    link_bps: u64,
+    one_way_delay: Duration,
+    loss_permille: u32,
+    background_wire_bps: u64,
+    background_payload_bytes: usize,
+    queue_bytes: u64,
+    wire_overhead_bytes: usize,
+    warmup_controls: usize,
+    measured_controls: usize,
+    drain: Duration,
+}
+
+#[cfg(test)]
+fn dialup_control_profile() -> DialupControlProfile {
+    DialupControlProfile {
+        control_period: Duration::from_millis(56),
+        link_bps: 33_600,
+        one_way_delay: Duration::from_millis(150),
+        loss_permille: 20,
+        background_wire_bps: 20_000,
+        background_payload_bytes: 512,
+        queue_bytes: 4_200,
+        wire_overhead_bytes: 32,
+        warmup_controls: 256,
+        measured_controls: 2_049,
+        drain: Duration::from_secs(30),
+    }
+}
+
+#[cfg(test)]
+fn dialup_control_body(tick: u32) -> Vec<u8> {
+    let packet = crate::encode_control_packet(&crate::LegacyControlFrame {
+        client_id: 1,
+        tick,
+        timestamp_ms: 0,
+        controls: vec![clonk_engine::ControlPacket::PlayerControl(
+            clonk_engine::PlayerControlData {
+                player: 0,
+                command: 1,
+                data: 0,
+                by_client: 1,
+            },
+        )],
+    })
+    .expect("the fixed benchmark control is encodable");
+    crate::transport::encode_complete_control_packet(&packet)
+        .expect("the fixed benchmark PID_Control body is encodable")
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DialupLossKey {
+    stream: u64,
+    packet_counter: u64,
+    emission: u32,
+    copy: u32,
+}
+
+#[cfg(test)]
+impl DialupLossKey {
+    fn endpoint(to_host: bool, packet_counter: u64, emission: u32, copy: u32) -> Self {
+        Self {
+            stream: u64::from(to_host),
+            packet_counter,
+            emission,
+            copy,
+        }
+    }
+
+    fn background(packet_counter: u64) -> Self {
+        Self {
+            stream: 2,
+            packet_counter,
+            emission: 0,
+            copy: 0,
+        }
+    }
+
+    fn draw(self, seed: u64) -> u32 {
+        let mut value = seed ^ self.stream.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for component in [
+            self.packet_counter,
+            u64::from(self.emission),
+            u64::from(self.copy),
+        ] {
+            value ^= component.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value ^= value >> 27;
+        }
+        (value ^ (value >> 31)) as u32
+    }
+}
+
+#[cfg(test)]
+fn dialup_loss_trace(seed: u64, packet_counters: u64, copies: u32) -> BTreeMap<(u64, u32), bool> {
+    let loss_permille = dialup_control_profile().loss_permille;
+    (0..packet_counters)
+        .flat_map(|counter| {
+            (0..copies).map(move |copy| {
+                let key = DialupLossKey::endpoint(true, counter, 0, copy);
+                ((counter, copy), key.draw(seed) % 1_000 < loss_permille)
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct DialupInFlight {
+    deliver_at: Duration,
+    to_host: bool,
+    payload: Vec<u8>,
+    filler: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct DialupWire {
+    profile: DialupControlProfile,
+    seed: u64,
+    busy_until: [Duration; 2],
+    in_flight: Vec<DialupInFlight>,
+    background_debt: u128,
+    background_offered: u64,
+}
+
+#[cfg(test)]
+impl DialupWire {
+    fn new(profile: DialupControlProfile, seed: u64) -> Self {
+        Self {
+            profile,
+            seed,
+            busy_until: [Duration::ZERO; 2],
+            in_flight: Vec::new(),
+            background_debt: 0,
+            background_offered: 0,
+        }
+    }
+
+    fn background_offered(&self) -> u64 {
+        self.background_offered
+    }
+
+    fn pump_background(&mut self, now: Duration, elapsed: Duration) {
+        self.background_debt = self.background_debt.saturating_add(
+            u128::from(self.profile.background_wire_bps).saturating_mul(elapsed.as_nanos()),
+        );
+        let charged_bytes = self
+            .profile
+            .background_payload_bytes
+            .saturating_add(self.profile.wire_overhead_bytes);
+        let charge = (charged_bytes as u128)
+            .saturating_mul(8)
+            .saturating_mul(1_000_000_000);
+        while self.background_debt >= charge {
+            self.background_debt -= charge;
+            let packet_counter = self.background_offered;
+            self.background_offered += 1;
+            let _ = self.admit(
+                now,
+                true,
+                vec![0; self.profile.background_payload_bytes],
+                DialupLossKey::background(packet_counter),
+            );
+        }
+    }
+
+    fn queued_wire_bytes(&self, now: Duration, to_host: bool) -> u64 {
+        let backlog = self.busy_until[usize::from(to_host)].saturating_sub(now);
+        let numerator = backlog
+            .as_nanos()
+            .saturating_mul(u128::from(self.profile.link_bps));
+        let denominator = 8_000_000_000_u128;
+        u64::try_from(numerator.div_ceil(denominator)).unwrap_or(u64::MAX)
+    }
+
+    fn admit(
+        &mut self,
+        now: Duration,
+        to_host: bool,
+        payload: Vec<u8>,
+        loss_key: DialupLossKey,
+    ) -> Option<Duration> {
+        let charged_bytes = payload
+            .len()
+            .saturating_add(self.profile.wire_overhead_bytes);
+        let queued_bytes = self.queued_wire_bytes(now, to_host);
+        if queued_bytes.saturating_add(charged_bytes as u64) > self.profile.queue_bytes {
+            return None;
+        }
+
+        let slot = usize::from(to_host);
+        let transmit_start = self.busy_until[slot].max(now);
+        let transmit_end =
+            transmit_start + serialization_time(charged_bytes, self.profile.link_bps);
+        self.busy_until[slot] = transmit_end;
+
+        if loss_key.draw(self.seed) % 1_000 < self.profile.loss_permille {
+            return None;
+        }
+
+        let deliver_at = transmit_end + self.profile.one_way_delay;
+        self.in_flight.push(DialupInFlight {
+            deliver_at,
+            to_host,
+            payload,
+            filler: loss_key.stream == 2,
+        });
+        Some(deliver_at)
+    }
+
+    fn due(&mut self, now: Duration) -> Vec<DialupInFlight> {
+        let mut due = Vec::new();
+        let mut pending = Vec::with_capacity(self.in_flight.len());
+        for packet in std::mem::take(&mut self.in_flight) {
+            if packet.deliver_at <= now {
+                due.push(packet);
+            } else {
+                pending.push(packet);
+            }
+        }
+        self.in_flight = pending;
+        due.sort_by_key(|packet| packet.deliver_at);
+        due
+    }
+}
+
+#[cfg(test)]
+const DIALUP_DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+#[cfg(test)]
+fn dialup_digest_packet(mut digest: u64, payload: &[u8]) -> u64 {
+    for byte in (payload.len() as u64).to_le_bytes().iter().chain(payload) {
+        digest ^= u64::from(*byte);
+        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    digest
+}
+
+#[cfg(test)]
+fn dialup_wire_packet_counter(wire: &[u8]) -> u64 {
+    let kind = crate::reliable_udp_packet_kind(wire);
+    let kind_tag = wire.first().copied().unwrap_or_default() & 0x7f;
+    let packet_counter = match kind {
+        Some(crate::ReliableUdpPacketKind::Data) => crate::decode_reliable_udp_data_fragment(wire)
+            .ok()
+            .map(|packet| packet.packet_number),
+        Some(crate::ReliableUdpPacketKind::Check) => crate::decode_reliable_udp_check(wire)
+            .ok()
+            .map(|packet| packet.packet_number),
+        Some(crate::ReliableUdpPacketKind::Connect) => crate::decode_reliable_udp_connect(wire)
+            .ok()
+            .flatten()
+            .map(|packet| packet.packet_number),
+        Some(crate::ReliableUdpPacketKind::ConnectOk) => {
+            crate::decode_reliable_udp_connect_ok(wire)
+                .ok()
+                .map(|packet| packet.packet_number)
+        }
+        Some(crate::ReliableUdpPacketKind::Close) => crate::decode_reliable_udp_close(wire)
+            .ok()
+            .map(|packet| packet.packet_number),
+        _ => None,
+    }
+    .map(u64::from)
+    .unwrap_or_else(|| dialup_digest_packet(DIALUP_DIGEST_OFFSET, wire) & 0xffff_ffff);
+    (u64::from(kind_tag) << 56) | packet_counter
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct DialupScheduler {
+    wire: DialupWire,
+    emissions: BTreeMap<(bool, u64), u32>,
+    initial_copy_counts: Vec<usize>,
+}
+
+#[cfg(test)]
+impl DialupScheduler {
+    fn new(profile: DialupControlProfile, seed: u64) -> Self {
+        Self {
+            wire: DialupWire::new(profile, seed),
+            emissions: BTreeMap::new(),
+            initial_copy_counts: Vec::new(),
+        }
+    }
+
+    fn schedule(
+        &mut self,
+        endpoint: &ReliableUdpEndpointCore,
+        peer: SocketAddr,
+        step: ReliableUdpStep,
+        now: Duration,
+        to_host: bool,
+    ) -> Vec<ReliableUdpEvent> {
+        for datagram in step.datagrams {
+            let packet_counter = dialup_wire_packet_counter(&datagram.payload);
+            let emission = self.emissions.entry((to_host, packet_counter)).or_default();
+            let current_emission = *emission;
+            *emission = emission.saturating_add(1);
+            let copies = endpoint
+                .redundant_copies_for(peer, &datagram.payload)
+                .saturating_add(1);
+            if to_host
+                && current_emission == 0
+                && crate::reliable_udp_packet_kind(&datagram.payload)
+                    == Some(crate::ReliableUdpPacketKind::Data)
+            {
+                self.initial_copy_counts.push(copies);
+            }
+            for copy in 0..copies {
+                let _ = self.wire.admit(
+                    now,
+                    to_host,
+                    datagram.payload.clone(),
+                    DialupLossKey::endpoint(to_host, packet_counter, current_emission, copy as u32),
+                );
+            }
+        }
+        step.events
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct DialupObservation {
+    profile: DialupControlProfile,
+    expected_bodies: Vec<Vec<u8>>,
+    sent_at: Vec<Duration>,
+    expected_digest: u64,
+    received_digest: u64,
+    delivered_ticks: Vec<u32>,
+    total_samples: Vec<Duration>,
+    added_samples: Vec<Duration>,
+    payloads_exact: bool,
+    disconnects: Vec<crate::ReliableUdpDisconnectReason>,
+}
+
+#[cfg(test)]
+impl DialupObservation {
+    fn new(profile: DialupControlProfile) -> Self {
+        Self {
+            profile,
+            expected_bodies: Vec::new(),
+            sent_at: Vec::new(),
+            expected_digest: DIALUP_DIGEST_OFFSET,
+            received_digest: DIALUP_DIGEST_OFFSET,
+            delivered_ticks: Vec::new(),
+            total_samples: Vec::new(),
+            added_samples: Vec::new(),
+            payloads_exact: true,
+            disconnects: Vec::new(),
+        }
+    }
+
+    fn record_sent(&mut self, body: Vec<u8>, now: Duration) {
+        self.expected_digest = dialup_digest_packet(self.expected_digest, &body);
+        self.expected_bodies.push(body);
+        self.sent_at.push(now);
+    }
+
+    fn observe(&mut self, on_host: bool, events: Vec<ReliableUdpEvent>, now: Duration) {
+        for event in events {
+            match event {
+                ReliableUdpEvent::Packet { payload, .. } if on_host => {
+                    self.received_digest = dialup_digest_packet(self.received_digest, &payload);
+                    let packet = crate::transport::parse_complete_packet(&payload)
+                        .ok()
+                        .flatten()
+                        .and_then(|message| match message {
+                            crate::ControlMessage::Control(packet) => Some(packet),
+                            _ => None,
+                        });
+                    let Some(packet) = packet else {
+                        self.payloads_exact = false;
+                        continue;
+                    };
+                    let tick = packet.tick();
+                    let index = tick as usize;
+                    self.payloads_exact &= packet.client_id() == 1
+                        && self
+                            .expected_bodies
+                            .get(index)
+                            .is_some_and(|expected| expected == &payload);
+                    self.delivered_ticks.push(tick);
+                    if index >= self.profile.warmup_controls {
+                        let Some(sent_at) = self.sent_at.get(index) else {
+                            self.payloads_exact = false;
+                            continue;
+                        };
+                        let total = now.saturating_sub(*sent_at);
+                        self.total_samples.push(total);
+                        self.added_samples
+                            .push(total.saturating_sub(self.profile.one_way_delay));
+                    }
+                }
+                ReliableUdpEvent::Packet { .. } => self.payloads_exact = false,
+                ReliableUdpEvent::Disconnected { reason, .. } => self.disconnects.push(reason),
+                ReliableUdpEvent::Connected { .. } | ReliableUdpEvent::Puncher(_) => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct DialupControlReport {
+    total_samples: Vec<Duration>,
+    added_samples: Vec<Duration>,
+    delivered_ticks: Vec<u32>,
+    payloads_exact: bool,
+    expected_digest: u64,
+    received_digest: u64,
+    host_status: Option<crate::ReliableUdpPeerStatus>,
+    client_status: Option<crate::ReliableUdpPeerStatus>,
+    disconnects: Vec<crate::ReliableUdpDisconnectReason>,
+    initial_copy_counts: Vec<usize>,
+}
+
+#[cfg(test)]
+fn run_dialup_control(seed: u64) -> DialupControlReport {
+    let profile = dialup_control_profile();
+    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40_000);
+    let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40_001);
+    let mut host = ReliableUdpEndpointCore::new_at(Duration::ZERO);
+    let mut client = ReliableUdpEndpointCore::new_at(Duration::ZERO);
+
+    // Establish the real endpoints without impairments; setup is outside the
+    // client-control measurement, just as it is for the public transport rig.
+    let mut pending = host
+        .connect_at(client_addr, Duration::ZERO)
+        .datagrams
+        .into_iter()
+        .map(|datagram| (false, datagram.payload))
+        .collect::<Vec<_>>();
+    for _ in 0..64 {
+        let batch = std::mem::take(&mut pending);
+        if batch.is_empty() {
+            break;
+        }
+        for (to_host, payload) in batch {
+            let step = if to_host {
+                host.receive_at(client_addr, &payload, Duration::ZERO)
+            } else {
+                client.receive_at(host_addr, &payload, Duration::ZERO)
+            };
+            pending.extend(
+                step.datagrams
+                    .into_iter()
+                    .map(|datagram| (!to_host, datagram.payload)),
+            );
+        }
+    }
+    assert_eq!(
+        host.peer_status(client_addr),
+        Some(crate::ReliableUdpPeerStatus::Working),
+        "clean benchmark handshake must establish the host"
+    );
+    assert_eq!(
+        client.peer_status(host_addr),
+        Some(crate::ReliableUdpPeerStatus::Working),
+        "clean benchmark handshake must establish the client"
+    );
+
+    let mut scheduler = DialupScheduler::new(profile, seed);
+    let mut observation = DialupObservation::new(profile);
+    let total_controls = profile.warmup_controls + profile.measured_controls;
+    let last_control_at = profile.control_period * total_controls.saturating_sub(1) as u32;
+    let deadline = last_control_at + profile.drain;
+    let mut next_control_at = Duration::ZERO;
+    let mut tick = 0_u32;
+    let mut now = Duration::ZERO;
+
+    while now <= deadline {
+        if tick < total_controls as u32 && now >= next_control_at {
+            let body = dialup_control_body(tick);
+            observation.record_sent(body.clone(), now);
+            let step = client
+                .send_packet(host_addr, &body)
+                .expect("the established benchmark client accepts PID_Control");
+            let events = scheduler.schedule(&client, host_addr, step, now, true);
+            observation.observe(false, events, now);
+            tick += 1;
+            next_control_at += profile.control_period;
+        }
+
+        scheduler.wire.pump_background(now, STEP);
+        for packet in scheduler.wire.due(now) {
+            if packet.filler {
+                continue;
+            }
+            if packet.to_host {
+                let step = host.receive_at(client_addr, &packet.payload, now);
+                let events = scheduler.schedule(&host, client_addr, step, now, false);
+                observation.observe(true, events, now);
+            } else {
+                let step = client.receive_at(host_addr, &packet.payload, now);
+                let events = scheduler.schedule(&client, host_addr, step, now, true);
+                observation.observe(false, events, now);
+            }
+        }
+
+        let step = host.timer_at(now);
+        let events = scheduler.schedule(&host, client_addr, step, now, false);
+        observation.observe(true, events, now);
+
+        let step = client.timer_at(now);
+        let events = scheduler.schedule(&client, host_addr, step, now, true);
+        observation.observe(false, events, now);
+        now += STEP;
+    }
+
+    DialupControlReport {
+        total_samples: observation.total_samples,
+        added_samples: observation.added_samples,
+        delivered_ticks: observation.delivered_ticks,
+        payloads_exact: observation.payloads_exact,
+        expected_digest: observation.expected_digest,
+        received_digest: observation.received_digest,
+        host_status: host.peer_status(client_addr),
+        client_status: client.peer_status(host_addr),
+        disconnects: observation.disconnects,
+        initial_copy_counts: scheduler.initial_copy_counts,
+    }
+}
+
+#[cfg(test)]
+fn dialup_median_ns(samples: &[Duration]) -> u64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    u64::try_from(percentile(&sorted, 0.5).as_nanos()).expect("dial-up latency fits u64 nanos")
+}
+
+#[cfg(test)]
+fn dialup_sample_nanos(samples: &[Duration]) -> Vec<u64> {
+    samples
+        .iter()
+        .map(|sample| {
+            u64::try_from(sample.as_nanos()).expect("dial-up latency sample fits u64 nanos")
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn dialup_benchmark_report_json() -> String {
+    const SEEDS: [u64; 20] = [
+        0x0000_0000_0000_0001,
+        0x0000_0000_0000_0002,
+        0x0000_0000_0000_0003,
+        0x0000_0000_0000_0005,
+        0x0000_0000_0000_0008,
+        0x0000_0000_0000_000d,
+        0x0000_0000_0000_0015,
+        0x0000_0000_0000_0022,
+        0x0000_0000_0000_0037,
+        0x0000_0000_0000_0059,
+        0x0000_0000_0000_0090,
+        0x0000_0000_0000_00e9,
+        0x0000_0000_0000_0179,
+        0x0000_0000_0000_0262,
+        0x0000_0000_0000_03db,
+        0x0000_0000_0000_063d,
+        0x0000_0000_0000_0a18,
+        0x0000_0000_0000_1055,
+        0x0000_0000_0000_1a6d,
+        0x0000_0000_0000_2ac2,
+    ];
+
+    let profile = dialup_control_profile();
+    let total_controls = profile.warmup_controls + profile.measured_controls;
+    let expected_ticks = (0..total_controls as u32).collect::<Vec<_>>();
+    let mut pooled_total = Vec::with_capacity(SEEDS.len() * profile.measured_controls);
+    let mut pooled_added = Vec::with_capacity(SEEDS.len() * profile.measured_controls);
+    let mut seed_reports = Vec::with_capacity(SEEDS.len());
+
+    for seed in SEEDS {
+        let report = run_dialup_control(seed);
+        assert_eq!(report.total_samples.len(), profile.measured_controls);
+        assert_eq!(report.added_samples.len(), profile.measured_controls);
+        assert_eq!(report.delivered_ticks, expected_ticks);
+        assert!(report.payloads_exact);
+        assert_eq!(report.received_digest, report.expected_digest);
+        assert_eq!(
+            report.host_status,
+            Some(crate::ReliableUdpPeerStatus::Working)
+        );
+        assert_eq!(
+            report.client_status,
+            Some(crate::ReliableUdpPeerStatus::Working)
+        );
+        assert!(report.disconnects.is_empty());
+        assert_eq!(report.initial_copy_counts.len(), total_controls);
+
+        let copy_histogram = report.initial_copy_counts.iter().copied().fold(
+            BTreeMap::<usize, usize>::new(),
+            |mut histogram, copies| {
+                *histogram.entry(copies).or_default() += 1;
+                histogram
+            },
+        );
+        pooled_total.extend_from_slice(&report.total_samples);
+        pooled_added.extend_from_slice(&report.added_samples);
+        seed_reports.push(serde_json::json!({
+            "seed": format!("0x{seed:016x}"),
+            "total_p50_ns": dialup_median_ns(&report.total_samples),
+            "added_p50_ns": dialup_median_ns(&report.added_samples),
+            "total_samples_ns": dialup_sample_nanos(&report.total_samples),
+            "added_samples_ns": dialup_sample_nanos(&report.added_samples),
+            "initial_copy_histogram": copy_histogram,
+            "controls_delivered": report.delivered_ticks.len(),
+            "digest": format!("0x{:016x}", report.received_digest),
+            "host_status": "working",
+            "client_status": "working",
+            "disconnects": 0,
+        }));
+    }
+
+    serde_json::json!({
+        "schema": "clonk-dialup-control-v1",
+        "profile": {
+            "direction": "client-to-host",
+            "control_period_ms": profile.control_period.as_millis(),
+            "link_bps_each_direction": profile.link_bps,
+            "rtt_ms": profile.one_way_delay.as_millis() * 2,
+            "loss_permille": profile.loss_permille,
+            "loss_model": "independent-counter-keyed-after-serialization",
+            "background_direction": "client-to-host",
+            "background_wire_bps": profile.background_wire_bps,
+            "background_payload_bytes": profile.background_payload_bytes,
+            "queue_bytes": profile.queue_bytes,
+            "wire_overhead_bytes": profile.wire_overhead_bytes,
+            "warmup_controls": profile.warmup_controls,
+            "measured_controls": profile.measured_controls,
+            "drain_ms": profile.drain.as_millis(),
+        },
+        "pooled": {
+            "samples": pooled_total.len(),
+            "total_p50_ns": dialup_median_ns(&pooled_total),
+            "added_p50_ns": dialup_median_ns(&pooled_added),
+        },
+        "seeds": seed_reports,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod dialup_control_tests {
+    use super::*;
+
+    #[test]
+    fn dialup_profile_pins_the_acceptance_conditions() {
+        let profile = dialup_control_profile();
+
+        assert_eq!(profile.control_period, Duration::from_millis(56));
+        assert_eq!(profile.link_bps, 33_600);
+        assert_eq!(profile.one_way_delay, Duration::from_millis(150));
+        assert_eq!(profile.loss_permille, 20);
+        assert_eq!(profile.background_wire_bps, 20_000);
+        assert_eq!(profile.background_payload_bytes, 512);
+        assert_eq!(profile.queue_bytes, 4_200);
+        assert_eq!(profile.wire_overhead_bytes, 32);
+        assert_eq!(profile.warmup_controls, 256);
+        assert_eq!(profile.measured_controls, 2_049);
+        assert_eq!(profile.drain, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn dialup_wire_charges_udp_ip_bytes_before_propagation() {
+        let mut profile = dialup_control_profile();
+        profile.loss_permille = 0;
+        let mut wire = DialupWire::new(profile, 1);
+
+        let delivered_at = wire
+            .admit(
+                Duration::ZERO,
+                true,
+                vec![0; 388],
+                DialupLossKey::endpoint(true, 0, 0, 0),
+            )
+            .expect("a lossless empty queue admits the packet");
+
+        assert_eq!(delivered_at, Duration::from_millis(250));
+        assert!(wire.due(Duration::from_millis(249)).is_empty());
+        assert_eq!(wire.due(Duration::from_millis(250)).len(), 1);
+    }
+
+    #[test]
+    fn dialup_loss_is_counter_keyed_across_copy_policies() {
+        let single = dialup_loss_trace(0x5eed_1234, 1_000, 1);
+        let tripled = dialup_loss_trace(0x5eed_1234, 1_000, 3);
+        let original = |trace: &BTreeMap<(u64, u32), bool>| {
+            trace
+                .iter()
+                .filter_map(|(&(counter, copy), &lost)| (copy == 0).then_some((counter, lost)))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(original(&single), original(&tripled));
+        assert!(
+            original(&single).iter().any(|(_, lost)| *lost),
+            "the fixed trace must exercise loss"
+        );
+    }
+
+    #[test]
+    fn dialup_background_rate_counts_wire_bytes() {
+        let mut profile = dialup_control_profile();
+        profile.loss_permille = 0;
+        let mut wire = DialupWire::new(profile, 1);
+
+        wire.pump_background(Duration::ZERO, Duration::from_millis(1_088));
+
+        assert_eq!(wire.background_offered(), 5);
+        assert_eq!(wire.queued_wire_bytes(Duration::ZERO, true), 5 * 544);
+        assert_eq!(wire.queued_wire_bytes(Duration::ZERO, false), 0);
+    }
+
+    #[test]
+    fn dialup_sample_is_a_real_one_player_pid_control() {
+        // The client in central mode sends its own `PID_Control` to the host
+        // (oracle-src-pinned src/C4GameControlNetwork.cpp:156-168).
+        let body = dialup_control_body(7);
+        let message = crate::transport::parse_complete_packet(&body)
+            .expect("the generated PID_Control parses")
+            .expect("PID_Control is not ignored");
+        let crate::ControlMessage::Control(packet) = message else {
+            panic!("expected PID_Control, got {message:?}");
+        };
+        let frame = crate::decode_control_packet(&packet).expect("the control list decodes");
+
+        assert_eq!((frame.client_id, frame.tick), (1, 7));
+        assert_eq!(
+            frame.controls,
+            vec![clonk_engine::ControlPacket::PlayerControl(
+                clonk_engine::PlayerControlData {
+                    player: 0,
+                    command: 1,
+                    data: 0,
+                    by_client: 1,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn dialup_run_preserves_control_integrity_and_raw_samples() {
+        let profile = dialup_control_profile();
+        let report = run_dialup_control(0x5eed_1234);
+        let total_controls = profile.warmup_controls + profile.measured_controls;
+
+        assert_eq!(report.total_samples.len(), profile.measured_controls);
+        assert_eq!(report.added_samples.len(), profile.measured_controls);
+        assert_eq!(
+            report.delivered_ticks,
+            (0..total_controls as u32).collect::<Vec<_>>()
+        );
+        assert!(report.payloads_exact);
+        assert_eq!(report.received_digest, report.expected_digest);
+        assert_eq!(
+            report.host_status,
+            Some(crate::ReliableUdpPeerStatus::Working)
+        );
+        assert_eq!(
+            report.client_status,
+            Some(crate::ReliableUdpPeerStatus::Working)
+        );
+        assert!(report.disconnects.is_empty());
+        assert_eq!(report.initial_copy_counts.len(), total_controls);
+        assert!(report
+            .total_samples
+            .iter()
+            .zip(&report.added_samples)
+            .all(|(total, added)| *added == total.saturating_sub(profile.one_way_delay)));
+    }
+
+    #[test]
+    #[ignore = "explicit deterministic performance report"]
+    fn dialup_20_seed_report() {
+        println!("{}", dialup_benchmark_report_json());
+    }
+}
