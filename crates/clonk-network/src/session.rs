@@ -30,6 +30,27 @@ use crate::{
     TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
 };
 
+#[cfg(test)]
+thread_local! {
+    static LIVENESS_TIMER_ARMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn new_liveness_timer(deadline: tokio::time::Instant) -> Pin<Box<tokio::time::Sleep>> {
+    #[cfg(test)]
+    LIVENESS_TIMER_ARMS.set(LIVENESS_TIMER_ARMS.get() + 1);
+    Box::pin(tokio::time::sleep_until(deadline))
+}
+
+#[cfg(test)]
+fn reset_liveness_timer_arms() {
+    LIVENESS_TIMER_ARMS.set(0);
+}
+
+#[cfg(test)]
+fn liveness_timer_arms() -> usize {
+    LIVENESS_TIMER_ARMS.get()
+}
+
 mod api;
 mod client_loop;
 mod client_routes;
@@ -273,6 +294,33 @@ mod tests {
         stats.record_arrival(7, 103, reset_reached_at + Duration::from_millis(500));
         stats.mark_consumed(103, reset_reached_at + Duration::from_secs(1), [7]);
         assert_eq!(stats.wait_ms(7), 5);
+    }
+
+    #[test]
+    fn repeated_performance_observations_consider_tick_retention_once() {
+        let reached_at = tokio::time::Instant::now();
+        let mut stats = ClientPerformanceStats::new(2);
+
+        stats.record_cadence(10, reached_at);
+        for client_id in 1..=24 {
+            stats.record_arrival(client_id, 10, reached_at);
+        }
+        stats.mark_consumed(10, reached_at, 1..=24);
+
+        assert_eq!(stats.retention_considerations(), 1);
+    }
+
+    #[test]
+    fn unbounded_performance_history_does_not_duplicate_tick_tracking() {
+        let reached_at = tokio::time::Instant::now();
+        let mut stats = ClientPerformanceStats::new(0);
+
+        for tick in 0..1_024 {
+            stats.record_cadence(tick, reached_at);
+        }
+
+        assert_eq!(stats.tracked_tick_count(), 0);
+        assert_eq!(stats.retention_considerations(), 0);
     }
 
     fn tcp_frame(payload: &[u8]) -> Vec<u8> {
@@ -619,6 +667,7 @@ mod tests {
                         sender,
                         retire,
                         post_failure: PostFailureBuffer::default(),
+                        udp: None,
                     },
                 },
             )
@@ -4993,6 +5042,52 @@ mod tests {
                 ..
             }) if status == inbound
         ));
+
+        retire_tx.send_replace(true);
+        timeout(EVENT_WAIT, task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_route_reuses_its_liveness_timer_across_packets() {
+        let (client_stream, peer_stream) = duplex(4_096);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (retire_tx, retire_rx) = watch::channel(false);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        reset_liveness_timer_arms();
+        let task = tokio::spawn(run_client_route(
+            1,
+            11,
+            None,
+            crate::ControlTransport::new(client_stream),
+            outbound_tx.clone(),
+            outbound_rx,
+            retire_rx,
+            event_tx,
+            ConnectionLivenessState::new_accepted_system(),
+        ));
+
+        for target_tick in 1..=3 {
+            let status = NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 1,
+                target_tick,
+            };
+            peer.send_message(ControlMessage::Status(status))
+                .await
+                .unwrap();
+            assert!(matches!(
+                timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+                Some(ClientRouteEvent::Packet {
+                    packet: crate::transport::InboundPacket::Message(ControlMessage::Status(
+                        received,
+                    )),
+                    ..
+                }) if received == status
+            ));
+        }
+
+        assert_eq!(liveness_timer_arms(), 1);
 
         retire_tx.send_replace(true);
         timeout(EVENT_WAIT, task).await.unwrap().unwrap();
@@ -11517,6 +11612,7 @@ mod tests {
             crate::NetworkIoStatistics::default(),
             admission_tx,
             host_tx,
+            None,
         );
         let admission = tokio::spawn(async move {
             let request = admission_rx.recv().await.unwrap();

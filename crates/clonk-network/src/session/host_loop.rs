@@ -449,6 +449,7 @@ pub(crate) async fn run_host(
                 match accept_result {
                     Ok(stream) => {
                         let addr = stream.peer_addr();
+                        let udp_outbox = stream.outbox_registration();
                         let connection_id = state.next_connection_id;
                         state.next_connection_id = state.next_connection_id.wrapping_add(1);
                         if let Err(error) = stream.bind_statistics_connection(connection_id).await {
@@ -473,6 +474,7 @@ pub(crate) async fn run_host(
                             io_statistics.clone(),
                             admission_tx.clone(),
                             client_tx.clone(),
+                            Some(udp_outbox),
                         );
                     }
                     Err(error) => {
@@ -917,6 +919,7 @@ fn spawn_host_accept(
         io_statistics,
         admission_tx,
         host_tx,
+        None,
     );
 }
 
@@ -933,6 +936,7 @@ pub(crate) fn spawn_host_transport<S>(
     io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
     host_tx: mpsc::UnboundedSender<HostLoopMessage>,
+    udp_outbox: Option<crate::udp_session::ReliableUdpOutboxRegistration>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -974,8 +978,54 @@ pub(crate) fn spawn_host_transport<S>(
             });
             return;
         };
-        let (outbound, outbound_rx) = HostOutboundSender::channel();
-        let retire_rx = outbound.subscribe_retire();
+        let udp_outbound = match udp_outbox {
+            Some(registration) => match registration.promote(transport.outbound_packet_log()).await
+            {
+                Ok(outbound) => Some(outbound),
+                Err(error) => {
+                    let _ = host_tx.send(HostLoopMessage::AdmissionFailed {
+                        connection_id,
+                        error: format!("failed to promote UDP route {addr}: {error}"),
+                    });
+                    return;
+                }
+            },
+            None => None,
+        };
+        let (outbound, mut client_task): (
+            HostOutboundSender,
+            Pin<Box<dyn Future<Output = ()> + Send>>,
+        ) = if let Some(udp_outbound) = udp_outbound {
+            let outbound = HostOutboundSender::from_udp(udp_outbound);
+            let retire_rx = outbound.subscribe_retire();
+            let task = UdpClientTask {
+                local_connection_id: connection_id,
+                remote_connection_id,
+                client_id,
+                transport,
+                outbound: outbound.clone(),
+                retire_rx,
+                host_tx: host_tx.clone(),
+                liveness,
+            }
+            .run();
+            (outbound, Box::pin(task))
+        } else {
+            let (outbound, outbound_rx) = HostOutboundSender::channel();
+            let retire_rx = outbound.subscribe_retire();
+            let task = ClientTask {
+                local_connection_id: connection_id,
+                remote_connection_id,
+                client_id,
+                transport,
+                outbound_rx,
+                retire_rx,
+                host_tx: host_tx.clone(),
+                liveness,
+            }
+            .run();
+            (outbound, Box::pin(task))
+        };
         let (setup_tx, setup_rx) = oneshot::channel();
         if host_tx
             .send(HostLoopMessage::ClientAccepted {
@@ -995,18 +1045,6 @@ pub(crate) fn spawn_host_transport<S>(
         // main thread prepares SendJoinData
         // (src/C4Network2IO.cpp:611-623,1155-1191;
         // src/C4Network2.cpp:1107-1133,1836-1865).
-        let client_task = ClientTask {
-            local_connection_id: connection_id,
-            remote_connection_id,
-            client_id,
-            transport,
-            outbound_rx,
-            retire_rx,
-            host_tx: host_tx.clone(),
-            liveness,
-        }
-        .run();
-        tokio::pin!(client_task);
         // The owning host loop performs C++'s synchronous SendJoinData work
         // and queues the complete JoinData/address prefix before releasing
         // this transport gate. The accepted route still services inbound

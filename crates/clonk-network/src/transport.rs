@@ -446,6 +446,10 @@ impl<S> ControlTransport<S> {
             .next_packet_counter()
     }
 
+    pub(crate) fn outbound_packet_log(&self) -> Arc<Mutex<crate::RecoverablePacketLog>> {
+        self.outbound_packet_log.clone()
+    }
+
     /// Reads the next supported logical message, transparently consuming any
     /// known C++ packet types whose handlers have not been ported yet.
     ///
@@ -1026,14 +1030,14 @@ fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
             LegacyControlError::EmptyPayload,
         ));
     }
-    let (_, payload_len) =
+    let (controls, payload_len) =
         decode_control_list_prefix(payload).map_err(TransportError::ControlDecode)?;
     let payload = payload[..payload_len].to_vec();
-    Ok(ControlMessage::Control(
-        ControlPacket::builder(client_id, tick as Tick)
-            .timestamp_ms(0)
-            .payload(payload),
-    ))
+    let packet = ControlPacket::builder(client_id, tick as Tick)
+        .timestamp_ms(0)
+        .payload(payload);
+    packet.prime_decoded_control_list(controls, payload_len);
+    Ok(ControlMessage::Control(packet))
 }
 
 fn parse_request(data: &[u8]) -> Result<ControlMessage, TransportError> {

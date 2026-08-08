@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ClientId;
@@ -170,13 +171,37 @@ impl ClosedConnectionRouter {
 #[derive(Debug, Default)]
 pub struct RecoverablePacketLog {
     next_packet_counter: u32,
-    packets: VecDeque<(u32, Vec<u8>)>,
+    packets: VecDeque<(u32, RecoverablePacketPayload)>,
     post_mortem_sent: bool,
+}
+
+#[derive(Debug)]
+enum RecoverablePacketPayload {
+    Owned(Vec<u8>),
+    Shared(Arc<[u8]>),
+}
+
+impl AsRef<[u8]> for RecoverablePacketPayload {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Owned(packet) => packet,
+            Self::Shared(packet) => packet,
+        }
+    }
 }
 
 impl RecoverablePacketLog {
     pub fn record_outbound(&mut self, packet: Vec<u8>) -> Option<u32> {
+        self.record_payload(RecoverablePacketPayload::Owned(packet))
+    }
+
+    pub(crate) fn record_shared_outbound(&mut self, packet: Arc<[u8]>) -> Option<u32> {
+        self.record_payload(RecoverablePacketPayload::Shared(packet))
+    }
+
+    fn record_payload(&mut self, packet: RecoverablePacketPayload) -> Option<u32> {
         if packet
+            .as_ref()
             .first()
             .is_none_or(|packet_type| *packet_type < crate::PACKET_LOG_START)
         {
@@ -197,6 +222,15 @@ impl RecoverablePacketLog {
 
     pub fn logged_packet_count(&self) -> usize {
         self.packets.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn newest_packet_shares_storage_with(&self, packet: &Arc<[u8]>) -> bool {
+        self.packets
+            .front()
+            .is_some_and(|(_, logged)| {
+                matches!(logged, RecoverablePacketPayload::Shared(logged) if Arc::ptr_eq(logged, packet))
+            })
     }
 
     pub fn acknowledge_received(&mut self, next_inbound_packet: u32) {
@@ -221,7 +255,7 @@ impl RecoverablePacketLog {
                 .packets
                 .iter()
                 .rev()
-                .map(|(_, packet)| packet.clone())
+                .map(|(_, packet)| packet.as_ref().to_vec())
                 .collect(),
         })
     }
@@ -260,7 +294,12 @@ mod tests {
         log.acknowledge_received(0);
         assert_eq!(log.logged_packet_count(), 3);
         log.acknowledge_received(2);
-        assert_eq!(log.packets, VecDeque::from([(2, vec![0x12, 0xcc])]));
+        assert_eq!(
+            log.packets
+                .front()
+                .map(|(number, packet)| (*number, packet.as_ref())),
+            Some((2, [0x12, 0xcc].as_slice()))
+        );
         assert_eq!(log.next_packet_counter(), 3);
     }
 

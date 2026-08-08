@@ -24,7 +24,7 @@ use std::{
 
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, Notify},
     task::JoinHandle,
 };
 
@@ -75,6 +75,12 @@ enum HubCommand {
         connection_id: u32,
         response: oneshot::Sender<io::Result<()>>,
     },
+    PromoteOutbound {
+        peer: SocketAddr,
+        generation: u64,
+        packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
+        response: oneshot::Sender<io::Result<ReliableUdpRouteSender>>,
+    },
     Send {
         peer: SocketAddr,
         generation: u64,
@@ -91,6 +97,736 @@ enum HubCommand {
     Shutdown {
         completion: Option<oneshot::Sender<()>>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct UdpOutboxRouteId(u64);
+
+struct UdpOutboxRouteState {
+    accepting: bool,
+    retirement_started: bool,
+    peer: SocketAddr,
+    generation: u64,
+    packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
+    drained: Arc<UdpRouteDrain>,
+}
+
+#[derive(Clone)]
+enum UdpPreparedPayload {
+    Packet(Arc<[u8]>),
+    Failed(Arc<str>),
+}
+
+enum UdpOutboxWork {
+    Single {
+        route: UdpOutboxRouteId,
+        payload: UdpPreparedPayload,
+    },
+    Many {
+        routes: VecDeque<UdpOutboxRouteId>,
+        payload: UdpPreparedPayload,
+    },
+    Retire {
+        route: UdpOutboxRouteId,
+    },
+    Close {
+        route: UdpOutboxRouteId,
+        payload: UdpPreparedPayload,
+    },
+}
+
+enum UdpOutboxAction {
+    Send {
+        route: UdpOutboxRouteId,
+        peer: SocketAddr,
+        generation: u64,
+        payload: Arc<[u8]>,
+    },
+    Failed {
+        route: UdpOutboxRouteId,
+        peer: SocketAddr,
+        generation: u64,
+        error: Arc<str>,
+    },
+    Retired {
+        route: UdpOutboxRouteId,
+        peer: SocketAddr,
+        generation: u64,
+    },
+    Close {
+        route: UdpOutboxRouteId,
+        peer: SocketAddr,
+        generation: u64,
+        payload: Option<Arc<[u8]>>,
+    },
+}
+
+#[derive(Default)]
+struct UdpRouteDrain {
+    complete: AtomicBool,
+    notify: Notify,
+}
+
+impl UdpRouteDrain {
+    fn finish(&self) {
+        if !self.complete.swap(true, Ordering::AcqRel) {
+            self.notify.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.complete.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Default)]
+struct UdpLogicalOutbox {
+    next_route: u64,
+    routes: BTreeMap<UdpOutboxRouteId, UdpOutboxRouteState>,
+    queue: VecDeque<UdpOutboxWork>,
+    #[cfg(test)]
+    wake_count: usize,
+}
+
+impl UdpLogicalOutbox {
+    #[cfg(test)]
+    fn register_route(
+        &mut self,
+        packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
+    ) -> UdpOutboxRouteId {
+        self.register_live_route(
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            0,
+            packet_log,
+            Arc::new(UdpRouteDrain::default()),
+        )
+    }
+
+    fn register_live_route(
+        &mut self,
+        peer: SocketAddr,
+        generation: u64,
+        packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
+        drained: Arc<UdpRouteDrain>,
+    ) -> UdpOutboxRouteId {
+        let route = UdpOutboxRouteId(self.next_route);
+        self.next_route = self.next_route.wrapping_add(1);
+        let replaced = self.routes.insert(
+            route,
+            UdpOutboxRouteState {
+                accepting: true,
+                retirement_started: false,
+                peer,
+                generation,
+                packet_log,
+                drained,
+            },
+        );
+        debug_assert!(replaced.is_none());
+        route
+    }
+
+    #[cfg(test)]
+    fn enqueue_single(
+        &mut self,
+        route: UdpOutboxRouteId,
+        payload: Arc<[u8]>,
+    ) -> Result<(), Arc<[u8]>> {
+        self.enqueue_prepared(route, UdpPreparedPayload::Packet(payload))
+            .map_err(|payload| match payload {
+                UdpPreparedPayload::Packet(payload) => payload,
+                UdpPreparedPayload::Failed(_) => {
+                    unreachable!("packet enqueue returned a prepared failure")
+                }
+            })
+    }
+
+    fn enqueue_prepared(
+        &mut self,
+        route: UdpOutboxRouteId,
+        payload: UdpPreparedPayload,
+    ) -> Result<(), UdpPreparedPayload> {
+        if !self.routes.get(&route).is_some_and(|state| state.accepting) {
+            return Err(payload);
+        }
+        self.push(UdpOutboxWork::Single { route, payload });
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn enqueue_many(
+        &mut self,
+        routes: impl IntoIterator<Item = UdpOutboxRouteId>,
+        payload: Arc<[u8]>,
+    ) -> Vec<UdpOutboxRouteId> {
+        self.enqueue_many_prepared(routes, UdpPreparedPayload::Packet(payload))
+    }
+
+    fn enqueue_many_prepared(
+        &mut self,
+        routes: impl IntoIterator<Item = UdpOutboxRouteId>,
+        payload: UdpPreparedPayload,
+    ) -> Vec<UdpOutboxRouteId> {
+        let routes = routes
+            .into_iter()
+            .filter(|route| self.routes.get(route).is_some_and(|state| state.accepting))
+            .collect::<VecDeque<_>>();
+        let accepted = routes.iter().copied().collect::<Vec<_>>();
+        if !routes.is_empty() {
+            self.push(UdpOutboxWork::Many { routes, payload });
+        }
+        accepted
+    }
+
+    fn retire(&mut self, route: UdpOutboxRouteId) -> bool {
+        let Some(state) = self.routes.get_mut(&route) else {
+            return false;
+        };
+        if state.retirement_started || state.drained.complete.load(Ordering::Acquire) {
+            return false;
+        }
+        state.accepting = false;
+        state.retirement_started = true;
+        self.push(UdpOutboxWork::Retire { route });
+        true
+    }
+
+    fn fail_route(&mut self, route: UdpOutboxRouteId) -> bool {
+        let Some(state) = self.routes.get_mut(&route) else {
+            return false;
+        };
+        state.accepting = false;
+
+        let mut retained = VecDeque::with_capacity(self.queue.len());
+        while let Some(work) = self.queue.pop_front() {
+            match work {
+                UdpOutboxWork::Single {
+                    route: work_route,
+                    payload,
+                } if work_route == route => self.record_prepared(route, &payload),
+                UdpOutboxWork::Many {
+                    mut routes,
+                    payload,
+                } => {
+                    let removed = routes.iter().filter(|&&target| target == route).count();
+                    routes.retain(|&target| target != route);
+                    for _ in 0..removed {
+                        self.record_prepared(route, &payload);
+                    }
+                    if !routes.is_empty() {
+                        retained.push_back(UdpOutboxWork::Many { routes, payload });
+                    }
+                }
+                UdpOutboxWork::Retire { route: work_route } if work_route == route => {}
+                UdpOutboxWork::Close {
+                    route: work_route, ..
+                } if work_route == route => {}
+                work => retained.push_back(work),
+            }
+        }
+        self.queue = retained;
+        if let Some(state) = self.routes.remove(&route) {
+            state.drained.finish();
+        }
+        true
+    }
+
+    fn next_action(&mut self) -> Option<UdpOutboxAction> {
+        loop {
+            match self.queue.pop_front()? {
+                UdpOutboxWork::Single { route, payload } => {
+                    if let Some(action) = self.prepare_action(route, payload) {
+                        return Some(action);
+                    }
+                }
+                UdpOutboxWork::Many {
+                    mut routes,
+                    payload,
+                } => {
+                    let Some(route) = routes.pop_front() else {
+                        continue;
+                    };
+                    if !routes.is_empty() {
+                        self.queue.push_front(UdpOutboxWork::Many {
+                            routes,
+                            payload: payload.clone(),
+                        });
+                    }
+                    if let Some(action) = self.prepare_action(route, payload) {
+                        return Some(action);
+                    }
+                }
+                UdpOutboxWork::Retire { route } => {
+                    if let Some((peer, generation)) = self.route_identity(route) {
+                        return Some(UdpOutboxAction::Retired {
+                            route,
+                            peer,
+                            generation,
+                        });
+                    }
+                }
+                UdpOutboxWork::Close { route, payload } => {
+                    if let Some((peer, generation)) = self.route_identity(route) {
+                        let payload = match payload {
+                            UdpPreparedPayload::Packet(payload) => {
+                                self.record(route, &payload);
+                                Some(payload)
+                            }
+                            UdpPreparedPayload::Failed(_) => None,
+                        };
+                        return Some(UdpOutboxAction::Close {
+                            route,
+                            peer,
+                            generation,
+                            payload,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn close_route(&mut self, route: UdpOutboxRouteId, payload: UdpPreparedPayload) -> bool {
+        let Some(state) = self.routes.get_mut(&route) else {
+            return false;
+        };
+        if state.retirement_started {
+            return false;
+        }
+        state.accepting = false;
+        state.retirement_started = true;
+
+        let mut retained = VecDeque::with_capacity(self.queue.len());
+        while let Some(work) = self.queue.pop_front() {
+            match work {
+                UdpOutboxWork::Single {
+                    route: work_route, ..
+                }
+                | UdpOutboxWork::Retire { route: work_route }
+                | UdpOutboxWork::Close {
+                    route: work_route, ..
+                } if work_route == route => {}
+                UdpOutboxWork::Many {
+                    mut routes,
+                    payload,
+                } => {
+                    routes.retain(|&target| target != route);
+                    if !routes.is_empty() {
+                        retained.push_back(UdpOutboxWork::Many { routes, payload });
+                    }
+                }
+                work => retained.push_back(work),
+            }
+        }
+        retained.push_front(UdpOutboxWork::Close { route, payload });
+        self.queue = retained;
+        true
+    }
+
+    fn fail_all(&mut self) {
+        let routes = self.routes.keys().copied().collect::<Vec<_>>();
+        for route in routes {
+            self.fail_route(route);
+        }
+        self.queue.clear();
+    }
+
+    fn prepare_action(
+        &self,
+        route: UdpOutboxRouteId,
+        payload: UdpPreparedPayload,
+    ) -> Option<UdpOutboxAction> {
+        let (peer, generation) = self.route_identity(route)?;
+        Some(match payload {
+            UdpPreparedPayload::Packet(payload) => {
+                self.record(route, &payload);
+                UdpOutboxAction::Send {
+                    route,
+                    peer,
+                    generation,
+                    payload,
+                }
+            }
+            UdpPreparedPayload::Failed(error) => UdpOutboxAction::Failed {
+                route,
+                peer,
+                generation,
+                error,
+            },
+        })
+    }
+
+    fn route_identity(&self, route: UdpOutboxRouteId) -> Option<(SocketAddr, u64)> {
+        self.routes
+            .get(&route)
+            .map(|state| (state.peer, state.generation))
+    }
+
+    fn finish_retire(&mut self, route: UdpOutboxRouteId) {
+        if let Some(state) = self.routes.remove(&route) {
+            state.drained.finish();
+        }
+    }
+
+    fn push(&mut self, work: UdpOutboxWork) {
+        #[cfg(test)]
+        if self.queue.is_empty() {
+            self.wake_count += 1;
+        }
+        self.queue.push_back(work);
+    }
+
+    fn record(&self, route: UdpOutboxRouteId, payload: &Arc<[u8]>) {
+        if let Some(state) = self.routes.get(&route) {
+            state
+                .packet_log
+                .lock()
+                .expect("UDP outbox packet log poisoned")
+                .record_shared_outbound(payload.clone());
+        }
+    }
+
+    fn record_prepared(&self, route: UdpOutboxRouteId, payload: &UdpPreparedPayload) {
+        if let UdpPreparedPayload::Packet(payload) = payload {
+            self.record(route, payload);
+        }
+    }
+
+    #[cfg(test)]
+    fn wake_count(&self) -> usize {
+        self.wake_count
+    }
+
+    #[cfg(test)]
+    fn route_count(&self) -> usize {
+        self.routes.len()
+    }
+}
+
+#[derive(Default)]
+struct UdpSharedOutbox {
+    state: Mutex<UdpLogicalOutbox>,
+    ready: Notify,
+}
+
+impl UdpSharedOutbox {
+    fn register_route(
+        self: &Arc<Self>,
+        peer: SocketAddr,
+        generation: u64,
+        packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
+    ) -> Option<ReliableUdpRouteSender> {
+        let drained = Arc::new(UdpRouteDrain::default());
+        let mut state = self.state.lock().expect("UDP outbox poisoned");
+        if state
+            .routes
+            .values()
+            .any(|route| route.peer == peer && route.generation == generation)
+        {
+            return None;
+        }
+        let route = state.register_live_route(peer, generation, packet_log, drained.clone());
+        drop(state);
+        Some(ReliableUdpRouteSender {
+            lease: Arc::new(UdpRouteLease {
+                outbox: self.clone(),
+                route,
+                drained,
+            }),
+        })
+    }
+
+    fn enqueue(
+        &self,
+        route: UdpOutboxRouteId,
+        payload: UdpPreparedPayload,
+    ) -> Result<(), UdpPreparedPayload> {
+        let mut state = self.state.lock().expect("UDP outbox poisoned");
+        let was_empty = state.queue.is_empty();
+        let result = state.enqueue_prepared(route, payload);
+        drop(state);
+        if was_empty && result.is_ok() {
+            self.ready.notify_one();
+        }
+        result
+    }
+
+    fn enqueue_many(
+        &self,
+        routes: impl IntoIterator<Item = UdpOutboxRouteId>,
+        payload: UdpPreparedPayload,
+    ) -> Vec<UdpOutboxRouteId> {
+        let mut state = self.state.lock().expect("UDP outbox poisoned");
+        let was_empty = state.queue.is_empty();
+        let accepted = state.enqueue_many_prepared(routes, payload);
+        drop(state);
+        if was_empty && !accepted.is_empty() {
+            self.ready.notify_one();
+        }
+        accepted
+    }
+
+    fn retire(&self, route: UdpOutboxRouteId) {
+        let mut state = self.state.lock().expect("UDP outbox poisoned");
+        let was_empty = state.queue.is_empty();
+        let queued = state.retire(route);
+        drop(state);
+        if was_empty && queued {
+            self.ready.notify_one();
+        }
+    }
+
+    fn close(&self, route: UdpOutboxRouteId, payload: UdpPreparedPayload) {
+        let mut state = self.state.lock().expect("UDP outbox poisoned");
+        let was_empty = state.queue.is_empty();
+        let queued = state.close_route(route, payload);
+        drop(state);
+        if was_empty && queued {
+            self.ready.notify_one();
+        }
+    }
+
+    async fn wait_ready(&self) {
+        loop {
+            let notified = self.ready.notified();
+            if !self
+                .state
+                .lock()
+                .expect("UDP outbox poisoned")
+                .queue
+                .is_empty()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn take_action(&self) -> Option<UdpOutboxAction> {
+        self.state
+            .lock()
+            .expect("UDP outbox poisoned")
+            .next_action()
+    }
+
+    #[cfg(test)]
+    async fn next_action(&self) -> UdpOutboxAction {
+        loop {
+            self.wait_ready().await;
+            if let Some(action) = self.take_action() {
+                return action;
+            }
+        }
+    }
+
+    fn fail_route(&self, route: UdpOutboxRouteId) {
+        self.state
+            .lock()
+            .expect("UDP outbox poisoned")
+            .fail_route(route);
+    }
+
+    fn finish_retire(&self, route: UdpOutboxRouteId) {
+        self.state
+            .lock()
+            .expect("UDP outbox poisoned")
+            .finish_retire(route);
+    }
+
+    fn is_accepting(&self, route: UdpOutboxRouteId) -> bool {
+        self.state
+            .lock()
+            .expect("UDP outbox poisoned")
+            .routes
+            .get(&route)
+            .is_some_and(|state| state.accepting)
+    }
+
+    fn fail_all(&self) {
+        match self.state.lock() {
+            Ok(mut state) => state.fail_all(),
+            Err(poisoned) => poisoned.into_inner().fail_all(),
+        }
+    }
+
+    #[cfg(test)]
+    fn route_count(&self) -> usize {
+        self.state.lock().expect("UDP outbox poisoned").routes.len()
+    }
+}
+
+struct UdpOutboxRunGuard(Arc<UdpSharedOutbox>);
+
+impl Drop for UdpOutboxRunGuard {
+    fn drop(&mut self) {
+        self.0.fail_all();
+    }
+}
+
+struct UdpRouteLease {
+    outbox: Arc<UdpSharedOutbox>,
+    route: UdpOutboxRouteId,
+    drained: Arc<UdpRouteDrain>,
+}
+
+impl Drop for UdpRouteLease {
+    fn drop(&mut self) {
+        self.outbox.retire(self.route);
+    }
+}
+
+/// Cloneable established-route sender backed by the one logical UDP outbox
+/// owned by its socket endpoint.
+#[derive(Clone)]
+pub(crate) struct ReliableUdpRouteSender {
+    lease: Arc<UdpRouteLease>,
+}
+
+impl fmt::Debug for ReliableUdpRouteSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReliableUdpRouteSender")
+            .field("route", &self.lease.route)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReliableUdpRouteSender {
+    #[cfg(test)]
+    pub(crate) fn test_sender() -> Self {
+        Arc::new(UdpSharedOutbox::default())
+            .register_route(
+                SocketAddr::from(([127, 0, 0, 1], 1)),
+                0,
+                Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
+            )
+            .expect("test route is unique")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fail(&self) {
+        self.lease.outbox.fail_route(self.lease.route);
+    }
+
+    pub(crate) fn try_send(
+        &self,
+        message: crate::ControlMessage,
+    ) -> Result<(), crate::ControlMessage> {
+        let prepared = prepare_udp_message(message.clone());
+        self.lease
+            .outbox
+            .enqueue(self.lease.route, prepared)
+            .map_err(|_| message)
+    }
+
+    pub(crate) fn try_send_raw(&self, packet: Vec<u8>) -> Result<(), Vec<u8>> {
+        let prepared = match u32::try_from(packet.len()) {
+            Ok(_) => UdpPreparedPayload::Packet(Arc::from(packet.clone())),
+            Err(_) => UdpPreparedPayload::Failed(Arc::from(
+                "send failed: malformed packet: packet exceeds C++ uint32 frame size",
+            )),
+        };
+        self.lease
+            .outbox
+            .enqueue(self.lease.route, prepared)
+            .map_err(|_| packet)
+    }
+
+    pub(crate) fn try_send_many(
+        routes: &[Self],
+        message: crate::ControlMessage,
+    ) -> Option<Vec<bool>> {
+        let first = routes.first()?;
+        if routes
+            .iter()
+            .any(|route| !Arc::ptr_eq(&first.lease.outbox, &route.lease.outbox))
+        {
+            return None;
+        }
+        let accepted = first.lease.outbox.enqueue_many(
+            routes.iter().map(|route| route.lease.route),
+            prepare_udp_message(message),
+        );
+        let accepted = accepted.into_iter().collect::<BTreeSet<_>>();
+        Some(
+            routes
+                .iter()
+                .map(|route| accepted.contains(&route.lease.route))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn retire(&self) {
+        self.lease.outbox.retire(self.lease.route);
+    }
+
+    pub(crate) fn is_accepting(&self) -> bool {
+        self.lease.outbox.is_accepting(self.lease.route)
+    }
+
+    pub(crate) async fn wait_drained(&self) {
+        self.lease.drained.wait().await;
+    }
+
+    pub(crate) fn same_route(&self, other: &Self) -> bool {
+        self.lease.route == other.lease.route
+            && Arc::ptr_eq(&self.lease.outbox, &other.lease.outbox)
+    }
+
+    pub(crate) fn close_with_reply(&self, reply: crate::ConnectionReply) {
+        self.lease.outbox.close(
+            self.lease.route,
+            prepare_udp_message(crate::ControlMessage::ConnectionReply(reply)),
+        );
+    }
+}
+
+fn prepare_udp_message(message: crate::ControlMessage) -> UdpPreparedPayload {
+    match crate::transport::encode_complete_message(message) {
+        Ok(packet) => UdpPreparedPayload::Packet(Arc::from(packet)),
+        Err(error) => UdpPreparedPayload::Failed(Arc::from(format!("send failed: {error}"))),
+    }
+}
+
+pub(crate) struct ReliableUdpOutboxRegistration {
+    peer: SocketAddr,
+    generation: u64,
+    commands: mpsc::Sender<HubCommand>,
+}
+
+impl ReliableUdpOutboxRegistration {
+    pub(crate) async fn promote(
+        self,
+        packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
+    ) -> io::Result<ReliableUdpRouteSender> {
+        let (response, completed) = oneshot::channel();
+        self.commands
+            .send(HubCommand::PromoteOutbound {
+                peer: self.peer,
+                generation: self.generation,
+                packet_log,
+                response,
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "reliable-UDP session hub stopped while promoting an outbound route",
+                )
+            })?;
+        completed.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "reliable-UDP session hub stopped while promoting an outbound route",
+            )
+        })?
+    }
 }
 
 enum PeerInbound {
@@ -225,6 +961,14 @@ impl ReliableUdpPeerStream {
 
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer
+    }
+
+    pub(crate) fn outbox_registration(&self) -> ReliableUdpOutboxRegistration {
+        ReliableUdpOutboxRegistration {
+            peer: self.peer,
+            generation: self.generation,
+            commands: self.commands.clone(),
+        }
     }
 
     /// Binds this physical UDP peer to its high-level Network2 connection ID.
@@ -795,6 +1539,7 @@ impl ReliableUdpSessionHub {
         let (commands, command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
         let (incoming_tx, incoming) = mpsc::channel(INCOMING_PEER_CAPACITY);
         let (puncher_event_tx, puncher_events) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
+        let outbox = Arc::new(UdpSharedOutbox::default());
         let task_commands = commands.clone();
         let task = runtime.spawn(run_hub(
             driver,
@@ -802,6 +1547,7 @@ impl ReliableUdpSessionHub {
             command_rx,
             incoming_tx,
             puncher_event_tx,
+            outbox,
         ));
         Ok(Self {
             local_addr,
@@ -927,7 +1673,12 @@ async fn run_hub(
     mut command_rx: mpsc::Receiver<HubCommand>,
     incoming: mpsc::Sender<io::Result<ReliableUdpPeerStream>>,
     puncher_events: mpsc::Sender<NetpuncherIoEvent>,
+    outbox: Arc<UdpSharedOutbox>,
 ) -> io::Result<()> {
+    // Task cancellation and the hub owner's full-command-queue abort path do
+    // not execute an async shutdown branch. The synchronous guard rejects all
+    // surviving senders and releases every drain waiter on every exit.
+    let _outbox_guard = UdpOutboxRunGuard(outbox.clone());
     let mut peers = BTreeMap::<SocketAddr, ConnectedPeer>::new();
     let mut pending_connects =
         BTreeMap::<SocketAddr, oneshot::Sender<io::Result<ReliableUdpPeerStream>>>::new();
@@ -942,6 +1693,7 @@ async fn run_hub(
         tokio::select! {
             command = command_rx.recv() => {
                 let Some(command) = command else {
+                    outbox.fail_all();
                     close_all(&mut driver, &mut peers, &mut pending_connects).await;
                     return Ok(());
                 };
@@ -1055,6 +1807,30 @@ async fn run_hub(
                         };
                         let _ = response.send(result);
                     }
+                    HubCommand::PromoteOutbound {
+                        peer,
+                        generation,
+                        packet_log,
+                        response,
+                    } => {
+                        let peer = canonical_reliable_udp_peer_address(peer);
+                        let result = if peer_generation_matches(&peers, peer, generation) {
+                            outbox.register_route(peer, generation, packet_log).ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::AlreadyExists,
+                                    format!(
+                                        "reliable-UDP peer {peer} generation {generation} already has an outbound route"
+                                    ),
+                                )
+                            })
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::NotConnected,
+                                format!("reliable-UDP peer {peer} is no longer connected"),
+                            ))
+                        };
+                        let _ = response.send(result);
+                    }
                     HubCommand::Send {
                         peer,
                         generation,
@@ -1125,11 +1901,139 @@ async fn run_hub(
                         .await;
                     }
                     HubCommand::Shutdown { completion } => {
+                        outbox.fail_all();
                         close_all(&mut driver, &mut peers, &mut pending_connects).await;
                         if let Some(completion) = completion {
                             let _ = completion.send(());
                         }
                         return Ok(());
+                    }
+                }
+            }
+            _ = outbox.wait_ready() => {
+                let Some(action) = outbox.take_action() else {
+                    continue;
+                };
+                match action {
+                    UdpOutboxAction::Send {
+                        route,
+                        peer,
+                        generation,
+                        payload,
+                    } => {
+                        if !peer_generation_matches(&peers, peer, generation) {
+                            outbox.fail_route(route);
+                            continue;
+                        }
+                        match driver.send_packet(peer, &payload).await {
+                            Ok(events) => {
+                                dispatch_events(
+                                    &mut driver,
+                                    events,
+                                    &commands,
+                                    &incoming,
+                                    &puncher_events,
+                                    &mut peers,
+                                    &mut pending_connects,
+                                    &mut next_peer_generation,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                // C4Network2IO::Broadcast combines every Send
+                                // result with `&=`. Retain this route's accepted
+                                // suffix, then let the outbox continue with the
+                                // later targets (oracle-src-pinned
+                                // src/C4Network2IO.cpp:378-404,1437-1477).
+                                outbox.fail_route(route);
+                                fail_peer(&mut peers, peer, generation, error.to_string());
+                                let _ = driver.close_peer(peer).await;
+                            }
+                        }
+                    }
+                    UdpOutboxAction::Failed {
+                        route,
+                        peer,
+                        generation,
+                        error,
+                    } => {
+                        outbox.fail_route(route);
+                        if peer_generation_matches(&peers, peer, generation) {
+                            fail_peer(&mut peers, peer, generation, error.to_string());
+                            let _ = driver.close_peer(peer).await;
+                        }
+                    }
+                    UdpOutboxAction::Retired {
+                        route,
+                        peer,
+                        generation,
+                    } => {
+                        if peer_generation_matches(&peers, peer, generation) {
+                            match driver.close_peer(peer).await {
+                                Ok(events) => {
+                                    dispatch_events(
+                                        &mut driver,
+                                        events,
+                                        &commands,
+                                        &incoming,
+                                        &puncher_events,
+                                        &mut peers,
+                                        &mut pending_connects,
+                                        &mut next_peer_generation,
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    fail_peer(&mut peers, peer, generation, error.to_string())
+                                }
+                            }
+                        }
+                        outbox.finish_retire(route);
+                    }
+                    UdpOutboxAction::Close {
+                        route,
+                        peer,
+                        generation,
+                        payload,
+                    } => {
+                        if peer_generation_matches(&peers, peer, generation) {
+                            if let Some(payload) = payload {
+                                if let Ok(events) = driver.send_packet(peer, &payload).await {
+                                    dispatch_events(
+                                        &mut driver,
+                                        events,
+                                        &commands,
+                                        &incoming,
+                                        &puncher_events,
+                                        &mut peers,
+                                        &mut pending_connects,
+                                        &mut next_peer_generation,
+                                    )
+                                    .await;
+                                }
+                            }
+                            if peer_generation_matches(&peers, peer, generation) {
+                                if let Some(events) = resolve_udp_outbox_close_result(
+                                    &mut peers,
+                                    peer,
+                                    generation,
+                                    driver.close_peer(peer).await,
+                                ) {
+                                    dispatch_events(
+                                        &mut driver,
+                                        events,
+                                        &commands,
+                                        &incoming,
+                                        &puncher_events,
+                                        &mut peers,
+                                        &mut pending_connects,
+                                        &mut next_peer_generation,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        outbox.finish_retire(route);
                     }
                 }
             }
@@ -1161,6 +2065,7 @@ async fn run_hub(
                     }
                     Err(error) => {
                         let message = error.to_string();
+                        outbox.fail_all();
                         fail_all(&mut peers, &mut pending_connects, &message);
                         let _ = incoming.try_send(Err(io::Error::new(error.kind(), message)));
                         return Err(error);
@@ -1437,6 +2342,21 @@ fn fail_peer(
     }
 }
 
+fn resolve_udp_outbox_close_result(
+    peers: &mut BTreeMap<SocketAddr, ConnectedPeer>,
+    peer: SocketAddr,
+    generation: u64,
+    result: io::Result<Vec<ReliableUdpEvent>>,
+) -> Option<Vec<ReliableUdpEvent>> {
+    match result {
+        Ok(events) => Some(events),
+        Err(error) => {
+            fail_peer(peers, peer, generation, error.to_string());
+            None
+        }
+    }
+}
+
 fn fail_all(
     peers: &mut BTreeMap<SocketAddr, ConnectedPeer>,
     pending_connects: &mut BTreeMap<SocketAddr, oneshot::Sender<io::Result<ReliableUdpPeerStream>>>,
@@ -1514,6 +2434,572 @@ mod tests {
 
     fn loopback() -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)
+    }
+
+    #[test]
+    fn udp_outbox_many_retains_unselected_suffix_and_yields_one_ordered_target_per_action() {
+        // C++ may call BroadcastMsg from either thread while mt-safe UDP
+        // Execute independently services socket input. The single Rust hub
+        // preserves that receive-progress seam by scheduling one selected
+        // target per turn (oracle-src-pinned
+        // src/C4Network2IO.cpp:395-407;
+        // src/C4NetIO.cpp:2282-2297,2789-2810).
+        let mut outbox = UdpLogicalOutbox::default();
+        let routes = (0..3)
+            .map(|_| {
+                outbox.register_route(Arc::new(Mutex::new(crate::RecoverablePacketLog::default())))
+            })
+            .collect::<Vec<_>>();
+        let payload = Arc::<[u8]>::from([crate::PACKET_LOG_START, 1]);
+        assert_eq!(outbox.enqueue_many(routes.iter().copied(), payload), routes);
+
+        for (index, &expected_route) in routes.iter().enumerate() {
+            assert!(matches!(
+                outbox.next_action(),
+                Some(UdpOutboxAction::Send { route, .. }) if route == expected_route
+            ));
+            let remaining = routes[index + 1..].iter().copied().collect::<VecDeque<_>>();
+            assert!(
+                matches!(
+                    outbox.queue.front(),
+                    Some(UdpOutboxWork::Many { routes, .. }) if routes == &remaining
+                ) || remaining.is_empty() && outbox.queue.is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn udp_recoverable_fanout_reuses_one_encoded_payload_allocation() {
+        // Native Broadcast passes one packet buffer through each selected
+        // connection's PacketLog before CreatePostMortem restores its
+        // oldest-to-newest sequence (oracle-src-pinned
+        // src/C4Network2IO.cpp:395-404,1379-1407,1437-1477).
+        let mut outbox = UdpLogicalOutbox::default();
+        let logs = (0..3)
+            .map(|index| {
+                let mut log = crate::RecoverablePacketLog::default();
+                assert_eq!(
+                    log.record_outbound(vec![crate::PACKET_LOG_START, index]),
+                    Some(0)
+                );
+                let log = Arc::new(Mutex::new(log));
+                let route = outbox.register_route(log.clone());
+                (route, log)
+            })
+            .collect::<Vec<_>>();
+        let payload = Arc::<[u8]>::from([crate::PACKET_LOG_START, 0xaa, 0xbb]);
+        assert_eq!(
+            outbox.enqueue_many(logs.iter().map(|(route, _)| *route), payload.clone()),
+            logs.iter().map(|(route, _)| *route).collect::<Vec<_>>()
+        );
+
+        while outbox.next_action().is_some() {}
+
+        for (index, (_, log)) in logs.into_iter().enumerate() {
+            let mut log = log.lock().unwrap();
+            assert!(log.newest_packet_shares_storage_with(&payload));
+            assert_eq!(
+                log.create_post_mortem(40 + index as u32),
+                Some(crate::PostMortemPacket {
+                    connection_id: 40 + index as u32,
+                    packet_counter: 2,
+                    packets: vec![vec![crate::PACKET_LOG_START, index as u8], payload.to_vec(),],
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_outbox_ready_wait_does_not_take_many_target_before_the_selected_branch() {
+        let outbox = Arc::new(UdpSharedOutbox::default());
+        let routes = (1..=2)
+            .map(|port| {
+                outbox
+                    .register_route(
+                        SocketAddr::from(([127, 0, 0, 1], port)),
+                        7,
+                        Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
+                    )
+                    .expect("test routes are unique")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outbox.enqueue_many(
+                routes.iter().map(|route| route.lease.route),
+                UdpPreparedPayload::Packet(Arc::from([crate::PACKET_LOG_START, 1])),
+            ),
+            routes
+                .iter()
+                .map(|route| route.lease.route)
+                .collect::<Vec<_>>()
+        );
+
+        timeout(Duration::from_secs(1), outbox.wait_ready())
+            .await
+            .expect("queued batch did not make the outbox ready");
+        assert!(matches!(
+            outbox.take_action(),
+            Some(UdpOutboxAction::Send { route, .. }) if route == routes[0].lease.route
+        ));
+        assert!(matches!(
+            outbox.take_action(),
+            Some(UdpOutboxAction::Send { route, .. }) if route == routes[1].lease.route
+        ));
+    }
+
+    #[tokio::test]
+    async fn udp_outbox_many_abort_before_first_send_retains_every_target_suffix() {
+        // Send logs each selected connection before native UDP submission;
+        // aborting the endpoint task cannot erase an already accepted target
+        // from PostMortem recovery (oracle-src-pinned
+        // src/C4Network2IO.cpp:395-404,1437-1477;
+        // src/C4NetIO.cpp:2789-2810).
+        let outbox = Arc::new(UdpSharedOutbox::default());
+        let logs = (1..=2)
+            .map(|port| {
+                let log = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+                let sender = outbox
+                    .register_route(SocketAddr::from(([127, 0, 0, 1], port)), 7, log.clone())
+                    .expect("test routes are unique");
+                (sender, log)
+            })
+            .collect::<Vec<_>>();
+        let payload = Arc::<[u8]>::from([crate::PACKET_LOG_START, 9]);
+        assert_eq!(
+            outbox.enqueue_many(
+                logs.iter().map(|(sender, _)| sender.lease.route),
+                UdpPreparedPayload::Packet(payload.clone()),
+            ),
+            logs.iter()
+                .map(|(sender, _)| sender.lease.route)
+                .collect::<Vec<_>>()
+        );
+        outbox.wait_ready().await;
+        assert!(matches!(
+            outbox.take_action(),
+            Some(UdpOutboxAction::Send { route, .. }) if route == logs[0].0.lease.route
+        ));
+
+        drop(UdpOutboxRunGuard(outbox.clone()));
+
+        for (sender, log) in logs {
+            timeout(Duration::from_secs(1), sender.wait_drained())
+                .await
+                .expect("hub abort did not drain a batch target");
+            assert!(sender
+                .try_send(ControlMessage::Ping(PingPacket {
+                    sent_at: 1,
+                    packet_counter: 2,
+                }))
+                .is_err());
+            assert_eq!(
+                log.lock().unwrap().create_post_mortem(31).unwrap().packets,
+                vec![payload.to_vec()]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_outbox_many_abort_after_first_target_retains_unprocessed_suffix_order() {
+        // Native Broadcast logs each selected connection before its synchronous
+        // UDP submission; task cancellation must retain both the in-flight
+        // batch and later accepted packets in per-route order
+        // (oracle-src-pinned src/C4Network2IO.cpp:395-404,1437-1477;
+        // src/C4NetIO.cpp:2789-2810).
+        let outbox = Arc::new(UdpSharedOutbox::default());
+        let logs = (1..=3)
+            .map(|port| {
+                let log = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+                let sender = outbox
+                    .register_route(SocketAddr::from(([127, 0, 0, 1], port)), 8, log.clone())
+                    .expect("test routes are unique");
+                (sender, log)
+            })
+            .collect::<Vec<_>>();
+        let prefix = Arc::<[u8]>::from([crate::PACKET_LOG_START, 1]);
+        let batch_payload = Arc::<[u8]>::from([crate::PACKET_LOG_START, 2]);
+        let suffix = Arc::<[u8]>::from([crate::PACKET_LOG_START, 3]);
+        assert!(outbox
+            .enqueue(
+                logs[0].0.lease.route,
+                UdpPreparedPayload::Packet(prefix.clone()),
+            )
+            .is_ok());
+        assert_eq!(
+            outbox.enqueue_many(
+                logs.iter().map(|(sender, _)| sender.lease.route),
+                UdpPreparedPayload::Packet(batch_payload.clone()),
+            ),
+            logs.iter()
+                .map(|(sender, _)| sender.lease.route)
+                .collect::<Vec<_>>()
+        );
+        assert!(outbox
+            .enqueue(
+                logs[2].0.lease.route,
+                UdpPreparedPayload::Packet(suffix.clone()),
+            )
+            .is_ok());
+
+        assert!(matches!(
+            outbox.take_action(),
+            Some(UdpOutboxAction::Send { route, .. }) if route == logs[0].0.lease.route
+        ));
+        assert!(matches!(
+            outbox.take_action(),
+            Some(UdpOutboxAction::Send { route, .. }) if route == logs[0].0.lease.route
+        ));
+
+        // The selected target is already logged; the outbox still owns every
+        // later target and queued suffix when the endpoint task is aborted.
+        drop(UdpOutboxRunGuard(outbox.clone()));
+
+        for (sender, _) in &logs {
+            timeout(Duration::from_secs(1), sender.wait_drained())
+                .await
+                .expect("hub abort did not drain a batch target");
+        }
+        assert_eq!(
+            logs[0]
+                .1
+                .lock()
+                .unwrap()
+                .create_post_mortem(41)
+                .unwrap()
+                .packets,
+            vec![prefix.to_vec(), batch_payload.to_vec()]
+        );
+        assert_eq!(
+            logs[1]
+                .1
+                .lock()
+                .unwrap()
+                .create_post_mortem(42)
+                .unwrap()
+                .packets,
+            vec![batch_payload.to_vec()]
+        );
+        assert_eq!(
+            logs[2]
+                .1
+                .lock()
+                .unwrap()
+                .create_post_mortem(43)
+                .unwrap()
+                .packets,
+            vec![batch_payload.to_vec(), suffix.to_vec()]
+        );
+    }
+
+    #[test]
+    fn udp_outbox_many_is_one_wake_and_preserves_per_route_fifo_log_barrier() {
+        // C4Network2Client selects the broadcast targets once, then
+        // C4Network2IOConnection::Send logs immediately before each target's
+        // physical send. Broadcast continues after an individual send fails
+        // (oracle-src-pinned src/C4Network2Client.cpp:497-541;
+        // src/C4Network2IO.cpp:378-404,1437-1477).
+        let mut outbox = UdpLogicalOutbox::default();
+        let log_a = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+        let log_b = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+        let route_a = outbox.register_route(log_a.clone());
+        let route_b = outbox.register_route(log_b.clone());
+
+        let body_1 = Arc::<[u8]>::from([crate::PACKET_LOG_START, 1]);
+        let body_2 = Arc::<[u8]>::from([crate::PACKET_LOG_START, 2]);
+        let body_3 = Arc::<[u8]>::from([crate::PACKET_LOG_START, 3]);
+        let body_4 = Arc::<[u8]>::from([crate::PACKET_LOG_START, 4]);
+        assert!(outbox.enqueue_single(route_a, body_1.clone()).is_ok());
+        assert_eq!(
+            outbox.enqueue_many([route_a, route_b], body_2.clone()),
+            vec![route_a, route_b]
+        );
+        assert!(outbox.enqueue_single(route_a, body_3.clone()).is_ok());
+        assert!(outbox.retire(route_a));
+        assert_eq!(outbox.enqueue_single(route_a, body_4.clone()), Err(body_4));
+        assert_eq!(outbox.wake_count(), 1, "one empty-to-ready wake");
+
+        let mut trace = Vec::new();
+        while let Some(action) = outbox.next_action() {
+            match action {
+                UdpOutboxAction::Send { route, payload, .. } => {
+                    trace.push(("send", route, payload[1]));
+                }
+                UdpOutboxAction::Retired { route, .. } => trace.push(("retire", route, 0)),
+                UdpOutboxAction::Failed { .. } => unreachable!("test queues valid packets"),
+                UdpOutboxAction::Close { .. } => unreachable!("test does not close a route"),
+            }
+        }
+        assert_eq!(
+            trace,
+            vec![
+                ("send", route_a, 1),
+                ("send", route_a, 2),
+                ("send", route_b, 2),
+                ("send", route_a, 3),
+                ("retire", route_a, 0),
+            ]
+        );
+        assert_eq!(
+            log_a
+                .lock()
+                .unwrap()
+                .create_post_mortem(11)
+                .unwrap()
+                .packets,
+            vec![body_1.to_vec(), body_2.to_vec(), body_3.to_vec()]
+        );
+        assert_eq!(
+            log_b
+                .lock()
+                .unwrap()
+                .create_post_mortem(12)
+                .unwrap()
+                .packets,
+            vec![body_2.to_vec()]
+        );
+    }
+
+    #[test]
+    fn udp_outbox_kth_failure_retains_its_suffix_and_continues_later_targets() {
+        // C4Network2IO::Broadcast combines every per-connection Send result
+        // with `&=` instead of short-circuiting, while a closed connection
+        // keeps the packets already accepted for PostMortem replay
+        // (oracle-src-pinned src/C4Network2IO.cpp:378-404,1437-1477).
+        let mut outbox = UdpLogicalOutbox::default();
+        let log_a = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+        let log_b = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+        let log_c = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+        let route_a = outbox.register_route(log_a);
+        let route_b = outbox.register_route(log_b.clone());
+        let route_c = outbox.register_route(log_c);
+        let broadcast = Arc::<[u8]>::from([crate::PACKET_LOG_START, 1]);
+        let b_suffix = Arc::<[u8]>::from([crate::PACKET_LOG_START, 2]);
+        let c_suffix = Arc::<[u8]>::from([crate::PACKET_LOG_START, 3]);
+
+        assert_eq!(
+            outbox.enqueue_many([route_a, route_b, route_c], broadcast.clone()),
+            vec![route_a, route_b, route_c]
+        );
+        assert!(outbox.enqueue_single(route_b, b_suffix.clone()).is_ok());
+        assert!(outbox.enqueue_single(route_c, c_suffix.clone()).is_ok());
+
+        assert!(matches!(
+            outbox.next_action(),
+            Some(UdpOutboxAction::Send { route, payload, .. })
+                if route == route_a && payload == broadcast
+        ));
+        assert!(matches!(
+            outbox.next_action(),
+            Some(UdpOutboxAction::Send { route, payload, .. })
+                if route == route_b && payload == broadcast
+        ));
+        assert!(outbox.fail_route(route_b));
+        assert_eq!(
+            outbox.enqueue_single(route_b, Arc::from([crate::PACKET_LOG_START, 4])),
+            Err(Arc::from([crate::PACKET_LOG_START, 4]))
+        );
+
+        let mut remaining = Vec::new();
+        while let Some(action) = outbox.next_action() {
+            match action {
+                UdpOutboxAction::Send { route, payload, .. } => {
+                    remaining.push((route, payload[1]));
+                }
+                UdpOutboxAction::Failed { .. }
+                | UdpOutboxAction::Retired { .. }
+                | UdpOutboxAction::Close { .. } => {}
+            }
+        }
+        assert_eq!(remaining, vec![(route_c, 1), (route_c, 3)]);
+        assert_eq!(
+            log_b
+                .lock()
+                .unwrap()
+                .create_post_mortem(22)
+                .unwrap()
+                .packets,
+            vec![broadcast.to_vec(), b_suffix.to_vec()]
+        );
+    }
+
+    #[test]
+    fn udp_outbox_failure_and_retirement_release_route_state_after_log_barrier() {
+        // C4Network2IO removes a closed connection after preserving its
+        // PostMortem packet suffix; later sends cannot re-enter that route
+        // (oracle-src-pinned src/C4Network2IO.cpp:718-738,1274-1281,1437-1477).
+        let mut outbox = UdpLogicalOutbox::default();
+        let failed =
+            outbox.register_route(Arc::new(Mutex::new(crate::RecoverablePacketLog::default())));
+        let retired =
+            outbox.register_route(Arc::new(Mutex::new(crate::RecoverablePacketLog::default())));
+        assert_eq!(outbox.route_count(), 2);
+
+        assert!(outbox.fail_route(failed));
+        assert_eq!(outbox.route_count(), 1);
+        assert!(outbox.retire(retired));
+        assert!(matches!(
+            outbox.next_action(),
+            Some(UdpOutboxAction::Retired { route, .. }) if route == retired
+        ));
+        outbox.finish_retire(retired);
+        assert_eq!(outbox.route_count(), 0);
+    }
+
+    #[test]
+    fn udp_outbox_rejects_duplicate_route_promotion_for_one_peer_generation() {
+        let outbox = Arc::new(UdpSharedOutbox::default());
+        let peer = loopback();
+        let first = outbox.register_route(
+            peer,
+            7,
+            Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
+        );
+        let duplicate = outbox.register_route(
+            peer,
+            7,
+            Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
+        );
+
+        assert!(first.is_some());
+        assert!(duplicate.is_none());
+        assert_eq!(outbox.route_count(), 1);
+    }
+
+    #[test]
+    fn udp_outbox_close_error_fails_the_matching_physical_peer() {
+        // C4Network2IO removes a failed connection before a same-address
+        // replacement may be admitted (oracle-src-pinned
+        // src/C4Network2IO.cpp:718-738,1274-1281).
+        let peer = loopback();
+        let (inbound, _inbound_rx) = mpsc::channel(1);
+        let terminal = Arc::new(PeerTerminalState::open());
+        let mut peers = BTreeMap::from([(
+            peer,
+            ConnectedPeer {
+                generation: 7,
+                inbound,
+                staged: VecDeque::new(),
+                terminal: terminal.clone(),
+            },
+        )]);
+
+        let events = resolve_udp_outbox_close_result(
+            &mut peers,
+            peer,
+            7,
+            Err(io::Error::other("close failed")),
+        );
+
+        assert!(events.is_none());
+        assert!(!peers.contains_key(&peer));
+        assert!(matches!(
+            terminal.reason(),
+            Some(PeerTerminal::Failed(error)) if error == "close failed"
+        ));
+    }
+
+    #[test]
+    fn stale_udp_outbox_close_error_does_not_fail_the_replacement_generation() {
+        let peer = loopback();
+        let (inbound, _inbound_rx) = mpsc::channel(1);
+        let terminal = Arc::new(PeerTerminalState::open());
+        let mut peers = BTreeMap::from([(
+            peer,
+            ConnectedPeer {
+                generation: 8,
+                inbound,
+                staged: VecDeque::new(),
+                terminal: terminal.clone(),
+            },
+        )]);
+
+        let events = resolve_udp_outbox_close_result(
+            &mut peers,
+            peer,
+            7,
+            Err(io::Error::other("stale close failed")),
+        );
+
+        assert!(events.is_none());
+        assert!(peers.contains_key(&peer));
+        assert!(!terminal.is_closed());
+    }
+
+    #[tokio::test]
+    async fn udp_route_sender_last_drop_retires_and_releases_its_route_lease() {
+        // C4Network2IOConnection destruction closes and unlinks its native
+        // transport connection; a cancelled Rust dial must not leave a
+        // selectable route behind (oracle-src-pinned
+        // src/C4Network2IO.cpp:718-738,1274-1281).
+        let outbox = Arc::new(UdpSharedOutbox::default());
+        let sender = outbox
+            .register_route(
+                loopback(),
+                7,
+                Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
+            )
+            .expect("test route is unique");
+        let route = sender.lease.route;
+        let drained = sender.lease.drained.clone();
+        let last_owner = sender.clone();
+        drop(sender);
+        assert_eq!(outbox.route_count(), 1);
+
+        drop(last_owner);
+        let action = timeout(Duration::from_secs(1), outbox.next_action())
+            .await
+            .expect("last sender drop did not queue route retirement");
+        assert!(matches!(
+            action,
+            UdpOutboxAction::Retired { route: retired, .. } if retired == route
+        ));
+        outbox.finish_retire(route);
+        timeout(Duration::from_secs(1), drained.wait())
+            .await
+            .expect("retirement did not release the route drain waiter");
+        assert_eq!(outbox.route_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn udp_outbox_run_guard_rejects_senders_and_finishes_logs_on_task_abort() {
+        // The hub owner may abort a task whose bounded command queue is full.
+        // Accepted C4Network2 packets still belong to the connection's
+        // PostMortem suffix (oracle-src-pinned src/C4Network2IO.cpp:1437-1477).
+        let outbox = Arc::new(UdpSharedOutbox::default());
+        let packet_log = Arc::new(Mutex::new(crate::RecoverablePacketLog::default()));
+        let sender = outbox
+            .register_route(loopback(), 9, packet_log.clone())
+            .expect("test route is unique");
+        let drained = sender.lease.drained.clone();
+        let packet = ControlMessage::Status(crate::NetworkStatus {
+            state: crate::NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 5,
+        });
+        let expected = crate::transport::encode_complete_message(packet.clone()).unwrap();
+        assert!(sender.try_send(packet).is_ok());
+
+        drop(UdpOutboxRunGuard(outbox.clone()));
+
+        timeout(Duration::from_secs(1), drained.wait())
+            .await
+            .expect("hub task abort did not release the route drain waiter");
+        assert!(sender
+            .try_send(ControlMessage::Ping(PingPacket {
+                sent_at: 6,
+                packet_counter: 7,
+            }))
+            .is_err());
+        assert_eq!(outbox.route_count(), 0);
+        assert_eq!(
+            packet_log
+                .lock()
+                .unwrap()
+                .create_post_mortem(91)
+                .unwrap()
+                .packets,
+            vec![expected]
+        );
     }
 
     #[test]
@@ -1858,7 +3344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_stream_close_does_not_close_a_reconnected_peer_generation() {
+    async fn stale_stream_close_and_encode_failure_do_not_close_a_reconnected_peer_generation() {
         let mut hub = ReliableUdpSessionHub::bind(loopback()).unwrap();
         let hub_address = hub.local_addr();
         let raw_peer = UdpSocket::bind(loopback()).await.unwrap();
@@ -1897,6 +3383,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stale_stream.peer_addr(), raw_peer_address);
+        let stale_outbound = stale_stream
+            .outbox_registration()
+            .promote(Arc::new(Mutex::new(crate::RecoverablePacketLog::default())))
+            .await
+            .unwrap();
 
         raw_peer
             .send_to(
@@ -1911,10 +3402,23 @@ mod tests {
             .unwrap();
         assert_eq!(replacement_stream.peer_addr(), raw_peer_address);
 
-        // Dropping the disconnected stream queues its Close after the hub has
-        // installed the replacement at the same socket address. That stale
-        // command must not close the replacement generation.
+        // Queueing an encode failure and dropping the disconnected stream
+        // target the old generation after the hub has installed the
+        // replacement at the same socket address. Neither stale action may
+        // close the replacement generation.
+        assert!(stale_outbound
+            .try_send(ControlMessage::ExecSync {
+                control_tick: (i32::MAX as u32) + 1,
+            })
+            .is_ok());
         drop(stale_stream);
+        timeout(Duration::from_secs(2), stale_outbound.wait_drained())
+            .await
+            .expect("stale encoding failure was not consumed");
+        replacement_stream
+            .bind_statistics_connection(31)
+            .await
+            .expect("stale encoding failure closed the replacement peer generation");
         let ping = PingPacket {
             sent_at: 0x1234_5678,
             packet_counter: 9,

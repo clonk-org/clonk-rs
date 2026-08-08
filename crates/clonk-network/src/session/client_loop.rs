@@ -5,6 +5,68 @@
 
 use super::*;
 
+struct ReceivedControlDeduplicator {
+    entries: BTreeSet<(Tick, ClientId)>,
+    highest_tick: Option<Tick>,
+    last_pruned_highest: Option<Tick>,
+    backlog_limit: Tick,
+    #[cfg(test)]
+    prune_passes: usize,
+}
+
+impl ReceivedControlDeduplicator {
+    fn new(backlog_limit: usize) -> Self {
+        Self {
+            entries: BTreeSet::new(),
+            highest_tick: None,
+            last_pruned_highest: None,
+            backlog_limit: Tick::try_from(backlog_limit).unwrap_or(Tick::MAX),
+            #[cfg(test)]
+            prune_passes: 0,
+        }
+    }
+
+    fn seed(&mut self, client_id: ClientId, tick: Tick) -> bool {
+        if !self.entries.insert((tick, client_id)) {
+            return false;
+        }
+        self.highest_tick = Some(self.highest_tick.map_or(tick, |highest| highest.max(tick)));
+        true
+    }
+
+    fn insert(&mut self, client_id: ClientId, tick: Tick) -> bool {
+        if !self.entries.insert((tick, client_id)) {
+            return false;
+        }
+
+        let highest = self.highest_tick.map_or(tick, |highest| highest.max(tick));
+        self.highest_tick = Some(highest);
+        let threshold = highest.saturating_sub(self.backlog_limit);
+        if tick < threshold {
+            self.entries.remove(&(tick, client_id));
+        }
+        if self.last_pruned_highest != Some(highest) {
+            self.entries = self.entries.split_off(&(threshold, ClientId::MIN));
+            self.last_pruned_highest = Some(highest);
+            #[cfg(test)]
+            {
+                self.prune_passes += 1;
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn prune_passes(&self) -> usize {
+        self.prune_passes
+    }
+
+    #[cfg(test)]
+    fn retained_len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 enum ClientRouteWriterExit {
     Cancelled,
     OutboundClosed,
@@ -91,8 +153,12 @@ pub(crate) async fn run_client_route<S>(
     let mut writer_task = tokio::spawn(run_client_route_writer(writer, outbound_rx, cancel_rx));
     let mut writer_finished = false;
     let mut publish_disconnect = true;
+    let mut liveness_timer = new_liveness_timer(liveness.next_timer_at());
     let reason = loop {
         let liveness_deadline = liveness.next_timer_at();
+        if liveness_timer.deadline() != liveness_deadline {
+            liveness_timer.as_mut().reset(liveness_deadline);
+        }
         tokio::select! {
             _ = wait_for_route_retirement(&mut retire_rx) => break None,
             writer_result = &mut writer_task => {
@@ -187,7 +253,7 @@ pub(crate) async fn run_client_route<S>(
                     }
                 }
             }
-            _ = tokio::time::sleep_until(liveness_deadline) => {
+            _ = liveness_timer.as_mut() => {
                 let ping = match liveness.timer_tick() {
                     Ok(ping) => ping,
                     Err(timeout) => {
@@ -219,6 +285,149 @@ pub(crate) async fn run_client_route<S>(
     if !writer_finished {
         let _ = writer_task.await;
     }
+    if publish_disconnect {
+        let next_outbound_packet = transport.outbound_packet_counter();
+        let post_mortem = transport.create_post_mortem(remote_connection_id);
+        let _ = event_tx.send(ClientRouteEvent::Disconnected {
+            route_id: local_connection_id,
+            next_inbound_packet: liveness.connection().inbound_packet_counter(),
+            next_outbound_packet,
+            post_mortem,
+            reason,
+        });
+    }
+}
+
+// Established UDP routes enqueue directly into their endpoint's logical
+// outbox. The route task keeps ownership of reads and liveness, but no longer
+// needs a second writer task or per-route command wake.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_udp_client_route<S>(
+    local_connection_id: u32,
+    remote_connection_id: u32,
+    peer_addr: Option<SocketAddr>,
+    transport: crate::ControlTransport<S>,
+    outbound: crate::udp_session::ReliableUdpRouteSender,
+    mut retire_rx: watch::Receiver<bool>,
+    event_tx: mpsc::UnboundedSender<ClientRouteEvent>,
+    mut liveness: ConnectionLivenessState,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut transport, writer) = transport.into_split();
+    drop(writer);
+    let mut publish_disconnect = true;
+    let mut liveness_timer = new_liveness_timer(liveness.next_timer_at());
+    let reason = loop {
+        let liveness_deadline = liveness.next_timer_at();
+        if liveness_timer.deadline() != liveness_deadline {
+            liveness_timer.as_mut().reset(liveness_deadline);
+        }
+        tokio::select! {
+            _ = wait_for_route_retirement(&mut retire_rx) => break None,
+            packet = transport.read_packet() => {
+                let packet = match packet {
+                    Ok(packet) => packet,
+                    Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                        break None;
+                    }
+                    Err(error) => break Some(format!("read failed: {error}")),
+                };
+                match packet {
+                    crate::transport::InboundPacket::Message(ControlMessage::Ping(packet)) => {
+                        liveness.record_inbound_message(&ControlMessage::Ping(packet));
+                        if outbound.try_send(ControlMessage::Pong(packet)).is_err() {
+                            break Some("pong send failed: UDP outbox closed".to_string());
+                        }
+                    }
+                    crate::transport::InboundPacket::Message(ControlMessage::Pong(packet)) => {
+                        liveness.record_inbound_message(&ControlMessage::Pong(packet));
+                        let round_trip_ms = liveness.record_pong(packet);
+                        if event_tx
+                            .send(ClientRouteEvent::PingMeasured {
+                                route_id: local_connection_id,
+                                round_trip_ms,
+                            })
+                            .is_err()
+                        {
+                            publish_disconnect = false;
+                            break None;
+                        }
+                    }
+                    crate::transport::InboundPacket::Message(message) => {
+                        liveness.record_inbound_message(&message);
+                        if event_tx
+                            .send(ClientRouteEvent::Packet {
+                                route_id: local_connection_id,
+                                peer_addr,
+                                packet: crate::transport::InboundPacket::Message(message),
+                            })
+                            .is_err()
+                        {
+                            publish_disconnect = false;
+                            break None;
+                        }
+                    }
+                    crate::transport::InboundPacket::Ignored(packet_type) => {
+                        liveness.record_inbound_packet(packet_type);
+                        if event_tx
+                            .send(ClientRouteEvent::Packet {
+                                route_id: local_connection_id,
+                                peer_addr,
+                                packet: crate::transport::InboundPacket::Ignored(packet_type),
+                            })
+                            .is_err()
+                        {
+                            publish_disconnect = false;
+                            break None;
+                        }
+                    }
+                    crate::transport::InboundPacket::Empty => {}
+                    crate::transport::InboundPacket::Invalid { packet_type, error } => {
+                        liveness.record_inbound_packet(packet_type);
+                        if event_tx
+                            .send(ClientRouteEvent::Packet {
+                                route_id: local_connection_id,
+                                peer_addr,
+                                packet: crate::transport::InboundPacket::Invalid {
+                                    packet_type,
+                                    error,
+                                },
+                            })
+                            .is_err()
+                        {
+                            publish_disconnect = false;
+                            break None;
+                        }
+                    }
+                }
+            }
+            _ = liveness_timer.as_mut() => {
+                let ping = match liveness.timer_tick() {
+                    Ok(ping) => ping,
+                    Err(timeout) => break Some(format!("connection {timeout:?} timeout")),
+                };
+                if let Some(ping) = ping {
+                    let sent = outbound.try_send(ControlMessage::Ping(ping));
+                    liveness.record_ping_dispatched();
+                    if sent.is_err() {
+                        break Some("ping send failed: UDP outbox closed".to_string());
+                    }
+                    if event_tx
+                        .send(ClientRouteEvent::PingDispatched {
+                            route_id: local_connection_id,
+                        })
+                        .is_err()
+                    {
+                        publish_disconnect = false;
+                        break None;
+                    }
+                }
+            }
+        }
+    };
+    outbound.retire();
+    outbound.wait_drained().await;
     if publish_disconnect {
         let next_outbound_packet = transport.outbound_packet_counter();
         let post_mortem = transport.create_post_mortem(remote_connection_id);
@@ -424,8 +633,7 @@ pub(crate) async fn run_client_loop_with_routes(
     let mut next_control_request_at = resource_state.next_control_request_at;
     let mut peer_recovery_from_tick = None::<Tick>;
     let mut pending_sync = Vec::<clonk_engine::ControlPacket>::new();
-    let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
-    let mut highest_received_tick = None::<Tick>;
+    let mut received_controls = ReceivedControlDeduplicator::new(CLIENT_BACKLOG_LIMIT);
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
     let mut udp_retry_at = None::<tokio::time::Instant>;
     let mut tcp_retry_at = None::<tokio::time::Instant>;
@@ -462,10 +670,8 @@ pub(crate) async fn run_client_loop_with_routes(
 
     for packet in std::mem::take(&mut resource_state.initial_controls) {
         let key = (packet.client_id(), packet.tick());
-        if received_controls.insert(key) {
+        if received_controls.seed(key.0, key.1) {
             client_performance.record_arrival(key.0, key.1, tokio::time::Instant::now());
-            highest_received_tick =
-                Some(highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())));
             let backlog_packet = packet.clone();
             let ready = match resource_state.control.accept_network(packet) {
                 Ok(ready) => ready,
@@ -738,15 +944,19 @@ pub(crate) async fn run_client_loop_with_routes(
             }
             route = await_pending_client_route(&mut pending_secondary), if !command_pending && has_pending_secondary => {
                 pending_secondary.take();
-                if let Some(route) = route {
+                if let Some(mut route) = route {
                     udp_retry_at = None;
-                    transport.add_route(
+                    let outbound = route
+                        .udp_outbound
+                        .take()
+                        .expect("established secondary UDP route has an outbox sender");
+                    transport.add_udp_route(
                         route.local_connection_id,
                         route.remote_connection_id,
-                        crate::NetworkProtocol::Udp,
                         Some(route.peer_addr),
                         route.transport,
                         route.liveness,
+                        outbound,
                     );
                 } else if udp_reconnect.is_some() {
                     udp_retry_at = Some(tokio::time::Instant::now() + CLIENT_ROUTE_RETRY_INTERVAL);
@@ -1822,7 +2032,7 @@ pub(crate) async fn run_client_loop_with_routes(
                             continue;
                         }
                         let key = (packet.client_id(), packet.tick());
-                        if !received_controls.insert(key) {
+                        if !received_controls.insert(key.0, key.1) {
                             continue;
                         }
                         client_performance.record_arrival(
@@ -1830,13 +2040,6 @@ pub(crate) async fn run_client_loop_with_routes(
                             key.1,
                             tokio::time::Instant::now(),
                         );
-                        highest_received_tick = Some(
-                            highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())),
-                        );
-                        if let Some(highest) = highest_received_tick {
-                            let threshold = highest.saturating_sub(CLIENT_BACKLOG_LIMIT as Tick);
-                            received_controls.retain(|(_, tick)| *tick >= threshold);
-                        }
                         let backlog_packet = packet.clone();
                         match resource_state.control.accept_network(packet) {
                             Ok(ready) => {
@@ -2356,6 +2559,38 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+
+    #[test]
+    fn received_control_deduplication_prunes_once_per_advancing_tick() {
+        let mut received = ReceivedControlDeduplicator::new(2);
+
+        for client_id in 1..=24 {
+            assert!(received.insert(client_id, 10));
+        }
+        assert_eq!(received.prune_passes(), 1);
+        assert!(!received.insert(7, 10), "live duplicates stay suppressed");
+        assert_eq!(received.prune_passes(), 1);
+
+        for client_id in 1..=24 {
+            assert!(received.insert(client_id, 11));
+        }
+        assert_eq!(received.prune_passes(), 2);
+
+        assert!(received.insert(1, 13));
+        assert_eq!(received.prune_passes(), 3);
+        assert_eq!(received.retained_len(), 25);
+        assert!(
+            received.insert(7, 10),
+            "controls older than the deduplication window remain replayable"
+        );
+        assert!(received.insert(7, 10));
+        assert_eq!(received.retained_len(), 25);
+        assert_eq!(received.prune_passes(), 3);
+        assert!(
+            !received.insert(7, 11),
+            "retained duplicates stay suppressed"
+        );
+    }
 
     struct RetireAfterFlushWriter {
         retire: watch::Sender<bool>,

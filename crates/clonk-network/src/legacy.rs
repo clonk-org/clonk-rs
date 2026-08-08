@@ -475,7 +475,7 @@ pub(crate) fn validate_control_envelope(
         return Err(LegacyControlError::EmptyPayload);
     }
 
-    let (_, consumed) = decode_control_list_prefix(payload)?;
+    let (_, consumed) = packet.decoded_control_list()?;
     let control_body_len = consumed
         .checked_sub(1)
         .ok_or(LegacyControlError::MissingListTerminator)?;
@@ -505,12 +505,12 @@ fn decode_client_id(client_id_raw: i32) -> Result<ClientId, LegacyControlError> 
 pub fn decode_control_packet(
     packet: &ControlPacket,
 ) -> Result<LegacyControlFrame, LegacyControlError> {
-    let controls = decode_control_list_payload(packet.payload())?;
+    let (controls, _) = packet.decoded_control_list()?;
     Ok(LegacyControlFrame {
         client_id: packet.client_id(),
         tick: packet.tick(),
         timestamp_ms: packet.timestamp_ms(),
-        controls,
+        controls: controls.to_vec(),
     })
 }
 
@@ -621,16 +621,6 @@ fn decode_control_list(
     Ok(controls)
 }
 
-fn decode_control_list_payload(
-    payload: &[u8],
-) -> Result<Vec<EngineControlPacket>, LegacyControlError> {
-    if payload.is_empty() {
-        return Err(LegacyControlError::EmptyPayload);
-    }
-    let (controls, _) = decode_control_list_prefix(payload)?;
-    Ok(controls)
-}
-
 /// Decode one terminated binary `C4Control` list from the beginning of
 /// `payload` and return the number of bytes it consumed, including the final
 /// `PID_None` byte.
@@ -640,9 +630,26 @@ fn decode_control_list_payload(
 pub fn decode_control_list_prefix(
     payload: &[u8],
 ) -> Result<(Vec<EngineControlPacket>, usize), LegacyControlError> {
+    #[cfg(test)]
+    CONTROL_LIST_DECODE_PASSES.set(CONTROL_LIST_DECODE_PASSES.get() + 1);
     let mut reader = Reader::new(payload);
     let controls = decode_control_list(&mut reader)?;
     Ok((controls, payload.len() - reader.remaining()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTROL_LIST_DECODE_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_control_list_decode_passes() {
+    CONTROL_LIST_DECODE_PASSES.set(0);
+}
+
+#[cfg(test)]
+fn control_list_decode_passes() -> usize {
+    CONTROL_LIST_DECODE_PASSES.get()
 }
 
 fn decode_control(
@@ -3515,6 +3522,19 @@ mod tests {
         let frame = decode_control_packet(&packet).expect("packet metadata and list decode");
         assert_eq!(frame.timestamp_ms, 1234);
         assert_eq!(frame.controls.len(), 1);
+    }
+
+    #[test]
+    fn cloned_control_packet_reuses_one_list_decode_across_validation() {
+        let packet = ControlPacket::builder(7, 12).payload(build_control_list(&[[1, 2, 3, 7]]));
+        let cloned = packet.clone();
+        reset_control_list_decode_passes();
+
+        validate_control_envelope(&packet).unwrap();
+        decode_control_packet(&cloned).unwrap();
+        validate_control_envelope(&cloned).unwrap();
+
+        assert_eq!(control_list_decode_passes(), 1);
     }
 
     #[test]

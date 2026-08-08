@@ -101,6 +101,16 @@ pub(crate) struct HostOutboundSender {
     close: watch::Sender<Option<crate::ConnectionReply>>,
     retire: watch::Sender<bool>,
     post_failure: PostFailureBuffer<HostOutboundMessage>,
+    udp: Option<crate::udp_session::ReliableUdpRouteSender>,
+}
+
+fn publish_udp_route_close(
+    close: &watch::Sender<Option<crate::ConnectionReply>>,
+    reply: crate::ConnectionReply,
+    queue_physical_close: impl FnOnce(crate::ConnectionReply),
+) {
+    close.send_replace(Some(reply.clone()));
+    queue_physical_close(reply);
 }
 
 impl HostOutboundSender {
@@ -122,6 +132,7 @@ impl HostOutboundSender {
                 close,
                 retire,
                 post_failure,
+                udp: None,
             },
             HostOutboundReceiver {
                 sender,
@@ -129,6 +140,20 @@ impl HostOutboundSender {
                 close: close_rx,
             },
         )
+    }
+
+    pub(crate) fn from_udp(outbound: crate::udp_session::ReliableUdpRouteSender) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let (close, _) = watch::channel(None);
+        let (retire, _) = watch::channel(false);
+        Self {
+            sender,
+            close,
+            retire,
+            post_failure: PostFailureBuffer::default(),
+            udp: Some(outbound),
+        }
     }
 
     #[cfg(test)]
@@ -150,6 +175,10 @@ impl HostOutboundSender {
         &self,
         reply: crate::ConnectionReply,
     ) -> Result<(), watch::error::SendError<Option<crate::ConnectionReply>>> {
+        if let Some(udp) = &self.udp {
+            publish_udp_route_close(&self.close, reply, |reply| udp.close_with_reply(reply));
+            return Ok(());
+        }
         self.close.send(Some(reply))
     }
 
@@ -164,6 +193,22 @@ impl HostOutboundSender {
         &self,
         message: HostOutboundMessage,
     ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        if let Some(udp) = &self.udp {
+            let message = match message {
+                HostOutboundMessage::Message(message) => match udp.try_send(message) {
+                    Ok(()) => return Ok(()),
+                    Err(message) => HostOutboundMessage::Message(message),
+                },
+                HostOutboundMessage::Raw(packet) => match udp.try_send_raw(packet) {
+                    Ok(()) => return Ok(()),
+                    Err(packet) => HostOutboundMessage::Raw(packet),
+                },
+            };
+            return self
+                .post_failure
+                .retain(message)
+                .map_err(mpsc::error::SendError);
+        }
         match self.sender.send(message) {
             Ok(()) => Ok(()),
             Err(mpsc::error::SendError(message)) => self
@@ -174,7 +219,11 @@ impl HostOutboundSender {
     }
 
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
-        self.sender.same_channel(&other.sender)
+        match (&self.udp, &other.udp) {
+            (Some(left), Some(right)) => left.same_route(right),
+            (None, None) => self.sender.same_channel(&other.sender),
+            _ => false,
+        }
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -199,10 +248,16 @@ impl HostOutboundSender {
         // removes this route and drains the post-failure suffix. C++ likewise
         // leaves the failed connection selected until Ev_Net_Disconn performs
         // its atomic route-removal/PostMortem handoff.
+        if let Some(udp) = &self.udp {
+            udp.retire();
+        }
         self.retire.send_replace(true);
     }
 
     pub(crate) fn retire_and_take_post_failure(&self) -> VecDeque<HostOutboundMessage> {
+        if let Some(udp) = &self.udp {
+            udp.retire();
+        }
         let messages = self.post_failure.close_and_drain();
         self.retire.send_replace(true);
         messages
@@ -210,6 +265,38 @@ impl HostOutboundSender {
 
     pub(crate) fn subscribe_retire(&self) -> watch::Receiver<bool> {
         self.retire.subscribe()
+    }
+
+    pub(crate) fn subscribe_close(&self) -> watch::Receiver<Option<crate::ConnectionReply>> {
+        self.close.subscribe()
+    }
+
+    pub(crate) async fn wait_udp_drained(&self) {
+        if let Some(udp) = &self.udp {
+            udp.wait_drained().await;
+        }
+    }
+
+    pub(crate) fn try_send_many(routes: &[Self], message: ControlMessage) -> Option<Vec<bool>> {
+        let udp = routes
+            .iter()
+            .map(|route| route.udp.clone())
+            .collect::<Option<Vec<_>>>()?;
+        let accepted =
+            crate::udp_session::ReliableUdpRouteSender::try_send_many(&udp, message.clone())?;
+        Some(
+            routes
+                .iter()
+                .zip(accepted)
+                .map(|(route, accepted)| {
+                    accepted
+                        || route
+                            .post_failure
+                            .retain(HostOutboundMessage::Message(message.clone()))
+                            .is_ok()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1193,5 +1280,51 @@ impl ClientResourceState {
             state.add_bootstrap_resource(resource)?;
         }
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod udp_sender_tests {
+    use super::*;
+
+    #[test]
+    fn udp_close_is_published_before_physical_close_is_queued() {
+        // CloseConns publishes the intentional removal before its best-effort
+        // ConnRe send closes the route (oracle-src-pinned
+        // src/C4Network2Client.cpp:104-119,457-492).
+        let (close, close_rx) = watch::channel(None);
+        let reply = crate::ConnectionReply {
+            ok: false,
+            message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
+            wrong_password: false,
+        };
+        let queued = std::cell::Cell::new(false);
+
+        publish_udp_route_close(&close, reply.clone(), |queued_reply| {
+            assert_eq!(close_rx.borrow().as_ref(), Some(&reply));
+            assert_eq!(queued_reply, reply);
+            queued.set(true);
+        });
+
+        assert!(queued.get());
+    }
+
+    #[test]
+    fn udp_close_before_route_task_subscription_retains_the_reply() {
+        // CloseConns publishes the best-effort ConnRe before route teardown;
+        // task scheduling cannot lose that state transition
+        // (oracle-src-pinned src/C4Network2Client.cpp:104-118;
+        // src/C4NetIO.cpp:1458-1468).
+        let outbound =
+            HostOutboundSender::from_udp(crate::udp_session::ReliableUdpRouteSender::test_sender());
+        let reply = crate::ConnectionReply {
+            ok: false,
+            message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
+            wrong_password: false,
+        };
+
+        assert!(outbound.try_close(reply.clone()).is_ok());
+        let close = outbound.subscribe_close();
+        assert_eq!(close.borrow().as_ref(), Some(&reply));
     }
 }

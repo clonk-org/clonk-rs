@@ -932,12 +932,14 @@ pub async fn connect_client_addresses(
                     None,
                     secondary_udp_addr,
                     None,
+                    None,
                     &mut client_mesh,
                 )
                 .await
             }
             ClientDialStream::Udp(stream) => {
                 let peer_addr = stream.peer_addr();
+                let udp_outbox = stream.outbox_registration();
                 match stream.bind_statistics_connection(0).await {
                     Ok(()) => {
                         connect_client_stream_attempt(
@@ -948,6 +950,7 @@ pub async fn connect_client_addresses(
                             None,
                             None,
                             secondary_tcp_addr,
+                            Some(udp_outbox),
                             &mut client_mesh,
                         )
                         .await
@@ -1087,6 +1090,7 @@ where
         liveness,
         secondary_udp_addr,
         None,
+        None,
         &mut client_mesh,
     )
     .await
@@ -1105,6 +1109,7 @@ async fn connect_client_stream_attempt<S>(
     liveness: Option<ConnectionLivenessState>,
     secondary_udp_addr: Option<SocketAddr>,
     secondary_tcp_addr: Option<SocketAddr>,
+    udp_outbox: Option<crate::udp_session::ReliableUdpOutboxRegistration>,
     client_mesh: &mut PreparedClientMesh,
 ) -> Result<ClientHandle, ClientAttemptError>
 where
@@ -1263,15 +1268,35 @@ where
     // liveness task before any synchronous bootstrap work
     // (oracle-src-pinned src/C4Network2.cpp:1590-1639;
     // src/C4Network2IO.cpp:117-197; src/C4Packet2.cpp:51-73).
+    let udp_outbound = match udp_outbox {
+        Some(registration) => Some(
+            registration
+                .promote(transport.outbound_packet_log())
+                .await
+                .map_err(|error| ClientAttemptError::Retryable(ClientError::Connect(error)))?,
+        ),
+        None => None,
+    };
     let mut routes = ClientRouteManager::new();
-    routes.add_route(
-        primary_local_connection_id,
-        primary_remote_connection_id,
-        host_protocol,
-        host_peer_addr,
-        transport,
-        primary_liveness,
-    );
+    if let Some(outbound) = udp_outbound {
+        routes.add_udp_route(
+            primary_local_connection_id,
+            primary_remote_connection_id,
+            host_peer_addr,
+            transport,
+            primary_liveness,
+            outbound,
+        );
+    } else {
+        routes.add_route(
+            primary_local_connection_id,
+            primary_remote_connection_id,
+            host_protocol,
+            host_peer_addr,
+            transport,
+            primary_liveness,
+        );
+    }
     #[cfg(test)]
     wait_at_client_post_join_bootstrap_pause(assigned_local_core.name.as_bytes()).await;
     let resource_config = ClientPostJoinResourceConfig {
@@ -1538,6 +1563,7 @@ pub(crate) struct ConnectedClientRoute<S> {
     pub(crate) peer_addr: SocketAddr,
     pub(crate) transport: crate::ControlTransport<S>,
     pub(crate) liveness: ConnectionLivenessState,
+    pub(crate) udp_outbound: Option<crate::udp_session::ReliableUdpRouteSender>,
 }
 
 pub(crate) type PendingClientRoute = tokio::task::JoinHandle<
@@ -1640,6 +1666,7 @@ pub(crate) async fn connect_mesh_tcp_route(
             peer_addr,
             transport,
             liveness: handshake.liveness,
+            udp_outbound: None,
         },
     })
 }
@@ -1668,6 +1695,7 @@ pub(crate) async fn connect_mesh_udp_route(
         .await
         .map_err(ClientError::Connect)?;
     let peer_addr = stream.peer_addr();
+    let udp_outbox = stream.outbox_registration();
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
         &mut transport,
@@ -1676,6 +1704,10 @@ pub(crate) async fn connect_mesh_udp_route(
     )
     .await
     .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    let udp_outbound = udp_outbox
+        .promote(transport.outbound_packet_log())
+        .await
+        .map_err(ClientError::Connect)?;
     Ok(ConnectedMeshRoute::Udp {
         peer_id,
         initiator_id,
@@ -1686,6 +1718,7 @@ pub(crate) async fn connect_mesh_udp_route(
             peer_addr,
             transport,
             liveness: handshake.liveness,
+            udp_outbound: Some(udp_outbound),
         },
     })
 }
@@ -1739,6 +1772,7 @@ pub(crate) async fn connect_mesh_tcp_socket_route(
             peer_addr,
             transport,
             liveness: handshake.liveness,
+            udp_outbound: None,
         },
     })
 }
@@ -1793,6 +1827,7 @@ pub(crate) async fn accept_mesh_tcp_route(
             peer_addr,
             transport,
             liveness: handshake.liveness,
+            udp_outbound: None,
         },
     })
 }
@@ -1808,6 +1843,7 @@ pub(crate) async fn accept_mesh_udp_route(
         .await
         .map_err(ClientError::Connect)?;
     let peer_addr = stream.peer_addr();
+    let udp_outbox = stream.outbox_registration();
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
         &mut transport,
@@ -1816,6 +1852,10 @@ pub(crate) async fn accept_mesh_udp_route(
     )
     .await
     .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    let udp_outbound = udp_outbox
+        .promote(transport.outbound_packet_log())
+        .await
+        .map_err(ClientError::Connect)?;
     let peer_id = ClientId::try_from(handshake.peer_core.client_id).map_err(|_| {
         ClientError::Handshake("mesh peer has a negative canonical client ID".to_string())
     })?;
@@ -1829,6 +1869,7 @@ pub(crate) async fn accept_mesh_udp_route(
             peer_addr,
             transport,
             liveness: handshake.liveness,
+            udp_outbound: Some(udp_outbound),
         },
     })
 }
@@ -2055,17 +2096,21 @@ pub(crate) fn add_connected_mesh_route(
             peer_id,
             initiator_id,
             peer_core: _,
-            route,
+            mut route,
         } => {
-            let first_peer_route = routes.add_peer_route(
+            let outbound = route
+                .udp_outbound
+                .take()
+                .expect("established UDP mesh route has an outbox sender");
+            let first_peer_route = routes.add_udp_peer_route(
                 peer_id,
                 initiator_id,
                 route.local_connection_id,
                 route.remote_connection_id,
-                crate::NetworkProtocol::Udp,
                 Some(route.peer_addr),
                 route.transport,
                 route.liveness,
+                outbound,
             );
             first_peer_route.then_some(peer_id)
         }
@@ -2197,6 +2242,7 @@ pub(crate) async fn connect_secondary_tcp_route(
         peer_addr,
         transport,
         liveness: handshake.liveness,
+        udp_outbound: None,
     })
 }
 
@@ -2221,6 +2267,7 @@ pub(crate) async fn connect_secondary_udp_route(
         .await
         .map_err(ClientError::Connect)?;
     let peer_addr = stream.peer_addr();
+    let udp_outbox = stream.outbox_registration();
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_client_route_handshake(
         &mut transport,
@@ -2229,6 +2276,10 @@ pub(crate) async fn connect_secondary_udp_route(
     )
     .await
     .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    let udp_outbound = udp_outbox
+        .promote(transport.outbound_packet_log())
+        .await
+        .map_err(ClientError::Connect)?;
     debug_assert_eq!(handshake.local_connection_id, connection_id);
     debug_assert_eq!(handshake.peer_core, expected_host_core);
     Ok(ConnectedClientRoute {
@@ -2237,6 +2288,7 @@ pub(crate) async fn connect_secondary_udp_route(
         peer_addr,
         transport,
         liveness: handshake.liveness,
+        udp_outbound: Some(udp_outbound),
     })
 }
 

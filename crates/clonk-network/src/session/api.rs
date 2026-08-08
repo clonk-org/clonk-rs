@@ -106,7 +106,10 @@ pub(crate) struct ClientPerformanceStats {
     consumed_at: BTreeMap<Tick, tokio::time::Instant>,
     consumed_clients: BTreeMap<Tick, BTreeSet<ClientId>>,
     sampled: BTreeSet<(Tick, ClientId)>,
+    tracked_ticks: BTreeSet<Tick>,
     pub(crate) scaled_wait_ms: BTreeMap<ClientId, i32>,
+    #[cfg(test)]
+    retention_considerations: usize,
 }
 
 impl ClientPerformanceStats {
@@ -118,7 +121,10 @@ impl ClientPerformanceStats {
             consumed_at: BTreeMap::new(),
             consumed_clients: BTreeMap::new(),
             sampled: BTreeSet::new(),
+            tracked_ticks: BTreeSet::new(),
             scaled_wait_ms: BTreeMap::new(),
+            #[cfg(test)]
+            retention_considerations: 0,
         }
     }
 
@@ -146,7 +152,7 @@ impl ClientPerformanceStats {
             .entry(client_id)
             .or_insert(arrived_at);
         self.sample(tick, client_id);
-        self.trim();
+        self.track_and_trim(tick);
     }
 
     pub(crate) fn mark_consumed(
@@ -166,7 +172,7 @@ impl ClientPerformanceStats {
         for client_id in client_ids {
             self.sample(tick, client_id);
         }
-        self.trim();
+        self.track_and_trim(tick);
     }
 
     pub(crate) fn reset_accumulators(&mut self) {
@@ -188,7 +194,7 @@ impl ClientPerformanceStats {
         for client_id in client_ids {
             self.sample(tick, client_id);
         }
-        self.trim();
+        self.track_and_trim(tick);
     }
 
     pub(crate) fn wait_ms(&self, client_id: ClientId) -> i32 {
@@ -231,29 +237,44 @@ impl ClientPerformanceStats {
         *scaled += wait_ms.saturating_mul(100).saturating_sub(*scaled) / 100;
     }
 
-    fn trim(&mut self) {
+    fn track_and_trim(&mut self, tick: Tick) {
         if self.tick_limit == 0 {
             return;
         }
-        let mut ticks = self
-            .arrivals
-            .keys()
-            .chain(self.cadences.keys())
-            .chain(self.consumed_at.keys())
-            .chain(self.consumed_clients.keys())
-            .copied()
-            .collect::<BTreeSet<_>>();
-        while ticks.len() > self.tick_limit {
-            let Some(tick) = ticks.pop_first() else {
+        if !self.tracked_ticks.insert(tick) {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.retention_considerations += 1;
+        }
+        while self.tracked_ticks.len() > self.tick_limit {
+            let Some(tick) = self.tracked_ticks.pop_first() else {
                 break;
             };
             self.arrivals.remove(&tick);
             self.cadences.remove(&tick);
             self.consumed_at.remove(&tick);
             self.consumed_clients.remove(&tick);
-            self.sampled
-                .retain(|(sampled_tick, _)| *sampled_tick != tick);
+            let sampled = self
+                .sampled
+                .range((tick, ClientId::MIN)..=(tick, ClientId::MAX))
+                .copied()
+                .collect::<Vec<_>>();
+            for sampled in sampled {
+                self.sampled.remove(&sampled);
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retention_considerations(&self) -> usize {
+        self.retention_considerations
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_tick_count(&self) -> usize {
+        self.tracked_ticks.len()
     }
 }
 

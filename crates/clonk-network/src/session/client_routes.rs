@@ -27,6 +27,13 @@ async fn wait_for_host_route_close(
     }
 }
 
+fn udp_route_exit_notifies_disconnect(
+    observed_disconnect: bool,
+    close_rx: &watch::Receiver<Option<crate::ConnectionReply>>,
+) -> bool {
+    observed_disconnect && close_rx.borrow().is_none()
+}
+
 async fn run_host_route_writer<W>(
     mut transport: crate::ControlTransport<W>,
     mut outbound_rx: mpsc::UnboundedReceiver<HostOutboundMessage>,
@@ -169,8 +176,12 @@ where
         let mut writer_finished = false;
         let mut disconnect_reason = None;
         let mut notify_disconnect = true;
+        let mut liveness_timer = new_liveness_timer(liveness.next_timer_at());
         loop {
             let liveness_deadline = liveness.next_timer_at();
+            if liveness_timer.deadline() != liveness_deadline {
+                liveness_timer.as_mut().reset(liveness_deadline);
+            }
             tokio::select! {
                 _ = wait_for_route_retirement(&mut retire_rx) => {
                     break;
@@ -280,7 +291,7 @@ where
                         }
                     }
                 }
-                _ = tokio::time::sleep_until(liveness_deadline) => {
+                _ = liveness_timer.as_mut() => {
                     match enqueue_host_session_liveness_probe(&mut liveness, &outbound_tx) {
                         Ok(true) => {
                             if host_tx
@@ -327,6 +338,182 @@ where
     }
 }
 
+pub(crate) struct UdpClientTask<S> {
+    pub(crate) local_connection_id: u32,
+    pub(crate) remote_connection_id: u32,
+    pub(crate) client_id: ClientId,
+    pub(crate) transport: crate::ControlTransport<S>,
+    pub(crate) outbound: HostOutboundSender,
+    pub(crate) retire_rx: watch::Receiver<bool>,
+    pub(crate) host_tx: mpsc::UnboundedSender<HostLoopMessage>,
+    pub(crate) liveness: ConnectionLivenessState,
+}
+
+impl<S> UdpClientTask<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    pub(crate) async fn run(self) {
+        let UdpClientTask {
+            local_connection_id,
+            remote_connection_id,
+            client_id,
+            transport,
+            outbound,
+            mut retire_rx,
+            host_tx,
+            mut liveness,
+        } = self;
+        let (mut transport, writer) = transport.into_split();
+        drop(writer);
+        let mut close_rx = outbound.subscribe_close();
+        let mut disconnect_reason = None;
+        let mut notify_disconnect = true;
+        let mut liveness_timer = new_liveness_timer(liveness.next_timer_at());
+        loop {
+            let liveness_deadline = liveness.next_timer_at();
+            if liveness_timer.deadline() != liveness_deadline {
+                liveness_timer.as_mut().reset(liveness_deadline);
+            }
+            tokio::select! {
+                biased;
+                _reply = wait_for_host_route_close(&mut close_rx) => {
+                    notify_disconnect = false;
+                    break;
+                }
+                _ = wait_for_route_retirement(&mut retire_rx) => break,
+                packet = transport.read_packet() => {
+                    let result = match packet {
+                        Ok(crate::transport::InboundPacket::Message(message)) => {
+                            liveness.record_inbound_message(&message);
+                            Ok(message)
+                        }
+                        Ok(crate::transport::InboundPacket::Ignored(packet_type)) => {
+                            liveness.record_inbound_packet(packet_type);
+                            if host_tx
+                                .send(HostLoopMessage::UnhandledPacket {
+                                    client_id: Some(client_id),
+                                    packet_type,
+                                })
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
+                            continue;
+                        }
+                        Ok(crate::transport::InboundPacket::Empty) => continue,
+                        Ok(crate::transport::InboundPacket::Invalid { packet_type, error }) => {
+                            liveness.record_inbound_packet(packet_type);
+                            Err(error)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(ControlMessage::Ping(packet)) => {
+                            if outbound.try_send(ControlMessage::Pong(packet)).is_err() {
+                                disconnect_reason =
+                                    Some("pong send failed: UDP outbox closed".to_string());
+                                break;
+                            }
+                        }
+                        Ok(ControlMessage::Pong(packet)) => {
+                            let round_trip_ms = liveness.record_pong(packet);
+                            if host_tx
+                                .send(HostLoopMessage::ConnectionPing {
+                                    connection_id: local_connection_id,
+                                    client_id,
+                                    update: RoutePingUpdate::Measured(round_trip_ms),
+                                })
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
+                        }
+                        Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
+                            disconnect_reason = Some(
+                                clonk_resources::decode_legacy_script_text(reply.message.as_bytes()),
+                            );
+                            break;
+                        }
+                        Ok(message) => {
+                            let ping_ms = liveness
+                                .connection()
+                                .measured_ping_ms()
+                                .unwrap_or(-1);
+                            if host_tx
+                                .send(HostLoopMessage::ClientMessage {
+                                    connection_id: local_connection_id,
+                                    client_id,
+                                    message,
+                                    ping_ms,
+                                })
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
+                        }
+                        Err(TransportError::Io(error))
+                            if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                        Err(error) => {
+                            disconnect_reason = Some(format!("read failed: {error}"));
+                            break;
+                        }
+                    }
+                }
+                _ = liveness_timer.as_mut() => {
+                    let ping = match liveness.timer_tick() {
+                        Ok(ping) => ping,
+                        Err(timeout) => {
+                            disconnect_reason = Some(format!("connection {timeout:?} timeout"));
+                            break;
+                        }
+                    };
+                    if let Some(ping) = ping {
+                        let sent = outbound.try_send(ControlMessage::Ping(ping));
+                        liveness.record_ping_dispatched();
+                        if sent.is_err() {
+                            disconnect_reason =
+                                Some("ping send failed: UDP outbox closed".to_string());
+                            break;
+                        }
+                        if host_tx
+                            .send(HostLoopMessage::ConnectionPing {
+                                connection_id: local_connection_id,
+                                client_id,
+                                update: RoutePingUpdate::Dispatched,
+                            })
+                            .is_err()
+                        {
+                            notify_disconnect = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        notify_disconnect = udp_route_exit_notifies_disconnect(notify_disconnect, &close_rx);
+        if notify_disconnect {
+            outbound.retire();
+        }
+        outbound.wait_udp_drained().await;
+        if notify_disconnect {
+            let next_outbound_packet = transport.outbound_packet_counter();
+            let post_mortem = transport.create_post_mortem(remote_connection_id);
+            let _ = host_tx.send(HostLoopMessage::ClientDisconnected {
+                connection_id: local_connection_id,
+                client_id,
+                next_inbound_packet: liveness.connection().inbound_packet_counter(),
+                next_outbound_packet,
+                post_mortem,
+                reason: disconnect_reason,
+            });
+        }
+    }
+}
+
 pub(crate) enum ClientRouteCommand {
     Message(ControlMessage),
     Flush(oneshot::Sender<()>),
@@ -337,6 +524,7 @@ pub(crate) struct ClientRouteSender {
     pub(crate) sender: mpsc::UnboundedSender<ClientRouteCommand>,
     pub(crate) retire: watch::Sender<bool>,
     pub(crate) post_failure: PostFailureBuffer<ClientRouteCommand>,
+    pub(crate) udp: Option<crate::udp_session::ReliableUdpRouteSender>,
 }
 
 impl ClientRouteSender {
@@ -356,6 +544,23 @@ impl ClientRouteSender {
         &self,
         command: ClientRouteCommand,
     ) -> Result<(), mpsc::error::SendError<ClientRouteCommand>> {
+        if let Some(udp) = &self.udp {
+            let command = match command {
+                ClientRouteCommand::Message(message) => match udp.try_send(message) {
+                    Ok(()) => return Ok(()),
+                    Err(message) => ClientRouteCommand::Message(message),
+                },
+                ClientRouteCommand::Flush(completion) if udp.is_accepting() => {
+                    let _ = completion.send(());
+                    return Ok(());
+                }
+                ClientRouteCommand::Flush(completion) => ClientRouteCommand::Flush(completion),
+            };
+            return self
+                .post_failure
+                .retain(command)
+                .map_err(mpsc::error::SendError);
+        }
         match self.sender.send(command) {
             Ok(()) => Ok(()),
             Err(mpsc::error::SendError(command)) => self
@@ -369,13 +574,41 @@ impl ClientRouteSender {
         // Cancellation stops the route task, but only Disconnected may expose
         // a fallback: it first removes this route, then closes and drains the
         // retained suffix into the route's PostMortem packet.
+        if let Some(udp) = &self.udp {
+            udp.retire();
+        }
         self.retire.send_replace(true);
     }
 
     fn retire_and_take_post_failure(&self) -> VecDeque<ClientRouteCommand> {
+        if let Some(udp) = &self.udp {
+            udp.retire();
+        }
         let commands = self.post_failure.close_and_drain();
         self.retire.send_replace(true);
         commands
+    }
+
+    fn send_many(routes: &[Self], message: ControlMessage) -> Option<Vec<bool>> {
+        let udp = routes
+            .iter()
+            .map(|route| route.udp.clone())
+            .collect::<Option<Vec<_>>>()?;
+        let accepted =
+            crate::udp_session::ReliableUdpRouteSender::try_send_many(&udp, message.clone())?;
+        Some(
+            routes
+                .iter()
+                .zip(accepted)
+                .map(|(route, accepted)| {
+                    accepted
+                        || route
+                            .post_failure
+                            .retain(ClientRouteCommand::Message(message.clone()))
+                            .is_ok()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -496,6 +729,30 @@ impl ClientRouteManager {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_udp_route<S>(
+        &mut self,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        outbound: crate::udp_session::ReliableUdpRouteSender,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_udp_peer_route(
+            HOST_CLIENT_ID,
+            HOST_CLIENT_ID,
+            local_connection_id,
+            remote_connection_id,
+            peer_addr,
+            transport,
+            liveness,
+            outbound,
+        );
+    }
+
     // Each argument is a distinct piece of classic route identity or owned
     // task state; keeping them explicit prevents local/remote IDs from being
     // silently conflated.
@@ -510,6 +767,63 @@ impl ClientRouteManager {
         peer_addr: Option<SocketAddr>,
         transport: crate::ControlTransport<S>,
         liveness: ConnectionLivenessState,
+    ) -> bool
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp(
+            peer_id,
+            initiator_id,
+            local_connection_id,
+            remote_connection_id,
+            protocol,
+            peer_addr,
+            transport,
+            liveness,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_udp_peer_route<S>(
+        &mut self,
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        outbound: crate::udp_session::ReliableUdpRouteSender,
+    ) -> bool
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.add_peer_route_with_udp(
+            peer_id,
+            initiator_id,
+            local_connection_id,
+            remote_connection_id,
+            crate::NetworkProtocol::Udp,
+            peer_addr,
+            transport,
+            liveness,
+            Some(outbound),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_peer_route_with_udp<S>(
+        &mut self,
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        protocol: crate::NetworkProtocol,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+        udp: Option<crate::udp_session::ReliableUdpRouteSender>,
     ) -> bool
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -551,6 +865,7 @@ impl ClientRouteManager {
         let route_tx = sender.clone();
         let (retire, retire_rx) = watch::channel(false);
         let post_failure = PostFailureBuffer::default();
+        let udp_task = udp.clone();
         let replaced = self.routes.insert(
             local_connection_id,
             ClientRouteEntry {
@@ -564,23 +879,38 @@ impl ClientRouteManager {
                     sender,
                     retire,
                     post_failure,
+                    udp,
                 },
             },
         );
         self.control_send_time_dirty = true;
         debug_assert!(replaced.is_none());
         let events = self.event_tx.clone();
-        let task = tokio::spawn(run_client_route(
-            local_connection_id,
-            remote_connection_id,
-            peer_addr,
-            transport,
-            route_tx,
-            outbound_rx,
-            retire_rx,
-            events,
-            liveness,
-        ));
+        let task = if let Some(udp) = udp_task {
+            drop(outbound_rx);
+            tokio::spawn(run_udp_client_route(
+                local_connection_id,
+                remote_connection_id,
+                peer_addr,
+                transport,
+                udp,
+                retire_rx,
+                events,
+                liveness,
+            ))
+        } else {
+            tokio::spawn(run_client_route(
+                local_connection_id,
+                remote_connection_id,
+                peer_addr,
+                transport,
+                route_tx,
+                outbound_rx,
+                retire_rx,
+                events,
+                liveness,
+            ))
+        };
         let replaced = self.tasks.insert(local_connection_id, task);
         debug_assert!(replaced.is_none());
         if !new_route_wins {
@@ -1023,14 +1353,39 @@ impl ClientRouteManager {
                 preferred_routes.insert(route.peer_id, (preference, *route_id));
             }
         }
+        let selected = preferred_routes
+            .into_iter()
+            .map(|(peer_id, (_, route_id))| {
+                (
+                    peer_id,
+                    self.routes
+                        .get(&route_id)
+                        .expect("selected client broadcast route exists")
+                        .outbound
+                        .clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(results) = ClientRouteSender::send_many(
+            &selected
+                .iter()
+                .map(|(_, outbound)| outbound.clone())
+                .collect::<Vec<_>>(),
+            message.clone(),
+        ) {
+            let mut sent = Vec::new();
+            for ((peer_id, _), accepted) in selected.into_iter().zip(results) {
+                if accepted || self.try_send_to(peer_id, message.clone()).is_ok() {
+                    sent.push(peer_id);
+                } else {
+                    self.retire_peer_gracefully(peer_id);
+                }
+            }
+            return sent;
+        }
+
         let mut sent = Vec::new();
-        for (peer_id, (_, route_id)) in preferred_routes {
-            let outbound = self
-                .routes
-                .get(&route_id)
-                .expect("selected client broadcast route exists")
-                .outbound
-                .clone();
+        for (peer_id, outbound) in selected {
             match outbound.send(ClientRouteCommand::Message(message.clone())) {
                 Ok(()) => sent.push(peer_id),
                 Err(mpsc::error::SendError(ClientRouteCommand::Message(message))) => {
@@ -1313,5 +1668,87 @@ impl ClientRouteManager {
         for (_, task) in std::mem::take(&mut self.tasks) {
             let _ = task.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod udp_outbox_tests {
+    use super::*;
+
+    #[test]
+    fn udp_explicit_close_dominates_simultaneously_ready_eof() {
+        // CloseConns publishes its intentional route removal before the
+        // resulting socket EOF can be reported as a second disconnect
+        // (oracle-src-pinned src/C4Network2Client.cpp:104-119,457-492).
+        let (close, close_rx) = watch::channel(None);
+        close.send_replace(Some(crate::ConnectionReply {
+            ok: false,
+            message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
+            wrong_password: false,
+        }));
+
+        assert!(!udp_route_exit_notifies_disconnect(true, &close_rx));
+    }
+
+    #[test]
+    fn udp_route_failure_moves_later_recoverable_sends_into_post_failure_fifo() {
+        // A closed C4Network2IO connection retains packets accepted before
+        // Ev_Net_Disconn removes the route, then emits them in PostMortem
+        // order (oracle-src-pinned src/C4Network2IO.cpp:718-738,1437-1477).
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let (retire, _) = watch::channel(false);
+        let udp = crate::udp_session::ReliableUdpRouteSender::test_sender();
+        let outbound = ClientRouteSender {
+            sender,
+            retire,
+            post_failure: PostFailureBuffer::default(),
+            udp: Some(udp.clone()),
+        };
+        let accepted = ControlMessage::Status(crate::NetworkStatus {
+            state: crate::NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 2,
+        });
+        let after_failure = [
+            ControlMessage::Status(crate::NetworkStatus {
+                state: crate::NETWORK_STATE_PAUSE,
+                control_mode: 3,
+                target_tick: 4,
+            }),
+            ControlMessage::StatusAck(crate::NetworkStatus {
+                state: crate::NETWORK_STATE_GO,
+                control_mode: 5,
+                target_tick: 6,
+            }),
+        ];
+
+        assert!(outbound.send(ClientRouteCommand::Message(accepted)).is_ok());
+        udp.test_fail();
+        for message in &after_failure {
+            assert!(outbound
+                .send(ClientRouteCommand::Message(message.clone()))
+                .is_ok());
+        }
+
+        let retained = outbound.retire_and_take_post_failure();
+        let expected = after_failure
+            .into_iter()
+            .map(|message| crate::transport::encode_complete_message(message).unwrap())
+            .collect::<Vec<_>>();
+        let mut post_mortem = None;
+        let mut next_packet = 11;
+        for command in retained {
+            let ClientRouteCommand::Message(message) = command else {
+                panic!("test queues only messages");
+            };
+            crate::post_mortem::retain_post_failure_packet(
+                &mut post_mortem,
+                23,
+                &mut next_packet,
+                crate::transport::encode_complete_message(message).unwrap(),
+            );
+        }
+        assert_eq!(post_mortem.unwrap().packets, expected);
+        assert_eq!(next_packet, 13);
     }
 }
