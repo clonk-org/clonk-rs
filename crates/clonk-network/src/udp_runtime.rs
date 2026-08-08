@@ -30,12 +30,6 @@ use crate::udp::{
 pub const RELIABLE_UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_CONNECT_RETRIES: u8 = 5;
 pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-/// Data fragments between redundancy decisions.
-///
-/// At ControlRate 2 a control tick is one fragment, so 128 is a few seconds of
-/// play — long enough that a single unlucky drop does not flip the decision,
-/// short enough to follow a link that changes.
-const REDUNDANCY_REVIEW_FRAGMENTS: u32 = 128;
 
 #[cfg(test)]
 thread_local! {
@@ -162,12 +156,6 @@ struct ReliableUdpPeer {
     connect_deadline: Option<Duration>,
     connect_retries_remaining: u8,
     notify_connect_failure: bool,
-    /// Data fragments handed to this peer since the last redundancy decision.
-    data_fragments_sent: u32,
-    /// How many of those the peer re-asked for, i.e. lost.
-    data_fragments_reasked: u32,
-    /// Extra copies currently being spent on control-sized datagrams.
-    redundant_copies: usize,
 }
 
 impl ReliableUdpPeer {
@@ -185,11 +173,6 @@ impl ReliableUdpPeer {
             connect_deadline: Some(now + RELIABLE_UDP_CONNECT_TIMEOUT),
             connect_retries_remaining: RELIABLE_UDP_CONNECT_RETRIES,
             notify_connect_failure,
-            data_fragments_sent: 0,
-            data_fragments_reasked: 0,
-            // Start where the measured default is, so a peer is never protected
-            // *less* than before until its own link has been observed.
-            redundant_copies: crate::udp::REDUNDANT_DATA_PACKET_COPIES,
         }
     }
 
@@ -275,10 +258,6 @@ impl ReliableUdpPeer {
         }
         let mut step = ReliableUdpStep::default();
         if self.status == ReliableUdpPeerStatus::Working {
-            self.data_fragments_sent = self
-                .data_fragments_sent
-                .saturating_add(fragments.len() as u32);
-            self.reconsider_redundancy();
             step.datagrams.extend(
                 fragments
                     .into_iter()
@@ -286,39 +265,6 @@ impl ReliableUdpPeer {
             );
         }
         Ok(step)
-    }
-
-    /// Re-decides how many extra copies of a control datagram this peer is
-    /// worth, from the loss it has actually reported.
-    ///
-    /// Redundancy is not free on a narrow link. Each copy is a whole extra
-    /// datagram, and on a dial-up uplink the ~35 bytes of IPv4/UDP/PPP framing
-    /// per datagram dominate the 10-27 byte control payload — at ControlRate 2
-    /// the fixed 3x costs roughly 22 kbit/s per peer per direction, two thirds
-    /// of a 33.6 kbit/s uplink, to protect a stream that may not be losing
-    /// anything. A link that demonstrably drops nothing gets nothing spent on
-    /// it; the moment it drops anything at all, it goes back to the measured
-    /// default. The threshold is deliberately "any loss", not a percentage:
-    /// PORT_STATUS records redundancy paying for itself at 1% loss, so a 2%-style
-    /// congestion threshold would switch it off exactly where it was proven.
-    fn reconsider_redundancy(&mut self) {
-        if self.data_fragments_sent < REDUNDANCY_REVIEW_FRAGMENTS {
-            return;
-        }
-        self.redundant_copies = if self.data_fragments_reasked == 0 {
-            0
-        } else {
-            crate::udp::REDUNDANT_DATA_PACKET_COPIES
-        };
-        self.data_fragments_sent = 0;
-        self.data_fragments_reasked = 0;
-    }
-
-    fn redundant_copies_for(&self, wire: &[u8]) -> usize {
-        if crate::udp::reliable_udp_redundant_copies(wire) == 0 {
-            return 0;
-        }
-        self.redundant_copies
     }
 
     fn plan_check(&mut self, force: bool, now: Duration) -> ReliableUdpStep {
@@ -474,9 +420,6 @@ impl ReliableUdpPeer {
         {
             self.outgoing_packets.pop_front();
         }
-        self.data_fragments_reasked = self
-            .data_fragments_reasked
-            .saturating_add(check.missing_packet_numbers.len() as u32);
         for packet_number in check.missing_packet_numbers {
             let fragment = self
                 .outgoing_packets
@@ -551,17 +494,9 @@ pub struct ReliableUdpEndpointCore {
 }
 
 impl ReliableUdpEndpointCore {
-    /// Extra copies of `wire` this peer's observed loss currently justifies.
-    ///
-    /// An unknown peer falls back to the measured default rather than to zero:
-    /// the first datagrams of a connection are the ones a stall is most
-    /// expensive on, and nothing has been observed yet to argue for spending
-    /// less.
-    pub fn redundant_copies_for(&self, peer: SocketAddr, wire: &[u8]) -> usize {
-        self.peers.get(&peer).map_or_else(
-            || crate::udp::reliable_udp_redundant_copies(wire),
-            |peer| peer.redundant_copies_for(wire),
-        )
+    /// Extra physical sends for `wire` beyond the original.
+    pub fn redundant_copies_for(&self, _peer: SocketAddr, wire: &[u8]) -> usize {
+        crate::udp::reliable_udp_redundant_copies(wire)
     }
 
     pub fn new_at(now: Duration) -> Self {
@@ -1696,17 +1631,7 @@ impl ReliableUdpSocketDriver {
         for datagram in step.datagrams {
             let (peer, peer_backed, result) = self.send_planned_datagram(&datagram).await;
             match result {
-                Ok(_) => {
-                    // Control-sized packets go out more than once, as many times
-                    // as this particular peer's observed loss justifies. See
-                    // `ReliableUdpPeer::reconsider_redundancy` for why the count
-                    // is per peer, and `reliable_udp_redundant_copies` for why a
-                    // C++ peer cannot tell either way.
-                    let copies = self.core.redundant_copies_for(peer, &datagram.payload);
-                    for _ in 0..copies {
-                        let _ = self.send_planned_datagram(&datagram).await;
-                    }
-                }
+                Ok(_) => {}
                 Err(error) => {
                     if peer_backed {
                         first_send_error.get_or_insert((error, peer));
@@ -2640,6 +2565,12 @@ mod tests {
             a.peer_status(b_address),
             Some(ReliableUdpPeerStatus::Working)
         );
+        let control = a.send_packet(b_address, b"after reconnect").unwrap();
+        assert_eq!(control.datagrams.len(), 1);
+        assert_eq!(
+            a.redundant_copies_for(b_address, &control.datagrams[0].payload),
+            0
+        );
     }
 
     #[test]
@@ -2792,6 +2723,39 @@ mod tests {
         assert_eq!(
             canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
             a_address
+        );
+    }
+
+    #[test]
+    fn missing_fragment_is_repaired_without_changing_the_single_send_policy() {
+        // C4NetIOUDP::Peer::Send sends a fragment once; a later Check resends
+        // that byte-identical fragment (oracle-src-pinned
+        // src/C4NetIO.cpp:2789-2809,2973-3031,3124-3144,3261-3285).
+        let (_, b_address, mut a, _) = handshake_pair();
+        let original = a.send_packet(b_address, b"control").unwrap();
+        assert_eq!(original.datagrams.len(), 1);
+        assert_eq!(
+            a.redundant_copies_for(b_address, &original.datagrams[0].payload),
+            0
+        );
+        let check = encode_reliable_udp_check(&ReliableUdpCheck {
+            packet_number: 0,
+            next_expected_packet_number: 0,
+            next_expected_multicast_packet_number: 0,
+            missing_packet_numbers: vec![0],
+            missing_multicast_packet_numbers: Vec::new(),
+        })
+        .unwrap();
+
+        let repair = a.receive_at(b_address, &check, Duration::ZERO);
+
+        assert_eq!(repair.datagrams.len(), 1);
+        assert_eq!(repair.datagrams[0].payload, original.datagrams[0].payload);
+        let next = a.send_packet(b_address, b"next control").unwrap();
+        assert_eq!(next.datagrams.len(), 1);
+        assert_eq!(
+            a.redundant_copies_for(b_address, &next.datagrams[0].payload),
+            0
         );
     }
 
@@ -3282,11 +3246,11 @@ mod tests {
         let (second_length, _) =
             recv_spy_kind(&second, &mut second_wire, ReliableUdpPacketKind::Data).await;
         assert!(statistics.generate_statistics(2_002));
-        // Both payloads are control-sized, so each went out three times. The
-        // redundant copies are real bandwidth and are accounted as such -- see
-        // `reliable_udp_redundant_copies`.
-        let first_output = normalize(udp_accounted_bytes(first_length) * 3);
-        let second_output = normalize(udp_accounted_bytes(second_length) * 3);
+        // C++ queues one logical send and forwards each reliable fragment once;
+        // physical accounting must therefore charge each route exactly once too
+        // (oracle-src-pinned src/C4NetIO.cpp:2789-2809,3124-3144,3261-3285).
+        let first_output = normalize(udp_accounted_bytes(first_length));
+        let second_output = normalize(udp_accounted_bytes(second_length));
         assert_eq!(
             statistics
                 .connection_statistics(first_key)
@@ -3395,101 +3359,5 @@ mod tests {
                 .input_rate,
             0
         );
-    }
-}
-
-#[cfg(test)]
-mod adaptive_redundancy_tests {
-    use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    fn peer_addr() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 40_100)
-    }
-
-    fn working_peer() -> ReliableUdpPeer {
-        let mut peer = ReliableUdpPeer::connecting(peer_addr(), Duration::ZERO, false);
-        peer.status = ReliableUdpPeerStatus::Working;
-        peer
-    }
-
-    /// A control-sized datagram, per `reliable_udp_redundant_copies`' size gate.
-    fn control_wire() -> Vec<u8> {
-        crate::udp::encode_reliable_udp_data_fragments(0, &[0u8; 24]).expect("encode")[0].clone()
-    }
-
-    #[test]
-    fn a_new_peer_starts_at_the_measured_default() {
-        // Nothing has been observed yet, and the first datagrams of a session
-        // are the ones a stall is most expensive on, so a fresh peer is never
-        // protected less than before this change.
-        let peer = working_peer();
-        assert_eq!(
-            peer.redundant_copies_for(&control_wire()),
-            crate::udp::REDUNDANT_DATA_PACKET_COPIES
-        );
-    }
-
-    #[test]
-    fn a_lossless_link_stops_paying_for_redundancy() {
-        // Each copy is a whole extra datagram, and on a narrow uplink the ~35
-        // bytes of IPv4/UDP/PPP framing per datagram dominate a 10-27 byte
-        // control payload. A link that demonstrably drops nothing should not be
-        // charged two thirds of its packet rate for protection it is not using.
-        let mut peer = working_peer();
-        for _ in 0..REDUNDANCY_REVIEW_FRAGMENTS {
-            peer.data_fragments_sent += 1;
-        }
-        peer.reconsider_redundancy();
-
-        assert_eq!(peer.redundant_copies_for(&control_wire()), 0);
-    }
-
-    #[test]
-    fn any_reported_loss_restores_the_measured_default() {
-        // Deliberately "any loss", not a congestion-style 2% threshold:
-        // PORT_STATUS records redundancy paying for itself at 1% loss, so a
-        // percentage threshold would switch it off exactly where it was proven.
-        let mut peer = working_peer();
-        peer.data_fragments_sent = REDUNDANCY_REVIEW_FRAGMENTS;
-        peer.data_fragments_reasked = 1;
-        peer.reconsider_redundancy();
-
-        assert_eq!(
-            peer.redundant_copies_for(&control_wire()),
-            crate::udp::REDUNDANT_DATA_PACKET_COPIES
-        );
-    }
-
-    #[test]
-    fn the_decision_follows_a_link_that_changes() {
-        let mut peer = working_peer();
-        peer.data_fragments_sent = REDUNDANCY_REVIEW_FRAGMENTS;
-        peer.reconsider_redundancy();
-        assert_eq!(peer.redundant_copies_for(&control_wire()), 0);
-
-        peer.data_fragments_sent = REDUNDANCY_REVIEW_FRAGMENTS;
-        peer.data_fragments_reasked = 3;
-        peer.reconsider_redundancy();
-        assert_eq!(
-            peer.redundant_copies_for(&control_wire()),
-            crate::udp::REDUNDANT_DATA_PACKET_COPIES,
-            "a link that starts dropping must be protected again"
-        );
-    }
-
-    #[test]
-    fn bulk_transfer_is_never_duplicated_however_clean_the_link_is() {
-        // The size gate still wins: a resource chunk fragments into full
-        // 499-byte datagrams and must never be copied.
-        let mut peer = working_peer();
-        peer.data_fragments_sent = REDUNDANCY_REVIEW_FRAGMENTS;
-        peer.data_fragments_reasked = 5;
-        peer.reconsider_redundancy();
-        let bulk = crate::udp::encode_reliable_udp_data_fragments(0, &[0u8; 8_192])
-            .expect("encode bulk")[0]
-            .clone();
-
-        assert_eq!(peer.redundant_copies_for(&bulk), 0);
     }
 }

@@ -3828,28 +3828,44 @@ an ordered-map model gap.
   than being hardcoded at rate 2's 55 ms, without which a higher rate measured as
   strictly worse because the cost per control tick rose while its budget did not.
 
-- **Control redundancy is now per peer, and a lossless link pays nothing**
-  (`crates/clonk-network/src/udp_runtime.rs`, `ReliableUdpPeer::reconsider_redundancy`;
-  extends the fixed-count entry below). Approved 2026-07-27.
-  Each copy is a whole extra datagram, and on a narrow uplink the ~35 bytes of
-  IPv4/UDP/PPP framing per datagram dominate the 10-27 byte control payload: at
-  ControlRate 2 the fixed 3x costs roughly 22 kbit/s per peer per direction, two
-  thirds of a 33.6 kbit/s uplink, to protect a stream that may not be losing
-  anything at all.
-  Each peer now counts the data fragments it sent and the fragments that peer
-  re-asked for — the `Check` missing list is the peer telling us exactly what it
-  lost — and re-decides every 128 fragments. A peer that reported no loss over
-  the window drops to zero extra copies; any loss at all restores the measured
-  default of two extras. A peer that has not been observed yet keeps the default,
-  since the opening datagrams of a session are the ones a stall is most expensive
-  on.
-  The threshold is deliberately "any loss" rather than a congestion-style 2%:
-  the entry below records redundancy paying for itself at 1% loss, so a
-  percentage threshold would switch it off exactly where it was proven to help.
-  The size gate is unchanged, so bulk transfer is still never duplicated.
-  Invisible to a C++ peer for the same reason as the fixed count: the copies are
-  byte-identical and carry the same packet number, so both engines discard the
-  duplicate.
+- **Reliable-UDP data now uses C++'s one-send policy**
+  (`crates/clonk-network/src/udp.rs`, `reliable_udp_redundant_copies`;
+  C++ `C4NetIOUDP::Peer::Send` and `SendDirect`, LegacyClonk 7d43b47
+  `src/C4NetIO.cpp:2789-2809`, `:3124-3144`, `:3261-3285`). Approved
+  2026-08-08.
+  Every data fragment is sent once and a missing fragment is repaired after a
+  `Check`. Immediate byte-identical copies hid random loss on fast links, but
+  their UDP/IP framing became positive feedback on a narrow shared uplink: two
+  copies of the benchmark control plus its background load already offer more
+  than 33.6 kbit/s. Re-ask counts cannot safely distinguish that congestion
+  from random wire loss, because the extra copies both create the queue and
+  censor the loss signal. Fresh peers and protected/unprotected review windows
+  therefore oscillated between overloaded states.
+
+  The deterministic acceptance profile sends one real client `PID_Control`
+  every 56 ms through a 33,600 bit/s, 300 ms RTT link with independent 2% loss,
+  a 4,200-byte drop-tail queue, 32 charged UDP/IP bytes per datagram and a paced
+  20,000 charged-wire-bit/s client upload. It runs 256 warm-up controls and
+  2,049 measured controls for each of 20 fixed seeds. Against the checked-in
+  medians recorded by the byte-identical pre-change harness, pooled
+  client-to-host total-delay p50 falls 878 ms -> 220 ms
+  (74.9%) and propagation-excluded p50 falls 728 ms -> 70 ms (90.4%). All
+  46,100 controls arrive exactly once and in order with matching payload digest,
+  both peers remain `Working`, and no disconnect occurs. Every paired seed also
+  clears the 50% total-delay target. The ordinary test
+  `single_copy_halves_each_paired_dialup_seed` pins the pooled and per-seed
+  thresholds. The ignored `dialup_20_seed_report` emits all 40,980 raw measured
+  samples.
+
+  The background is deliberately a paced charged-wire load, not a simulated
+  resource-protocol transfer: it shares queue and serialization capacity but
+  does not enter reliable packet numbering or repair. Resource head-of-line
+  behavior remains covered separately by the bulk-stream tests. Packet numbers,
+  delivered bytes, ordering and packet logs are unchanged. The public API
+  surface and signatures remain unchanged;
+  `ReliableUdpEndpointCore::redundant_copies_for` deliberately now reports zero
+  extra sends. This removes a Rust-only physical-send divergence and leaves the
+  existing 250 ms re-ask damping in place.
 
 - **The host stops extending the async deadline for a persistent straggler**
   (`crates/clonk-network/src/session/host_loop.rs`, `force_expired_async_control`;
@@ -3929,9 +3945,9 @@ an ordered-map model gap.
   forms still coincide at C++'s own chunk size.
   `RESOURCE_MAX_LOADS` is scaled with the chunk size (see the per-peer entry
   above), so the maximum outstanding bulk stays C++'s 2 MB.
-  The existing `reliable_udp_redundant_copies` mitigation does not help here: it
-  is gated at inner packets <= 256 bytes, so it protects control against *loss*
-  and does nothing about control being *queued behind* bulk.
+  The reliable-UDP one-send policy does not help here: repair recovers *loss*,
+  but it cannot move control ahead of bulk already queued on the same ordered
+  packet-number stream.
   Scope: the stock size applies only once a core becomes loadable. C++ decodes an
   unloadable core by substituting its compiled-in defaults for size, CRC and
   chunk size alike, so a custom value could not round-trip there and would mean
@@ -4011,8 +4027,9 @@ an ordered-map model gap.
   `SetPreSend` is script-settable), so a C++ peer needs no knowledge of this.
   Measured with `cargo run -p clonk-network --example link_impairment`
   (`LC_PRESEND=cpp` vs `adaptive`, `LC_DUP=2`), 24 seeds x 400 control ticks
-  (a 22 s session), paired with the redundancy entry below. Frozen time and the
-  worst single hitch, C++ -> port:
+  (a 22 s session), paired with the historical redundancy experiment below.
+  `LC_DUP=2` is an explicit harness setting and is not the current runtime
+  policy. Frozen time and the worst single hitch, C++ -> port:
   80 ms RTT / +-20 ms jitter / 1% loss, 27.19% -> 0.18% and 231 ms -> 31 ms;
   150 ms / +-40 ms / 3%, 82.06% -> 0.81% and 502 ms -> 119 ms;
   40 ms / +-8 ms / 0.5%, 6.47% -> 0.02% and 101 ms -> 4 ms.
@@ -4034,8 +4051,8 @@ an ordered-map model gap.
   instead, and because a single hub task owns the UDP socket for *every* peer,
   suspending there held up control delivery to all of them behind whichever
   peer was congested -- one bad uplink stalled the entire session. That is a
-  port artifact, not C++ behavior, and it mattered more once control datagrams
-  started going out twice.
+  port artifact, not C++ behavior, and it mattered more while control datagrams
+  went out redundantly.
   The divergence is only that C++ drops at the *first* sign of back-pressure
   while the port allows 2 ms first, which is strictly more conservative (it
   drops less) and still bounds the hub. A writable socket never reaches the
@@ -4048,47 +4065,18 @@ an ordered-map model gap.
   readiness has been established and silently drops every early datagram (it
   made 6 `udp_runtime`/`udp_session` tests time out).
 
-- **Control-sized reliable-UDP datagrams are sent three times**
-  (`crates/clonk-network/src/udp.rs`, `reliable_udp_redundant_copies`;
-  C++ `C4NetIOUDP::SendDirect`, LegacyClonk 7d43b47 src/C4NetIO.cpp:3128).
-  Approved 2026-07-24, copy count raised from 2 to 3 on 2026-07-25.
-  C++ sends each data datagram once and repairs a loss with a request/resend
-  round trip. Because reliable-UDP delivery is strictly ordered
-  (`take_complete_direct_packets`, udp.rs:421), a single lost control datagram
-  withholds every *later* control tick from the game loop until that repair
-  lands, so one dropped datagram freezes the whole session for
-  (control interval + 1 RTT) -- and a loss with no following traffic waits on
-  the 1 Hz check instead, up to a second. Putting further copies of the same
-  datagram on the wire immediately removes the round trip for any loss that does
-  not take every copy.
-  This is invisible to a C++ peer: the copy is byte-identical and therefore
-  carries the same packet number, and both engines discard a fragment they have
-  already stored -- Rust at `ReliableUdpPartialPacket::add_fragment`
-  (udp.rs:508-522), C++ at `C4NetIOUDP::Packet::AddFragment`
-  (LegacyClonk 7d43b47 src/C4NetIO.cpp:2615-2620). The delivered packet stream,
-  its ordering and the wire format are unchanged.
-  Only inner packets of <= 256 bytes qualify, which covers control (10-27 bytes
-  on the wire) and excludes resource transfer, whose chunks fragment into full
-  499-byte datagrams. The cost is about 1.5 KB/s per peer per direction.
-  Measured as above at 80 ms RTT / +-20 ms jitter / 1% loss, holding PreSend at
-  C++'s: worst hitch 231 ms -> 56 ms and frozen time 27.19% -> 18.53%; combined
-  with the entry above, 231 ms -> 31 ms and 0.18%. Staggering the copies was
-  measured and rejected: at 0/15/30 ms of delay the results were within noise,
-  and a correlated 60 ms loss episode swallows any stagger short enough to be
-  useful, so the copies go out immediately and need no timer.
-  The copy count is 3 by measurement over 32 seeds. The third copy is where the
-  lossy links collapse under independent loss, because it takes losing *three*
-  copies to cost a repair round trip: 250 ms/10% falls 12.22% -> 1.85% frozen
-  and 200 ms/5% falls 2.16% -> 1.14%. A fourth adds almost nothing.
-  Under correlated burst loss (`LC_BURST_MS`) every copy count measures the same
-  within noise -- redundancy is never worse there, only sometimes better -- and
-  the residual is the link itself: a 60 ms outage against a 55 ms control period
-  loses whole consecutive ticks that no copy count can recover, so the envelope
-  estimator carries that case instead.
-  Note for anyone re-running this: `link_impairment`'s burst model schedules
-  episodes in *time*. An earlier per-datagram draw made every redundant
-  configuration manufacture its own extra loss and measure as harmful, which was
-  an artifact of the model rather than a property of the link.
+- **Immediate reliable-UDP redundancy was measured, then reverted for narrow
+  shared links.** Historical divergence, active from 2026-07-24 through
+  2026-08-08. Sending three byte-identical control datagrams reduced repair
+  stalls on otherwise uncongested 5-10% independent-loss links, and peers safely
+  discarded the duplicates by packet number. It was not free: each physical
+  copy carried another UDP/IP frame, and the later per-peer re-ask controller
+  could only observe losses that survived every active copy. On a 33.6 kbit/s
+  link shared with an upload, the controller therefore used congestion as its
+  loss signal while its own copies created that congestion. The current
+  single-send entry above supersedes this experiment. The measured fast-link
+  benefit remains useful evidence for a future capacity-aware scheduler, but a
+  re-ask-only controller must not restore it.
 
 - **Reliable-UDP re-ask damping, 1 s -> 250 ms** (`crates/clonk-network/src/udp.rs`,
   `RELIABLE_UDP_RECHECK_INTERVAL`; C++ `C4NetIOUDP::Peer::iReCheckInterval`,
