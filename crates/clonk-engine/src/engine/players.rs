@@ -15,9 +15,16 @@ impl Engine {
         runtime_control: PlayerRuntimeControl,
         player_info_core: Option<PlayerInfoCoreState>,
     ) -> Result<JoinPlayerOutcome, EngineError> {
-        let has_valid_team = config
-            .team
-            .is_some_and(|team_id| self.team_state.teams.iter().any(|team| team.id == team_id));
+        let auto_generate_teams = self.team_state.team_configuration.auto_generate_teams;
+        let generated_team_is_valid = auto_generate_teams
+            && config
+                .team
+                .filter(|team_id| *team_id != 0)
+                .is_some_and(|team_id| self.resolve_or_generate_runtime_team(team_id));
+        let has_valid_team = generated_team_is_valid
+            || config
+                .team
+                .is_some_and(|team_id| self.team_state.teams.iter().any(|team| team.id == team_id));
         if self.team_state.runtime_join_team_choice && !has_valid_team && !semantics.script_player {
             let number = self.join_player_for_team_selection_at_client_with_name(
                 config,
@@ -195,6 +202,36 @@ impl Engine {
         self.finalize_joining_player(number, false, true)?;
         self.pending_player_joins.insert(number, config);
         Ok(Some(joined))
+    }
+
+    /// `C4TeamList::GetGenerateTeamByID`: resolve `TEAMID_New`, or create each
+    /// sequential default team through a requested positive ID
+    /// (C4Teams.cpp:386-420).
+    fn resolve_or_generate_runtime_team(&mut self, team_id: i32) -> bool {
+        if !self.team_state.team_configuration.active {
+            return false;
+        }
+        let team_id = if team_id == -1 {
+            let largest_team_id = self
+                .team_state
+                .teams
+                .iter()
+                .map(|team| team.id)
+                .max()
+                .unwrap_or(0);
+            let Some(team_id) = largest_team_id.checked_add(1) else {
+                return false;
+            };
+            team_id
+        } else {
+            team_id
+        };
+        while self.team_state.team_last_team_id < team_id {
+            if self.generate_runtime_team().is_none() {
+                return false;
+            }
+        }
+        self.team_state.teams.iter().any(|team| team.id == team_id)
     }
 
     pub(crate) fn generate_runtime_team(&mut self) -> Option<i32> {
