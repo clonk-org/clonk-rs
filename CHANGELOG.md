@@ -4,6 +4,17 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-08-09
+
+### Bug fixes
+
+- Restore network savegame players and construction state (#218)
+
+### Performance
+
+- Batch retained definition particles (#225)
+- Keep the C++ control horizon when no ping can size it (#223)
+
 ## [0.9.2] - 2026-08-09
 
 ### Performance
