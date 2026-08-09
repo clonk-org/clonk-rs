@@ -2039,6 +2039,7 @@ pub(crate) fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeE
             // ejection and SetAction(Idle), so callbacks fired by either
             // path must already see the new landscape (C4Object.cpp:
             // 1450-1472).
+            context.preview_live_object_sector(target);
             context.update_live_solid_mask(target, false);
         }
         Some((
@@ -2167,6 +2168,7 @@ pub(crate) fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeE
             // DoCon's keep-bottom/lift arm calls UpdateSolidMask again at
             // the adjusted position before Completion/Initialize.
             if moved {
+                context.preview_live_object_sector(target);
                 context.update_live_solid_mask(target, false);
             }
         });
@@ -4512,6 +4514,7 @@ pub(crate) fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         object.set_rotation(rotation, &metadata);
+        context.preview_live_object_sector(target);
         context.update_live_solid_mask(target, false);
         Ok(Value::Bool(true))
     })
@@ -5288,6 +5291,7 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
             changed
         };
         if changed {
+            context.preview_live_object_sector(target);
             // C4Object::ForcePosition removes and re-puts the live mask only
             // after the integer X/Y early-return gate (C4Movement.cpp:
             // 552-561). The C4SolidMask instance itself survives.
@@ -6383,6 +6387,7 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|id| context.object_effective_definition_id(id))
             .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
             .unwrap_or_default();
+        let preview_target = foreign.or(active);
         let scope = match foreign {
             Some(target) => {
                 &mut context
@@ -6422,7 +6427,13 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                 own_vertex_mode != VTX_SET_PERMANENT_UPD;
         }
         if own_vertex_mode == VTX_SET_PERMANENT_UPD {
+            if metadata.line == 0 {
+                scope.pending_update.shape_override = Some(None);
+            }
             scope.refresh_shape_preview(&metadata);
+            if let Some(target) = preview_target {
+                context.preview_live_object_sector(target);
+            }
         }
         Ok(Value::Bool(true))
     })

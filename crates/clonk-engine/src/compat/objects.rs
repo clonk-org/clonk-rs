@@ -508,6 +508,7 @@ pub(crate) fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, Ru
     }
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
+            context.preview_live_object_sector(target);
             context.update_live_solid_mask(target, true);
             let _ = refresh_live_object_ocf(context, target);
         }
@@ -1104,6 +1105,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
         if let Some(context) = cell.borrow_mut().as_mut() {
             // Exit's UpdateFace(true) updates the shape/solid mask before
             // SetOCF derives the final outside-container flags.
+            context.preview_live_object_sector(target);
             context.update_live_solid_mask(target, false);
             let _ = refresh_live_object_ocf(context, target);
         }
@@ -1390,6 +1392,7 @@ fn enter_object_live_internal(
             }
             scope.refresh_shape_preview(&definition_metadata);
         }
+        context.preview_live_object_sector(target);
         context.update_live_solid_mask(target, false);
         refresh_container_collection_ocf(context, container);
         true
@@ -2229,14 +2232,21 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
             .object_scope(collector)
             .map(ObjectScopeContext::fixed_velocity)
             .unwrap_or(collector_state.fixed_velocity);
-        let Some(scope) = context.object_scope_mut(item) else {
-            return;
+        let moved = {
+            let Some(scope) = context.object_scope_mut(item) else {
+                return;
+            };
+            let moved = scope.effective_position() != position;
+            let was_mobile = scope.mobile();
+            scope.set_position(position);
+            scope.set_fixed_velocity(velocity);
+            // Native CopyMotion writes x/y and xdir/ydir without changing Mobile.
+            scope.set_mobile(was_mobile);
+            moved
         };
-        let was_mobile = scope.mobile();
-        scope.set_position(position);
-        scope.set_fixed_velocity(velocity);
-        // Native CopyMotion writes x/y and xdir/ydir without changing Mobile.
-        scope.set_mobile(was_mobile);
+        if moved {
+            context.preview_live_object_sector(item);
+        }
     });
 
     // FnCollect restores the old positive NoCollectDelay but deliberately
@@ -9383,6 +9393,7 @@ pub(crate) fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             // StatusActivate::UpdateFace(true) still performs the ordinary
             // UpdateSolidMask remove/re-put before UpdateTransferZone.
+            context.preview_live_object_sector(object_id);
             context.update_live_solid_mask(object_id, false);
         }
         if status == ObjectStatus::Inactive && !clear_pointers {

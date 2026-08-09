@@ -12780,6 +12780,10 @@ mod component_con_regression;
 mod command_contact_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/pending_spawn_sector_regression.rs"]
+mod pending_spawn_sector_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]
 mod include_local_order_regression;
 

@@ -143,7 +143,7 @@ impl WorldAccessor for EffectHostContext {
         let mut ids = self.world.object_sector_ids_in_rect(rect)?;
         let mut seen = ids.iter().copied().collect::<HashSet<_>>();
         for &id in &self.pending_order {
-            let Some(object) = self.pending_objects.get(&id) else {
+            let Some(object) = self.get_world_object(id) else {
                 continue;
             };
             if rect.contains_point(object.position.x, object.position.y) && seen.insert(id) {
@@ -157,10 +157,10 @@ impl WorldAccessor for EffectHostContext {
         let mut ids = self.world.shape_sector_ids_in_rect(rect)?;
         let mut seen = ids.iter().copied().collect::<HashSet<_>>();
         for &id in &self.pending_order {
-            let Some(object) = self.pending_objects.get(&id) else {
+            let Some(object) = self.get_world_object(id) else {
                 continue;
             };
-            if self.object_shape_rect(object).overlaps(&rect) && seen.insert(id) {
+            if self.object_shape_rect(&object).overlaps(&rect) && seen.insert(id) {
                 ids.push(id);
             }
         }
@@ -170,16 +170,16 @@ impl WorldAccessor for EffectHostContext {
     fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
         let mut lists = self.world.object_sector_id_lists_in_rect(rect)?;
         let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
-        let pending: Vec<ObjectId> =
-            self.pending_order
-                .iter()
-                .copied()
-                .filter(|&id| {
-                    self.pending_objects.get(&id).is_some_and(|object| {
-                        rect.contains_point(object.position.x, object.position.y)
-                    }) && seen.insert(id)
-                })
-                .collect();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.get_world_object(id)
+                    .is_some_and(|object| rect.contains_point(object.position.x, object.position.y))
+                    && seen.insert(id)
+            })
+            .collect();
         if !pending.is_empty() {
             lists.push(pending);
         }
@@ -194,9 +194,8 @@ impl WorldAccessor for EffectHostContext {
             .iter()
             .copied()
             .filter(|&id| {
-                self.pending_objects
-                    .get(&id)
-                    .is_some_and(|object| self.object_shape_rect(object).overlaps(&rect))
+                self.get_world_object(id)
+                    .is_some_and(|object| self.object_shape_rect(&object).overlaps(&rect))
                     && seen.insert(id)
             })
             .collect();

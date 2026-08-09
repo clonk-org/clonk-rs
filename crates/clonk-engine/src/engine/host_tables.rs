@@ -501,6 +501,22 @@ impl Engine {
             .map(std::ptr::from_ref)
     }
 
+    /// Borrow `Game.Objects.Sectors` for a callback's read-only bounded-find
+    /// walk. C++ queries the live sector lists directly
+    /// (oracle-src-pinned src/C4FindObject.cpp:315-355); the callback-local
+    /// context switches to an owned map before previewing any mutation.
+    ///
+    /// # Safety
+    ///
+    /// Same synchronous source-lifetime contract as
+    /// [`Self::lazy_host_world_landscape_borrow`].
+    unsafe fn lazy_host_world_sector_map_borrow(source: *const ()) -> Option<*const SectorMap> {
+        let engine = source.cast::<Self>();
+        unsafe { &*std::ptr::addr_of!((*engine).sectors) }
+            .as_ref()
+            .map(std::ptr::from_ref)
+    }
+
     /// Report the landscape extent without copying the shell. Sector sizing is
     /// the only caller that used to force `lazy_host_world_landscape` for two
     /// integers, once per script call that reaches `FindObjects`.
@@ -748,6 +764,7 @@ impl Engine {
             .with_master_order(Self::lazy_host_world_master_order)
             .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
             .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
+            .with_sector_map_borrow(Self::lazy_host_world_sector_map_borrow)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
         };
         self.host_world_context_base()
@@ -784,10 +801,6 @@ impl Engine {
         exec_position: usize,
     ) -> HostWorldContext {
         let mut world = self.host_world_context();
-        world.seed_object(
-            self.objects.len(),
-            Self::host_world_object(&self.definitions, object),
-        );
         let mut master_order = world.master_object_ids().to_vec();
         if !master_order.contains(&object.id) {
             let master_position = master_order
@@ -795,7 +808,12 @@ impl Engine {
                 .saturating_sub(exec_position.min(master_order.len()));
             master_order.insert(master_position, object.id);
         }
-        world.with_master_order(master_order)
+        world = world.with_master_order(master_order);
+        world.seed_object(
+            self.objects.len(),
+            Self::host_world_object(&self.definitions, object),
+        );
+        world
     }
 
     /// The shared definition-script table host contexts carry (nested
