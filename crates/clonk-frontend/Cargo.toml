@@ -17,6 +17,7 @@ test = false
 
 [features]
 default = []
+bench = ["dep:criterion"]
 # The deterministic render probe is an explicitly invoked developer tool. Its
 # only test is ignored, so compiling and linking it in every workspace gate is
 # pure cold-build overhead.
@@ -32,6 +33,7 @@ clonk-gui = { path = "../clonk-gui" }
 clonk-resources = { path = "../clonk-resources" }
 clonk-script = { path = "../clonk-script" }
 rayon = "1.11.0"
+criterion = { version = "0.8", optional = true, default-features = false, features = ["cargo_bench_support"] }
 
 [dev-dependencies]
 # Same feature set as clonk-engine's image dep: a diverging dev-dep request makes
@@ -60,3 +62,8 @@ rustix = { version = "1", features = ["system"] }
 name = "dev_feedback_render"
 path = "tests/dev_feedback_render.rs"
 required-features = ["dev-feedback-render"]
+
+[[bench]]
+name = "particle_capture"
+harness = false
+required-features = ["bench"]

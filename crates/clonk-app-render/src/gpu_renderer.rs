@@ -15,10 +15,11 @@
 
 use clonk_graphics::{
     ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuPresentation, GpuPrimitiveTopology,
-    GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuTextureFormat, GpuTextureId,
-    GpuTextureResource, GpuVertex, Rect,
+    GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuSpriteQuad, GpuTextureFormat,
+    GpuTextureId, GpuTextureResource, GpuVertex, Rect,
 };
 use pixels::wgpu;
+use pixels::wgpu::util::DeviceExt;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -27,6 +28,11 @@ use thiserror::Error;
 
 const PACKED_VERTEX_FLOATS: usize = 18;
 const PACKED_VERTEX_STRIDE: u64 = (PACKED_VERTEX_FLOATS * std::mem::size_of::<f32>()) as u64;
+const PACKED_QUAD_INSTANCE_FLOATS: usize = 58;
+const PACKED_QUAD_INSTANCE_STRIDE: u64 =
+    (PACKED_QUAD_INSTANCE_FLOATS * std::mem::size_of::<f32>()) as u64;
+const PACKED_SPRITE_INSTANCE_STRIDE: u64 =
+    (8 * std::mem::size_of::<f32>() + 2 * std::mem::size_of::<u32>()) as u64;
 const INITIAL_VERTEX_BUFFER_SIZE: u64 = 4096;
 const SOURCE_TEXTURE_CACHE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 const SOURCE_TEXTURE_CACHE_MAX_ENTRIES: usize = 4096;
@@ -59,13 +65,125 @@ const PACKED_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     },
 ];
 
+const PACKED_QUAD_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 15] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 16,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 32,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 48,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 64,
+        shader_location: 4,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 80,
+        shader_location: 5,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 96,
+        shader_location: 6,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 112,
+        shader_location: 7,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 128,
+        shader_location: 8,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 144,
+        shader_location: 9,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 160,
+        shader_location: 10,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 176,
+        shader_location: 11,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 192,
+        shader_location: 12,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 208,
+        shader_location: 13,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 224,
+        shader_location: 14,
+    },
+];
+
+const PACKED_SPRITE_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 16,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 32,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 36,
+        shader_location: 3,
+    },
+];
+
 const QUAD_SHADER: &str = r#"
 struct VertexInput {
-    @location(0) clip_position: vec4<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) modulation: vec4<f32>,
-    @location(3) flags: vec4<f32>,
-    @location(4) sample_tile: vec4<f32>,
+    @location(0) clip_position_0: vec4<f32>,
+    @location(1) clip_position_1: vec4<f32>,
+    @location(2) clip_position_2: vec4<f32>,
+    @location(3) clip_position_3: vec4<f32>,
+    @location(4) uv_01: vec4<f32>,
+    @location(5) uv_23: vec4<f32>,
+    @location(6) modulation_0: vec4<f32>,
+    @location(7) modulation_1: vec4<f32>,
+    @location(8) modulation_2: vec4<f32>,
+    @location(9) modulation_3: vec4<f32>,
+    @location(10) sample_tile_0: vec4<f32>,
+    @location(11) sample_tile_1: vec4<f32>,
+    @location(12) sample_tile_2: vec4<f32>,
+    @location(13) sample_tile_3: vec4<f32>,
+    @location(14) flags: vec2<f32>,
+    @builtin(vertex_index) vertex_index: u32,
 };
 
 struct VertexOutput {
@@ -82,12 +200,37 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
+    let positions = array<vec4<f32>, 4>(
+        input.clip_position_0,
+        input.clip_position_1,
+        input.clip_position_2,
+        input.clip_position_3,
+    );
+    let uvs = array<vec2<f32>, 4>(
+        input.uv_01.xy,
+        input.uv_01.zw,
+        input.uv_23.xy,
+        input.uv_23.zw,
+    );
+    let modulations = array<vec4<f32>, 4>(
+        input.modulation_0,
+        input.modulation_1,
+        input.modulation_2,
+        input.modulation_3,
+    );
+    let sample_tiles = array<vec4<f32>, 4>(
+        input.sample_tile_0,
+        input.sample_tile_1,
+        input.sample_tile_2,
+        input.sample_tile_3,
+    );
+    let corner = input.vertex_index;
     var output: VertexOutput;
-    output.position = input.clip_position;
-    output.uv = input.uv;
-    output.modulation = input.modulation;
-    output.flags = input.flags;
-    output.sample_tile = input.sample_tile;
+    output.position = positions[corner];
+    output.uv = uvs[corner];
+    output.modulation = modulations[corner];
+    output.flags = vec4<f32>(input.flags, 0.0, 0.0);
+    output.sample_tile = sample_tiles[corner];
     return output;
 }
 
@@ -150,6 +293,85 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // control flow. Source textures have one mip, matching C4TexRef.
         source = textureSampleLevel(image, image_sampler, input.uv, 0.0);
     }
+    var rgb = source.rgb;
+    var alpha = source.a;
+    if input.flags.x > 0.5 {
+        rgb = clamp((rgb + input.modulation.rgb) * 2.0 - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else {
+        rgb = clamp(rgb * input.modulation.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        alpha = clamp(alpha - input.modulation.a, 0.0, 1.0);
+    }
+    if input.flags.y > 0.5 {
+        rgb = apply_gamma(rgb);
+    }
+    return vec4<f32>(rgb, alpha);
+}
+"#;
+
+const SPRITE_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) clip_rect: vec4<f32>,
+    @location(1) uv_rect: vec4<f32>,
+    @location(2) packed_modulation: u32,
+    @location(3) packed_flags: u32,
+    @builtin(vertex_index) vertex_index: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) modulation: vec4<f32>,
+    @location(2) flags: vec2<f32>,
+};
+
+@group(0) @binding(0) var gamma_lut: texture_2d<u32>;
+@group(1) @binding(0) var image: texture_2d<f32>;
+@group(1) @binding(1) var image_sampler: sampler;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    let right = input.vertex_index == 1u || input.vertex_index == 3u;
+    let bottom = input.vertex_index >= 2u;
+    let red = f32((input.packed_modulation >> 16u) & 255u) / 255.0;
+    let green = f32((input.packed_modulation >> 8u) & 255u) / 255.0;
+    let blue = f32(input.packed_modulation & 255u) / 255.0;
+    let transparency = f32(input.packed_modulation >> 24u) / 255.0;
+    var output: VertexOutput;
+    output.position = vec4<f32>(
+        select(input.clip_rect.x, input.clip_rect.z, right),
+        select(input.clip_rect.y, input.clip_rect.w, bottom),
+        0.0,
+        1.0,
+    );
+    output.uv = vec2<f32>(
+        select(input.uv_rect.x, input.uv_rect.z, right),
+        select(input.uv_rect.y, input.uv_rect.w, bottom),
+    );
+    output.modulation = vec4<f32>(red, green, blue, transparency);
+    output.flags = vec2<f32>(
+        select(0.0, 1.0, (input.packed_flags & 1u) != 0u),
+        select(0.0, 1.0, (input.packed_flags & 2u) != 0u),
+    );
+    return output;
+}
+
+fn gamma_channel(channel: u32, value: f32) -> f32 {
+    let index = min(u32(clamp(value, 0.0, 1.0) * 256.0), 255u);
+    let sample = textureLoad(gamma_lut, vec2<i32>(i32(index), i32(channel)), 0).r;
+    return f32(sample) / 65535.0;
+}
+
+fn apply_gamma(color: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        gamma_channel(0u, color.r),
+        gamma_channel(1u, color.g),
+        gamma_channel(2u, color.b),
+    );
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let source = textureSampleLevel(image, image_sampler, input.uv, 0.0);
     var rgb = source.rgb;
     var alpha = source.a;
     if input.flags.x > 0.5 {
@@ -685,6 +907,47 @@ struct QuadBindingKey {
     sampler: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuadRunKey {
+    binding: QuadBindingKey,
+    clip: Option<Rect>,
+    blend: GpuBlend,
+}
+
+fn quad_run_key(command: &GpuCommand) -> Option<QuadRunKey> {
+    match command {
+        GpuCommand::Quad {
+            texture,
+            owner_mask: None,
+            clip,
+            blend,
+            sampler,
+            ..
+        } => Some(QuadRunKey {
+            binding: QuadBindingKey {
+                texture: *texture,
+                sampler: sampler_key(*sampler),
+            },
+            clip: *clip,
+            blend: *blend,
+        }),
+        GpuCommand::SpriteBatch {
+            texture,
+            clip,
+            blend,
+            ..
+        } => Some(QuadRunKey {
+            binding: QuadBindingKey {
+                texture: *texture,
+                sampler: sampler_key(GpuSampler::Nearest),
+            },
+            clip: *clip,
+            blend: *blend,
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct LandscapeBindingKey {
     base: GpuTextureId,
@@ -712,8 +975,51 @@ struct DrawProjection {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct SpriteProjection {
+    logical: Rect,
+    physical: Rect,
+    scale: (f64, f64),
+    physical_extent: [u32; 2],
+}
+
+impl SpriteProjection {
+    fn new(projection: &DrawProjection) -> Self {
+        Self {
+            logical: projection.clipper.logical_clip(),
+            physical: projection.clipper.physical_clip(),
+            scale: projection.clipper.scale(),
+            physical_extent: projection.physical_extent,
+        }
+    }
+
+    fn clip_rect(self, rect: [f32; 4]) -> Result<[f32; 4], GpuRendererError> {
+        let [left, top, right, bottom] = rect;
+        if !rect.iter().all(|value| value.is_finite()) {
+            return Err(GpuRendererError::NonFiniteCoordinate);
+        }
+        let clip_x = |x: f32| {
+            let physical = f64::from(self.physical.x)
+                + (f64::from(x) - f64::from(self.logical.x)) * self.scale.0;
+            2.0 * physical / f64::from(self.physical_extent[0]) - 1.0
+        };
+        let clip_y = |y: f32| {
+            let physical = f64::from(self.physical.y)
+                + (f64::from(y) - f64::from(self.logical.y)) * self.scale.1;
+            1.0 - 2.0 * physical / f64::from(self.physical_extent[1])
+        };
+        let clip =
+            [clip_x(left), clip_y(top), clip_x(right), clip_y(bottom)].map(|value| value as f32);
+        clip.iter()
+            .all(|value| value.is_finite())
+            .then_some(clip)
+            .ok_or(GpuRendererError::NonFiniteCoordinate)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DrawKind {
     Quad(QuadBindingKey),
+    Sprite(QuadBindingKey),
     Landscape(LandscapeBindingKey),
     Solid { alpha_mode: GpuSolidAlphaMode },
 }
@@ -724,6 +1030,34 @@ struct DrawCall {
     scissor: Scissor,
     blend: GpuBlend,
     kind: DrawKind,
+}
+
+struct BuiltDrawStream {
+    vertices: Vec<PackedVertex>,
+    quad_instances: Vec<PackedQuadInstance>,
+    sprite_instances: Vec<PackedSpriteInstance>,
+    calls: Vec<DrawCall>,
+}
+
+impl DrawCall {
+    fn push_compatible_quad(calls: &mut Vec<Self>, batch_start: usize, call: Self) {
+        let compatible = (calls.len() > batch_start)
+            .then(|| calls.last_mut())
+            .flatten()
+            .filter(|previous| {
+                previous.vertices.end == call.vertices.start
+                    && previous.scissor == call.scissor
+                    && previous.blend == call.blend
+                    && previous.kind == call.kind
+            });
+        if let Some(previous) = compatible {
+            // Vertices retain command and triangle order, so fixed-function
+            // blending produces the same painter-order result in one draw.
+            previous.vertices.end = call.vertices.end;
+        } else {
+            calls.push(call);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -817,6 +1151,9 @@ pub struct RetainedGpuRenderer {
     quad_replace_pipeline: wgpu::RenderPipeline,
     quad_normal_pipeline: wgpu::RenderPipeline,
     quad_additive_pipeline: wgpu::RenderPipeline,
+    sprite_replace_pipeline: wgpu::RenderPipeline,
+    sprite_normal_pipeline: wgpu::RenderPipeline,
+    sprite_additive_pipeline: wgpu::RenderPipeline,
     landscape_pipeline: wgpu::RenderPipeline,
     solid_replace_pipeline: wgpu::RenderPipeline,
     solid_over_normal_pipeline: wgpu::RenderPipeline,
@@ -848,7 +1185,14 @@ pub struct RetainedGpuRenderer {
 
     vertex_buffer: wgpu::Buffer,
     vertex_buffer_size: u64,
+    quad_instance_buffer: wgpu::Buffer,
+    quad_instance_buffer_size: u64,
+    sprite_instance_buffer: wgpu::Buffer,
+    sprite_instance_buffer_size: u64,
+    quad_index_buffer: wgpu::Buffer,
     vertex_scratch: Vec<PackedVertex>,
+    quad_instance_scratch: Vec<PackedQuadInstance>,
+    sprite_instance_scratch: Vec<PackedSpriteInstance>,
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
@@ -942,6 +1286,7 @@ impl RetainedGpuRenderer {
                 ],
             });
         let quad_shader = shader(device, "lc_gpu_quad_shader", QUAD_SHADER);
+        let sprite_shader = shader(device, "lc_gpu_sprite_shader", SPRITE_SHADER);
         let landscape_shader = shader(device, "lc_gpu_landscape_shader", LANDSCAPE_SHADER);
         let solid_shader = shader(device, "lc_gpu_solid_shader", SOLID_SHADER);
         let present_shader = shader(device, "lc_gpu_present_shader", PRESENT_SHADER);
@@ -985,32 +1330,50 @@ impl RetainedGpuRenderer {
                 immediate_size: 0,
             });
 
-        let quad_replace_pipeline = scene_pipeline(
+        let quad_replace_pipeline = quad_scene_pipeline(
             device,
             "lc_gpu_quad_replace",
             &quad_pipeline_layout,
             &quad_shader,
-            wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Replace,
             GpuSolidAlphaMode::SourceOver,
         );
-        let quad_normal_pipeline = scene_pipeline(
+        let quad_normal_pipeline = quad_scene_pipeline(
             device,
             "lc_gpu_quad_normal",
             &quad_pipeline_layout,
             &quad_shader,
-            wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Normal,
             GpuSolidAlphaMode::SourceOver,
         );
-        let quad_additive_pipeline = scene_pipeline(
+        let quad_additive_pipeline = quad_scene_pipeline(
             device,
             "lc_gpu_quad_additive",
             &quad_pipeline_layout,
             &quad_shader,
-            wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Additive,
             GpuSolidAlphaMode::SourceOver,
+        );
+        let sprite_replace_pipeline = sprite_scene_pipeline(
+            device,
+            "lc_gpu_sprite_replace",
+            &quad_pipeline_layout,
+            &sprite_shader,
+            GpuBlend::Replace,
+        );
+        let sprite_normal_pipeline = sprite_scene_pipeline(
+            device,
+            "lc_gpu_sprite_normal",
+            &quad_pipeline_layout,
+            &sprite_shader,
+            GpuBlend::Normal,
+        );
+        let sprite_additive_pipeline = sprite_scene_pipeline(
+            device,
+            "lc_gpu_sprite_additive",
+            &quad_pipeline_layout,
+            &sprite_shader,
+            GpuBlend::Additive,
         );
         let landscape_pipeline = scene_pipeline(
             device,
@@ -1146,6 +1509,23 @@ impl RetainedGpuRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let quad_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_quad_instances"),
+            size: INITIAL_VERTEX_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sprite_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_sprite_instances"),
+            size: INITIAL_VERTEX_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let quad_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lc_gpu_quad_indices"),
+            contents: &[0, 0, 1, 0, 2, 0, 2, 0, 1, 0, 3, 0],
+            usage: wgpu::BufferUsages::INDEX,
+        });
 
         Self {
             surface_format,
@@ -1165,6 +1545,9 @@ impl RetainedGpuRenderer {
             quad_replace_pipeline,
             quad_normal_pipeline,
             quad_additive_pipeline,
+            sprite_replace_pipeline,
+            sprite_normal_pipeline,
+            sprite_additive_pipeline,
             landscape_pipeline,
             solid_replace_pipeline,
             solid_over_normal_pipeline,
@@ -1189,7 +1572,14 @@ impl RetainedGpuRenderer {
             fallback_liquid_view,
             vertex_buffer,
             vertex_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
+            quad_instance_buffer,
+            quad_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
+            sprite_instance_buffer,
+            sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
+            quad_index_buffer,
             vertex_scratch: Vec::new(),
+            quad_instance_scratch: Vec::new(),
+            sprite_instance_scratch: Vec::new(),
             draw_call_scratch: Vec::new(),
             composition: None,
             last_presented_monitor_gamma: None,
@@ -1370,14 +1760,21 @@ impl RetainedGpuRenderer {
         self.sync_textures(device, queue, &resources)?;
         self.compose_shader_landscape(device, queue, encoder)?;
 
-        let (vertices, calls) = self.build_layered_draw_stream(layers)?;
+        let BuiltDrawStream {
+            vertices,
+            quad_instances,
+            sprite_instances,
+            calls,
+        } = self.build_layered_draw_stream(layers)?;
         let vertex_bytes = packed_vertex_bytes(&vertices);
+        let quad_instance_bytes = packed_quad_instance_bytes(&quad_instances);
+        let sprite_instance_bytes = packed_sprite_instance_bytes(&sprite_instances);
         self.ensure_bind_groups(device, &calls)?;
         let mut used_quad_bindings = HashSet::new();
         let mut used_landscape_bindings = HashSet::new();
         for call in &calls {
             match call.kind {
-                DrawKind::Quad(key) => {
+                DrawKind::Quad(key) | DrawKind::Sprite(key) => {
                     used_quad_bindings.insert(key);
                 }
                 DrawKind::Landscape(key) => {
@@ -1397,6 +1794,14 @@ impl RetainedGpuRenderer {
         self.ensure_vertex_buffer(device, vertex_bytes.len())?;
         if !vertex_bytes.is_empty() {
             queue.write_buffer(&self.vertex_buffer, 0, vertex_bytes);
+        }
+        self.ensure_quad_instance_buffer(device, quad_instance_bytes.len())?;
+        if !quad_instance_bytes.is_empty() {
+            queue.write_buffer(&self.quad_instance_buffer, 0, quad_instance_bytes);
+        }
+        self.ensure_sprite_instance_buffer(device, sprite_instance_bytes.len())?;
+        if !sprite_instance_bytes.is_empty() {
+            queue.write_buffer(&self.sprite_instance_buffer, 0, sprite_instance_bytes);
         }
         self.last_stats.draw_calls = calls.len();
         self.last_stats.resident_source_textures = self.textures.len();
@@ -1428,7 +1833,6 @@ impl RetainedGpuRenderer {
                 multiview_mask: None,
             });
             if !calls.is_empty() {
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 pass.set_bind_group(0, &self.gamma_bind_group, &[]);
             }
             self.encode_draw_calls(&mut pass, &calls);
@@ -1495,6 +1899,8 @@ impl RetainedGpuRenderer {
         }
 
         self.vertex_scratch = vertices;
+        self.quad_instance_scratch = quad_instances;
+        self.sprite_instance_scratch = sprite_instances;
         self.draw_call_scratch = calls;
         self.check_health()?;
         Ok(readback)
@@ -1811,70 +2217,130 @@ impl RetainedGpuRenderer {
     fn build_layered_draw_stream(
         &mut self,
         layers: &[GpuSceneLayer<'_>],
-    ) -> Result<(Vec<PackedVertex>, Vec<DrawCall>), GpuRendererError> {
+    ) -> Result<BuiltDrawStream, GpuRendererError> {
         let mut vertices = std::mem::take(&mut self.vertex_scratch);
+        let mut quad_instances = std::mem::take(&mut self.quad_instance_scratch);
+        let mut sprite_instances = std::mem::take(&mut self.sprite_instance_scratch);
         let mut calls = std::mem::take(&mut self.draw_call_scratch);
         vertices.clear();
+        quad_instances.clear();
+        sprite_instances.clear();
         calls.clear();
         calls.reserve(layers.iter().map(|layer| layer.scene.commands.len()).sum());
         for layer in layers {
-            self.append_draw_stream(layer.scene, &layer.presentation, &mut vertices, &mut calls)?;
+            let layer_call_start = calls.len();
+            self.append_draw_stream(
+                layer.scene,
+                &layer.presentation,
+                &mut vertices,
+                &mut quad_instances,
+                &mut sprite_instances,
+                &mut calls,
+                layer_call_start,
+            )?;
         }
-        Ok((vertices, calls))
+        Ok(BuiltDrawStream {
+            vertices,
+            quad_instances,
+            sprite_instances,
+            calls,
+        })
     }
 
+    // Keep the independently typed upload streams explicit at this packing boundary.
+    #[allow(clippy::too_many_arguments)]
     fn append_draw_stream(
         &self,
         scene: &GpuScene,
         presentation: &GpuPresentation,
         vertices: &mut Vec<PackedVertex>,
+        quad_instances: &mut Vec<PackedQuadInstance>,
+        sprite_instances: &mut Vec<PackedSpriteInstance>,
         calls: &mut Vec<DrawCall>,
+        layer_call_start: usize,
     ) -> Result<(), GpuRendererError> {
-        for command in &scene.commands {
+        let mut commands = scene.commands.iter().peekable();
+        while let Some(command) = commands.next() {
             match command {
-                GpuCommand::Quad {
-                    texture,
-                    owner_mask,
-                    vertices: quad,
-                    clip,
-                    blend,
-                    base_mod2,
-                    owner_mod2: _,
-                    sampler,
-                    gamma,
-                } => {
+                GpuCommand::Quad { owner_mask, .. } => {
                     if owner_mask.is_some() {
                         return Err(GpuRendererError::OwnerMaskNotLowered);
                     }
-                    self.require_format(*texture, GpuTextureFormat::Rgba8)?;
+                    let Some(run) = quad_run_key(command) else {
+                        return Err(GpuRendererError::OwnerMaskNotLowered);
+                    };
+                    self.require_format(run.binding.texture, GpuTextureFormat::Rgba8)?;
                     let Some(projection) =
-                        draw_projection(*clip, scene.logical_extent, presentation)?
+                        draw_projection(run.clip, scene.logical_extent, presentation)?
+                    else {
+                        while commands.peek().is_some_and(|next| {
+                            matches!(next, GpuCommand::Quad { .. })
+                                && quad_run_key(next) == Some(run)
+                        }) {
+                            let _ = commands.next();
+                        }
+                        continue;
+                    };
+                    append_prepared_quad_command(
+                        quad_instances,
+                        calls,
+                        layer_call_start,
+                        command,
+                        scene.gamma_mode,
+                        &projection,
+                        run,
+                    )?;
+                    while commands.peek().is_some_and(|next| {
+                        matches!(next, GpuCommand::Quad { .. }) && quad_run_key(next) == Some(run)
+                    }) {
+                        if let Some(next) = commands.next() {
+                            append_prepared_quad_command(
+                                quad_instances,
+                                calls,
+                                layer_call_start,
+                                next,
+                                scene.gamma_mode,
+                                &projection,
+                                run,
+                            )?;
+                        }
+                    }
+                }
+                GpuCommand::SpriteBatch {
+                    quads, mod2, gamma, ..
+                } => {
+                    if quads.is_empty() {
+                        continue;
+                    }
+                    let run = quad_run_key(command)
+                        .expect("sprite batches always have a textured run key");
+                    self.require_format(run.binding.texture, GpuTextureFormat::Rgba8)?;
+                    let Some(projection) =
+                        draw_projection(run.clip, scene.logical_extent, presentation)?
                     else {
                         continue;
                     };
-                    let start = vertex_count(vertices)?;
-                    for index in [0, 1, 2, 2, 1, 3] {
-                        let vertex = quad[index];
-                        append_vertex(
-                            vertices,
-                            packed_quad_vertex(
-                                vertex,
-                                *base_mod2,
-                                fragment_gamma_flag(scene.gamma_mode, *gamma),
-                                &projection,
-                            )?,
-                        );
+                    let start = sprite_instance_count(sprite_instances)?;
+                    let gamma = fragment_gamma_flag(scene.gamma_mode, *gamma);
+                    let sprite_projection = SpriteProjection::new(&projection);
+                    for quad in quads {
+                        sprite_instances.push(packed_sprite_instance(
+                            *quad,
+                            *mod2,
+                            gamma,
+                            sprite_projection,
+                        )?);
                     }
-                    let end = vertex_count(vertices)?;
-                    calls.push(DrawCall {
-                        vertices: start..end,
-                        scissor: projection.scissor,
-                        blend: *blend,
-                        kind: DrawKind::Quad(QuadBindingKey {
-                            texture: *texture,
-                            sampler: sampler_key(*sampler),
-                        }),
-                    });
+                    DrawCall::push_compatible_quad(
+                        calls,
+                        layer_call_start,
+                        DrawCall {
+                            vertices: start..sprite_instance_count(sprite_instances)?,
+                            scissor: projection.scissor,
+                            blend: run.blend,
+                            kind: DrawKind::Sprite(run.binding),
+                        },
+                    );
                 }
                 GpuCommand::Landscape {
                     base,
@@ -2047,7 +2513,9 @@ impl RetainedGpuRenderer {
     ) -> Result<(), GpuRendererError> {
         for call in calls {
             match call.kind {
-                DrawKind::Quad(key) if !self.quad_bind_groups.contains_key(&key) => {
+                DrawKind::Quad(key) | DrawKind::Sprite(key)
+                    if !self.quad_bind_groups.contains_key(&key) =>
+                {
                     let texture = self
                         .textures
                         .get(&key.texture)
@@ -2160,6 +2628,54 @@ impl RetainedGpuRenderer {
         Ok(())
     }
 
+    fn ensure_quad_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        required: usize,
+    ) -> Result<(), GpuRendererError> {
+        let required =
+            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        if required <= self.quad_instance_buffer_size {
+            return Ok(());
+        }
+        let size = required
+            .checked_next_power_of_two()
+            .ok_or(GpuRendererError::VertexRangeOverflow)?
+            .max(INITIAL_VERTEX_BUFFER_SIZE);
+        self.quad_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_quad_instances"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.quad_instance_buffer_size = size;
+        Ok(())
+    }
+
+    fn ensure_sprite_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        required: usize,
+    ) -> Result<(), GpuRendererError> {
+        let required =
+            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        if required <= self.sprite_instance_buffer_size {
+            return Ok(());
+        }
+        let size = required
+            .checked_next_power_of_two()
+            .ok_or(GpuRendererError::VertexRangeOverflow)?
+            .max(INITIAL_VERTEX_BUFFER_SIZE);
+        self.sprite_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_sprite_instances"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.sprite_instance_buffer_size = size;
+        Ok(())
+    }
+
     fn ensure_composition(&mut self, device: &wgpu::Device, extent: [u32; 2]) {
         if self
             .composition
@@ -2252,6 +2768,11 @@ impl RetainedGpuRenderer {
             );
             match call.kind {
                 DrawKind::Quad(key) => {
+                    pass.set_vertex_buffer(0, self.quad_instance_buffer.slice(..));
+                    pass.set_index_buffer(
+                        self.quad_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint16,
+                    );
                     pass.set_pipeline(match call.blend {
                         GpuBlend::Replace => &self.quad_replace_pipeline,
                         GpuBlend::Normal => &self.quad_normal_pipeline,
@@ -2264,8 +2785,30 @@ impl RetainedGpuRenderer {
                             .expect("quad binding was prepared"),
                         &[],
                     );
+                    pass.draw_indexed(0..6, 0, call.vertices.clone());
+                }
+                DrawKind::Sprite(key) => {
+                    pass.set_vertex_buffer(0, self.sprite_instance_buffer.slice(..));
+                    pass.set_index_buffer(
+                        self.quad_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint16,
+                    );
+                    pass.set_pipeline(match call.blend {
+                        GpuBlend::Replace => &self.sprite_replace_pipeline,
+                        GpuBlend::Normal => &self.sprite_normal_pipeline,
+                        GpuBlend::Additive => &self.sprite_additive_pipeline,
+                    });
+                    pass.set_bind_group(
+                        1,
+                        self.quad_bind_groups
+                            .get(&key)
+                            .expect("sprite binding was prepared"),
+                        &[],
+                    );
+                    pass.draw_indexed(0..6, 0, call.vertices.clone());
                 }
                 DrawKind::Landscape(key) => {
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_pipeline(&self.landscape_pipeline);
                     pass.set_bind_group(
                         1,
@@ -2274,12 +2817,14 @@ impl RetainedGpuRenderer {
                             .expect("landscape binding was prepared"),
                         &[],
                     );
+                    pass.draw(call.vertices.clone(), 0..1);
                 }
                 DrawKind::Solid { alpha_mode } => {
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_pipeline(self.solid_pipeline(call.blend, alpha_mode));
+                    pass.draw(call.vertices.clone(), 0..1);
                 }
             }
-            pass.draw(call.vertices.clone(), 0..1);
         }
     }
 }
@@ -2292,6 +2837,115 @@ struct PackedVertex {
     data0: [f32; 4],
     data1: [f32; 4],
     data2: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct PackedQuadInstance {
+    clip: [[f32; 4]; 4],
+    uv: [[f32; 4]; 2],
+    modulation: [[f32; 4]; 4],
+    sample_tile: [[f32; 4]; 4],
+    flags: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct PackedSpriteInstance {
+    clip_rect: [f32; 4],
+    uv_rect: [f32; 4],
+    modulation: u32,
+    flags: u32,
+}
+
+fn packed_quad_instance(
+    quad: [GpuVertex; 4],
+    mod2: bool,
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<PackedQuadInstance, GpuRendererError> {
+    let packed = [
+        packed_quad_vertex(quad[0], mod2, gamma, projection)?,
+        packed_quad_vertex(quad[1], mod2, gamma, projection)?,
+        packed_quad_vertex(quad[2], mod2, gamma, projection)?,
+        packed_quad_vertex(quad[3], mod2, gamma, projection)?,
+    ];
+    Ok(PackedQuadInstance {
+        clip: packed.map(|vertex| vertex.clip),
+        uv: [
+            [
+                packed[0].uv[0],
+                packed[0].uv[1],
+                packed[1].uv[0],
+                packed[1].uv[1],
+            ],
+            [
+                packed[2].uv[0],
+                packed[2].uv[1],
+                packed[3].uv[0],
+                packed[3].uv[1],
+            ],
+        ],
+        modulation: packed.map(|vertex| vertex.data0),
+        sample_tile: packed.map(|vertex| vertex.data2),
+        flags: [flag(mod2), flag(gamma)],
+    })
+}
+
+fn packed_sprite_instance(
+    quad: GpuSpriteQuad,
+    mod2: bool,
+    gamma: bool,
+    projection: SpriteProjection,
+) -> Result<PackedSpriteInstance, GpuRendererError> {
+    Ok(PackedSpriteInstance {
+        clip_rect: projection.clip_rect(quad.rect)?,
+        uv_rect: quad.uv,
+        modulation: quad.modulation,
+        flags: u32::from(mod2) | (u32::from(gamma) << 1),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prepared_quad_command(
+    quad_instances: &mut Vec<PackedQuadInstance>,
+    calls: &mut Vec<DrawCall>,
+    batch_start: usize,
+    command: &GpuCommand,
+    gamma_mode: GpuGammaMode,
+    projection: &DrawProjection,
+    run: QuadRunKey,
+) -> Result<(), GpuRendererError> {
+    let mut append = |instance| -> Result<(), GpuRendererError> {
+        let start = quad_instance_count(quad_instances)?;
+        quad_instances.push(instance);
+        DrawCall::push_compatible_quad(
+            calls,
+            batch_start,
+            DrawCall {
+                vertices: start..quad_instance_count(quad_instances)?,
+                scissor: projection.scissor,
+                blend: run.blend,
+                kind: DrawKind::Quad(run.binding),
+            },
+        );
+        Ok(())
+    };
+    if let GpuCommand::Quad {
+        vertices,
+        base_mod2,
+        gamma,
+        ..
+    } = command
+    {
+        append(packed_quad_instance(
+            *vertices,
+            *base_mod2,
+            fragment_gamma_flag(gamma_mode, *gamma),
+            projection,
+        )?)?;
+    }
+    Ok(())
 }
 
 fn packed_quad_vertex(
@@ -2965,6 +3619,44 @@ fn validate_scene(
                 }
                 packed_vertices = packed_vertices.saturating_add(6);
             }
+            GpuCommand::SpriteBatch {
+                texture,
+                quads,
+                clip,
+                ..
+            } => {
+                if quads.is_empty() {
+                    continue;
+                }
+                require_declared_format(&resources, *texture, GpuTextureFormat::Rgba8)?;
+                let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
+                let mut minimum = [f32::INFINITY; 2];
+                let mut maximum = [f32::NEG_INFINITY; 2];
+                for quad in quads {
+                    if !quad
+                        .rect
+                        .iter()
+                        .chain(quad.uv.iter())
+                        .all(|value| value.is_finite())
+                    {
+                        return Err(GpuRendererError::NonFiniteCoordinate);
+                    }
+                    let [left, top, right, bottom] = quad.rect;
+                    minimum[0] = minimum[0].min(left).min(right);
+                    minimum[1] = minimum[1].min(top).min(bottom);
+                    maximum[0] = maximum[0].max(left).max(right);
+                    maximum[1] = maximum[1].max(top).max(bottom);
+                }
+                if let Some(projection) = projection.as_ref() {
+                    let _ = SpriteProjection::new(projection)
+                        .clip_rect([minimum[0], minimum[1], maximum[0], maximum[1]])?;
+                }
+                packed_vertices = packed_vertices.saturating_add(
+                    u64::try_from(quads.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(6),
+                );
+            }
             GpuCommand::Landscape {
                 base,
                 liquid_mask,
@@ -3361,6 +4053,14 @@ fn vertex_count(vertices: &[PackedVertex]) -> Result<u32, GpuRendererError> {
     u32::try_from(vertices.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
 }
 
+fn quad_instance_count(instances: &[PackedQuadInstance]) -> Result<u32, GpuRendererError> {
+    u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
+}
+
+fn sprite_instance_count(instances: &[PackedSpriteInstance]) -> Result<u32, GpuRendererError> {
+    u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
+}
+
 fn append_vertex(vertices: &mut Vec<PackedVertex>, vertex: PackedVertex) {
     vertices.push(vertex);
 }
@@ -3376,6 +4076,36 @@ fn packed_vertex_bytes(vertices: &[PackedVertex]) -> &[u8] {
         std::slice::from_raw_parts(
             vertices.as_ptr().cast::<u8>(),
             std::mem::size_of_val(vertices),
+        )
+    }
+}
+
+fn packed_quad_instance_bytes(instances: &[PackedQuadInstance]) -> &[u8] {
+    const {
+        assert!(std::mem::size_of::<PackedQuadInstance>() == PACKED_QUAD_INSTANCE_STRIDE as usize);
+    }
+    // SAFETY: `PackedQuadInstance` is `repr(C)`, contains only contiguous
+    // `f32` arrays, and the size assertion above excludes padding.
+    unsafe {
+        std::slice::from_raw_parts(
+            instances.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(instances),
+        )
+    }
+}
+
+fn packed_sprite_instance_bytes(instances: &[PackedSpriteInstance]) -> &[u8] {
+    const {
+        assert!(
+            std::mem::size_of::<PackedSpriteInstance>() == PACKED_SPRITE_INSTANCE_STRIDE as usize
+        );
+    }
+    // SAFETY: `PackedSpriteInstance` is `repr(C)`, contains only contiguous
+    // `f32` and `u32` fields, and the size assertion above excludes padding.
+    unsafe {
+        std::slice::from_raw_parts(
+            instances.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(instances),
         )
     }
 }
@@ -3749,6 +4479,63 @@ fn packed_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+fn packed_quad_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: PACKED_QUAD_INSTANCE_STRIDE,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &PACKED_QUAD_INSTANCE_ATTRIBUTES,
+    }
+}
+
+fn packed_sprite_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: PACKED_SPRITE_INSTANCE_STRIDE,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &PACKED_SPRITE_INSTANCE_ATTRIBUTES,
+    }
+}
+
+fn quad_scene_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    blend: GpuBlend,
+    alpha_mode: GpuSolidAlphaMode,
+) -> wgpu::RenderPipeline {
+    scene_pipeline_with_vertex_layout(
+        device,
+        label,
+        layout,
+        shader,
+        wgpu::PrimitiveTopology::TriangleList,
+        blend,
+        alpha_mode,
+        packed_quad_instance_layout(),
+        "vs_main",
+    )
+}
+
+fn sprite_scene_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    blend: GpuBlend,
+) -> wgpu::RenderPipeline {
+    scene_pipeline_with_vertex_layout(
+        device,
+        label,
+        layout,
+        shader,
+        wgpu::PrimitiveTopology::TriangleList,
+        blend,
+        GpuSolidAlphaMode::SourceOver,
+        packed_sprite_instance_layout(),
+        "vs_main",
+    )
+}
+
 fn scene_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -3758,7 +4545,32 @@ fn scene_pipeline(
     blend: GpuBlend,
     alpha_mode: GpuSolidAlphaMode,
 ) -> wgpu::RenderPipeline {
-    let vertex_layouts = [packed_vertex_layout()];
+    scene_pipeline_with_vertex_layout(
+        device,
+        label,
+        layout,
+        shader,
+        topology,
+        blend,
+        alpha_mode,
+        packed_vertex_layout(),
+        "vs_main",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scene_pipeline_with_vertex_layout(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    topology: wgpu::PrimitiveTopology,
+    blend: GpuBlend,
+    alpha_mode: GpuSolidAlphaMode,
+    vertex_layout: wgpu::VertexBufferLayout<'static>,
+    vertex_entry_point: &'static str,
+) -> wgpu::RenderPipeline {
+    let vertex_layouts = [vertex_layout];
     let targets = [Some(wgpu::ColorTargetState {
         format: wgpu::TextureFormat::Rgba8Unorm,
         blend: Some(blend_state(blend, alpha_mode)),
@@ -3769,7 +4581,7 @@ fn scene_pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
+            entry_point: Some(vertex_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &vertex_layouts,
         },
@@ -5073,6 +5885,149 @@ mod tests {
     }
 
     #[test]
+    fn compact_sprite_projection_matches_generic_quad_at_fractional_scale_and_crop() {
+        let presentation = GpuPresentation {
+            physical_extent: [17, 11],
+            scale: 1.5,
+            crop_top: 2,
+        };
+        let projection = draw_projection(Some(Rect::new(1, 2, 6, 4)), [9, 8], &presentation)
+            .expect("valid fractional presentation")
+            .expect("clip intersects the framebuffer");
+        let sprite = GpuSpriteQuad {
+            rect: [1.25, 2.5, 6.75, 5.875],
+            uv: [0.125, 0.25, 0.875, 0.75],
+            modulation: 0x407f_3fc0,
+        };
+        let compact =
+            packed_sprite_instance(sprite, true, true, SpriteProjection::new(&projection))
+                .expect("pack compact sprite");
+        let modulation = [127.0 / 255.0, 63.0 / 255.0, 192.0 / 255.0, 64.0 / 255.0];
+        let generic = packed_quad_instance(
+            [
+                GpuVertex::new(
+                    [sprite.rect[0], sprite.rect[1], 1.0],
+                    [sprite.uv[0], sprite.uv[1]],
+                    modulation,
+                ),
+                GpuVertex::new(
+                    [sprite.rect[2], sprite.rect[1], 1.0],
+                    [sprite.uv[2], sprite.uv[1]],
+                    modulation,
+                ),
+                GpuVertex::new(
+                    [sprite.rect[0], sprite.rect[3], 1.0],
+                    [sprite.uv[0], sprite.uv[3]],
+                    modulation,
+                ),
+                GpuVertex::new(
+                    [sprite.rect[2], sprite.rect[3], 1.0],
+                    [sprite.uv[2], sprite.uv[3]],
+                    modulation,
+                ),
+            ],
+            true,
+            true,
+            &projection,
+        )
+        .expect("pack generic quad");
+
+        assert_eq!(
+            compact.clip_rect,
+            [
+                generic.clip[0][0],
+                generic.clip[0][1],
+                generic.clip[3][0],
+                generic.clip[3][1],
+            ]
+        );
+        assert_eq!(
+            generic.clip[1],
+            [compact.clip_rect[2], compact.clip_rect[1], 0.0, 1.0,]
+        );
+        assert_eq!(
+            generic.clip[2],
+            [compact.clip_rect[0], compact.clip_rect[3], 0.0, 1.0,]
+        );
+        assert_eq!(compact.uv_rect, sprite.uv);
+        assert_eq!(compact.modulation, sprite.modulation);
+        assert_eq!(compact.flags, 3);
+    }
+
+    #[test]
+    fn compact_sprite_matches_expanded_quad_modulation_modes_and_blends() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact sprite parity check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let packed_modulation = 0x407f_3fc0;
+        let normalized_modulation = [127.0 / 255.0, 63.0 / 255.0, 192.0 / 255.0, 64.0 / 255.0];
+        let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
+            0x102030, 0x708090, 0xd0e0f0,
+        ]));
+        let scene = |command| GpuScene {
+            logical_extent: [2, 2],
+            clear: Color::new(17, 29, 43, 113),
+            gamma: gamma.clone(),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures: vec![rgba_resource(texture, [96, 144, 208, 191])],
+            commands: vec![command],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        for blend in [GpuBlend::Normal, GpuBlend::Additive] {
+            for mod2 in [false, true] {
+                let expanded = scene(GpuCommand::Quad {
+                    texture,
+                    owner_mask: None,
+                    vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, normalized_modulation),
+                    clip: None,
+                    blend,
+                    base_mod2: mod2,
+                    owner_mod2: false,
+                    sampler: GpuSampler::Nearest,
+                    gamma: true,
+                });
+                let compact = scene(GpuCommand::SpriteBatch {
+                    texture,
+                    quads: vec![GpuSpriteQuad {
+                        rect: [0.0, 0.0, 2.0, 2.0],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        modulation: packed_modulation,
+                    }],
+                    clip: None,
+                    blend,
+                    mod2,
+                    gamma: true,
+                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+                });
+
+                let expanded = render_readback(
+                    &mut renderer,
+                    &device,
+                    &queue,
+                    &expanded,
+                    &GpuPresentation::identity(2, 2),
+                );
+                let compact = render_readback(
+                    &mut renderer,
+                    &device,
+                    &queue,
+                    &compact,
+                    &GpuPresentation::identity(2, 2),
+                );
+
+                assert_eq!(
+                    compact, expanded,
+                    "compact sprite differs for {blend:?}, mod2={mod2}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn recovery_validation_requires_every_command_texture_in_the_current_scene() {
         let texture = GpuTextureId::fresh();
         let identity = [1.0, 1.0, 1.0, 0.0];
@@ -5105,6 +6060,319 @@ mod tests {
         assert!(
             RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 2)).is_ok()
         );
+    }
+
+    #[test]
+    fn compatible_particle_quads_share_one_painter_order_draw_call() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping particle draw-call batching check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let command = |modulation| GpuCommand::Quad {
+            texture,
+            owner_mask: None,
+            vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
+            clip: None,
+            blend: GpuBlend::Normal,
+            base_mod2: false,
+            owner_mod2: false,
+            sampler: GpuSampler::Nearest,
+            gamma: false,
+        };
+        let commands = vec![
+            command([1.0, 0.0, 0.0, 127.0 / 255.0]),
+            command([0.0, 1.0, 0.0, 127.0 / 255.0]),
+        ];
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands,
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(1, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+    }
+
+    #[test]
+    fn compatible_quad_before_sprite_batch_keeps_every_painter_order_instance() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping mixed particle batch check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands: vec![
+                GpuCommand::Quad {
+                    texture,
+                    owner_mask: None,
+                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, [1.0, 0.0, 0.0, 127.0 / 255.0]),
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    base_mod2: false,
+                    owner_mod2: false,
+                    sampler: GpuSampler::Nearest,
+                    gamma: false,
+                },
+                GpuCommand::SpriteBatch {
+                    texture,
+                    quads: vec![GpuSpriteQuad {
+                        rect: [0.0, 0.0, 1.0, 1.0],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        modulation: 0x7f00_ff00,
+                    }],
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    mod2: false,
+                    gamma: false,
+                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+                },
+            ],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(1, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+    }
+
+    #[test]
+    fn clipped_quad_does_not_consume_following_visible_sprite_batch() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping clipped mixed particle batch check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands: vec![
+                GpuCommand::Quad {
+                    texture,
+                    owner_mask: None,
+                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]),
+                    clip: Some(Rect::new(2, 0, 1, 1)),
+                    blend: GpuBlend::Normal,
+                    base_mod2: false,
+                    owner_mod2: false,
+                    sampler: GpuSampler::Nearest,
+                    gamma: false,
+                },
+                GpuCommand::SpriteBatch {
+                    texture,
+                    quads: vec![GpuSpriteQuad {
+                        rect: [0.0, 0.0, 1.0, 1.0],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        modulation: 0x0000_ff00,
+                    }],
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    mod2: false,
+                    gamma: false,
+                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+                },
+            ],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(1, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![0, 255, 0, 255]);
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+    }
+
+    #[test]
+    fn sprite_batch_before_compatible_quad_keeps_every_painter_order_instance() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping reverse mixed particle batch check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands: vec![
+                GpuCommand::SpriteBatch {
+                    texture,
+                    quads: vec![GpuSpriteQuad {
+                        rect: [0.0, 0.0, 1.0, 1.0],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        modulation: 0x7fff_0000,
+                    }],
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    mod2: false,
+                    gamma: false,
+                    outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+                },
+                GpuCommand::Quad {
+                    texture,
+                    owner_mask: None,
+                    vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, [0.0, 1.0, 0.0, 127.0 / 255.0]),
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    base_mod2: false,
+                    owner_mod2: false,
+                    sampler: GpuSampler::Nearest,
+                    gamma: false,
+                },
+            ],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(1, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+    }
+
+    #[test]
+    fn compatible_adjacent_sprite_batches_share_one_painter_order_draw_call() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact sprite coalescing check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let batch = |modulation| GpuCommand::SpriteBatch {
+            texture,
+            quads: vec![GpuSpriteQuad {
+                rect: [0.0, 0.0, 1.0, 1.0],
+                uv: [0.0, 0.0, 1.0, 1.0],
+                modulation,
+            }],
+            clip: None,
+            blend: GpuBlend::Normal,
+            mod2: false,
+            gamma: false,
+            outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+        };
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands: vec![batch(0x7fff_0000), batch(0x7f00_ff00)],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(1, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+    }
+
+    #[test]
+    fn fire_like_sprite_batches_keep_texture_and_blend_state_boundaries() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping Fire-like sprite state check");
+            return;
+        };
+        let fire_texture = GpuTextureId::fresh();
+        let fire2_texture = GpuTextureId::fresh();
+        let batch = |texture, rect, modulation, blend| GpuCommand::SpriteBatch {
+            texture,
+            quads: vec![GpuSpriteQuad {
+                rect,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                modulation,
+            }],
+            clip: None,
+            blend,
+            mod2: false,
+            gamma: false,
+            outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
+        };
+        let scene = GpuScene {
+            logical_extent: [2, 1],
+            clear: Color::opaque(0, 0, 0),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![
+                rgba_resource(fire_texture, [255; 4]),
+                rgba_resource(fire2_texture, [255; 4]),
+            ],
+            commands: vec![
+                batch(
+                    fire_texture,
+                    [0.0, 0.0, 1.0, 1.0],
+                    0x00ff_0000,
+                    GpuBlend::Normal,
+                ),
+                batch(
+                    fire2_texture,
+                    [1.0, 0.0, 2.0, 1.0],
+                    0x0000_ff00,
+                    GpuBlend::Additive,
+                ),
+            ],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(2, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(renderer.last_stats().draw_calls, 2);
     }
 
     #[test]

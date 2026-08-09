@@ -9,6 +9,10 @@ repository.workspace = true
 readme.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+bench = ["dep:criterion", "clonk-frontend/bench"]
+
 [dependencies]
 clonk-engine = { path = "../clonk-engine" }
 clonk-frontend = { path = "../clonk-frontend" }
@@ -16,6 +20,9 @@ clonk-graphics = { path = "../clonk-graphics" }
 pixels = "0.17"
 thiserror = "2"
 tracing = "0.1"
+# Benchmark-only: keep Criterion out of the application and workspace test
+# graph while retaining an executable end-to-end GPU submission benchmark.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"], optional = true }
 
 [dev-dependencies]
 # Keep clonk-engine's property-test dependencies in this test graph so focused
@@ -26,3 +33,8 @@ clonk-gui = { path = "../clonk-gui" }
 # workspace test graph's full Tokio feature union so focused render-crate runs
 # share one Tokio fingerprint with the app and workspace gates.
 tokio = { version = "1.32", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+
+[[bench]]
+name = "particle_render"
+harness = false
+required-features = ["bench"]

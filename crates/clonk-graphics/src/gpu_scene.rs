@@ -253,6 +253,19 @@ pub struct GpuVertex {
     pub sample_tile: [f32; 4],
 }
 
+/// One affine, axis-aligned sprite in a retained painter-order batch.
+///
+/// Positions and UVs are stored as `[left, top, right, bottom]`. Every corner
+/// has homogeneous W=1, shares one packed-C4 modulation, and uses nearest
+/// sampling without native tile metadata. More general textured draws remain
+/// [`GpuCommand::Quad`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuSpriteQuad {
+    pub rect: [f32; 4],
+    pub uv: [f32; 4],
+    pub modulation: u32,
+}
+
 impl GpuVertex {
     pub fn new(position: [f32; 3], uv: [f32; 2], modulation: [f32; 4]) -> Self {
         // Identity is the native "no active modulation" sentinel. Any
@@ -324,6 +337,15 @@ pub enum GpuCommand {
         owner_mod2: bool,
         sampler: GpuSampler,
         gamma: bool,
+    },
+    SpriteBatch {
+        texture: GpuTextureId,
+        quads: Vec<GpuSpriteQuad>,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        mod2: bool,
+        gamma: bool,
+        outer_modulation: GpuOuterModulation,
     },
     Landscape {
         base: GpuTextureId,
@@ -421,6 +443,15 @@ impl GpuCommand {
                     .for_each(|vertex| vertex.translate(x, y));
                 translate_clip(clip, x, y);
             }
+            Self::SpriteBatch { quads, clip, .. } => {
+                for quad in quads {
+                    quad.rect[0] += x;
+                    quad.rect[1] += y;
+                    quad.rect[2] += x;
+                    quad.rect[3] += y;
+                }
+                translate_clip(clip, x, y);
+            }
             Self::Solid { vertices, clip, .. } => {
                 vertices
                     .iter_mut()
@@ -432,9 +463,10 @@ impl GpuCommand {
 
     pub fn clip_to(&mut self, bounds: Rect) -> bool {
         let clip = match self {
-            Self::Quad { clip, .. } | Self::Landscape { clip, .. } | Self::Solid { clip, .. } => {
-                clip
-            }
+            Self::Quad { clip, .. }
+            | Self::SpriteBatch { clip, .. }
+            | Self::Landscape { clip, .. }
+            | Self::Solid { clip, .. } => clip,
         };
         *clip = match *clip {
             Some(current) => current.intersection(bounds),
@@ -481,6 +513,23 @@ impl GpuCommand {
                         vertex_index,
                         "owner modulation",
                     )?;
+                }
+            }
+            Self::SpriteBatch {
+                quads,
+                outer_modulation,
+                ..
+            } => {
+                for (quad_index, quad) in quads.iter().enumerate() {
+                    if *outer_modulation == GpuOuterModulation::Inherit
+                        && quad.modulation != 0x00ff_ffff
+                    {
+                        return Err(GpuSceneModulationError::NonIdentityInheritedColor {
+                            command,
+                            vertex: quad_index,
+                            channel_set: "sprite modulation",
+                        });
+                    }
                 }
             }
             Self::Landscape { vertices, .. } => {
@@ -538,6 +587,24 @@ impl GpuCommand {
                         vertex.owner_outer_modulation,
                         modulation,
                     );
+                }
+                promote_transparent_replace_blend(blend, modulation, outer_applies);
+            }
+            Self::SpriteBatch {
+                quads,
+                blend,
+                outer_modulation,
+                ..
+            } => {
+                let outer_applies = *outer_modulation != GpuOuterModulation::Ignore;
+                for quad in quads {
+                    quad.modulation = match *outer_modulation {
+                        GpuOuterModulation::Inherit => modulation,
+                        GpuOuterModulation::Combine => {
+                            modulate_packed_c4(quad.modulation, modulation)
+                        }
+                        GpuOuterModulation::Ignore => quad.modulation,
+                    };
                 }
                 promote_transparent_replace_blend(blend, modulation, outer_applies);
             }
@@ -794,6 +861,9 @@ impl GpuSceneRecorder {
     }
 
     pub fn push(&mut self, command: GpuCommand) {
+        if matches!(&command, GpuCommand::SpriteBatch { quads, .. } if quads.is_empty()) {
+            return;
+        }
         if let GpuCommand::Solid {
             vertices,
             topology,
@@ -934,6 +1004,10 @@ impl GpuSceneRecorder {
                         referenced.insert(*texture);
                     }
                 }
+                GpuCommand::SpriteBatch { texture, quads, .. } if !quads.is_empty() => {
+                    referenced.insert(*texture);
+                }
+                GpuCommand::SpriteBatch { .. } => {}
                 GpuCommand::Landscape {
                     base,
                     liquid_mask,

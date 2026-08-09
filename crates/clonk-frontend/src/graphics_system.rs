@@ -254,6 +254,46 @@ impl ParticleLayerIndex {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParticleSpriteBatchKey {
+    texture: GpuTextureId,
+    clip: Option<SurfaceRect>,
+    blend: GpuBlend,
+    mod2: bool,
+    gamma: bool,
+}
+
+struct ParticleSpriteBatch {
+    key: ParticleSpriteBatchKey,
+    resource: GpuTextureResource,
+    quads: Vec<GpuSpriteQuad>,
+}
+
+enum ParticleSpriteBatchPreparation {
+    Skip,
+    Fallback,
+    Draw {
+        key: ParticleSpriteBatchKey,
+        quad: GpuSpriteQuad,
+    },
+}
+
+fn flush_particle_sprite_batch(surface: &mut Surface, batch: &mut Option<ParticleSpriteBatch>) {
+    let Some(batch) = batch.take() else {
+        return;
+    };
+    let _ = surface.add_gpu_texture(batch.resource);
+    let _ = surface.push_gpu_command(GpuCommand::SpriteBatch {
+        texture: batch.key.texture,
+        quads: batch.quads,
+        clip: batch.key.clip,
+        blend: batch.key.blend,
+        mod2: batch.key.mod2,
+        gamma: batch.key.gamma,
+        outer_modulation: GpuOuterModulation::Combine,
+    });
+}
+
 #[cfg(test)]
 std::thread_local! {
     /// Particle entries examined to decide layer membership, whether by the
@@ -866,6 +906,19 @@ impl GraphicsSystem {
         self.surface
             .take_gpu_scene_capture()
             .map(|recorder| recorder.into_scene(extent, Color::opaque(8, 12, 24), gamma))
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn capture_global_definition_particles_for_benchmark(
+        &mut self,
+        particles: &[ParticleSnapshot],
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> clonk_graphics::GpuScene {
+        self.begin_gpu_scene_capture();
+        self.draw_definition_particles(particles, &ParticleLayer::Global, None, None);
+        self.finish_gpu_scene_capture(gamma)
+            .expect("benchmark capture was started")
     }
 
     pub(crate) fn fog_draw_context(&self) -> Option<FogDrawContext> {
@@ -4188,20 +4241,63 @@ impl GraphicsSystem {
                 );
             }
         }
+        let particle_sprites = Arc::clone(&self.particle_sprites);
+        let batches_supported = self.surface.is_gpu_scene_capture_active()
+            && self.fog_draw_context().is_none()
+            && !self.advanced_renderer_config.has_adjusted_quad_geometry();
+        let batch_capacity = order.len().min(1_024);
+        let mut batch = None;
+        let mut cached_definition_id = None;
+        let mut cached_definition = None;
         for offset in &order {
-            if let Some(particle) = particles.get(*offset as usize) {
-                self.draw_definition_particle(particle, target, gamma);
+            let Some(particle) = particles.get(*offset as usize) else {
+                continue;
+            };
+            if self.definition_particle_is_suppressed(particle, target) {
+                continue;
+            }
+            if cached_definition_id != Some(particle.definition_id.as_str()) {
+                cached_definition_id = Some(particle.definition_id.as_str());
+                cached_definition = particle_sprites.get(&particle.definition_id);
+            }
+            let Some(definition) = cached_definition else {
+                continue;
+            };
+            let prepared = if batches_supported {
+                self.prepare_std_particle_sprite_quad(particle, definition, target, gamma)
+            } else {
+                ParticleSpriteBatchPreparation::Fallback
+            };
+            match prepared {
+                ParticleSpriteBatchPreparation::Skip => {}
+                ParticleSpriteBatchPreparation::Fallback => {
+                    flush_particle_sprite_batch(&mut self.surface, &mut batch);
+                    self.draw_definition_particle(particle, definition, target, gamma);
+                }
+                ParticleSpriteBatchPreparation::Draw { key, quad } => {
+                    if batch.as_ref().is_some_and(|batch| batch.key != key) {
+                        flush_particle_sprite_batch(&mut self.surface, &mut batch);
+                    }
+                    batch
+                        .get_or_insert_with(|| ParticleSpriteBatch {
+                            key,
+                            resource: definition.image.gpu_texture_resource(),
+                            quads: Vec::with_capacity(batch_capacity),
+                        })
+                        .quads
+                        .push(quad);
+                }
             }
         }
+        flush_particle_sprite_batch(&mut self.surface, &mut batch);
         self.particle_draw_order = order;
     }
 
-    fn draw_definition_particle(
-        &mut self,
+    fn definition_particle_is_suppressed(
+        &self,
         particle: &ParticleSnapshot,
         target: Option<&ObjectSnapshot>,
-        gamma: Option<&clonk_graphics::GammaRamp>,
-    ) {
+    ) -> bool {
         // The `NoFireParticles` presentation-detail rung reclaims exactly
         // these draws: one unbatched call per flame particle. It is the
         // measured-cost governor's first step-down, so it is a renderer
@@ -4221,21 +4317,24 @@ impl GraphicsSystem {
         // cost. There is no provenance flag on a particle, so script fire on
         // an object that *is* alight is suppressed too; that is intended,
         // since it renders as part of the same blaze.
-        if !self.draws_fire_particles
+        !self.draws_fire_particles
             && target.is_some_and(|object| object.on_fire)
             && matches!(
                 particle.definition_id.as_str(),
                 clonk_engine::particles::FIRE_DEF_NAME | clonk_engine::particles::FIRE2_DEF_NAME
             )
-        {
-            return;
-        }
-        let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned() else {
-            return;
-        };
+    }
+
+    fn draw_definition_particle(
+        &mut self,
+        particle: &ParticleSnapshot,
+        definition: &ParticleRenderDefinition,
+        target: Option<&ObjectSnapshot>,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
         match definition.draw_proc {
-            ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, &definition, gamma),
-            ParticleDrawProc::Std => self.draw_std_particle(particle, &definition, target, gamma),
+            ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, definition, gamma),
+            ParticleDrawProc::Std => self.draw_std_particle(particle, definition, target, gamma),
         }
     }
 
@@ -4259,6 +4358,181 @@ impl GraphicsSystem {
             && x <= tx as f32 + width + radius
             && y >= ty as f32 - radius
             && y <= ty as f32 + height + radius
+    }
+
+    fn prepare_std_particle_sprite_quad(
+        &self,
+        particle: &ParticleSnapshot,
+        definition: &ParticleRenderDefinition,
+        target: Option<&ObjectSnapshot>,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> ParticleSpriteBatchPreparation {
+        if definition.draw_proc != ParticleDrawProc::Std {
+            return ParticleSpriteBatchPreparation::Fallback;
+        }
+
+        let (tx, ty) = self.particle_parallax_target(&definition.core);
+        let mut x = particle.position.x;
+        let mut y = particle.position.y;
+        let mut xdir = particle.velocity.x;
+        let mut ydir = particle.velocity.y;
+        if definition.core.attach != 0 {
+            if let Some(target) = target {
+                x += target.position.x as f32;
+                y += target.position.y as f32;
+                if let Some(velocity) = target.fixed_velocity {
+                    xdir += velocity.x.to_float();
+                    ydir += velocity.y.to_float();
+                } else {
+                    xdir += target.velocity.x as f32;
+                    ydir += target.velocity.y as f32;
+                }
+            }
+        }
+        if !self.particle_visible(x, y, particle.parameter_a, tx, ty) {
+            return ParticleSpriteBatchPreparation::Skip;
+        }
+
+        let mut phase = particle.life;
+        if definition.core.delay != 0 {
+            if phase >= 0 {
+                phase /= definition.core.delay;
+                if definition.core.reverse != 0 {
+                    let length = definition.length - 1;
+                    let cycle = length.saturating_mul(2);
+                    if cycle == 0 {
+                        return ParticleSpriteBatchPreparation::Skip;
+                    }
+                    phase %= cycle;
+                    if phase > length {
+                        phase = length.saturating_mul(2).saturating_add(1) - phase;
+                    }
+                } else {
+                    if definition.length == 0 {
+                        return ParticleSpriteBatchPreparation::Skip;
+                    }
+                    phase %= definition.length;
+                }
+            } else {
+                if definition.core.fade_out_delay == 0 {
+                    return ParticleSpriteBatchPreparation::Skip;
+                }
+                phase = (phase + 1) / -definition.core.fade_out_delay + definition.length;
+            }
+        }
+
+        let rotation = match definition.core.r_by_v {
+            1 | 2 => c4_particle_angle((xdir * 10.0) as i32, (ydir * 10.0) as i32),
+            3 => ((particle.position.x * 23.0 + particle.position.y * 12.0) as i32) % 360,
+            _ => 0,
+        };
+        if rotation != 0 {
+            return ParticleSpriteBatchPreparation::Fallback;
+        }
+
+        let half_width = particle.parameter_a as i32;
+        let half_height = (definition.aspect * half_width as f32) as i32;
+        if half_width <= 0 || half_height <= 0 {
+            return ParticleSpriteBatchPreparation::Skip;
+        }
+        let cgox = -tx;
+        let cgoy = -ty;
+        let cx = (x + cgox as f32) as i32;
+        let cy = (y + cgoy as f32) as i32;
+        let width = half_width.saturating_mul(2);
+        let height = half_height.saturating_mul(2);
+        let source = definition.facet.phase(phase, 0);
+        let image_width = definition.image.width();
+        let image_height = definition.image.height();
+        if source.width <= 0
+            || source.height <= 0
+            || source.x < 0
+            || source.y < 0
+            || image_width == 0
+            || image_height == 0
+            || source.x as f32 + source.width as f32 > image_width as f32
+            || source.y as f32 + source.height as f32 > image_height as f32
+        {
+            return ParticleSpriteBatchPreparation::Fallback;
+        }
+
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let rect = GuiRect::new(
+            (cx - half_width) as f32 * zoom,
+            (cy - half_height) as f32 * zoom,
+            width as f32 * zoom,
+            height as f32 * zoom,
+        );
+        if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+            return ParticleSpriteBatchPreparation::Skip;
+        }
+        let dest_width = rect.size.width.max(1.0).round() as u32;
+        let dest_height = rect.size.height.max(1.0).round() as u32;
+        if dest_width == 0 || dest_height == 0 {
+            return ParticleSpriteBatchPreparation::Skip;
+        }
+        let dest_x = rect.origin.x.round() as i32;
+        let dest_y = rect.origin.y.round() as i32;
+
+        let clip_left = (cgox as f32 * zoom).round() as i32;
+        let clip_top = ((cgoy + definition.core.y_off) as f32 * zoom).round() as i32;
+        let lower_clip = lower_bounded_surface_clip(&self.surface, clip_left, clip_top);
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(lower_clip))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    lower_clip
+                }
+            });
+
+        let mode =
+            self.advanced_renderer_config
+                .masked_blit_mode(if definition.core.additive != 0 {
+                    C4GFXBLIT_ADDITIVE
+                } else {
+                    0
+                });
+        let mut modulation = particle.parameter_b as u32;
+        let mod2 = mode & C4GFXBLIT_MOD2 != 0 && modulation != 0;
+        if !mod2
+            && !self.advanced_renderer_config.shader
+            && self.advanced_renderer_config.no_alpha_add
+        {
+            modulation &= 0x00ff_ffff;
+        }
+        let image_width = image_width as f32;
+        let image_height = image_height as f32;
+        ParticleSpriteBatchPreparation::Draw {
+            key: ParticleSpriteBatchKey {
+                texture: definition.image.gpu_texture_id(),
+                clip: Some(clip),
+                blend: if mode & C4GFXBLIT_ADDITIVE != 0 {
+                    GpuBlend::Additive
+                } else {
+                    GpuBlend::Normal
+                },
+                mod2,
+                gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            },
+            quad: GpuSpriteQuad {
+                rect: [
+                    dest_x as f32,
+                    dest_y as f32,
+                    dest_x as f32 + dest_width as f32,
+                    dest_y as f32 + dest_height as f32,
+                ],
+                uv: [
+                    source.x as f32 / image_width,
+                    source.y as f32 / image_height,
+                    (source.x as f32 + source.width as f32) / image_width,
+                    (source.y as f32 + source.height as f32) / image_height,
+                ],
+                modulation,
+            },
+        }
     }
 
     fn draw_smoke_particle(
