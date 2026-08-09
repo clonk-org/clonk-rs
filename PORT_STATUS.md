@@ -2847,6 +2847,26 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **The product starts games at `SetGameSpeed(38)` cadence**
+  (`DEFAULT_GAME_TICK_DELAY_MS`, `crates/clonk-engine/src/lib.rs`; C++
+  `C4Game::OpenGame` starts its application timer at 28 ms in
+  `src/C4Game.cpp:443`, while parameterless `SetGameSpeed` installs integer
+  `1000 / 38 = 26` ms in `src/C4Script.cpp:5219-5230`). Approved 2026-08-09.
+  A 28 ms timer is capped at 35.714 updates per wall-clock second even when a
+  frame costs no CPU time, so it cannot satisfy the product requirement that
+  Hazard remain at or above 38 updates/s. The port therefore uses the native
+  script API's 38-speed timer as its process-local default; explicit
+  `SetGameSpeed` calls and their timer-revision behavior are unchanged.
+  **Blast radius.** This does not enter savegames, synchronized controls, or
+  simulation snapshots, so the state after a fixed frame/control sequence is
+  unchanged and port peers remain lockstep deterministic. It does change
+  wall-time pacing: offline play and recordings advance about 7.7% faster,
+  more frames can occur between independent one-second timer pulses, and a
+  mixed Rust/C++ session can still be bounded by a 28 ms C++ peer. The native
+  28 ms graphics-budget diagnostics remain explicitly oracle-relative rather
+  than being relabeled as the product scheduler. Pinned by
+  `default_timer_uses_the_parameterless_game_speed_cadence`.
+
 - **A one-column script menu may claim the horizontal controls as a step**
   (`Engine::object_menu_step`, `crates/clonk-engine/src/direct_com.rs`; no key,
   opt-in per menu; C++ `C4Menu::Control`, LegacyClonk 7d43b47

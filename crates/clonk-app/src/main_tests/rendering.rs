@@ -592,16 +592,17 @@ fn full_speed_runs_unpaced_skips_requested_renders_and_slow_restores_timer() {
     let waiting = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
         .expect("normal pacing waits without elapsed time");
     assert_eq!(waiting.executed_frames, 0);
-    accumulator += Duration::from_millis(27);
+    let tick_delay = Duration::from_millis(app.engine.game_tick_delay_ms());
+    accumulator += tick_delay - Duration::from_millis(1);
     assert_eq!(
         advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-            .expect("27ms remains below the normal tick")
+            .expect("one millisecond below the normal tick still waits")
             .executed_frames,
         0
     );
     accumulator += Duration::from_millis(1);
     let paced = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("the 28th millisecond executes one normal tick");
+        .expect("the configured tick delay executes one normal tick");
     assert_eq!(paced.executed_frames, 1);
     assert!(!paced.skip_redraw);
     assert_eq!(app.engine.frame(), paced_frame + 1);
