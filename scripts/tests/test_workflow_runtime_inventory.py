@@ -6,6 +6,9 @@ from _repo import REPOSITORY
 
 LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
 MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
+EXACT_SHA_QUALIFICATION_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
+)
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.yml"
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
@@ -43,6 +46,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         for workflow in (
             LANDING_WORKFLOW,
             MAIN_WORKFLOW,
+            EXACT_SHA_QUALIFICATION_WORKFLOW,
             RELEASE_WORKFLOW,
             RELEASE_BUILD_WORKFLOW,
         ):

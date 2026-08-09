@@ -1,0 +1,217 @@
+name: Exact-SHA qualification
+
+on:
+  workflow_call:
+    inputs:
+      source-sha:
+        description: The exact commit to qualify
+        required: true
+        type: string
+      concurrency-suffix:
+        description: An exact-SHA or rolling concurrency lane
+        required: true
+        type: string
+      publish-recording-host-cache:
+        description: Whether this trusted ref may publish the macOS cache
+        required: true
+        type: boolean
+      upload-diagnostics:
+        description: Whether to retain coverage and developer-feedback reports
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Rust code coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    concurrency:
+      group: "main-coverage-${{ inputs.concurrency-suffix }}"
+      cancel-in-progress: true
+    env:
+      COVERAGE_MIN_LINE_PERCENT: '79'
+      COVERAGE_IGNORE_REGEX: '/(main_tests|lib_tests)/|/(parity_differential|test_game_call_ex|test_support)\.rs$'
+      LLVM_PROFILE_FILE_NAME: 'clonk-%8m.profraw'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install native Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libxmp4 \
+            libudev-dev \
+            mesa-vulkan-drivers \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+
+      # Replay/render use the ordinary landing target while coverage keeps its
+      # instrumented artifacts elsewhere. This diagnostic never publishes a
+      # partial cache if a newer main commit supersedes it.
+      - name: Restore Linux landing cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: . -> target
+          shared-key: full-parity
+          save-if: false
+
+      # The ordinary landing suite runs the replay assertion. Repeat it here
+      # only to retain a fresh snapshot for the ignored render diagnostic.
+      - name: Generate deterministic replay evidence
+        env:
+          LC_TEST_ARTIFACT_DIR: ${{ github.workspace }}/target/dev-check/replay
+          LC_KEEP_PASS_ARTIFACTS: '1'
+        run: |
+          cargo nextest run \
+            -p clonk-engine-integration-tests \
+            --test engine_it \
+            --locked \
+            -- \
+            dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order \
+            --exact
+          snapshot=$(find target/dev-check/replay -type f -name final.json -print | sort | tail -1)
+          if [[ -z "$snapshot" ]]; then
+            echo "deterministic replay produced no final snapshot" >&2
+            exit 1
+          fi
+          cp "$snapshot" target/dev-check/snapshot-final.json
+
+      - name: Render the replay snapshot
+        env:
+          LC_DEV_CHECK_SNAPSHOT: ${{ github.workspace }}/target/dev-check/snapshot-final.json
+          LC_DEV_CHECK_FRAME_PNG: ${{ github.workspace }}/target/dev-check/frame-final.png
+          LC_DEV_CHECK_RENDER_METRICS: ${{ github.workspace }}/target/dev-check/render-metrics.json
+        run: |
+          cargo nextest run \
+            -p clonk-frontend \
+            --features dev-feedback-render \
+            --test dev_feedback_render \
+            --locked \
+            -- \
+            dev_feedback_render --ignored --exact
+
+      - name: Collect instrumented workspace coverage
+        env:
+          CARGO_TARGET_DIR: target/coverage-build
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report nextest \
+            --workspace \
+            --no-fail-fast \
+            --features xtask/engine-tools \
+            --locked
+
+      - name: Generate Rust coverage reports
+        env:
+          CARGO_TARGET_DIR: target/coverage-build
+        run: |
+          mkdir -p target/coverage
+          cargo llvm-cov report --lcov --output-path target/coverage/lcov.info \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+          cargo llvm-cov report --html --output-dir target/coverage \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+
+      - name: Enforce line coverage floor
+        env:
+          CARGO_TARGET_DIR: target/coverage-build
+        run: |
+          cargo llvm-cov report --fail-under-lines "$COVERAGE_MIN_LINE_PERCENT" \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+
+      - name: Upload developer-feedback artifacts
+        if: ${{ always() && inputs.upload-diagnostics }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: developer-feedback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/dev-check
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Rust coverage reports
+        if: ${{ always() && inputs.upload-diagnostics }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/coverage
+          if-no-files-found: warn
+          retention-days: 14
+
+  recording-host-oracles:
+    name: Recording-host material-order oracles (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    concurrency:
+      group: "main-recording-host-${{ inputs.concurrency-suffix }}"
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: . -> target
+          shared-key: recording-host-oracles
+          save-if: ${{ inputs.publish-recording-host-cache }}
+
+      # scripts/tests/test_rust_ci_recording_host_gate.py requires every test
+      # carrying the recording-host marker to appear here.
+      - name: Run recording-host material-order oracles
+        run: |
+          cargo nextest run \
+            -p clonk-app \
+            -p clonk-engine-integration-tests \
+            -p clonk-frontend-unit-tests \
+            --bin clonk-app \
+            --test engine_it \
+            --test frontend_inline \
+            --locked \
+            -E 'test(/(alchemy_real_scenario_subcases_batch_4|app_virtual_keyboard_completes_real_tutorial02_route|committed_real_scenario_replays_are_deterministic|real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence|tutorial02_virtual_player_completes_the_real_tutorial_route|tutorial07_seed_zero_landscape_matches_cpp_surface8)$/)'
