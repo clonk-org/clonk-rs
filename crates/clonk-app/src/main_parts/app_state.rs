@@ -525,6 +525,7 @@ pub(crate) struct GameApp {
     /// rate too; this port decouples the two and needs both numbers to say
     /// which half of a slow session is actually slow.
     pub(crate) presentation_stats: PresentationStats,
+    pub(crate) input_latency_benchmark: Option<InputLatencyBenchmark>,
     /// C4Game::FullSpeed and FrameSkip are transient per-game scheduler
     /// controls. They are deliberately excluded from save capture/restore.
     pub(crate) full_speed: bool,
@@ -3030,6 +3031,175 @@ impl RenderFloor {
 /// driving the one-second timer cannot turn the accumulator into a leak.
 pub(crate) const PRESENTATION_STATS_MAX_SAMPLES: usize = 400;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputLatencyBenchmark {
+    interval: Duration,
+    started: Option<Instant>,
+    next_pair: Option<Instant>,
+    pending: VecDeque<PendingInputLatencyBenchmark>,
+    submitted_inputs: u64,
+    latency_samples: Vec<Duration>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingInputLatencyBenchmark {
+    tick: Tick,
+    control: InputLatencyControlKey,
+    submitted_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InputLatencyControlKey {
+    player: i32,
+    command: i32,
+    data: i32,
+    by_client: i32,
+}
+
+impl From<&clonk_engine::PlayerControlData> for InputLatencyControlKey {
+    fn from(control: &clonk_engine::PlayerControlData) -> Self {
+        Self {
+            player: control.player,
+            command: control.command,
+            data: control.data,
+            by_client: control.by_client,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputLatencyBenchmarkReport {
+    pub(crate) elapsed: Duration,
+    pub(crate) submitted_inputs: u64,
+    pub(crate) executed_inputs: u64,
+    pub(crate) pending_inputs: u64,
+    pub(crate) p50: Duration,
+    pub(crate) p95: Duration,
+    pub(crate) p99: Duration,
+    pub(crate) max: Duration,
+    pub(crate) latency_samples: Vec<Duration>,
+}
+
+impl InputLatencyBenchmarkReport {
+    pub(crate) fn machine_line(&self) -> String {
+        let samples = self
+            .latency_samples
+            .iter()
+            .map(|sample| sample.as_nanos().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT elapsed_seconds={:.6} submitted_inputs={} executed_inputs={} pending_inputs={} input_latency_sample_count={} input_latency_p50_ms={:.6} input_latency_p95_ms={:.6} input_latency_p99_ms={:.6} input_latency_max_ms={:.6} input_latency_samples_ns=[{samples}]",
+            self.elapsed.as_secs_f64(),
+            self.submitted_inputs,
+            self.executed_inputs,
+            self.pending_inputs,
+            self.latency_samples.len(),
+            self.p50.as_secs_f64() * 1_000.0,
+            self.p95.as_secs_f64() * 1_000.0,
+            self.p99.as_secs_f64() * 1_000.0,
+            self.max.as_secs_f64() * 1_000.0,
+        )
+    }
+}
+
+impl InputLatencyBenchmark {
+    pub(crate) fn new(interval: Duration) -> Self {
+        debug_assert!(!interval.is_zero());
+        Self {
+            interval,
+            started: None,
+            next_pair: None,
+            pending: VecDeque::new(),
+            submitted_inputs: 0,
+            latency_samples: Vec::new(),
+        }
+    }
+
+    pub(crate) fn start(&mut self, at: Instant) {
+        if self.started == Some(at) {
+            return;
+        }
+        self.started = Some(at);
+        self.next_pair = Some(at);
+        self.pending.clear();
+        self.submitted_inputs = 0;
+        self.latency_samples.clear();
+    }
+
+    pub(crate) fn pair_due(&mut self, now: Instant) -> bool {
+        let Some(next_pair) = self.next_pair.filter(|next_pair| *next_pair <= now) else {
+            return false;
+        };
+        let intervals_elapsed = now
+            .saturating_duration_since(next_pair)
+            .as_nanos()
+            .checked_div(self.interval.as_nanos())
+            .unwrap_or_default()
+            .saturating_add(1);
+        let advance = u32::try_from(intervals_elapsed)
+            .ok()
+            .and_then(|intervals| self.interval.checked_mul(intervals))
+            .unwrap_or(self.interval);
+        self.next_pair = Some(next_pair + advance);
+        true
+    }
+
+    pub(crate) fn record_submission(
+        &mut self,
+        tick: Tick,
+        control: &clonk_engine::PlayerControlData,
+        submitted_at: Instant,
+    ) {
+        self.submitted_inputs = self.submitted_inputs.saturating_add(1);
+        self.pending.push_back(PendingInputLatencyBenchmark {
+            tick,
+            control: control.into(),
+            submitted_at,
+        });
+    }
+
+    pub(crate) fn record_execution(
+        &mut self,
+        tick: Tick,
+        control: &clonk_engine::PlayerControlData,
+        executed_at: Instant,
+    ) -> bool {
+        let control = control.into();
+        let Some(pending) = self
+            .pending
+            .iter()
+            .position(|pending| pending.tick == tick && pending.control == control)
+            .and_then(|position| self.pending.remove(position))
+        else {
+            return false;
+        };
+        self.latency_samples
+            .push(executed_at.saturating_duration_since(pending.submitted_at));
+        true
+    }
+
+    pub(crate) fn report(&self, elapsed: Duration) -> InputLatencyBenchmarkReport {
+        let (p50, p95, p99) = graphics_pass_percentiles(&self.latency_samples);
+        InputLatencyBenchmarkReport {
+            elapsed,
+            submitted_inputs: self.submitted_inputs,
+            executed_inputs: self.latency_samples.len() as u64,
+            pending_inputs: self.pending.len() as u64,
+            p50,
+            p95,
+            p99,
+            max: self
+                .latency_samples
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or_default(),
+            latency_samples: self.latency_samples.clone(),
+        }
+    }
+}
+
 /// Live per-second presentation counters for the opt-in diagnostics overlay.
 ///
 /// [`PresentationBenchmark`] already derives these numbers from the same
@@ -3150,7 +3320,7 @@ impl PresentationBenchmarkReport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PresentationBenchmark {
     window: Duration,
-    first_successful_presentation: Option<Instant>,
+    warmup_started: Option<Instant>,
     measurement: PresentationBenchmarkMeasurement,
     finished: bool,
 }
@@ -3159,7 +3329,7 @@ impl PresentationBenchmark {
     pub(crate) fn new(window: Duration) -> Self {
         Self {
             window,
-            first_successful_presentation: None,
+            warmup_started: None,
             measurement: PresentationBenchmarkMeasurement::default(),
             finished: false,
         }
@@ -3175,13 +3345,13 @@ impl PresentationBenchmark {
             return None;
         }
         if !running {
-            self.first_successful_presentation = None;
+            self.warmup_started = None;
             self.measurement = PresentationBenchmarkMeasurement::default();
             return None;
         }
-        let first_presentation = self.first_successful_presentation?;
+        let warmup_started = *self.warmup_started.get_or_insert(now);
         let Some(started) = self.measurement.started else {
-            if now.saturating_duration_since(first_presentation) >= PRESENTATION_BENCHMARK_WARMUP {
+            if now.saturating_duration_since(warmup_started) >= PRESENTATION_BENCHMARK_WARMUP {
                 self.measurement.started = Some(now);
                 self.measurement.simulation_frame = simulation_frame;
             }
@@ -3219,6 +3389,12 @@ impl PresentationBenchmark {
         })
     }
 
+    pub(crate) fn measurement_window(&self) -> Option<(Instant, Instant)> {
+        self.measurement
+            .started
+            .map(|started| (started, started + self.window))
+    }
+
     pub(crate) fn record_successful_presentation(
         &mut self,
         now: Instant,
@@ -3228,8 +3404,10 @@ impl PresentationBenchmark {
         if self.finished {
             return;
         }
-        self.first_successful_presentation.get_or_insert(now);
-        if self.measurement.started.is_none() {
+        let Some(started) = self.measurement.started else {
+            return;
+        };
+        if now >= started + self.window {
             return;
         }
         self.measurement.submissions = self.measurement.submissions.saturating_add(1);
@@ -3273,6 +3451,21 @@ pub(crate) fn parse_presentation_benchmark_window(raw: &str) -> Option<Duration>
         .ok()
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
+}
+
+pub(crate) fn parse_input_latency_benchmark_interval(raw: &str) -> Option<Duration> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Duration::from_millis)
+}
+
+pub(crate) fn input_latency_benchmark_from_env() -> Option<InputLatencyBenchmark> {
+    std::env::var_os(PRESENTATION_BENCHMARK_ENV)?;
+    std::env::var(INPUT_LATENCY_BENCHMARK_INTERVAL_ENV)
+        .ok()
+        .and_then(|raw| parse_input_latency_benchmark_interval(&raw))
+        .map(InputLatencyBenchmark::new)
 }
 
 pub(crate) fn presentation_benchmark_from_env() -> Option<PresentationBenchmark> {
@@ -3325,10 +3518,11 @@ pub(crate) fn presentation_benchmark_context_line(
     synchronized_player_infos: usize,
     activated_nonhost_clients: usize,
     runtime_crew_objects: usize,
+    runtime_players_with_live_crew: usize,
     runtime_players_with_exactly_one_live_sf5b_crew: usize,
 ) -> String {
     format!(
-        "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players={runtime_players} synchronized_player_infos={synchronized_player_infos} activated_nonhost_clients={activated_nonhost_clients} runtime_crew_objects={runtime_crew_objects} runtime_players_with_exactly_one_live_sf5b_crew={runtime_players_with_exactly_one_live_sf5b_crew}"
+        "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players={runtime_players} synchronized_player_infos={synchronized_player_infos} activated_nonhost_clients={activated_nonhost_clients} runtime_crew_objects={runtime_crew_objects} runtime_players_with_live_crew={runtime_players_with_live_crew} runtime_players_with_exactly_one_live_sf5b_crew={runtime_players_with_exactly_one_live_sf5b_crew}"
     )
 }
 
@@ -3484,6 +3678,31 @@ pub(crate) fn runtime_crew_object_count(snapshot: &SimulationSnapshot) -> usize 
         .count()
 }
 
+pub(crate) fn runtime_player_has_live_crew(snapshot: &SimulationSnapshot, player_id: i32) -> bool {
+    snapshot
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .is_some_and(|player| {
+            player.crew.iter().any(|crew| {
+                snapshot.object(*crew).is_some_and(|object| {
+                    object.owner == player_id
+                        && object.crew_member
+                        && object.status.is_active()
+                        && object.alive
+                })
+            })
+        })
+}
+
+pub(crate) fn runtime_players_with_live_crew(snapshot: &SimulationSnapshot) -> usize {
+    snapshot
+        .players
+        .iter()
+        .filter(|player| runtime_player_has_live_crew(snapshot, player.id))
+        .count()
+}
+
 /// Count players whose Crew contains exactly one live, owner-matched SF5B.
 /// HarpoonRace creates one SF5B owned by each player and calls MakeCrewMember
 /// with it (HarpoonRace.c4s/Script.c:66-73); C++ retains that exact object in
@@ -3517,16 +3736,21 @@ pub(crate) fn finish_presentation_benchmark(
     event_loop: &ActiveEventLoop,
     exit_code: &AtomicI32,
     report: PresentationBenchmarkReport,
+    input_latency: Option<InputLatencyBenchmarkReport>,
     assert_native_tick: bool,
     runtime_players: usize,
     synchronized_player_infos: usize,
     activated_nonhost_clients: usize,
     runtime_crew_objects: usize,
+    runtime_players_with_live_crew: usize,
     runtime_players_with_exactly_one_live_sf5b_crew: usize,
     network_evidence: Option<std::result::Result<PresentationBenchmarkNetworkEvidence, String>>,
     keep_running: bool,
 ) {
     println!("{}", report.machine_line());
+    if let Some(input_latency) = input_latency {
+        println!("{}", input_latency.machine_line());
+    }
     println!(
         "{}",
         presentation_benchmark_context_line(
@@ -3534,6 +3758,7 @@ pub(crate) fn finish_presentation_benchmark(
             synchronized_player_infos,
             activated_nonhost_clients,
             runtime_crew_objects,
+            runtime_players_with_live_crew,
             runtime_players_with_exactly_one_live_sf5b_crew,
         )
     );
@@ -3568,10 +3793,15 @@ pub(crate) fn finish_app_presentation_benchmark(
     keep_running: bool,
 ) {
     let network_evidence = inspect_presentation_benchmark_network(app);
+    let input_latency = app
+        .input_latency_benchmark
+        .as_ref()
+        .map(|benchmark| benchmark.report(report.elapsed));
     finish_presentation_benchmark(
         event_loop,
         exit_code,
         report,
+        input_latency,
         assert_native_tick,
         app.engine.players().count(),
         app.control_player_infos.nonremoved_player_count(),
@@ -3581,6 +3811,7 @@ pub(crate) fn finish_app_presentation_benchmark(
             .filter(|client_id| *client_id != 0)
             .count(),
         runtime_crew_object_count(&app.snapshot),
+        runtime_players_with_live_crew(&app.snapshot),
         runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
         network_evidence,
         keep_running,

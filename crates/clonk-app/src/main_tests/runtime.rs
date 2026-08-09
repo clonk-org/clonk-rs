@@ -816,8 +816,8 @@
     #[test]
     fn presentation_benchmark_context_reports_actual_network_players() {
         assert_eq!(
-                presentation_benchmark_context_line(24, 24, 24, 24, 24),
-                "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 synchronized_player_infos=24 activated_nonhost_clients=24 runtime_crew_objects=24 runtime_players_with_exactly_one_live_sf5b_crew=24"
+                presentation_benchmark_context_line(24, 24, 24, 24, 24, 24),
+                "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 synchronized_player_infos=24 activated_nonhost_clients=24 runtime_crew_objects=24 runtime_players_with_live_crew=24 runtime_players_with_exactly_one_live_sf5b_crew=24"
             );
     }
 
@@ -878,6 +878,8 @@
 
     #[test]
     fn presentation_benchmark_counts_live_player_crew_objects() {
+        // C4Player::MakeCrewMember only retains owned, active CrewMember
+        // objects in the player's Crew (src/C4Player.cpp:1173-1203).
         let mut app = new_lightweight_running_sandbox_app();
         let crew = app.snapshot.players[0].crew[0];
         app.snapshot
@@ -887,6 +889,16 @@
             .expect("sandbox crew object")
             .alive = true;
         assert_eq!(runtime_crew_object_count(&app.snapshot), 1);
+        assert_eq!(runtime_players_with_live_crew(&app.snapshot), 1);
+
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == crew)
+            .expect("sandbox crew object")
+            .owner += 1;
+        assert_eq!(runtime_crew_object_count(&app.snapshot), 1);
+        assert_eq!(runtime_players_with_live_crew(&app.snapshot), 0);
 
         app.snapshot
             .objects
@@ -1042,6 +1054,212 @@
             benchmark.poll(true, base + Duration::from_secs(10), 999),
             None
         );
+    }
+
+    #[test]
+    fn runtime_benchmark_window_does_not_require_a_visible_surface() {
+        let base = Instant::now();
+        let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+
+        assert_eq!(benchmark.poll(true, base, 10), None);
+        assert_eq!(
+            benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
+            None
+        );
+        let deadline = base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3);
+        benchmark.record_successful_presentation(deadline, Duration::from_millis(10), true);
+        let report = benchmark
+            .poll(true, deadline, 70)
+            .expect("the running clock completes an occluded client's measurement");
+
+        assert_eq!(report.simulation_frames, 0);
+        assert_eq!(report.submissions, 0);
+        assert!(report.graphics_samples.is_empty());
+    }
+
+    #[test]
+    fn input_latency_benchmark_starts_with_the_measurement_and_keeps_its_interval() {
+        let base = Instant::now();
+        let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
+
+        assert!(!benchmark.pair_due(base));
+        benchmark.start(base);
+        assert!(benchmark.pair_due(base));
+        assert!(!benchmark.pair_due(base + Duration::from_millis(499)));
+        assert!(benchmark.pair_due(base + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn input_latency_benchmark_resets_when_a_new_measurement_window_starts() {
+        let base = Instant::now();
+        let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
+        let control = clonk_engine::PlayerControlData {
+            player: 2,
+            command: i32::from(clonk_engine::COM_LEFT),
+            data: 0,
+            by_client: 1,
+        };
+        benchmark.start(base);
+        assert!(benchmark.pair_due(base));
+        benchmark.record_submission(7, &control, base);
+
+        let restarted = base + Duration::from_secs(10);
+        benchmark.start(restarted);
+        assert!(benchmark.pair_due(restarted));
+        let report = benchmark.report(Duration::from_secs(1));
+        assert_eq!(report.submitted_inputs, 0);
+        assert_eq!(report.executed_inputs, 0);
+        assert_eq!(report.pending_inputs, 0);
+    }
+
+    #[test]
+    fn input_latency_benchmark_interval_requires_positive_milliseconds() {
+        assert_eq!(
+            parse_input_latency_benchmark_interval("500"),
+            Some(Duration::from_millis(500))
+        );
+        for value in ["", "0", "-1", "no"] {
+            assert_eq!(parse_input_latency_benchmark_interval(value), None);
+        }
+    }
+
+    #[test]
+    fn input_latency_benchmark_matches_the_exact_local_control_fifo() {
+        let base = Instant::now();
+        let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
+        let press = clonk_engine::PlayerControlData {
+            player: 2,
+            command: i32::from(clonk_engine::COM_LEFT),
+            data: 0,
+            by_client: 1,
+        };
+        let release = clonk_engine::PlayerControlData {
+            command: i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
+            ..press
+        };
+
+        benchmark.record_submission(7, &press, base);
+        benchmark.record_submission(7, &release, base);
+        assert!(!benchmark.record_execution(
+            7,
+            &clonk_engine::PlayerControlData {
+                by_client: 3,
+                ..press
+            },
+            base + Duration::from_millis(20),
+        ));
+        assert!(benchmark.record_execution(7, &press, base + Duration::from_millis(100)));
+        assert!(benchmark.record_execution(7, &release, base + Duration::from_millis(101)));
+
+        let report = benchmark.report(Duration::from_secs(5));
+        assert_eq!(report.submitted_inputs, 2);
+        assert_eq!(report.executed_inputs, 2);
+        assert_eq!(report.pending_inputs, 0);
+        assert_eq!(
+            report.latency_samples,
+            vec![Duration::from_millis(100), Duration::from_millis(101)]
+        );
+        assert_eq!(report.p50, Duration::from_millis(100));
+        assert_eq!(report.p95, Duration::from_millis(101));
+        assert_eq!(report.p99, Duration::from_millis(101));
+        assert_eq!(report.max, Duration::from_millis(101));
+        assert_eq!(
+                report.machine_line(),
+                "LC_APP_PRESENTATION_BENCHMARK_INPUT elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]"
+        );
+    }
+
+    #[test]
+    fn input_latency_benchmark_does_not_let_one_drop_poison_later_matches() {
+        let base = Instant::now();
+        let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
+        let press = clonk_engine::PlayerControlData {
+            player: 2,
+            command: i32::from(clonk_engine::COM_LEFT),
+            data: 0,
+            by_client: 1,
+        };
+        let release = clonk_engine::PlayerControlData {
+            command: i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
+            ..press
+        };
+
+        benchmark.record_submission(7, &press, base);
+        benchmark.record_submission(7, &release, base);
+        assert!(benchmark.record_execution(7, &release, base + Duration::from_millis(20)));
+        benchmark.record_submission(9, &press, base + Duration::from_millis(500));
+        benchmark.record_submission(9, &release, base + Duration::from_millis(500));
+        assert!(benchmark.record_execution(9, &press, base + Duration::from_millis(520)));
+        assert!(benchmark.record_execution(9, &release, base + Duration::from_millis(521)));
+
+        let report = benchmark.report(Duration::from_secs(1));
+        assert_eq!(report.submitted_inputs, 4);
+        assert_eq!(report.executed_inputs, 3);
+        assert_eq!(report.pending_inputs, 1);
+    }
+
+    #[test]
+    fn input_latency_benchmark_submits_two_unmatched_releases_to_lockstep() {
+        // C4Player::InCom drops a release whose press bit is clear before it
+        // dispatches DirectCom (src/C4Player.cpp:1541-1548). Two distinct
+        // unmatched releases exercise lockstep without changing game state.
+        let mut app = new_state_only_running_sandbox_app();
+        let owner = app.local_owner;
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.input_latency_benchmark = Some(InputLatencyBenchmark::new(Duration::from_millis(500)));
+        let started = Instant::now();
+        let tick = app.local_control_submission_tick();
+
+        app.submit_due_input_latency_benchmark_pair(started, started);
+        assert_eq!(
+            commands.take_submitted_local(),
+            vec![
+                (owner, ControlEvent::Release(ControlButton::Left), tick),
+                (owner, ControlEvent::Release(ControlButton::Right), tick),
+            ]
+        );
+        app.submit_due_input_latency_benchmark_pair(
+            started,
+            started + Duration::from_millis(499),
+        );
+        assert!(commands.take_submitted_local().is_empty());
+        let report = app
+            .input_latency_benchmark
+            .as_ref()
+            .map(|benchmark| benchmark.report(Duration::from_secs(1)))
+            .expect("benchmark remains installed");
+        assert_eq!(report.submitted_inputs, 2);
+        assert_eq!(report.pending_inputs, 2);
+    }
+
+    #[test]
+    fn input_latency_benchmark_requires_a_live_local_crew() {
+        let mut app = new_state_only_running_sandbox_app();
+        let owner = app.local_owner;
+        app.snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("local snapshot player")
+            .crew
+            .clear();
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.input_latency_benchmark = Some(InputLatencyBenchmark::new(Duration::from_millis(500)));
+        let started = Instant::now();
+
+        app.submit_due_input_latency_benchmark_pair(started, started);
+
+        assert!(commands.take_submitted_local().is_empty());
+        let report = app
+            .input_latency_benchmark
+            .as_ref()
+            .map(|benchmark| benchmark.report(Duration::from_secs(1)))
+            .expect("benchmark remains installed");
+        assert_eq!(report.submitted_inputs, 0);
     }
 
     #[test]

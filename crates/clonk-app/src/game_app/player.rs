@@ -7,6 +7,57 @@
 use super::*;
 
 impl GameApp {
+    pub(crate) fn submit_due_input_latency_benchmark_pair(
+        &mut self,
+        started: Instant,
+        now: Instant,
+    ) {
+        let due = self
+            .input_latency_benchmark
+            .as_mut()
+            .is_some_and(|benchmark| {
+                benchmark.start(started);
+                benchmark.pair_due(now)
+            });
+        if !due {
+            return;
+        }
+        let Some(by_client) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return;
+        };
+        let owner = self.local_owner;
+        if !runtime_player_has_live_crew(&self.snapshot, owner) {
+            return;
+        }
+        let tick = self.local_control_submission_tick();
+        // A release with no matching press takes the complete synchronized
+        // PlayerControl route but C4Player::InCom drops it before DirectCom
+        // or pressed-state mutation (C4Player.cpp:1541-1548). Keep the probe
+        // observational so repeated benchmark runs follow the same game state.
+        let left_release = clonk_engine::PlayerControlData {
+            player: owner,
+            command: i32::from(clonk_engine::COM_LEFT + clonk_engine::COM_RELEASE_OFFSET),
+            data: 0,
+            by_client,
+        };
+        let right_release = clonk_engine::PlayerControlData {
+            command: i32::from(clonk_engine::COM_RIGHT + clonk_engine::COM_RELEASE_OFFSET),
+            ..left_release
+        };
+        if let Some(benchmark) = self.input_latency_benchmark.as_mut() {
+            benchmark.record_submission(tick, &left_release, now);
+            benchmark.record_submission(tick, &right_release, now);
+        }
+        if let Some(network) = self.network.as_ref() {
+            network.submit_local_control(owner, ControlEvent::Release(ControlButton::Left), tick);
+            network.submit_local_control(owner, ControlEvent::Release(ControlButton::Right), tick);
+        }
+    }
+
     pub(crate) fn synchronized_player_profile_path(
         &self,
         info: &clonk_engine::ControlPlayerInfoEntry,
