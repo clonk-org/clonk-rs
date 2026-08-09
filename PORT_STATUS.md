@@ -4028,6 +4028,23 @@ an ordered-map model gap.
   ping estimate and can no longer stand in for a missing one, so a participant
   that samples a zero control send time keeps C++'s untouched horizon. See "the
   zero-ping arm" below.
+  Extended 2026-08-09: central and async clients keep the adaptive envelope
+  dormant for the first 38 admitted simulation frames after GO. C++ starts
+  sampling immediately, but GO queues the initial player batch before ordinary
+  frame execution (`src/C4Network2.cpp:2101-2109`,
+  `src/C4Network2Players.cpp:465-482`, `src/C4Game.cpp:796-801`), so those
+  samples measure scenario/player construction rather than steady control
+  delivery. Rust still feeds every route-ping sample into C++'s exact 1/150 ACT
+  average during this grace period; it suppresses only adaptive-envelope
+  seeding and automatic PreSend changes. The grace counts the actual admitted
+  frame numbers rather than control packets, so ControlRate changes cannot
+  stretch it, and the first adaptive sample remains inside the benchmark's
+  two-second warmup at every legal rate. A genuinely slow route therefore has
+  no adaptive lookahead during the 38-frame grace plus, at most, one control
+  interval before the next sample. Pinned by
+  `host_routed_startup_wait_does_not_seed_client_presend`,
+  `host_routed_startup_grace_counts_simulation_frames_across_control_rates`, and
+  `host_routed_startup_grace_uses_admitted_frames_across_a_rate_change`.
   C++ derives the horizon from `pConn->getPingTime()` and nothing else, and
   `iTargetFPS` is a hardcoded 38 rather than a measurement. A client that is
   slow rather than *distant* — a weak machine, a saturated uplink queue —
