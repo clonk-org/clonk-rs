@@ -6435,6 +6435,7 @@ impl GameApp {
                                 || !had_client_packet);
                     self.admission_resources
                         .register_player_info_resources(&info.players);
+                    self.generate_incoming_player_info_teams(&info.players);
                     self.control_player_infos.apply(info);
                     let rebalance_updates = self.recheck_team_memberships_from_player_infos();
                     if local_origin {

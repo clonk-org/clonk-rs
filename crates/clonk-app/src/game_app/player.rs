@@ -1035,6 +1035,7 @@ impl GameApp {
                         continue;
                     };
                     let client_id = info.client_id;
+                    self.generate_incoming_player_info_teams(&info.players);
                     self.control_player_infos.apply(info);
                     self.recheck_team_memberships_from_player_infos();
                     seed_engine_player_info_parameters(
@@ -1086,6 +1087,7 @@ impl GameApp {
         self.admission_resources
             .register_player_info_resources(&info.players);
         self.register_classic_lobby_player_resources(&info.players);
+        self.generate_incoming_player_info_teams(&info.players);
         self.control_player_infos.apply(info);
         self.prune_host_local_alternate_colors();
         let rebalance_updates = self.recheck_team_memberships_from_player_infos();
@@ -1501,6 +1503,22 @@ impl GameApp {
         &mut self,
     ) -> Vec<clonk_engine::PlayerInfoControlData> {
         self.reconcile_player_info_teams(true, true)
+    }
+
+    pub(crate) fn generate_incoming_player_info_teams(
+        &mut self,
+        players: &[clonk_engine::ControlPlayerInfoEntry],
+    ) {
+        let Some(assignment) = self.network_team_assignment.as_mut() else {
+            return;
+        };
+        for team in players
+            .iter()
+            .map(|player| player.team)
+            .filter(|team| *team != 0)
+        {
+            assignment.generate_team_for_id(team);
+        }
     }
 
     pub(crate) fn recheck_team_memberships_without_random_rebalance(&mut self) {

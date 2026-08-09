@@ -3986,6 +3986,15 @@ impl GameApp {
                                     by_client: 0,
                                 }),
                         );
+                        self.network_team_assignment = initial_team_metadata_from_join_snapshot(
+                            &join_data.parameters.teams,
+                        )
+                        .map(|metadata| {
+                            NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                                metadata,
+                                self.generated_team_name_template.clone(),
+                            )
+                        });
                         seed_engine_player_info_parameters(
                             &mut self.engine,
                             &self.network_league_name,
