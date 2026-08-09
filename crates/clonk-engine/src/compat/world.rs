@@ -1645,6 +1645,71 @@ pub(crate) struct HostDefinitionTables {
     direct_call_function_names: Rc<HashSet<String>>,
 }
 
+fn script_for_host_identity_from_hosts(
+    scenario_script: Option<&Arc<ScriptEngine>>,
+    linked_script_hosts: &[(String, Arc<ScriptEngine>)],
+    definition_scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    identity: clonk_script::ScriptHostIdentity,
+) -> Option<(String, Option<DefinitionId>, Arc<ScriptEngine>)> {
+    if let Some(script) = scenario_script.filter(|script| script.host_identity() == identity) {
+        return Some(("Game.Script".to_string(), None, Arc::clone(script)));
+    }
+    if let Some((name, script)) = linked_script_hosts
+        .iter()
+        .find(|(_, script)| script.host_identity() == identity)
+    {
+        return Some((name.clone(), None, Arc::clone(script)));
+    }
+    let mut matches = definition_scripts
+        .iter()
+        .filter(|(_, script)| script.host_identity() == identity)
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(definition, _)| *definition);
+    matches.first().map(|(definition, script)| {
+        (
+            (*definition).clone(),
+            Some((*definition).clone()),
+            Arc::clone(script),
+        )
+    })
+}
+
+fn resolve_engine_global_script_from_hosts(
+    scenario_script: Option<&Arc<ScriptEngine>>,
+    linked_script_hosts: &[(String, Arc<ScriptEngine>)],
+    definition_scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    name: &str,
+) -> Option<(Arc<ScriptEngine>, clonk_script::ScriptFunctionResolution)> {
+    let resolve = |script: &Arc<ScriptEngine>| {
+        let resolution = script.resolve_global_function(name)?;
+        let exact_script = script_for_host_identity_from_hosts(
+            scenario_script,
+            linked_script_hosts,
+            definition_scripts,
+            resolution.host_identity,
+        )
+        .map(|(_, _, script)| script)
+        .or_else(|| {
+            (script.host_identity() == resolution.host_identity).then(|| Arc::clone(script))
+        })?;
+        Some((exact_script, resolution))
+    };
+
+    if let Some(resolved) = scenario_script.and_then(resolve) {
+        return Some(resolved);
+    }
+    for (_, script) in linked_script_hosts {
+        if let Some(resolved) = resolve(script) {
+            return Some(resolved);
+        }
+    }
+    let mut definitions = definition_scripts.iter().collect::<Vec<_>>();
+    definitions.sort_by_key(|(definition, _)| *definition);
+    definitions
+        .into_iter()
+        .find_map(|(_, script)| resolve(script))
+}
+
 impl HostDefinitionTables {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -3205,33 +3270,12 @@ impl HostWorldContext {
         &self,
         identity: clonk_script::ScriptHostIdentity,
     ) -> Option<(String, Option<DefinitionId>, Arc<ScriptEngine>)> {
-        if let Some(script) = self
-            .scenario_script
-            .as_ref()
-            .filter(|script| script.host_identity() == identity)
-        {
-            return Some(("Game.Script".to_string(), None, Arc::clone(script)));
-        }
-        if let Some((name, script)) = self
-            .linked_script_hosts
-            .iter()
-            .find(|(_, script)| script.host_identity() == identity)
-        {
-            return Some((name.clone(), None, Arc::clone(script)));
-        }
-        let mut matches = self
-            .definition_scripts
-            .iter()
-            .filter(|(_, script)| script.host_identity() == identity)
-            .collect::<Vec<_>>();
-        matches.sort_by_key(|(definition, _)| *definition);
-        matches.first().map(|(definition, script)| {
-            (
-                (*definition).clone(),
-                Some((*definition).clone()),
-                Arc::clone(script),
-            )
-        })
+        script_for_host_identity_from_hosts(
+            self.scenario_script.as_ref(),
+            self.linked_script_hosts.as_ref(),
+            self.definition_scripts.as_ref(),
+            identity,
+        )
     }
 
     /// Resolve a function strictly through `Game.ScriptEngine`, then return
@@ -3242,30 +3286,12 @@ impl HostWorldContext {
         &self,
         name: &str,
     ) -> Option<(Arc<ScriptEngine>, clonk_script::ScriptFunctionResolution)> {
-        let resolve = |script: &Arc<ScriptEngine>| {
-            let resolution = script.resolve_global_function(name)?;
-            let exact_script = self
-                .script_for_host_identity(resolution.host_identity)
-                .map(|(_, _, script)| script)
-                .or_else(|| {
-                    (script.host_identity() == resolution.host_identity).then(|| Arc::clone(script))
-                })?;
-            Some((exact_script, resolution))
-        };
-
-        if let Some(resolved) = self.scenario_script.as_ref().and_then(resolve) {
-            return Some(resolved);
-        }
-        for (_, script) in self.linked_script_hosts.iter() {
-            if let Some(resolved) = resolve(script) {
-                return Some(resolved);
-            }
-        }
-        let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
-        definitions.sort_by_key(|(definition, _)| *definition);
-        definitions
-            .into_iter()
-            .find_map(|(_, script)| resolve(script))
+        resolve_engine_global_script_from_hosts(
+            self.scenario_script.as_ref(),
+            self.linked_script_hosts.as_ref(),
+            self.definition_scripts.as_ref(),
+            name,
+        )
     }
 
     /// Native functions owned by `Game.ScriptEngine` are registered on each
