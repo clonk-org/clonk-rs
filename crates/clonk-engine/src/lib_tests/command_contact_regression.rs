@@ -343,6 +343,47 @@ protected func QueryWorld()
 }
 
 #[test]
+fn set_position_without_a_solid_mask_bake_does_not_materialize_the_landscape() {
+    // C4Object::ForcePosition only reaches UpdateSolidMask after its changed
+    // X/Y gate (oracle-src-pinned src/C4Movement.cpp:552-561). An ordinary
+    // object has no C4SolidMask raster to remove, so that callback-local
+    // bookkeeping must not deep-clone the landscape.
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(100, 100));
+    let mover = Definition::from_script(
+        "MOVE",
+        "Unmasked mover",
+        r#"#strict
+func Move() { SetPosition(20, 30); return(0); }
+"#,
+    )
+    .expect("mover compiles");
+    engine.register_definition(mover).expect("mover registers");
+    let mover = engine
+        .spawn_object(SpawnConfig::new("MOVE").with_position(Vector2::new(10, 10)))
+        .expect("mover spawns");
+    let mover_index = engine.find_object_index(mover).expect("mover exists");
+
+    HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(mover_index, "Move", Vec::new())
+            .expect("move callback succeeds"),
+        Value::Nil,
+    );
+    assert_eq!(
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "removing an absent solid-mask bake must not clone the callback landscape"
+    );
+    assert_eq!(
+        engine.objects[mover_index].state.position,
+        Vector2::new(20, 30),
+        "the callback still applies its position update"
+    );
+}
+
+#[test]
 fn lazy_master_order_ignores_stale_object_index_cache() {
     let mut engine = Engine::new();
     engine

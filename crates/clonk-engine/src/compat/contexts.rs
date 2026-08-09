@@ -3837,6 +3837,13 @@ impl EffectHostContext {
     /// It restores saved bytes and re-puts every overlapping bake, including
     /// refreshing those masks' buffers exactly like C4SolidMask.cpp:233-283.
     fn remove_live_solid_mask(&mut self, id: ObjectId) -> Option<(usize, u64)> {
+        if !self
+            .solid_mask_bakes
+            .iter()
+            .any(|(object_id, _)| *object_id == id)
+        {
+            return None;
+        }
         let landscape = self.world.landscape_mut()?;
         remove_host_solid_mask_raster(landscape, &mut self.solid_mask_bakes, id)
     }
