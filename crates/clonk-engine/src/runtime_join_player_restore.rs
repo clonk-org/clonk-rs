@@ -24,6 +24,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeJoinPlayerSource {
     pub client_id: i32,
+    /// Client title passed to `C4Player::Init` before the profile is opened.
+    pub at_client_name: String,
     pub info: ControlPlayerInfoEntry,
     /// Native local loads adopt an otherwise unnamed embedded portrait;
     /// remote loads only resolve explicit portrait specifications.
@@ -64,6 +66,8 @@ pub enum RuntimeJoinPlayerRestoreError {
         #[source]
         source: Box<ScenarioError>,
     },
+    #[error("failed to remove provisional recreated player: {0}")]
+    ProvisionalRemoval(String),
 }
 
 #[derive(Debug)]
@@ -422,6 +426,30 @@ fn effective_player_name(info: &ControlPlayerInfoEntry) -> String {
         .unwrap_or_default()
 }
 
+fn apply_player_file_to_state(
+    state: &mut PlayerState,
+    source: &RuntimeJoinPlayerSource,
+    player_file: &PlayerFile,
+) {
+    let info_core = player_file.exact_info_core();
+    state.name = effective_player_name(&source.info);
+    state.team = (source.info.team != 0).then_some(source.info.team);
+    state.script_player = source.info.is_script_player();
+    state.no_elimination_check = source.info.no_elimination_check();
+    state.won = source.info.flags & PLAYER_INFO_FLAG_WON != 0;
+    state.score = player_file.score;
+    state.rounds = player_file.rounds;
+    state.rounds_won = player_file.rounds_won;
+    state.rounds_lost = player_file.rounds_lost;
+    state.total_playing_time = player_file.total_playing_time;
+    state.pref_control = player_file.pref_control;
+    state.pref_mouse = Some(player_file.pref_mouse);
+    state.pref_control_style = player_file.pref_control_style;
+    state.pref_auto_context_menu = player_file.pref_auto_context_menu;
+    state.extra_data = info_core.extra_data.clone();
+    state.player_info_core = Some(info_core);
+}
+
 fn legacy_basename(path: &[u8]) -> &[u8] {
     path.iter()
         .rposition(|byte| matches!(*byte, b'/' | b'\\'))
@@ -493,27 +521,43 @@ impl Engine {
     /// pre-`Load` defaults (`Status = PS_Normal`, view centred on the world at
     /// C4Player.cpp:257,286) with Number/ColorDw/ID/Team re-seeded from the
     /// restore row (C4Player.cpp:363-369).
-    fn default_script_player_state(&self, info: &ControlPlayerInfoEntry) -> PlayerState {
+    fn fresh_recreated_player_state(
+        &self,
+        number: i32,
+        source: &RuntimeJoinPlayerSource,
+    ) -> PlayerState {
+        let mut state = Player::new(number, String::new()).to_state();
+        state.player_info_id = source.info.id;
+        state.at_client = PlayerAtClient::new(source.client_id);
+        state.at_client_name = Some(source.at_client_name.clone());
+        state.status = PlayerStatus::Active;
+        state.status_value = Some(1);
+        state.team = (source.info.team != 0).then_some(source.info.team);
+        state.script_player = source.info.is_script_player();
+        state.no_elimination_check = source.info.no_elimination_check();
+        state.initial_value_set = true;
+        // DefaultRuntimeData seeds both flashes before Init opens the profile
+        // (C4Player.cpp:1718-1760).
+        state.control.select_flash = 30;
+        state.control.cursor_flash = 30;
+        state
+    }
+
+    fn default_script_player_state(&self, source: &RuntimeJoinPlayerSource) -> PlayerState {
         let (world_width, world_height) = self
             .landscape
             .as_ref()
             .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
             .unwrap_or((0, 0));
-        PlayerState {
-            id: info.game_number,
-            player_info_id: info.id,
-            status: PlayerStatus::Active,
-            status_value: Some(1),
-            color: Some(RgbColor::new(
-                ((info.color >> 16) & 0xff) as u8,
-                ((info.color >> 8) & 0xff) as u8,
-                (info.color & 0xff) as u8,
-            )),
-            color_dw_raw: Some(info.color),
-            view_center: Some(Vector2::new(world_width / 2, world_height / 2)),
-            initial_value_set: true,
-            ..PlayerState::default()
-        }
+        let mut state = self.fresh_recreated_player_state(source.info.game_number, source);
+        state.color = Some(RgbColor::new(
+            ((source.info.color >> 16) & 0xff) as u8,
+            ((source.info.color >> 8) & 0xff) as u8,
+            (source.info.color & 0xff) as u8,
+        ));
+        state.color_dw_raw = Some(source.info.color);
+        state.view_center = Some(Vector2::new(world_width / 2, world_height / 2));
+        state
     }
 
     fn restore_runtime_join_players_with_external_paths(
@@ -539,107 +583,175 @@ impl Engine {
             strings: self.legacy_string_table_snapshot(),
             object_numbers: object_numbers.clone(),
         };
-        let mut occupied = self.players.keys().copied().collect::<HashSet<_>>();
-        let mut prepared = Vec::with_capacity(sources.len());
-
+        let mut restored = Vec::with_capacity(sources.len());
         for source in sources {
+            let filename = legacy_basename(source.info.filename.as_bytes());
+            if !source.info.is_script_player()
+                && filename.is_empty()
+                && !external_player_paths.contains_key(&source.info.id)
+            {
+                continue;
+            }
+            let player_count = i32::try_from(self.players.len()).unwrap_or(i32::MAX);
+            if self
+                .max_players()
+                .is_some_and(|maximum| player_count.saturating_add(1) > maximum)
+            {
+                continue;
+            }
+            // C4PlayerList::Join appends a default player before Init opens
+            // the profile. Any later failure therefore traverses the normal
+            // player-removal callback path (C4PlayerList.cpp:302-314).
+            let provisional_number = (0..)
+                .find(|number| !self.players.contains_key(number))
+                .unwrap_or_default();
+            let provisional_state = self.fresh_recreated_player_state(provisional_number, source);
+            self.assign_player_info_id(provisional_state.player_info_id);
+            self.players.insert(
+                provisional_number,
+                Player::from_state(provisional_state.clone()),
+            );
+            self.player_order.push(provisional_number);
+            self.players_registered = true;
+
+            let player_file_result = (|| {
+                if let Some(external_path) = external_player_paths.get(&source.info.id) {
+                    let child = Group::open(external_path)?;
+                    PlayerFile::load_with_portraits_and_value_resolution(
+                        &child,
+                        source.load_unnamed_portraits,
+                        &value_resolution,
+                    )
+                    .map_err(|error| {
+                        RuntimeJoinPlayerRestoreError::PlayerFile {
+                            filename: external_path.display().to_string(),
+                            source: Box::new(error),
+                        }
+                    })
+                } else if filename.is_empty() && source.info.is_script_player() {
+                    Ok(PlayerFile::default())
+                } else {
+                    let entry = root_entries
+                        .iter()
+                        .find(|entry| entry.name_bytes.eq_ignore_ascii_case(filename))
+                        .ok_or_else(|| RuntimeJoinPlayerRestoreError::MissingPlayerGroup {
+                            player_info_id: source.info.id,
+                            filename: clonk_script::c4_string_from_bytes(filename),
+                        })?;
+                    let child = scenario_group.open_child(&entry.relative_path)?;
+                    PlayerFile::load_with_portraits_and_value_resolution(
+                        &child,
+                        source.load_unnamed_portraits,
+                        &value_resolution,
+                    )
+                    .map_err(|error| {
+                        RuntimeJoinPlayerRestoreError::PlayerFile {
+                            filename: clonk_script::c4_string_from_bytes(filename),
+                            source: Box::new(error),
+                        }
+                    })
+                }
+            })();
+            let player_file = match player_file_result {
+                Ok(player_file) => player_file,
+                Err(error) => {
+                    return Err(self
+                        .remove_failed_recreated_player(provisional_number)
+                        .err()
+                        .map(|cleanup| {
+                            RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
+                        })
+                        .unwrap_or(error));
+                }
+            };
+
+            // Profile values are already live when LoadRuntimeData begins;
+            // a runtime-section failure snapshots these exact score/time
+            // values during provisional removal (C4Player.cpp:267-275,
+            // 354-386; C4RoundResults.cpp:52-79).
+            let mut loaded_profile_state = provisional_state;
+            apply_player_file_to_state(&mut loaded_profile_state, source, &player_file);
+            let (world_width, world_height) = self
+                .landscape
+                .as_ref()
+                .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
+                .unwrap_or((0, 0));
+            loaded_profile_state.view_center =
+                Some(Vector2::new(world_width / 2, world_height / 2));
+            self.players
+                .insert(provisional_number, Player::from_state(loaded_profile_state));
+
             let section_name = format!("Player{}", source.info.id);
-            let mut state = match sections.iter().find(|section| section.name == section_name) {
-                Some(section) => parse_player_state(section, source.info.id, &object_numbers)?,
+            let state_result = match sections.iter().find(|section| section.name == section_name) {
+                Some(section) => parse_player_state(section, source.info.id, &object_numbers),
                 // "for script players in non-savegames, this is OK - it means
                 // they get restored using default values"
                 // (C4Player.cpp:359-371).
                 None if !save_game && source.info.is_script_player() => {
-                    self.default_script_player_state(&source.info)
+                    Ok(self.default_script_player_state(source))
                 }
-                None => {
-                    return Err(RuntimeJoinPlayerRestoreError::MissingPlayerSection(
-                        source.info.id,
-                    ))
-                }
-            };
-            if state.player_info_id == 0 {
-                return Err(RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(
+                None => Err(RuntimeJoinPlayerRestoreError::MissingPlayerSection(
                     source.info.id,
-                ));
-            }
-            if state.id == -1 {
-                state.id = (0..)
-                    .find(|number| !occupied.contains(number))
-                    .unwrap_or_default();
-            }
-            if !occupied.insert(state.id) {
-                return Err(RuntimeJoinPlayerRestoreError::DuplicatePlayerNumber(
-                    state.id,
-                ));
-            }
-
-            let filename = legacy_basename(source.info.filename.as_bytes());
-            let player_file = if let Some(external_path) =
-                external_player_paths.get(&source.info.id)
-            {
-                let child = Group::open(external_path)?;
-                PlayerFile::load_with_portraits_and_value_resolution(
-                    &child,
-                    true,
-                    &value_resolution,
-                )
-                .map_err(|error| RuntimeJoinPlayerRestoreError::PlayerFile {
-                    filename: external_path.display().to_string(),
-                    source: Box::new(error),
-                })?
-            } else if filename.is_empty() && source.info.is_script_player() {
-                PlayerFile::default()
-            } else {
-                let entry = root_entries
-                    .iter()
-                    .find(|entry| entry.name_bytes.eq_ignore_ascii_case(filename))
-                    .ok_or_else(|| RuntimeJoinPlayerRestoreError::MissingPlayerGroup {
-                        player_info_id: source.info.id,
-                        filename: clonk_script::c4_string_from_bytes(filename),
-                    })?;
-                let child = scenario_group.open_child(&entry.relative_path)?;
-                PlayerFile::load_with_portraits_and_value_resolution(
-                    &child,
-                    source.load_unnamed_portraits,
-                    &value_resolution,
-                )
-                .map_err(|error| RuntimeJoinPlayerRestoreError::PlayerFile {
-                    filename: clonk_script::c4_string_from_bytes(filename),
-                    source: Box::new(error),
-                })?
+                )),
             };
-            let info_core = player_file.exact_info_core();
-            state.name = effective_player_name(&source.info);
-            state.team = (source.info.team != 0).then_some(source.info.team);
-            state.script_player = source.info.is_script_player();
-            state.no_elimination_check = source.info.no_elimination_check();
-            state.won = source.info.flags & PLAYER_INFO_FLAG_WON != 0;
-            state.score = player_file.score;
-            state.rounds = player_file.rounds;
-            state.rounds_won = player_file.rounds_won;
-            state.rounds_lost = player_file.rounds_lost;
-            state.total_playing_time = player_file.total_playing_time;
-            state.pref_control = player_file.pref_control;
-            state.pref_mouse = Some(player_file.pref_mouse);
-            state.pref_control_style = player_file.pref_control_style;
-            state.pref_auto_context_menu = player_file.pref_auto_context_menu;
-            state.extra_data = info_core.extra_data.clone();
-            state.player_info_core = Some(info_core);
-            prepared.push((
-                RestoredRuntimeJoinPlayer {
-                    client_id: source.client_id,
-                    player_info_id: source.info.id,
-                    number: state.id,
-                },
-                state,
-                player_file.crew,
-            ));
-        }
-
-        let mut restored = Vec::with_capacity(prepared.len());
-        for (binding, state, roster) in prepared {
-            self.assign_player_info_id(state.player_info_id);
+            let mut state = match state_result {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(self
+                        .remove_failed_recreated_player(provisional_number)
+                        .err()
+                        .map(|cleanup| {
+                            RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
+                        })
+                        .unwrap_or(error));
+                }
+            };
+            if state.id == -1 {
+                state.id = provisional_number;
+            }
+            apply_player_file_to_state(&mut state, source, &player_file);
+            if state.player_info_id == 0 {
+                let mut removal_key = provisional_number;
+                if state.id != provisional_number && !self.players.contains_key(&state.id) {
+                    self.players.remove(&provisional_number);
+                    if let Some(ledger) = self
+                        .player_order
+                        .iter_mut()
+                        .find(|number| **number == provisional_number)
+                    {
+                        *ledger = state.id;
+                    }
+                    removal_key = state.id;
+                    self.players.insert(removal_key, Player::from_state(state));
+                } else {
+                    self.players
+                        .insert(provisional_number, Player::from_state(state));
+                }
+                let error = RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(source.info.id);
+                return Err(self
+                    .remove_failed_recreated_player(removal_key)
+                    .err()
+                    .map(|cleanup| {
+                        RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
+                    })
+                    .unwrap_or(error));
+            }
+            let validation_error =
+                (state.id != provisional_number && self.players.contains_key(&state.id)).then_some(
+                    RuntimeJoinPlayerRestoreError::DuplicatePlayerNumber(state.id),
+                );
+            if let Some(error) = validation_error {
+                return Err(self
+                    .remove_failed_recreated_player(provisional_number)
+                    .err()
+                    .map(|cleanup| {
+                        RuntimeJoinPlayerRestoreError::ProvisionalRemoval(cleanup.to_string())
+                    })
+                    .unwrap_or(error));
+            }
+            self.players.remove(&provisional_number);
+            self.player_order
+                .retain(|number| *number != provisional_number);
             let number = state.id;
             let mut player = Player::from_state(state);
             player.set_game_join_time(self.game_time);
@@ -647,12 +759,16 @@ impl Engine {
                 .retain(|link, _| link.player_id != number);
             self.players.insert(number, player);
             self.append_and_recheck_player_order(number);
-            self.crew_rosters.insert(number, roster);
+            self.crew_rosters.insert(number, player_file.crew);
             let roster_len = self.crew_rosters.get(&number).map_or(0, Vec::len);
             self.crew_info_order
                 .insert(number, (0..roster_len).rev().collect());
             self.actualize_ownerless_fow_objects_for_new_player();
-            restored.push(binding);
+            restored.push(RestoredRuntimeJoinPlayer {
+                client_id: source.client_id,
+                player_info_id: source.info.id,
+                number,
+            });
         }
         self.recheck_runtime_team_memberships();
         self.players_registered = !self.players.is_empty();
@@ -684,6 +800,7 @@ mod tests {
         .expect("write Player.txt");
         let source = RuntimeJoinPlayerSource {
             client_id: 0,
+            at_client_name: "Local".to_string(),
             info: ControlPlayerInfoEntry {
                 name: crate::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
                 flags: crate::PLAYER_INFO_FLAG_JOINED,
@@ -710,6 +827,60 @@ mod tests {
         assert_eq!(player.score(), 31);
     }
 
+    #[test]
+    fn external_remote_profile_does_not_adopt_an_unnamed_portrait() {
+        // C4Player::Init passes LocalControl to C4PlayerInfoCore::Load so only
+        // the current client's profile adopts an unnamed custom portrait
+        // (C4Player.cpp:267-275, exact decision at :272).
+        let fixture = tempdir().expect("save tempdir");
+        let save = fixture.path().join("Save.c4s");
+        std::fs::create_dir(&save).expect("create save group");
+        std::fs::write(
+            save.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n",
+        )
+        .expect("write Game.txt");
+        let profile = fixture.path().join("Remote.c4p");
+        let crew = profile.join("Veteran.c4i");
+        std::fs::create_dir_all(&crew).expect("create remote player crew group");
+        std::fs::write(profile.join("Player.txt"), "[Player]\nName=Remote\n")
+            .expect("write Player.txt");
+        std::fs::write(
+            crew.join("ObjectInfo.txt"),
+            "[ObjectInfo]\nid=CLNK\nName=Veteran\nPortraitFile=\n",
+        )
+        .expect("write ObjectInfo.txt");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(crew.join("Portrait.png"))
+            .expect("write unnamed custom portrait");
+        let source = RuntimeJoinPlayerSource {
+            client_id: 3,
+            at_client_name: "Remote".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id: 7,
+                ..Default::default()
+            },
+            load_unnamed_portraits: false,
+        };
+        let mut engine = Engine::new();
+
+        engine
+            .restore_offline_savegame_players_from_path(
+                &save,
+                &[source],
+                &HashMap::from([(7, profile)]),
+                true,
+            )
+            .expect("restore remote external profile");
+
+        let state = engine.capture_state();
+        let veteran = &state.crew_info_rosters[&2][0];
+        assert!(veteran.core.portrait_file.is_empty());
+        assert!(veteran.core.portrait_png.is_empty());
+        assert_eq!(veteran.portraits, crate::CrewPortraitState::default());
+    }
+
     /// `C4Player::LoadRuntimeData` bails when the scenario ships no `Game.txt`
     /// and again when that text carries no `[Player<ID>]` section
     /// (C4Player.cpp:1652-1657). For a script player in a non-savegame,
@@ -732,6 +903,7 @@ mod tests {
         .expect("write script profile");
         let source = RuntimeJoinPlayerSource {
             client_id: 0,
+            at_client_name: "Local".to_string(),
             info: ControlPlayerInfoEntry {
                 name: crate::LegacyCString::from_bytes(b"Ala Kadabra".to_vec()).unwrap(),
                 filename: crate::LegacyCString::from_bytes(b"ScriptPlr-1.c4p".to_vec()).unwrap(),
@@ -766,6 +938,12 @@ mod tests {
         assert!(player.no_elimination_check());
         assert_eq!(player.team(), Some(2));
         assert_eq!(player.name(), "Ala Kadabra");
+        assert!(player.show_startup());
+        assert_eq!(player.control_set(), -1);
+        assert_eq!(
+            (player.control.select_flash, player.control.cursor_flash),
+            (30, 30)
+        );
     }
 
     /// The same missing section stays fatal for a real savegame and for user
@@ -780,6 +958,7 @@ mod tests {
             .expect("write Game.txt");
         let source = RuntimeJoinPlayerSource {
             client_id: 0,
+            at_client_name: "Local".to_string(),
             info: ControlPlayerInfoEntry {
                 flags: crate::PLAYER_INFO_FLAG_JOINED,
                 id: 1,
@@ -800,6 +979,158 @@ mod tests {
             ),
             Err(RuntimeJoinPlayerRestoreError::MissingPlayerSection(1))
         ));
+    }
+
+    #[test]
+    fn failed_recreated_player_runs_provisional_removal_after_loading_profile_core() {
+        // Join appends the provisional C4Player before Init loads its profile.
+        // A later LoadRuntimeData failure removes that live player through the
+        // full callback path and snapshots the loaded core values
+        // (C4Player.cpp:246-386; C4PlayerList.cpp:219-242,302-314).
+        let fixture = tempdir().expect("scenario tempdir");
+        let save = fixture.path().join("Save.c4s");
+        std::fs::create_dir(&save).expect("create save group");
+        std::fs::write(save.join("Game.txt"), "[Game]\nTime=17\n")
+            .expect("write Game.txt without player section");
+        let profile = fixture.path().join("Alice.c4p");
+        std::fs::create_dir(&profile).expect("create player profile");
+        std::fs::write(
+            profile.join("Player.txt"),
+            "[Player]\nName=Alice\nScore=37\nTotalPlayingTime=41\n",
+        )
+        .expect("write player profile");
+        let source = RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Remote client".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id: 7,
+                name: crate::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+        let original_gravity = engine.physics().gravity;
+        engine
+            .load_scenario_script_with_convention(
+                "RemovePlayer.c",
+                concat!(
+                    "#strict 3\n",
+                    "func RemovePlayer(int player, int team) { ",
+                    "SetGravity(GetPlayerVal(\"Control\", \"Player\", player) + 78); }",
+                ),
+                true,
+            )
+            .expect("load provisional removal callback");
+
+        assert!(matches!(
+            engine.restore_offline_savegame_players_from_path(
+                &save,
+                &[source],
+                &HashMap::from([(7, profile)]),
+                true,
+            ),
+            Err(RuntimeJoinPlayerRestoreError::MissingPlayerSection(7))
+        ));
+
+        assert!(engine.players().next().is_none());
+        assert_ne!(original_gravity, 77);
+        assert_eq!(engine.physics().gravity, 77);
+        let result = engine
+            .snapshot()
+            .round_results
+            .players
+            .into_iter()
+            .find(|result| result.player_info_id == 7)
+            .expect("failed provisional player result");
+        assert_eq!((result.score_old, result.total_playing_time), (37, 41));
+    }
+
+    #[test]
+    fn empty_user_recreation_source_skips_join_without_provisional_removal() {
+        // RecreatePlayers checks GetLocalJoinFilename before Players.Join. An
+        // empty user source is logged and skipped without allocating/removing
+        // a provisional player (C4PlayerInfo.cpp:1566-1592).
+        let fixture = tempdir().expect("scenario tempdir");
+        let save = fixture.path().join("Save.c4s");
+        std::fs::create_dir(&save).expect("create save group");
+        std::fs::write(
+            save.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n",
+        )
+        .expect("write player runtime");
+        let source = RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id: 7,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+        let original_gravity = engine.physics().gravity;
+        engine
+            .load_scenario_script_with_convention(
+                "RemovePlayer.c",
+                "#strict 3\nfunc RemovePlayer(int player, int team) { SetGravity(77); }",
+                true,
+            )
+            .expect("load removal probe");
+
+        let restored = engine
+            .restore_offline_savegame_players_from_path(&save, &[source], &HashMap::new(), true)
+            .expect("empty user source is a pre-join skip");
+
+        assert!(restored.is_empty());
+        assert_eq!(engine.physics().gravity, original_gravity);
+        assert!(engine.snapshot().round_results.players.is_empty());
+    }
+
+    #[test]
+    fn recreated_players_over_maximum_are_skipped_before_provisional_join() {
+        // C4PlayerList::Join checks MaxPlayers before allocating C4Player, so
+        // later joined restore rows remain infos only and emit no removal
+        // side effects (C4PlayerList.cpp:288-303).
+        let fixture = tempdir().expect("scenario tempdir");
+        let scenario = fixture.path().join("Scenario.c4s");
+        std::fs::create_dir(&scenario).expect("create scenario group");
+        let source = |id, game_number| RuntimeJoinPlayerSource {
+            client_id: 0,
+            at_client_name: "Local".to_string(),
+            info: ControlPlayerInfoEntry {
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id,
+                game_number,
+                player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+        engine.set_max_players(1);
+
+        let restored = engine
+            .restore_offline_savegame_players_from_path(
+                &scenario,
+                &[source(7, 2), source(8, 3)],
+                &HashMap::new(),
+                false,
+            )
+            .expect("over-capacity recreation is a pre-join skip");
+
+        assert_eq!(
+            restored
+                .iter()
+                .map(|player| player.player_info_id)
+                .collect::<Vec<_>>(),
+            [7]
+        );
+        assert!(engine.player(2).is_some());
+        assert!(engine.player(3).is_none());
+        assert!(engine.snapshot().round_results.players.is_empty());
     }
 
     #[test]

@@ -4836,6 +4836,7 @@ impl GameApp {
         self.recording_template = None;
         self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
+        self.network_savegame_recreation_progress = None;
         self.message_dialogs.clear();
         self.message_dialog_active_index = None;
         self.message_dialog_pointer_capture_index = None;

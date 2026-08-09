@@ -7,6 +7,17 @@ use super::*;
 use crate::update_check::PendingUpdateCheck;
 use crate::update_download::PendingUpdateDownload;
 
+#[derive(Debug, Default)]
+pub(crate) struct NetworkSavegameRecreationProgress {
+    pub(crate) cursor: usize,
+    /// `ChangeToLocal` tears down the manager, but Game.Control keeps the
+    /// original local client identity while InitPlayers resumes.
+    pub(crate) local_client_id: i32,
+    /// The native outer RecreatePlayers packet loop freezes the client and
+    /// name while its inner player loop may block on a resource.
+    pub(crate) active_client: Option<(i32, String)>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -580,6 +591,7 @@ pub(crate) struct GameApp {
     /// RecreatePlayers phase. They must never fall back into normal network
     /// JoinPlayer issuance while legacy runtime-player loading is deferred.
     pub(crate) deferred_network_savegame_recreation: Vec<(i32, i32)>,
+    pub(crate) network_savegame_recreation_progress: Option<NetworkSavegameRecreationProgress>,
     /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
     pub(crate) generated_team_name_template: LegacyCString,
     pub(crate) network_team_assignment: Option<NetworkTeamAssignmentState>,

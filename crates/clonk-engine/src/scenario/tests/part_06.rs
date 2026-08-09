@@ -1315,7 +1315,7 @@
         );
         engine.crew_info_order.insert(0, vec![0, 1]);
         engine
-            .finalize_restored_players()
+            .finalize_restored_players(false)
             .expect("saved Info links after player restoration");
 
         let crew_id = ObjectId::new(100);
@@ -1393,6 +1393,140 @@
             "a priority-zero Fire node performs no fire execution"
         );
         assert_eq!(engine.rng, rng_before, "dead Fire consumes no random draw");
+    }
+
+    #[test]
+    fn restored_object_links_clear_invalid_owners_even_when_every_player_restore_failed() {
+        // InitGameFinal always validates object Owner/Base/Controller after
+        // InitPlayers, including when RecreatePlayers joined nobody
+        // (C4Game.cpp:2724-2729,3157-3165).
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("THNG", "Thing", "").expect("compile definition"),
+            )
+            .expect("register definition");
+        let object = engine
+            .spawn_object(SpawnConfig::new("THNG").with_owner(7))
+            .expect("spawn saved-owner fixture");
+        let object_index = engine.find_object_index(object).expect("fixture object");
+        assert_eq!(engine.objects[object_index].state.owner, 7);
+
+        engine
+            .finalize_restored_players(false)
+            .expect("finalize empty restore result");
+
+        assert_eq!(engine.objects[object_index].state.owner, crate::OWNER_NONE);
+    }
+
+    #[test]
+    fn unassociated_joined_savegame_player_removes_only_its_raw_player_objects() {
+        // RestoreSavegameInfos removes each joined restore row without a
+        // current SavegamePlayer association in packet/row order; the saved
+        // GameNumber selects FLAG or raw C4D_CrewMember objects by live Owner
+        // (C4PlayerInfo.cpp:1422-1439,1610-1633; C4PlayerList.cpp:208-216;
+        // C4Object.cpp:6267-6291).
+        let mut engine = Engine::new();
+        for id in ["FLAG", "CREW", "KEEP"] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, "").expect("compile definition"),
+                )
+                .expect("register definition");
+        }
+        let flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_owner(7))
+            .expect("spawn unassociated flag");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(7)
+                    .with_category(1 << 18),
+            )
+            .expect("spawn unassociated raw-category crew");
+        let ordinary = engine
+            .spawn_object(SpawnConfig::new("KEEP").with_owner(7))
+            .expect("spawn unassociated ordinary object");
+        let associated = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(8)
+                    .with_category(1 << 18),
+            )
+            .expect("spawn associated crew");
+        let ownerless = engine
+            .spawn_object(SpawnConfig::new("FLAG"))
+            .expect("spawn ownerless flag");
+
+        let mut current = crate::ControlPlayerInfoRegistry::default();
+        current.apply(crate::PlayerInfoControlData {
+            client_id: 4,
+            players: vec![crate::ControlPlayerInfoEntry {
+                id: 91,
+                savegame_player: 8,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let restore = [
+            crate::ControlPlayerInfoEntry {
+                id: 7,
+                game_number: 7,
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            },
+            crate::ControlPlayerInfoEntry {
+                id: 8,
+                game_number: 8,
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            },
+            crate::ControlPlayerInfoEntry {
+                id: 9,
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            },
+        ];
+
+        engine
+            .remove_unassociated_savegame_player_objects(&current, &restore)
+            .expect("remove unassociated saved-player objects");
+
+        assert_eq!(
+            engine
+                .object_snapshot(flag)
+                .expect("retained tombstone")
+                .status,
+            crate::ObjectStatus::Deleted
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("retained tombstone")
+                .status,
+            crate::ObjectStatus::Deleted
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(ordinary)
+                .expect("ordinary object")
+                .status,
+            crate::ObjectStatus::Normal
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(associated)
+                .expect("associated crew")
+                .status,
+            crate::ObjectStatus::Normal
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(ownerless)
+                .expect("ownerless flag")
+                .status,
+            crate::ObjectStatus::Normal
+        );
     }
 
     #[test]

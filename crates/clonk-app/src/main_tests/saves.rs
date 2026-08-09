@@ -578,6 +578,593 @@ fn classic_record_stream_is_converted_and_activated() {
 }
 
 #[test]
+fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
+    // Replay RestoreSavegameInfos changes the current row to the saved ID,
+    // then RecreatePlayerFiles loads Recreate-<ID>.c4p before RecreatePlayers
+    // restores Game.txt runtime state (C4PlayerInfo.cpp:1395-1421,1448-1518,
+    // 1524-1607).
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("replay recreation user data");
+    let content = tempdir().expect("replay recreation content");
+    let frontend = install_minimal_prepared_host_fixture(content.path());
+    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
+        .expect("read replay scenario core")
+        .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
+    fs::write(replay_path.join("Scenario.txt"), scenario_core)
+        .expect("mark fixture as a replayed savegame");
+    fs::write(
+        replay_path.join("Game.txt"),
+        concat!(
+            "[Game]\nTime=17\n\n",
+            "[Player7]\nStatus=1\nIndex=2\nID=7\n",
+            "AtClient=99\nAtClientName=stale\nWealth=19\n\n",
+            "[Player8]\nStatus=1\nIndex=3\nID=8\nWealth=23\n",
+            "[Player6]\nStatus=1\nIndex=4\nID=6\nWealth=29\n",
+        ),
+    )
+    .expect("write replay runtime state");
+    fs::write(
+        replay_path.join("CtrlRec.c4b"),
+        [0, clonk_engine::RCT_FRAME],
+    )
+    .expect("write replay control stream");
+    fs::write(
+        replay_path.join("Teams.txt"),
+        b"[Teams]\nActive=1\nAutoGenerateTeams=1\n",
+    )
+    .expect("write auto-generated replay teams");
+    let native = |bytes: &[u8]| {
+        LegacyCString::from_bytes(bytes.to_vec()).expect("test native string has no NUL")
+    };
+    let recorded_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 17,
+        loadable: true,
+        filename: native(b"Alice.c4p"),
+        ..Default::default()
+    };
+    let fallback_profile_path = user_data.path().join("Local.c4p");
+    fs::create_dir(&fallback_profile_path).expect("create installed fallback replay profile");
+    fs::write(
+        fallback_profile_path.join("Player.txt"),
+        "[Player]\nName=Local recorded profile\nScore=37\n[Preferences]\nControl=1\nMouse=0\n",
+    )
+    .expect("write installed fallback replay profile");
+    let fallback_profile_filename = LegacyCString::from_bytes(
+        clonk_resources::path_to_legacy_bytes(&fallback_profile_path),
+    )
+    .expect("fallback replay profile path has no NUL");
+    let stale_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 18,
+        loadable: true,
+        filename: native(b"Wrong.c4p"),
+        ..Default::default()
+    };
+    let stale_resource_path = user_data.path().join("Wrong.c4p");
+    fs::create_dir(&stale_resource_path).expect("create stale replay resource profile");
+    fs::write(
+        stale_resource_path.join("Player.txt"),
+        "[Player]\nName=Wrong resource profile\nScore=99\n",
+    )
+    .expect("write stale replay resource profile");
+    let missing_profile_filename = LegacyCString::from_bytes(
+        clonk_resources::path_to_legacy_bytes(&user_data.path().join("Missing.c4p")),
+    )
+    .expect("missing replay profile path has no NUL");
+    let current_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 100,
+        clients: vec![
+            clonk_network::ClientPlayerInfosSnapshot {
+                client_id: 4,
+                flags: 0,
+                players: vec![
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 100,
+                        name: native(b"New-team ordering probe"),
+                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                        team: -1,
+                        ..Default::default()
+                    },
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 91,
+                        name: native(b"Current replay player"),
+                        filename: native(b"Alice.c4p"),
+                        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                        color: 0x0044_5566,
+                        team: 4,
+                        resource: Some(recorded_resource),
+                        ..Default::default()
+                    },
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 93,
+                        name: native(b"Missing replay profile"),
+                        filename: missing_profile_filename,
+                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                        ..Default::default()
+                    },
+                ],
+            },
+            clonk_network::ClientPlayerInfosSnapshot {
+                client_id: -1,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 92,
+                    name: native(b"Unknown-client replay player"),
+                    filename: fallback_profile_filename,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                    resource: Some(stale_resource.clone()),
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+    let restore_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 7,
+        clients: vec![
+            clonk_network::ClientPlayerInfosSnapshot {
+                client_id: 4,
+                flags: 0,
+                players: vec![
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                        name: native(b"Current replay player"),
+                        filename: native(b"Alice.c4p"),
+                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                        color: 0x0011_2233,
+                        team: 3,
+                        ..Default::default()
+                    },
+                    clonk_engine::ControlPlayerInfoEntry {
+                        id: 6,
+                        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                        name: native(b"Missing replay profile"),
+                        filename: native(b"Missing.c4p"),
+                        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                        ..Default::default()
+                    },
+                ],
+            },
+            clonk_network::ClientPlayerInfosSnapshot {
+                client_id: -1,
+                flags: 0,
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 8,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                        | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                    name: native(b"Unknown-client replay player"),
+                    filename: native(b"Local.c4p"),
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+    fs::write(
+        replay_path.join("PlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&current_infos)
+            .expect("encode replay current infos"),
+    )
+    .expect("write replay current infos");
+    fs::write(
+        replay_path.join("SavePlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&restore_infos)
+            .expect("encode replay restore infos"),
+    )
+    .expect("write replay restore infos");
+    let profile_path = replay_path.join("Recreate-7.c4p");
+    fs::create_dir(&profile_path).expect("create recorded replay profile");
+    fs::write(
+        profile_path.join("Player.txt"),
+        "[Player]\nName=Recorded profile\nScore=31\n[Preferences]\nControl=0\nMouse=0\n",
+    )
+    .expect("write recorded replay profile");
+    let packed_replay_path = content.path().join("PackedReplay.c4s");
+    let replay_group = Group::open(&replay_path).expect("open folder replay group");
+    fs::write(
+        &packed_replay_path,
+        MutableGroup::from_group(&replay_group)
+            .expect("copy folder replay group")
+            .pack()
+            .expect("pack replay group"),
+    )
+    .expect("write packed replay group");
+
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
+        .expect("initialize replay app");
+    app.admission_resources
+        .mark_complete(stale_resource.id, stale_resource_path);
+    app.start_scenario(FrontendScenario::from_command_line(&packed_replay_path))
+        .expect("start resumed-savegame replay");
+    wait_for_running_with_attempts(&mut app, 2_400);
+
+    let player = app.engine.player(2).expect("recreated replay player 2");
+    assert_eq!(
+        (
+            player.player_info_id(),
+            player.name(),
+            player.wealth(),
+            player.score(),
+            player.at_client(),
+            player.at_client_name(),
+        ),
+        (
+            7,
+            "Current replay player",
+            19,
+            31,
+            clonk_engine::PlayerAtClient::new(4),
+            "Replay",
+        )
+    );
+    let resumed_info = app
+        .control_player_infos
+        .get(7)
+        .expect("resumed replay player info");
+    assert!(
+        resumed_info.filename.is_empty(),
+        "DeleteTempFile clears the extracted Recreate filename after the join"
+    );
+    assert!(resumed_info.resource.is_none());
+    assert_eq!(
+        resumed_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        "replay DiscardResource has no live resource pointer and preserves HasRes"
+    );
+    assert_eq!(
+        (resumed_info.game_number, resumed_info.game_join_frame),
+        (-1, -1),
+        "non-scenario-init recreation does not call SetJoined"
+    );
+    assert!(app.control_player_infos.get(91).is_none());
+    assert!(
+        app.control_player_infos
+            .get(6)
+            .is_some_and(|info| { info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0 }),
+        "a failed filename-backed replay join marks its PlayerInfo removed"
+    );
+    let failed_result = app
+        .engine
+        .snapshot()
+        .round_results
+        .players
+        .into_iter()
+        .find(|result| result.player_info_id == 6)
+        .expect("failed provisional replay player result");
+    assert_eq!(
+        (
+            failed_result.total_playing_time,
+            failed_result.score_old,
+            failed_result.score_new,
+        ),
+        (0, 0, None)
+    );
+    // A failed/missing Recreate extraction leaves the original filename in
+    // place, so RecreatePlayers can still load the installed profile
+    // (C4PlayerInfo.cpp:1468-1504,1566-1603).
+    let local_player = app
+        .engine
+        .player(3)
+        .expect("unknown-client replay player from installed profile");
+    assert_eq!(
+        (
+            local_player.player_info_id(),
+            local_player.name(),
+            local_player.wealth(),
+            local_player.score(),
+            local_player.at_client(),
+            local_player.at_client_name(),
+        ),
+        (
+            8,
+            "Unknown-client replay player",
+            23,
+            37,
+            clonk_engine::PlayerAtClient::UNKNOWN,
+            "Replay",
+        )
+    );
+    assert!(app.local_controls.assignment(3).is_some());
+    assert_eq!(app.engine.snapshot().hud.local_players, vec![3]);
+    let teams = app.engine.teams();
+    assert!(teams.iter().any(|team| team.id == 4));
+    // RecheckAutoGeneratedTeams visits PlayerInfos in packet/row order. A
+    // TEAMID_New row before team 4 therefore generates team 1 first and must
+    // not append team 5 (C4PlayerInfo.cpp:819-831; C4Teams.cpp:409-420).
+    assert!(!teams.iter().any(|team| team.id == 5));
+    assert_eq!(
+        teams
+            .iter()
+            .find(|team| team.id == 3)
+            .map(|team| team.player_ids.as_slice()),
+        Some(&[7][..])
+    );
+    assert!(
+        app.control_clients.snapshot().is_empty(),
+        "replay PlayerInfos packets do not synthesize Parameters.Clients"
+    );
+    assert_eq!(app.engine.game_time(), 17);
+    assert_eq!(
+        app.control_player_infos.retained_rows_snapshot().0,
+        7,
+        "SavePlayerInfos overwrites the replay PlayerInfos ID counter"
+    );
+    // InitGame snapshots the raw PlayerInfos before InitPlayers merges the
+    // restore list (C4Game.cpp:2390-2399,2827-2850).
+    assert_eq!(
+        app.restart_restore_infos
+            .players
+            .get(b"Current replay player".as_slice()),
+        Some(&RestartRestorePlayerInfo {
+            player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+            team: 4,
+            color: 0x0044_5566,
+        })
+    );
+    assert!(app.control_playback.is_some());
+    app.apply_ready_controls(
+        0,
+        vec![NetworkControl::ClientUpdate(
+            clonk_engine::ClientUpdateControlData {
+                update_type: clonk_engine::CLIENT_UPDATE_SET_OBSERVER,
+                client_id: 4,
+                data: 1,
+                by_client: 0,
+            },
+        )],
+    )
+    .expect("execute absent-client replay update");
+    assert!(
+        app.engine.player(2).is_some(),
+        "ClientUpdate is a no-op when Parameters.Clients has no matching row"
+    );
+    // ClientRemove has a replay-only absent-client fallback that removes the
+    // client's runtime players without inventing a client row
+    // (C4Control.cpp:578-584,637-649).
+    app.apply_ready_controls(
+        0,
+        vec![NetworkControl::ClientRemove(
+            clonk_engine::ClientRemoveControlData {
+                client_id: 4,
+                reason: LegacyCString::default(),
+                by_client: 0,
+            },
+        )],
+    )
+    .expect("execute absent-client replay removal");
+    assert!(app.engine.player(2).is_none());
+    assert!(app.engine.player(3).is_some());
+    reset_cached_app_paths();
+}
+
+#[test]
+fn savegame_replay_empty_current_packet_does_not_adopt_restore_players() {
+    // Runtime-record fallback tests C4PlayerInfoList::GetInfoCount, the client
+    // packet count, so one retained empty packet suppresses adoption of the
+    // restore list (C4PlayerInfo.cpp:1422-1439; C4PlayerInfo.h:373).
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("empty-packet replay user data");
+    let content = tempdir().expect("empty-packet replay content");
+    let frontend = install_minimal_prepared_host_fixture(content.path());
+    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
+        .expect("read replay scenario core")
+        .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
+    fs::write(replay_path.join("Scenario.txt"), scenario_core)
+        .expect("mark fixture as a replayed savegame");
+    fs::write(
+        replay_path.join("Game.txt"),
+        b"[Player7]\nStatus=1\nIndex=2\nID=7\n",
+    )
+    .expect("write saved script runtime");
+    fs::write(
+        replay_path.join("Objects.txt"),
+        b"[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=262144\nOwner=2\nX=10\nY=10\n",
+    )
+    .expect("write unassociated saved-player crew object");
+    fs::write(
+        replay_path.join("CtrlRec.c4b"),
+        [0, clonk_engine::RCT_FRAME],
+    )
+    .expect("write replay control stream");
+    let current_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 91,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 4,
+            flags: 0,
+            players: Vec::new(),
+        }],
+    };
+    let restore_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 7,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 4,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 7,
+                game_number: 2,
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                    | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+                player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+                ..Default::default()
+            }],
+        }],
+    };
+    fs::write(
+        replay_path.join("PlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&current_infos)
+            .expect("encode empty current packet"),
+    )
+    .expect("write empty current packet");
+    fs::write(
+        replay_path.join("SavePlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&restore_infos)
+            .expect("encode replay restore infos"),
+    )
+    .expect("write replay restore infos");
+
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
+        .expect("initialize empty-packet replay app");
+    app.start_scenario(frontend)
+        .expect("start empty-packet savegame replay");
+    wait_for_running_with_attempts(&mut app, 2_400);
+
+    assert!(app.engine.player(2).is_none());
+    assert_eq!(
+        app.engine
+            .object_snapshot(clonk_engine::ObjectId::new(10))
+            .expect("unassociated crew tombstone")
+            .status,
+        clonk_engine::ObjectStatus::Deleted
+    );
+    assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
+    assert!(app.control_player_infos.contains_client(4));
+    reset_cached_app_paths();
+}
+
+#[test]
+fn savegame_replay_removed_restore_rows_do_not_gain_associations() {
+    // RestoreSavegameInfos does nothing when the restore list has no active
+    // players, so even an otherwise exact match stays unassociated
+    // (C4Game.cpp:2827-2851; C4PlayerInfo.cpp:1371-1393).
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("removed-restore replay user data");
+    let content = tempdir().expect("removed-restore replay content");
+    let frontend = install_minimal_prepared_host_fixture(content.path());
+    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
+        .expect("read replay scenario core")
+        .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
+    fs::write(replay_path.join("Scenario.txt"), scenario_core)
+        .expect("mark fixture as a replayed savegame");
+    fs::write(replay_path.join("Game.txt"), b"[Game]\nTime=11\n").expect("write replay game state");
+    fs::write(
+        replay_path.join("CtrlRec.c4b"),
+        [0, clonk_engine::RCT_FRAME],
+    )
+    .expect("write replay control stream");
+    let native = |bytes: &[u8]| {
+        LegacyCString::from_bytes(bytes.to_vec()).expect("test native string has no NUL")
+    };
+    let current_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 91,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 4,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 91,
+                name: native(b"Removed restore match"),
+                filename: native(b"Alice.c4p"),
+                player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                ..Default::default()
+            }],
+        }],
+    };
+    let restore_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 7,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 4,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 7,
+                name: native(b"Removed restore match"),
+                filename: native(b"Alice.c4p"),
+                flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                ..Default::default()
+            }],
+        }],
+    };
+    fs::write(
+        replay_path.join("PlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&current_infos).expect("encode current infos"),
+    )
+    .expect("write current infos");
+    fs::write(
+        replay_path.join("SavePlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&restore_infos)
+            .expect("encode removed restore infos"),
+    )
+    .expect("write removed restore infos");
+
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
+        .expect("initialize removed-restore replay app");
+    app.start_scenario(frontend)
+        .expect("start removed-restore savegame replay");
+    wait_for_running_with_attempts(&mut app, 2_400);
+
+    let current = app
+        .control_player_infos
+        .get(91)
+        .expect("current replay player info");
+    assert_eq!(current.savegame_player, 0);
+    assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
+    reset_cached_app_paths();
+}
+
+#[test]
+fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
+    // C4GameParameters::Load transfers the SavePlayerInfos allocator counter
+    // even when every restore row is Removed and InitPlayers has no work
+    // (C4GameParameters.cpp:379-399; C4Game.cpp:2827-2851).
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("removed-only replay user data");
+    let content = tempdir().expect("removed-only replay content");
+    let frontend = install_minimal_prepared_host_fixture(content.path());
+    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
+        .expect("read replay scenario core")
+        .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
+    fs::write(replay_path.join("Scenario.txt"), scenario_core)
+        .expect("mark fixture as a replayed savegame");
+    fs::write(replay_path.join("Game.txt"), b"[Game]\nTime=11\n").expect("write replay game state");
+    fs::write(
+        replay_path.join("CtrlRec.c4b"),
+        [0, clonk_engine::RCT_FRAME],
+    )
+    .expect("write replay control stream");
+    let restore_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 7,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 4,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 7,
+                flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                ..Default::default()
+            }],
+        }],
+    };
+    fs::write(
+        replay_path.join("SavePlayerInfos.txt"),
+        clonk_network::encode_player_info_list_ini(&restore_infos)
+            .expect("encode removed-only restore infos"),
+    )
+    .expect("write removed-only restore infos");
+
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
+        .expect("initialize removed-only replay app");
+    app.start_scenario(frontend)
+        .expect("start removed-only savegame replay");
+    wait_for_running_with_attempts(&mut app, 2_400);
+
+    assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
+    assert!(app.control_player_infos.get(7).is_none());
+    reset_cached_app_paths();
+}
+
+#[test]
 fn unusable_classic_record_stream_exits_without_showing_startup() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
@@ -1540,9 +2127,12 @@ fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
     let file = File::open(path).expect("open screenshot");
     let decoder = png::Decoder::new(io::BufReader::new(file));
     let mut reader = decoder.read_info().expect("read screenshot header");
-    let mut buffer = vec![0; reader
-        .output_buffer_size()
-        .expect("screenshot buffer size fits usize")];
+    let mut buffer = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("screenshot buffer size fits usize")
+    ];
     let info = reader.next_frame(&mut buffer).expect("decode screenshot");
     assert_eq!(info.color_type, ColorType::Rgb);
     assert_eq!(info.bit_depth, BitDepth::Eight);
@@ -1601,9 +2191,12 @@ fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
         .expect("encode retained GPU thumbnail");
     let decoder = png::Decoder::new(io::Cursor::new(encoded));
     let mut reader = decoder.read_info().expect("read thumbnail header");
-    let mut buffer = vec![0; reader
-        .output_buffer_size()
-        .expect("thumbnail buffer size fits usize")];
+    let mut buffer = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("thumbnail buffer size fits usize")
+    ];
     let info = reader.next_frame(&mut buffer).expect("decode thumbnail");
 
     assert_eq!(
@@ -3979,7 +4572,11 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     ));
     assert_eq!(app.film_view_player, Some(first));
 
-    assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    assert!(app.handle_film_view_key_for_mode(
+        VirtualKeyCode::ArrowRight,
+        ElementState::Pressed,
+        true,
+    ));
     assert_eq!(
         app.film_view_player,
         Some(second),
@@ -3997,12 +4594,20 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     );
 
     app.keyboard_modifiers = ModifiersState::SHIFT;
-    assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    assert!(!app.handle_film_view_key_for_mode(
+        VirtualKeyCode::ArrowRight,
+        ElementState::Pressed,
+        true,
+    ));
     assert_eq!(app.film_view_player, Some(second));
     app.keyboard_modifiers = ModifiersState::empty();
 
     app.scoreboard_dialog = Some(app.scoreboard_request());
-    assert!(app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    assert!(app.handle_film_view_key_for_mode(
+        VirtualKeyCode::ArrowRight,
+        ElementState::Pressed,
+        true,
+    ));
     assert_eq!(
         app.film_view_player,
         Some(first),
@@ -4010,7 +4615,11 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     );
 
     app.start_running_chat(RunningChatMode::All);
-    assert!(!app.handle_film_view_key_for_mode(VirtualKeyCode::ArrowRight, ElementState::Pressed, true,));
+    assert!(!app.handle_film_view_key_for_mode(
+        VirtualKeyCode::ArrowRight,
+        ElementState::Pressed,
+        true,
+    ));
     assert_eq!(
         app.film_view_player,
         Some(first),

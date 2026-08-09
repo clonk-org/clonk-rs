@@ -3957,7 +3957,7 @@ impl Scenario {
             engine,
             !network_game,
             team_configuration,
-            network_game.then_some(team_registry).flatten(),
+            team_registry,
             game_parameter_rule_goal_lists,
             game_data,
             true,

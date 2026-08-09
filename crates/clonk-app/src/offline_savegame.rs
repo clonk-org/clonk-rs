@@ -19,6 +19,17 @@ pub(super) struct OfflineSavegameStartup {
     pub(super) initial_game_data: Option<InitialNetworkGameData>,
     pub(super) runtime_players: Vec<RuntimeJoinPlayerSource>,
     pub(super) external_player_paths: HashMap<i32, PathBuf>,
+    /// Profile sources that native `RecreatePlayers` passes to RecAddFile,
+    /// including logical children below a packed scenario group.
+    pub(super) recreation_record_paths: HashMap<i32, PathBuf>,
+    /// Script rows whose temporary embedded extraction succeeded and whose
+    /// retained filename/resource are cleared after the attempted join.
+    pub(super) embedded_player_info_ids: HashSet<i32>,
+    /// PlayerInfos as StartRecord observes them: local/script rows after
+    /// InitLocal, but before RestoreSavegameInfos mutates takeover IDs.
+    pub(super) recording_player_info: clonk_engine::PlayerInfoControlData,
+    pub(super) recording_last_player_id: i32,
+    pub(super) unassociated_restore_players: Vec<ControlPlayerInfoEntry>,
     /// `C4S.Head.SaveGame`: only a real savegame insists on a runtime section
     /// per restored player (C4Player.cpp:359-371).
     pub(super) save_game: bool,
@@ -80,8 +91,52 @@ pub(super) fn prepare_offline_savegame_startup(
         effective_offline_max_players(declared_max_players, restore_count, save_game),
         restore.last_player_id,
     );
-    let (runtime_players, external_player_paths, wild_takeovers) =
+    let (runtime_players, mut external_player_paths, wild_takeovers, recording_player_info) =
         associate_offline_savegame_players(&mut startup, &restore, save_game);
+    let mut recreation_record_paths = HashMap::new();
+    let mut embedded_player_info_ids = HashSet::new();
+    for source in &runtime_players {
+        if let Some(path) = external_player_paths.get(&source.info.id) {
+            recreation_record_paths.insert(source.info.id, path.clone());
+            continue;
+        }
+        if !source.info.is_script_player() || source.info.filename.is_empty() {
+            continue;
+        }
+        let configured = crate::path_from_group_name_bytes(&crate::normalize_legacy_path_bytes(
+            source.info.filename.as_bytes().to_vec(),
+        ));
+        let basename = configured
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| configured.clone());
+        if group.exists(&basename) {
+            embedded_player_info_ids.insert(source.info.id);
+            recreation_record_paths.insert(source.info.id, scenario_path.join(basename));
+        } else {
+            external_player_paths.insert(source.info.id, configured.clone());
+            recreation_record_paths.insert(source.info.id, configured);
+        }
+    }
+
+    let recording_last_player_id = recording_player_info
+        .players
+        .iter()
+        .map(|player| player.id)
+        .fold(restore.last_player_id, i32::max);
+    let restore_players = restore
+        .clients
+        .iter()
+        .flat_map(|client| client.players.iter().cloned())
+        .collect::<Vec<_>>();
+    let unassociated_restore_players = if restore_players
+        .iter()
+        .any(|player| player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+    {
+        restore_players
+    } else {
+        Vec::new()
+    };
 
     Ok((
         startup,
@@ -89,6 +144,11 @@ pub(super) fn prepare_offline_savegame_startup(
             initial_game_data,
             runtime_players,
             external_player_paths,
+            recreation_record_paths,
+            embedded_player_info_ids,
+            recording_player_info,
+            recording_last_player_id,
+            unassociated_restore_players,
             save_game,
             wild_takeovers,
         },
@@ -132,6 +192,7 @@ fn associate_offline_savegame_players(
     Vec<RuntimeJoinPlayerSource>,
     HashMap<i32, PathBuf>,
     Vec<OfflineWildTakeover>,
+    clonk_engine::PlayerInfoControlData,
 ) {
     let configured_paths = (0..startup.player_info.players.len())
         .filter_map(|row| {
@@ -140,15 +201,25 @@ fn associate_offline_savegame_players(
                 .map(|selected| selected.source_path().to_path_buf())
         })
         .collect::<Vec<_>>();
-    let (player_info, runtime_players, external_player_paths, wild_takeovers) =
-        associate_offline_savegame_player_info(
-            startup.player_info.clone(),
-            &configured_paths,
-            restore,
-            save_game,
-        );
+    let (
+        player_info,
+        runtime_players,
+        external_player_paths,
+        wild_takeovers,
+        recording_player_info,
+    ) = associate_offline_savegame_player_info(
+        startup.player_info.clone(),
+        &configured_paths,
+        restore,
+        save_game,
+    );
     startup.replace_player_info(player_info);
-    (runtime_players, external_player_paths, wild_takeovers)
+    (
+        runtime_players,
+        external_player_paths,
+        wild_takeovers,
+        recording_player_info,
+    )
 }
 
 fn associate_offline_savegame_player_info(
@@ -161,12 +232,16 @@ fn associate_offline_savegame_player_info(
     Vec<RuntimeJoinPlayerSource>,
     HashMap<i32, PathBuf>,
     Vec<OfflineWildTakeover>,
+    clonk_engine::PlayerInfoControlData,
 ) {
     let restore_players = restore
         .clients
         .iter()
         .flat_map(|client| client.players.iter().cloned())
         .collect::<Vec<_>>();
+    let has_active_restore = restore_players
+        .iter()
+        .any(|player| player.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0);
     let configured_count = configured_paths.len();
 
     // Script players are copied into the first local packet and pre-associated
@@ -184,12 +259,17 @@ fn associate_offline_savegame_player_info(
         script.savegame_player = restore_player.id;
         player_info.players.push(script);
     }
+    let recording_player_info = player_info.clone();
 
     // The automatic passes run for non-network savegames only; a regular
     // scenario shipping restore infos keeps its participants unassociated
     // (C4PlayerInfo.cpp:1372).
     let mut wild_takeovers = Vec::new();
-    let matching_levels: &[u8] = if save_game { &[0, 1, 2, 3] } else { &[] };
+    let matching_levels: &[u8] = if save_game && has_active_restore {
+        &[0, 1, 2, 3]
+    } else {
+        &[]
+    };
     for &matching_level in matching_levels {
         for player_index in 0..player_info.players.len() {
             if player_info.players[player_index].savegame_player != 0 {
@@ -241,8 +321,10 @@ fn associate_offline_savegame_player_info(
     let original_by_client = player_info.by_client;
     let mut registry = ControlPlayerInfoRegistry::default();
     registry.replace_snapshot(restore.last_player_id, [player_info]);
-    for restore_player in &restore_players {
-        registry.resume_savegame_player_from_info(restore_player);
+    if has_active_restore {
+        for restore_player in &restore_players {
+            registry.resume_savegame_player_from_info(restore_player);
+        }
     }
     let (_, mut packets) = registry.retained_rows_snapshot();
     let player_info = packets
@@ -257,29 +339,35 @@ fn associate_offline_savegame_player_info(
         )
         .unwrap_or_default();
 
-    let runtime_players = registry
-        .recreation_players()
-        .into_iter()
-        .filter_map(|(client_id, info_id)| {
-            registry
-                .get(info_id)
-                .cloned()
-                .map(|info| RuntimeJoinPlayerSource {
-                    client_id,
-                    info,
-                    load_unnamed_portraits: true,
-                })
-        })
-        .collect();
+    let runtime_players = if has_active_restore {
+        registry
+            .recreation_players()
+            .into_iter()
+            .filter_map(|(client_id, info_id)| {
+                registry
+                    .get(info_id)
+                    .cloned()
+                    .map(|info| RuntimeJoinPlayerSource {
+                        client_id,
+                        at_client_name: "Local".to_string(),
+                        info,
+                        load_unnamed_portraits: true,
+                    })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     (
         player_info,
         runtime_players,
         external_player_paths,
         wild_takeovers,
+        recording_player_info,
     )
 }
 
-fn savegame_players_match(
+pub(super) fn savegame_players_match(
     current: &ControlPlayerInfoEntry,
     saved: &ControlPlayerInfoEntry,
     matching_level: u8,
@@ -288,14 +376,39 @@ fn savegame_players_match(
         0 => {
             !current.filename.is_empty()
                 && !saved.filename.is_empty()
-                && legacy_basename(current.filename.as_bytes())
-                    .eq_ignore_ascii_case(legacy_basename(saved.filename.as_bytes()))
-                && effective_player_name(current).eq_ignore_ascii_case(effective_player_name(saved))
+                && legacy_bytes_equal_no_case(
+                    legacy_basename(current.filename.as_bytes()),
+                    legacy_basename(saved.filename.as_bytes()),
+                )
+                && legacy_bytes_equal_no_case(
+                    effective_player_name(current),
+                    effective_player_name(saved),
+                )
         }
-        1 => effective_player_name(current).eq_ignore_ascii_case(effective_player_name(saved)),
+        1 => {
+            legacy_bytes_equal_no_case(effective_player_name(current), effective_player_name(saved))
+        }
         2 => current.original_color == saved.original_color,
         _ => true,
     }
+}
+
+fn legacy_bytes_equal_no_case(left: &[u8], right: &[u8]) -> bool {
+    fn capital(byte: u8) -> u8 {
+        match byte {
+            b'a'..=b'z' => byte - 32,
+            0xe4 => 0xc4,
+            0xf6 => 0xd6,
+            0xfc => 0xdc,
+            _ => byte,
+        }
+    }
+
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| capital(*left) == capital(*right))
 }
 
 fn effective_player_name(player: &ControlPlayerInfoEntry) -> &[u8] {
@@ -394,7 +507,7 @@ mod tests {
             }],
         };
 
-        let (player_info, _, _, wild) = associate_offline_savegame_player_info(
+        let (player_info, _, _, wild, _) = associate_offline_savegame_player_info(
             player_info,
             &[
                 PathBuf::from("Players/Alice.c4p"),
@@ -479,7 +592,7 @@ mod tests {
             }],
         };
 
-        let (player_info, sources, paths, _) = associate_offline_savegame_player_info(
+        let (player_info, sources, paths, _, _) = associate_offline_savegame_player_info(
             player_info,
             &[
                 PathBuf::from("Players/Alice.c4p"),
@@ -550,7 +663,7 @@ mod tests {
             }],
         };
 
-        let (player_info, sources, paths, wild) = associate_offline_savegame_player_info(
+        let (player_info, sources, paths, wild, _) = associate_offline_savegame_player_info(
             player_info,
             &[PathBuf::from("Players/Alice.c4p")],
             &restore,
@@ -571,6 +684,50 @@ mod tests {
             vec![2],
             "only the copied script player is recreated",
         );
+    }
+
+    #[test]
+    fn removed_only_restore_list_does_not_resume_configured_user() {
+        // InitPlayers enters RestoreSavegameInfos only when the restore list
+        // has an active row. Historical Removed rows therefore cannot claim
+        // a current local player (C4Game.cpp:2827-2851).
+        let player_info = PlayerInfoControlData {
+            client_id: 0,
+            players: vec![ControlPlayerInfoEntry {
+                name: c4("Alice"),
+                filename: c4("Players/Alice.c4p"),
+                id: 41,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let restore = PlayerInfoListSnapshot {
+            last_player_id: 7,
+            clients: vec![ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![ControlPlayerInfoEntry {
+                    name: c4("Alice"),
+                    filename: c4("Players/Alice.c4p"),
+                    id: 7,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                    ..Default::default()
+                }],
+            }],
+        };
+
+        let (player_info, sources, paths, wild, _) = associate_offline_savegame_player_info(
+            player_info,
+            &[PathBuf::from("Players/Alice.c4p")],
+            &restore,
+            true,
+        );
+
+        assert_eq!(player_info.players[0].id, 41);
+        assert_eq!(player_info.players[0].savegame_player, 0);
+        assert!(sources.is_empty());
+        assert!(paths.is_empty());
+        assert!(wild.is_empty());
     }
 
     /// `C4Game::OpenScenario` only reads `Game.txt` into `GameText`, and
@@ -612,5 +769,22 @@ mod tests {
         assert!(!savegame_players_match(&current, &same_color, 1));
         assert!(savegame_players_match(&current, &same_color, 2));
         assert!(savegame_players_match(&current, &same_color, 3));
+    }
+
+    #[test]
+    fn savegame_player_name_matching_uses_legacy_latin_one_case_folding() {
+        // SEqualNoCase delegates to CharCapital, which folds the legacy
+        // single-byte umlauts in addition to ASCII (C4Strings.cpp:27-33,
+        // 121-131; C4PlayerInfo.cpp:1091-1118).
+        let current = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"\xe4lice".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let saved = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"\xc4LICE".to_vec()).unwrap(),
+            ..Default::default()
+        };
+
+        assert!(savegame_players_match(&current, &saved, 1));
     }
 }

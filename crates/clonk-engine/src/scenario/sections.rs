@@ -1047,9 +1047,9 @@ impl LegacyObjectRecord {
                     ))
                 })?);
             }
-            // C++ saves Con under the key "Size" (C4Object::CompileFunc,
-            // C4Object.cpp:2763); the GoldRush bushes carry Size=25610
-            // and grow toward FullCon from there.
+            // C++ saves and restores raw Con under the key "Size"
+            // (C4Object::CompileFunc, C4Object.cpp:2777); even small values
+            // remain raw construction rather than percentages.
             "size" => {
                 let value = parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -1057,12 +1057,7 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                let raw = if value > 1000 {
-                    value
-                } else {
-                    (value.clamp(0, 100) * FULL_CON) / 100
-                };
-                self.construction = Some(raw.max(0));
+                self.construction = Some(value);
             }
             "alive" => {
                 let alive = parse_bool(trimmed_value).ok_or_else(|| {

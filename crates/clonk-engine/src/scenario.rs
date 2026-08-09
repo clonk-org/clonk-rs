@@ -37,7 +37,7 @@ use crate::{
     EffectVarValue, Engine, EngineError, EnvironmentSettings, Landscape, LegacyCString,
     MaterialSet, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor,
     RoundResultsState, ScoreboardState, ScriptGlobalState, SkyFrame, SkyParallaxMode, SkySettings,
-    SpawnConfig, TeamInfo, Vector2, FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
+    SpawnConfig, TeamInfo, Vector2, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
     LANDSCAPE_MODE_STATIC,
 };
 

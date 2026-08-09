@@ -2911,6 +2911,21 @@ impl ControlPlayerInfoRegistry {
         })
     }
 
+    /// Whether a joined restore row has neither its pre-resume association nor
+    /// its post-resume player-info ID in the current list. This is
+    /// `C4PlayerInfoList::FindUnassociatedRestoreInfo`'s lobby-start predicate
+    /// (C4PlayerInfo.cpp:1125-1139).
+    pub fn has_unassociated_restore_info(&self, restore_infos: &[ControlPlayerInfoEntry]) -> bool {
+        restore_infos.iter().any(|restore| {
+            restore.is_joined()
+                && !self.clients.iter().any(|client| {
+                    client.players.iter().any(|player| {
+                        player.savegame_player == restore.id || player.id == restore.id
+                    })
+                })
+        })
+    }
+
     /// C4PlayerInfoList::RecreatePlayers walks client packets and each
     /// packet's player list in storage order. InitControl collision handling
     /// therefore observes this order before restored runtime player numbers
@@ -2933,6 +2948,36 @@ impl ControlPlayerInfoRegistry {
             .into_iter()
             .map(|(_, info_id)| info_id)
             .collect()
+    }
+
+    /// Apply the retained-info side of `RecreatePlayerFiles` after its player
+    /// child was extracted. `DeleteTempFile` clears the temporary filename
+    /// after the attempted join. `DiscardResource` always clears ResCore, but
+    /// clears HasRes only when a live resource pointer exists; replay-loaded
+    /// rows have no such pointer (C4PlayerInfo.cpp:295-305,1499-1504,
+    /// 1601-1603; DeleteTempFile at :57-67).
+    pub fn clear_recreated_temporary_player_file(
+        &mut self,
+        info_id: i32,
+        clear_resource_flag: bool,
+    ) {
+        if let Some(info) = self.get_mut(info_id) {
+            info.filename = LegacyCString::default();
+            info.resource = None;
+            if clear_resource_flag {
+                info.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
+            }
+        }
+    }
+
+    /// `C4PlayerInfo::LoadResource` discards an unavailable live resource but
+    /// retains the configured filename for `GetLocalJoinFilename`
+    /// (C4PlayerInfo.cpp:124-130,275-292).
+    pub fn discard_player_resource(&mut self, info_id: i32) {
+        if let Some(info) = self.get_mut(info_id) {
+            info.resource = None;
+            info.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
+        }
     }
 
     /// Applies `C4PlayerInfo::SetSavegameResume` from the exact restore-info
@@ -7676,6 +7721,52 @@ mod tests {
         assert_ne!(resumed.flags & PLAYER_INFO_FLAG_NO_SCENARIO_INIT, 0);
         assert_ne!(resumed.flags & PLAYER_INFO_FLAG_INVISIBLE, 0);
         assert_eq!(registry.recreation_players(), vec![(0, 7)]);
+    }
+
+    #[test]
+    fn savegame_warning_reports_only_joined_restore_infos_without_a_current_match() {
+        // FindUnassociatedRestoreInfo considers a joined restore row claimed by
+        // either its pre-resume association or its post-resume ID
+        // (C4PlayerInfo.cpp:1125-1139).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            8,
+            [PlayerInfoControlData {
+                client_id: 0,
+                players: vec![
+                    ControlPlayerInfoEntry {
+                        id: 91,
+                        savegame_player: 7,
+                        ..Default::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        id: 8,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+        );
+        let joined = |id| ControlPlayerInfoEntry {
+            id,
+            flags: PLAYER_INFO_FLAG_JOINED,
+            ..Default::default()
+        };
+        let restore = vec![
+            joined(7),
+            joined(8),
+            ControlPlayerInfoEntry {
+                id: 9,
+                flags: PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED,
+                ..Default::default()
+            },
+        ];
+
+        assert!(!registry.has_unassociated_restore_info(&restore));
+
+        let mut restore_with_free_player = restore;
+        restore_with_free_player.push(joined(10));
+        assert!(registry.has_unassociated_restore_info(&restore_with_free_player));
     }
 
     #[test]

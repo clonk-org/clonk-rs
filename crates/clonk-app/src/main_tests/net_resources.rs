@@ -2265,6 +2265,33 @@ fn resource_join_record_copies_player_group_for_replay() {
 }
 
 #[test]
+fn recreated_savegame_record_copies_current_profile_under_saved_info_id() {
+    // Direct RecreatePlayers joins have no JoinPlayer control to record, so
+    // C++ adds the current profile itself as Recreate-<saved ID>.c4p
+    // (C4PlayerInfo.cpp:1594-1598).
+    let directory = tempdir().expect("record directory");
+    let player_path = directory.path().join("Alice.c4p");
+    let mut player_group = MutableGroup::new("Alice.c4p");
+    player_group
+        .add_file("Player.txt", b"[Player]\nName=Alice\n".to_vec())
+        .expect("add player core");
+    fs::write(&player_path, player_group.pack().expect("pack player")).expect("write player group");
+    let output_path = directory.path().join("001-Recreate.c4s");
+    let mut app = new_state_only_running_sandbox_app();
+    install_test_recording_template(&mut app, output_path.clone());
+    app.start_recording(true).unwrap();
+
+    app.record_recreated_player_file(7, &player_path);
+    assert!(app.finish_recording().is_none());
+
+    let record = Group::open(&output_path).expect("record group");
+    let copied = record
+        .open_child("Recreate-7.c4p")
+        .expect("recreated player child");
+    assert!(copied.exists("Player.txt"));
+}
+
+#[test]
 fn synchronized_player_file_with_empty_filename_never_resolves_the_install_root() {
     // C4Player::Save on a filename-less player fails at its EraseItem/
     // C4Group_MoveItem calls without ever renaming the installation

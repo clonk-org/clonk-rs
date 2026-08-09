@@ -1041,6 +1041,14 @@ impl Engine {
 
     pub fn initialize_scenario_script(&mut self) -> Result<Vec<ObjectId>, EngineError> {
         self.finalize_legacy_object_links()?;
+        self.initialize_scenario_script_after_restored_object_links()
+    }
+
+    /// Invoke the scenario constructor after InitGameFinal's restored-object
+    /// link phase was already forced, including the zero-player case.
+    pub fn initialize_scenario_script_after_restored_object_links(
+        &mut self,
+    ) -> Result<Vec<ObjectId>, EngineError> {
         let Some(c4_args) = self.scenario_script.as_ref().map(|script| script.c4_args) else {
             return Ok(Vec::new());
         };

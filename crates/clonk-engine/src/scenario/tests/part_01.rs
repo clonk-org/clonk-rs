@@ -512,6 +512,26 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn legacy_objects_size_preserves_small_raw_construction() {
+        // C4Object::CompileFunc compiles Size directly into the raw Con field;
+        // it does not interpret small values as percentages (C4Object.cpp:2777).
+        let records =
+            parse_legacy_objects("[Object]\nid=PART\nSize=410\n").expect("Objects.txt parses");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].construction, Some(410));
+    }
+
+    #[test]
+    fn legacy_objects_size_preserves_negative_raw_construction() {
+        // C4Object::CompileFunc assigns signed Size directly and its compiler
+        // tail does not clamp Con (C4Object.cpp:2777,2858-2891).
+        let records =
+            parse_legacy_objects("[Object]\nid=NEGC\nSize=-1\n").expect("Objects.txt parses");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].construction, Some(-1));
+    }
+
+    #[test]
     fn scenario_value_store_follows_c4value_compiler_indexing_and_types() {
         let directory = tempdir().expect("scenario directory");
         std::fs::write(
@@ -1086,4 +1106,3 @@ global func Step(state, frame, random)
     fn legacy_cstring(bytes: &[u8]) -> LegacyCString {
         LegacyCString::from_bytes(bytes.to_vec()).expect("fixture has no interior NUL")
     }
-

@@ -1734,8 +1734,47 @@ func ControlUpSingle()
             2,
             "snapshot restore preserves the serialized cache"
         );
-        restored.finalize_restored_players()?;
+        restored.finalize_restored_players(false)?;
         assert_eq!(restored.player(1).expect("player").select_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn restored_player_final_init_establishes_initial_value_only_for_non_savegames(
+    ) -> Result<(), EngineError> {
+        // InitGameFinal forwards !C4S.Head.SaveGame to PlayerList::FinalInit,
+        // so regular scenarios establish the restored player's baseline while
+        // savegames preserve the serialized one (C4Game.cpp:2731-2739).
+        let restored_player = || {
+            let mut engine = Engine::new();
+            engine.register_player(
+                PlayerConfig::new(1, "Restored")
+                    .with_points(10)
+                    .with_wealth(7)
+                    .with_initial_value(103),
+            )?;
+            Ok::<_, EngineError>(engine)
+        };
+
+        let mut regular_scenario = restored_player()?;
+        regular_scenario.finalize_restored_player_initialization(true)?;
+        assert_eq!(
+            regular_scenario
+                .player(1)
+                .expect("regular restored player")
+                .initial_value(),
+            17
+        );
+
+        let mut savegame = restored_player()?;
+        savegame.finalize_restored_player_initialization(false)?;
+        assert_eq!(
+            savegame
+                .player(1)
+                .expect("savegame restored player")
+                .initial_value(),
+            103
+        );
         Ok(())
     }
 

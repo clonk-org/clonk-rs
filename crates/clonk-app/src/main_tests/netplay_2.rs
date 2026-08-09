@@ -2678,18 +2678,22 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     if let Some(parent) = paths.config_file().parent() {
         fs::create_dir_all(parent).expect("create native config directory");
     }
-    fs::write(paths.config_file(), b"[Network]\r\nMasterServerSignUp=1\r\n")
-        .expect("seed an enabled masterserver signup");
+    fs::write(
+        paths.config_file(),
+        b"[Network]\r\nMasterServerSignUp=1\r\n",
+    )
+    .expect("seed an enabled masterserver signup");
 
     let mut app = new_classic_menu_app(800, 600);
     app.app_paths = Some(paths.clone());
     app.open_network_game_dialog();
-    assert!(app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .config()
-        .masterserver_signup);
+    assert!(
+        app.startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .config()
+            .masterserver_signup
+    );
 
     // The controller flips its own flag before emitting the action.
     app.startup_network_dialog
@@ -2733,7 +2737,10 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     // of the surfaces C++ also writes straight through, so it supersedes the
     // netdlg's unflushed change instead of being shadowed by it.
     app.persist_game_option_value("Network", "MasterServerSignUp", "1".to_string());
-    assert_eq!(app.deferred_config.get("Network", "MasterServerSignUp"), None);
+    assert_eq!(
+        app.deferred_config.get("Network", "MasterServerSignUp"),
+        None
+    );
     assert!(app.masterserver_signup_setting());
 }
 
@@ -3897,7 +3904,9 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
         "a join that actually launches stops the search"
     );
     assert!(matches!(
-        app.message_dialogs.last().map(|dialog| &dialog.continuation),
+        app.message_dialogs
+            .last()
+            .map(|dialog| &dialog.continuation),
         Some(MessageDialogContinuation::StartupNetworkConnectProgress)
     ));
 
@@ -11603,6 +11612,879 @@ fn network_restore_routes_associated_info_away_from_plain_join_queue() {
 }
 
 #[test]
+fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
+    // Network::FinalInit reaches the GO barrier before InitPlayers enters
+    // RecreatePlayers and starts RetrieveRes (C4Network2.cpp:558-616;
+    // C4Game.cpp:459-483,2805-2850; C4PlayerInfo.cpp:1566-1576).
+    let fixture = tempdir().expect("post-GO resource wait fixture");
+    let scenario_path = fixture.path().join("NetworkSave.c4s");
+    fs::create_dir(&scenario_path).expect("create post-GO save group");
+    fs::write(
+        scenario_path.join("Game.txt"),
+        b"[Player7]\nStatus=1\nIndex=2\nID=7\nWealth=19\n\n[Player9]\nStatus=1\nIndex=3\nID=9\nWealth=23\n\n[Player11]\nStatus=1\nIndex=4\nID=11\nWealth=29\n",
+    )
+    .expect("write post-GO player runtime");
+    let player_path = fixture.path().join("Alice.c4p");
+    fs::create_dir(&player_path).expect("create post-GO player profile");
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Alice profile\nScore=31\n",
+    )
+    .expect("write post-GO player profile");
+    let script_player_path = fixture.path().join("ScriptResource.c4p");
+    fs::create_dir(&script_player_path).expect("create post-GO script profile");
+    fs::write(
+        script_player_path.join("Player.txt"),
+        b"[Player]\nName=Script resource profile\nScore=37\n",
+    )
+    .expect("write post-GO script profile");
+    let embedded_script_path = scenario_path.join("ScriptPlr-11.c4p");
+    fs::create_dir(&embedded_script_path).expect("create staged embedded script profile");
+    fs::write(
+        embedded_script_path.join("Player.txt"),
+        b"[Player]\nName=Embedded script profile\nScore=41\n",
+    )
+    .expect("write staged embedded script profile");
+    let mut app = new_running_sandbox_app();
+    let provisional_owner = app.local_owner;
+    app.remove_local_control_assignment(provisional_owner);
+    app.engine.retain_restored_players([]);
+    app.engine.set_local_players([]);
+    app.mode = AppMode::Loading;
+    let (network, events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(network);
+    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    let native = |bytes: &[u8]| {
+        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
+            .expect("test native string has no NUL")
+    };
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: native(b"Current client"),
+            ..Default::default()
+        }]);
+    let resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 17,
+        loadable: true,
+        filename: native(b"Alice.c4p"),
+        ..Default::default()
+    };
+    let script_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 19,
+        loadable: true,
+        filename: native(b"ScriptResource.c4p"),
+        ..Default::default()
+    };
+    let current = clonk_engine::ControlPlayerInfoEntry {
+        id: 91,
+        savegame_player: 7,
+        name: native(b"Alice"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        resource: Some(resource.clone()),
+        ..Default::default()
+    };
+    let script_current = clonk_engine::ControlPlayerInfoEntry {
+        id: 92,
+        savegame_player: 9,
+        name: native(b"Script resource"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        resource: Some(script_resource.clone()),
+        ..Default::default()
+    };
+    let embedded_script_current = clonk_engine::ControlPlayerInfoEntry {
+        id: 93,
+        savegame_player: 11,
+        name: native(b"Embedded script"),
+        filename: native(b"ScriptPlr-11.c4p"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        resource: Some(clonk_engine::NetworkResourceCore {
+            resource_type: clonk_network::HostResourceType::Player as u8,
+            id: 20,
+            loadable: true,
+            filename: native(b"StaleScriptResource.c4p"),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    app.control_player_infos = ControlPlayerInfoRegistry::default();
+    app.control_player_infos.replace_snapshot(
+        script_current.id,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![
+                current.clone(),
+                script_current.clone(),
+                embedded_script_current,
+            ],
+            ..Default::default()
+        }],
+    );
+    app.admission_resources
+        .register_player_info_resources(std::slice::from_ref(&current));
+    app.admission_resources
+        .register_player_info_resources(std::slice::from_ref(&script_current));
+    let (_sender, receiver) = mpsc::channel();
+    let mut scenario = FrontendScenario::fallback();
+    scenario.path = Some(scenario_path);
+    app.loading_state = Some(ScenarioLoadingState {
+        scenario,
+        refreshed_resources: None,
+        refreshed_tooltip_font: None,
+        refreshed_native_font_source: None,
+        refreshed_global_gui_failures: None,
+        refreshed_gui_sheet_overrides: None,
+        refresh_requested: false,
+        receiver,
+        finished: true,
+        last_progress: 0,
+        log: Vec::new(),
+        prepared_go: Some(PreparedGoLoadingState {
+            status: clonk_network::NetworkStatus {
+                state: clonk_network::NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            local_reached: false,
+            save_game: true,
+            network_runtime_join: false,
+            restore_player_infos: vec![
+                clonk_engine::ControlPlayerInfoEntry {
+                    id: 7,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                    ..Default::default()
+                },
+                clonk_engine::ControlPlayerInfoEntry {
+                    id: 11,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                },
+                clonk_engine::ControlPlayerInfoEntry {
+                    id: 9,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                },
+            ],
+            runtime_join_players: Vec::new(),
+            pending_client_runtime_join: None,
+            initial_game_data: None,
+            random_seed: 0,
+            use_fair_crew: false,
+            fair_crew_strength: 0,
+            fair_crew_forced: false,
+            allow_debug: true,
+            auto_frame_skip: true,
+            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
+                Vec::new(),
+                Vec::new(),
+            ),
+            team_configuration: TeamConfiguration::default(),
+            team_registry: Vec::new(),
+            definition_modules: None,
+        }),
+        offline_startup_players: None,
+        offline_savegame: None,
+        offline_random_seed: None,
+    });
+
+    app.try_reach_loaded_network_go_barrier()
+        .expect("reach GO before associated player resource wait");
+
+    assert_eq!(commands.take_status_reached(), 1);
+    assert_eq!(
+        app.loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| prepared.local_reached),
+        Some(true)
+    );
+    assert!(app.blocking_resource_wait.is_none());
+
+    app.handle_status_committed(clonk_network::NetworkStatus {
+        state: clonk_network::NETWORK_STATE_GO,
+        control_mode: 0,
+        target_tick: 0,
+    })
+    .expect("commit GO and begin associated player resource wait");
+
+    assert!(app.blocking_resource_wait.as_ref().is_some_and(|wait| {
+        wait.scope == BlockingResourceScope::PlayerJoin
+            && wait.resource_id == resource.id
+            && wait.player_info_id == Some(7)
+    }));
+    assert_eq!(app.mode, AppMode::Loading);
+    // RecreatePlayerFiles stages every embedded script profile and discards
+    // its live resource before RecreatePlayers reaches the first user pRes
+    // wait (C4Game.cpp:2841-2847; C4PlayerInfo.cpp:1448-1521).
+    let staged_script = app
+        .control_player_infos
+        .get(11)
+        .expect("later embedded script info is already staged");
+    assert!(staged_script.resource.is_none());
+    assert_eq!(
+        staged_script.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        0
+    );
+
+    app.admission_resources
+        .mark_complete(resource.id, player_path);
+    app.clear_blocking_resource_wait();
+    app.poll_loading()
+        .expect("advance committed GO to the associated script resource");
+
+    // A script player whose embedded extraction is absent still uses its live
+    // pRes before Filename and waits in RecreatePlayers when that resource is
+    // loading (C4PlayerInfo.cpp:124-130,1460-1512,1566-1577).
+    assert!(app.blocking_resource_wait.as_ref().is_some_and(|wait| {
+        wait.scope == BlockingResourceScope::PlayerJoin
+            && wait.resource_id == script_resource.id
+            && wait.player_info_id == Some(9)
+    }));
+    assert_eq!(app.mode, AppMode::Loading);
+    let user = app
+        .engine
+        .player(2)
+        .expect("ready user is recreated before waiting for the later script resource");
+    assert_eq!(
+        (user.player_info_id(), user.wealth(), user.score()),
+        (7, 19, 31)
+    );
+    assert!(app.engine.player(3).is_none());
+
+    app.poll_loading()
+        .expect("polling the same wait does not recreate the ready prefix twice");
+    assert_eq!(
+        app.engine
+            .players()
+            .filter(|player| player.player_info_id() == 7)
+            .count(),
+        1
+    );
+    let ready_tick = app.expected_network_control_tick();
+    events
+        .send(NetworkEvent::ReadyTick {
+            tick: ready_tick,
+            controls: Vec::new(),
+        })
+        .expect("queue initial lockstep tick while profile retrieval pumps network events");
+    app.process_network_events()
+        .expect("retain initial lockstep tick during profile retrieval");
+    assert!(app.network_ticks.ready.contains_key(&ready_tick));
+
+    app.admission_resources
+        .mark_complete(script_resource.id, script_player_path);
+    app.clear_blocking_resource_wait();
+    app.poll_loading()
+        .expect("resume committed GO after associated script profile completes");
+
+    assert_eq!(app.mode, AppMode::Running);
+    let player = app.engine.player(2).expect("recreated player after wait");
+    assert_eq!(
+        (player.player_info_id(), player.wealth(), player.score()),
+        (7, 19, 31)
+    );
+    let script = app
+        .engine
+        .player(3)
+        .expect("recreated script player after resource wait");
+    assert_eq!(
+        (script.player_info_id(), script.wealth(), script.score()),
+        (9, 23, 37)
+    );
+    assert!(script.is_script_player());
+    let embedded = app
+        .engine
+        .player(4)
+        .expect("staged embedded script player after resource wait");
+    assert_eq!(
+        (
+            embedded.player_info_id(),
+            embedded.wealth(),
+            embedded.score()
+        ),
+        (11, 29, 41)
+    );
+    assert!(embedded.is_script_player());
+}
+
+#[test]
+fn change_to_local_during_savegame_recreation_retains_completed_profile_files() {
+    // ChangeToLocal clears the network while RecreatePlayers remains on its
+    // native stack: completed pRes files stay usable and pending retrievals
+    // fail (C4GameControl.cpp:93-127; C4PlayerInfo.cpp:1566-1577).
+    let fixture = tempdir().expect("change-to-local resource fixture");
+    let completed_path = fixture.path().join("Complete.c4p");
+    fs::create_dir(&completed_path).expect("create completed player resource");
+    let native = |bytes: &[u8]| {
+        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
+            .expect("test native string has no NUL")
+    };
+    let completed = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 31,
+        loadable: true,
+        filename: native(b"Complete.c4p"),
+        ..Default::default()
+    };
+    let pending = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 32,
+        loadable: true,
+        filename: native(b"Pending.c4p"),
+        ..Default::default()
+    };
+    let mut app = new_running_sandbox_app();
+    let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+    app.network = Some(network);
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 7,
+            activated: true,
+            name: native(b"Local survivor"),
+            nick: native(b"Survivor nick"),
+            ..Default::default()
+        }]);
+    app.network_savegame_recreation_progress = Some(NetworkSavegameRecreationProgress::default());
+    app.admission_resources.register_lobby_resource(&completed);
+    app.admission_resources
+        .mark_complete(completed.id, completed_path.clone());
+    app.admission_resources.register_lobby_resource(&pending);
+
+    app.change_network_control_to_local(7);
+
+    assert_eq!(
+        app.admission_resources.complete_path(completed.id),
+        Some(completed_path.as_path())
+    );
+    assert!(matches!(
+        app.admission_resources.status(pending.id),
+        Some(AdmissionResourceState::Unavailable(
+            AdmissionResourceUnavailable::TransferFailed
+        ))
+    ));
+    let retained_client = app
+        .control_clients
+        .state(7)
+        .expect("local client survives ChangeToLocal");
+    assert_eq!(retained_client.name.as_bytes(), b"Local survivor");
+    assert_eq!(retained_client.nick.as_bytes(), b"Survivor nick");
+}
+
+#[test]
+fn ordinary_network_savegame_recreates_associated_user_player_with_local_control() {
+    // Ordinary C++ savegame startup associates RestorePlayerInfos, reloads the
+    // current lobby profile, then joins the saved runtime player and reruns
+    // InitControl (C4Game.cpp:2827-2850; C4PlayerInfo.cpp:1524-1607;
+    // C4Player.cpp:354-386).
+    let fixture = tempdir().expect("ordinary network save fixture");
+    let scenario_path = fixture.path().join("NetworkSave.c4s");
+    fs::create_dir(&scenario_path).expect("create network save group");
+    fs::write(
+        scenario_path.join("Game.txt"),
+        b"[Player7]\nStatus=1\nAtClient=9\nAtClientName=stale\nIndex=2\nID=7\nWealth=19\n\n[Player9]\nStatus=1\nIndex=4\nID=9\n\n[Player10]\nStatus=1\nIndex=5\nID=10\nWealth=29\n\n[Player8]\nStatus=1\nIndex=3\nID=8\nWealth=23\n\n[Player12]\nStatus=1\nIndex=6\nID=12\n",
+    )
+    .expect("write saved player runtime section");
+    let player_path = fixture.path().join("Alice.c4p");
+    fs::create_dir(&player_path).expect("create current player group");
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Alice profile\nScore=31\n[Preferences]\nControl=0\nMouse=0\n",
+    )
+    .expect("write current player profile");
+    let filename_player_path = fixture.path().join("Bob.c4p");
+    fs::create_dir(&filename_player_path).expect("create filename-only player group");
+    fs::write(
+        filename_player_path.join("Player.txt"),
+        b"[Player]\nName=Bob profile\nScore=37\n[Preferences]\nControl=0\nMouse=0\n",
+    )
+    .expect("write filename-only player profile");
+    let script_player_path = scenario_path.join("ScriptPlr-10.c4p");
+    fs::create_dir(&script_player_path).expect("create embedded script player group");
+    fs::write(
+        script_player_path.join("Player.txt"),
+        b"[Player]\nName=Script profile\nScore=41\n",
+    )
+    .expect("write embedded script player profile");
+    let installed_script_player_path = fixture.path().join("InstalledScript.c4p");
+    fs::create_dir(&installed_script_player_path).expect("create installed script player group");
+    fs::write(
+        installed_script_player_path.join("Player.txt"),
+        b"[Player]\nName=Installed script profile\nScore=43\n",
+    )
+    .expect("write installed script player profile");
+    let packed_scenario_path = fixture.path().join("PackedNetworkSave.c4s");
+    let scenario_group = Group::open(&scenario_path).expect("open folder save group");
+    fs::write(
+        &packed_scenario_path,
+        MutableGroup::from_group(&scenario_group)
+            .expect("copy folder save group")
+            .pack()
+            .expect("pack network save group"),
+    )
+    .expect("write packed network save group");
+
+    let native = |bytes: &[u8]| {
+        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
+            .expect("test native string has no NUL")
+    };
+    let resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 17,
+        loadable: true,
+        filename: native(b"Alice.c4p"),
+        ..Default::default()
+    };
+    let installed_script_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 19,
+        loadable: true,
+        filename: native(b"InstalledScript.c4p"),
+        ..Default::default()
+    };
+    let unavailable_filename_resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 21,
+        loadable: false,
+        filename: native(b"MissingPublishedBob.c4p"),
+        ..Default::default()
+    };
+    let current = clonk_engine::ControlPlayerInfoEntry {
+        id: 91,
+        savegame_player: 7,
+        name: native(b"Alice current"),
+        filename: native(b"Alice.c4p"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        resource: Some(resource.clone()),
+        ..Default::default()
+    };
+    let restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 7,
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        ..Default::default()
+    };
+    let filename_current = clonk_engine::ControlPlayerInfoEntry {
+        id: 92,
+        savegame_player: 8,
+        name: native(b"Bob current"),
+        filename: clonk_engine::LegacyCString::from_bytes(clonk_resources::path_to_legacy_bytes(
+            &filename_player_path,
+        ))
+        .expect("filename-only profile path has no NUL"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        resource: Some(unavailable_filename_resource),
+        ..Default::default()
+    };
+    let filename_restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 8,
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        ..Default::default()
+    };
+    let missing_filename_current = clonk_engine::ControlPlayerInfoEntry {
+        id: 93,
+        savegame_player: 12,
+        name: native(b"Missing filename user"),
+        filename: clonk_engine::LegacyCString::from_bytes(clonk_resources::path_to_legacy_bytes(
+            &fixture.path().join("MissingUser.c4p"),
+        ))
+        .expect("missing filename-only profile path has no NUL"),
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        ..Default::default()
+    };
+    let missing_filename_restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 12,
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+        ..Default::default()
+    };
+    let missing_script_current = clonk_engine::ControlPlayerInfoEntry {
+        id: 9,
+        savegame_player: 9,
+        name: native(b"Installed script player"),
+        filename: native(b"wrong-installed-script-path.c4p"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        resource: Some(installed_script_resource.clone()),
+        ..Default::default()
+    };
+    let missing_script_restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 9,
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        ..Default::default()
+    };
+    let script_current = clonk_engine::ControlPlayerInfoEntry {
+        id: 10,
+        savegame_player: 10,
+        name: native(b"Current script player"),
+        filename: native(b"ScriptPlr-10.c4p"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        resource: Some(clonk_engine::NetworkResourceCore {
+            resource_type: clonk_network::HostResourceType::Player as u8,
+            id: 18,
+            loadable: true,
+            filename: native(b"ScriptPlr-10.c4p"),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let script_restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 10,
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        ..Default::default()
+    };
+
+    let mut app = new_state_only_running_sandbox_app();
+    app.engine
+        .register_definition(
+            Definition::from_script("UCRW", "Unassociated crew", "")
+                .expect("compile unassociated crew definition"),
+        )
+        .expect("register unassociated crew definition");
+    let provisional_owner = app.local_owner;
+    app.remove_local_control_assignment(provisional_owner);
+    app.engine.retain_restored_players([]);
+    app.engine.set_local_players([]);
+    let unassociated_crew = app
+        .engine
+        .spawn_object(
+            SpawnConfig::new("UCRW")
+                .with_owner(6)
+                .with_category(1 << 18),
+        )
+        .expect("spawn unassociated savegame crew");
+    let (network, _events) = NetworkManager::test_stub();
+    app.network = Some(network);
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: native(b"Current client"),
+            ..Default::default()
+        }]);
+    app.control_player_infos = ControlPlayerInfoRegistry::default();
+    app.control_player_infos.replace_snapshot(
+        missing_filename_current.id,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![
+                current.clone(),
+                missing_script_current.clone(),
+                script_current,
+                filename_current,
+                missing_filename_current,
+            ],
+            ..Default::default()
+        }],
+    );
+    app.admission_resources
+        .register_player_info_resources(std::slice::from_ref(&current));
+    app.admission_resources
+        .register_player_info_resources(std::slice::from_ref(&missing_script_current));
+    app.admission_resources
+        .mark_complete(resource.id, player_path);
+    app.admission_resources
+        .mark_complete(installed_script_resource.id, installed_script_player_path);
+    let mut scenario = FrontendScenario::fallback();
+    scenario.path = Some(packed_scenario_path);
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(ScenarioLoadingState {
+        scenario,
+        refreshed_resources: None,
+        refreshed_tooltip_font: None,
+        refreshed_native_font_source: None,
+        refreshed_global_gui_failures: None,
+        refreshed_gui_sheet_overrides: None,
+        refresh_requested: false,
+        receiver,
+        finished: false,
+        last_progress: 0,
+        log: Vec::new(),
+        prepared_go: Some(PreparedGoLoadingState {
+            status: clonk_network::NetworkStatus {
+                state: clonk_network::NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            local_reached: true,
+            save_game: true,
+            network_runtime_join: false,
+            restore_player_infos: vec![
+                restore,
+                missing_script_restore,
+                script_restore,
+                filename_restore,
+                missing_filename_restore,
+                clonk_engine::ControlPlayerInfoEntry {
+                    id: 11,
+                    game_number: 6,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                    player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+                    ..Default::default()
+                },
+            ],
+            runtime_join_players: Vec::new(),
+            pending_client_runtime_join: None,
+            initial_game_data: None,
+            random_seed: 0,
+            use_fair_crew: false,
+            fair_crew_strength: 0,
+            fair_crew_forced: false,
+            allow_debug: true,
+            auto_frame_skip: true,
+            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
+                Vec::new(),
+                Vec::new(),
+            ),
+            team_configuration: TeamConfiguration::default(),
+            team_registry: Vec::new(),
+            definition_modules: None,
+        }),
+        offline_startup_players: None,
+        offline_savegame: None,
+        offline_random_seed: None,
+    });
+    let record_path = fixture.path().join("001-RecreatedPlayers.c4s");
+    install_test_recording_template(&mut app, record_path.clone());
+    app.start_recording(true)
+        .expect("start recreation recording");
+
+    app.finalize_network_loaded_scenario(true)
+        .expect("finalize ordinary network savegame");
+
+    let player = app.engine.player(2).expect("saved runtime player 2");
+    assert_eq!((player.player_info_id(), player.wealth()), (7, 19));
+    assert_eq!((player.name(), player.score()), ("Alice current", 31));
+    assert_eq!(player.at_client(), clonk_engine::PlayerAtClient::HOST);
+    assert_eq!(player.at_client_name(), "Current client");
+    let filename_player = app
+        .engine
+        .player(3)
+        .expect("filename-only runtime player 3");
+    // LoadResource clears an unavailable pRes but retains Filename, which
+    // GetLocalJoinFilename then uses for RecreatePlayers
+    // (C4PlayerInfo.cpp:124-130,275-292,1566-1601).
+    assert_eq!(
+        (
+            filename_player.player_info_id(),
+            filename_player.name(),
+            filename_player.wealth(),
+            filename_player.score(),
+        ),
+        (8, "Bob current", 23, 37)
+    );
+    let filename_info = app
+        .control_player_infos
+        .get(8)
+        .expect("retained unavailable-resource filename info");
+    assert!(filename_info.resource.is_none());
+    assert_eq!(
+        filename_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        0
+    );
+    let installed_script = app
+        .engine
+        .player(4)
+        .expect("installed script runtime player 4");
+    assert_eq!(
+        (
+            installed_script.player_info_id(),
+            installed_script.name(),
+            installed_script.score(),
+        ),
+        (9, "Installed script player", 43)
+    );
+    assert!(installed_script.is_script_player());
+    let script_player = app
+        .engine
+        .player(5)
+        .expect("embedded script runtime player 5");
+    assert_eq!(
+        (
+            script_player.player_info_id(),
+            script_player.name(),
+            script_player.wealth(),
+            script_player.score(),
+        ),
+        (10, "Current script player", 29, 41)
+    );
+    assert!(script_player.is_script_player());
+    // GetLocalJoinFilename returns a nonempty raw filename even when the file
+    // does not exist. RecreatePlayers attempts that join, whose failure marks
+    // the retained info Removed (C4PlayerInfo.cpp:124-130,1566-1603;
+    // C4PlayerList.cpp:302-314).
+    assert!(app.engine.player(6).is_none());
+    assert!(app
+        .control_player_infos
+        .get(12)
+        .is_some_and(|info| { info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0 }));
+    assert!(app
+        .engine
+        .snapshot()
+        .round_results
+        .players
+        .iter()
+        .any(|result| result.player_info_id == 12 && result.score_old == 0));
+    assert_eq!(
+        app.engine
+            .object_snapshot(unassociated_crew)
+            .expect("unassociated crew tombstone")
+            .status,
+        clonk_engine::ObjectStatus::Deleted,
+        "RemoveUnassociatedPlayers removes raw-category crew before recreation"
+    );
+    let script_info = app
+        .control_player_infos
+        .get(10)
+        .expect("retained recreated script info");
+    // RecreatePlayerFiles extracts script profiles to a temporary path and
+    // DeleteTempFile clears that filename/resource after the attempted join
+    // (C4PlayerInfo.cpp:1460-1504,1601-1603).
+    assert!(script_info.filename.is_empty());
+    assert!(script_info.resource.is_none());
+    assert_eq!(
+        script_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        0
+    );
+    assert!(app.local_controls.assignment(2).is_some());
+    assert!(app.local_controls.assignment(3).is_some());
+    assert_eq!(app.engine.snapshot().hud.local_players, vec![2, 3]);
+    assert_eq!(app.local_owner, 2);
+    assert!(app.finish_recording().is_none());
+    let record = Group::open(record_path).expect("open recreation record");
+    // RecreatePlayers records every filename-backed profile, including
+    // embedded script players that the initial record cleanup removed
+    // (C4PlayerInfo.cpp:1594-1598).
+    assert!(record
+        .open_child("Recreate-10.c4p")
+        .expect("recorded embedded script profile")
+        .exists("Player.txt"));
+}
+
+#[test]
+fn regular_network_scenario_recreates_fileless_script_player_without_runtime_data() {
+    // A non-savegame script player may have no [Player<ID>] runtime section;
+    // C4Player::Init then retains the restore-info defaults instead of
+    // failing recreation (C4Player.cpp:355-371).
+    let fixture = tempdir().expect("regular network scenario fixture");
+    let scenario_path = fixture.path().join("NetworkScenario.c4s");
+    fs::create_dir(&scenario_path).expect("create regular scenario group");
+    let native = |bytes: &[u8]| {
+        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
+            .expect("test native string has no NUL")
+    };
+    let restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 7,
+        name: native(b"Scenario script player"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        game_number: 10,
+        ..Default::default()
+    };
+    let mut current = restore.clone();
+    current.savegame_player = restore.id;
+
+    let mut app = new_state_only_running_sandbox_app();
+    let provisional_owner = app.local_owner;
+    app.remove_local_control_assignment(provisional_owner);
+    app.engine.retain_restored_players([]);
+    app.engine.set_local_players([]);
+    let (network, _events) = NetworkManager::test_stub();
+    app.network = Some(network);
+    app.control_clients
+        .replace_snapshot([clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: native(b"Current client"),
+            ..Default::default()
+        }]);
+    app.control_player_infos = ControlPlayerInfoRegistry::default();
+    app.control_player_infos.replace_snapshot(
+        current.id,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![current],
+            ..Default::default()
+        }],
+    );
+    let mut scenario = FrontendScenario::fallback();
+    scenario.path = Some(scenario_path);
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(ScenarioLoadingState {
+        scenario,
+        refreshed_resources: None,
+        refreshed_tooltip_font: None,
+        refreshed_native_font_source: None,
+        refreshed_global_gui_failures: None,
+        refreshed_gui_sheet_overrides: None,
+        refresh_requested: false,
+        receiver,
+        finished: false,
+        last_progress: 0,
+        log: Vec::new(),
+        prepared_go: Some(PreparedGoLoadingState {
+            status: clonk_network::NetworkStatus {
+                state: clonk_network::NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            local_reached: true,
+            save_game: false,
+            network_runtime_join: false,
+            restore_player_infos: vec![restore],
+            runtime_join_players: Vec::new(),
+            pending_client_runtime_join: None,
+            initial_game_data: None,
+            random_seed: 0,
+            use_fair_crew: false,
+            fair_crew_strength: 0,
+            fair_crew_forced: false,
+            allow_debug: true,
+            auto_frame_skip: true,
+            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
+                Vec::new(),
+                Vec::new(),
+            ),
+            team_configuration: TeamConfiguration::default(),
+            team_registry: Vec::new(),
+            definition_modules: None,
+        }),
+        offline_startup_players: None,
+        offline_savegame: None,
+        offline_random_seed: None,
+    });
+
+    app.finalize_network_loaded_scenario(false)
+        .expect("finalize regular network scenario");
+
+    let player = app.engine.player(10).expect("fileless script player 10");
+    assert!(player.is_script_player());
+    assert_eq!(player.player_info_id(), 7);
+    assert!(app.engine.snapshot().hud.local_players.is_empty());
+    assert!(app.local_controls.assignment(10).is_none());
+}
+
+#[test]
 fn network_savegame_finalization_does_not_rerun_scenario_initialize() {
     let install_probe = |app: &mut GameApp| {
         app.engine.clear_scenario_script();
@@ -11740,16 +12622,19 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
     let sources = vec![
         clonk_engine::RuntimeJoinPlayerSource {
             client_id: 0,
+            at_client_name: "Current client".to_string(),
             info: first.clone(),
             load_unnamed_portraits: true,
         },
         clonk_engine::RuntimeJoinPlayerSource {
             client_id: 0,
+            at_client_name: "Current client".to_string(),
             info: second.clone(),
             load_unnamed_portraits: true,
         },
         clonk_engine::RuntimeJoinPlayerSource {
             client_id: 99,
+            at_client_name: "Departed client".to_string(),
             info: departed.clone(),
             load_unnamed_portraits: false,
         },

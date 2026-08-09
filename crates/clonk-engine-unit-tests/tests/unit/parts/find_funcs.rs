@@ -1577,7 +1577,7 @@
             None,
             "raw runtime compilation precedes C4Game::InitGameFinal"
         );
-        restored.finalize_restored_players()?;
+        restored.finalize_restored_players(false)?;
         assert_eq!(
             restored.player(1).and_then(Player::captain),
             Some(active_crew),

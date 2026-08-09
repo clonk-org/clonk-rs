@@ -657,13 +657,32 @@ impl Engine {
         Ok(())
     }
 
-    /// C4Game::InitGameFinal savegame phase: after every recreated player has
-    /// rerun InitControl, FinalInit(false) executes in `C4PlayerList` order.
-    pub fn finalize_restored_players(&mut self) -> Result<(), EngineError> {
-        self.finalize_legacy_object_links()?;
+    /// C4Game::InitGameFinal restore phase: after every recreated player has
+    /// rerun InitControl, FinalInit executes in `C4PlayerList` order.
+    pub fn finalize_restored_players(
+        &mut self,
+        establish_initial_value: bool,
+    ) -> Result<(), EngineError> {
+        self.finalize_restored_object_links()?;
+        self.finalize_restored_player_initialization(establish_initial_value)
+    }
+
+    /// The object half of InitGameFinal always runs after player recreation,
+    /// even when every attempted player join failed.
+    pub fn finalize_restored_object_links(&mut self) -> Result<(), EngineError> {
+        self.finalize_legacy_object_links_unconditionally()
+    }
+
+    /// Run restored-player `FinalInit(!Head.SaveGame)` after the optional
+    /// scenario constructor. C++ places this after `Script.Initialize` for
+    /// regular restore-info scenarios (C4Game.cpp:2724-2739).
+    pub fn finalize_restored_player_initialization(
+        &mut self,
+        establish_initial_value: bool,
+    ) -> Result<(), EngineError> {
         let players = self.player_ids_in_order();
         for player in players {
-            self.finalize_joining_player(player, false, true)?;
+            self.finalize_joining_player(player, establish_initial_value, true)?;
         }
         Ok(())
     }
@@ -1762,6 +1781,13 @@ impl Engine {
         self.remove_player_internal(id, true)
     }
 
+    /// `C4PlayerList::Join` removes a provisional player with callbacks but
+    /// suppresses the game-over check when `C4Player::Init` fails
+    /// (C4PlayerList.cpp:302-314).
+    pub(crate) fn remove_failed_recreated_player(&mut self, id: i32) -> Result<(), EngineError> {
+        self.remove_player_internal(id, false).map(drop)
+    }
+
     /// `C4Game::Abort`'s `RemoveLocal(true, true)` followed by
     /// `RemoveAtRemoteClient(true, true)`. Local-control user players are
     /// removed first in C4PlayerList order. The second pass removes every
@@ -2024,7 +2050,7 @@ impl Engine {
         };
         let mut args = Vec::with_capacity(2);
         args.push(Value::Int(id));
-        args.push(team.map(Value::Int).unwrap_or(Value::Nil));
+        args.push(Value::Int(team.unwrap_or(0)));
         // GRBroadcast uses fail-safe execution here: partial mutations from
         // a failing RemovePlayer callback remain, but the native ownership
         // notification still follows (C4PlayerList.cpp:219-224).
@@ -2086,6 +2112,70 @@ impl Engine {
             self.check_game_over()?;
         }
         Ok(player)
+    }
+
+    /// Remove the saved FLAG and raw C4D_CrewMember objects for every joined
+    /// restore row that no current player-info row takes over.
+    ///
+    /// `RestoreSavegameInfos` walks restore packets and their rows in storage
+    /// order, and `RemoveUnjoined` walks `Game.Objects` First -> Next for each
+    /// missing saved `GameNumber` (C4PlayerInfo.cpp:1422-1439,1610-1633;
+    /// C4PlayerList.cpp:208-216; C4Object.cpp:6267-6291).
+    pub fn remove_unassociated_savegame_player_objects(
+        &mut self,
+        current_player_infos: &ControlPlayerInfoRegistry,
+        restore_player_infos: &[ControlPlayerInfoEntry],
+    ) -> Result<(), EngineError> {
+        let (_, current_packets) = current_player_infos.retained_rows_snapshot();
+        let associated_restore_ids = current_packets
+            .iter()
+            .flat_map(|(_, _, players)| players)
+            .map(|player| player.savegame_player)
+            .filter(|id| *id != 0)
+            .collect::<HashSet<_>>();
+
+        for restore in restore_player_infos {
+            if restore.is_joined()
+                && restore.game_number != OWNER_NONE
+                && !associated_restore_ids.contains(&restore.id)
+            {
+                self.remove_unjoined_player_objects(restore.game_number)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_unjoined_player_objects(
+        &mut self,
+        saved_player_number: i32,
+    ) -> Result<(), EngineError> {
+        const C4D_CREW_MEMBER: i32 = 1 << 18;
+
+        // Rust stores the active execution list in reverse C++ master-list
+        // order. Advance from the current physical link after each callback:
+        // AssignRemoval may append a new unsorted/Line object after that link,
+        // and native's live `clnk = clnk->Next` visits it in this same pass.
+        let mut current = self.exec_list.last().copied();
+        while let Some(object_id) = current {
+            let remove = self.find_object_index(object_id).is_some_and(|index| {
+                let object = &self.objects[index];
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.state.owner == saved_player_number
+                    && (object.definition_id.as_str() == "FLAG"
+                        || object.state.category & C4D_CREW_MEMBER != 0)
+            });
+            if remove {
+                let _ = self.assign_object_removal_with_contents(object_id, true)?;
+            }
+            current = self
+                .exec_list
+                .iter()
+                .position(|candidate| *candidate == object_id)
+                .and_then(|position| position.checked_sub(1))
+                .and_then(|position| self.exec_list.get(position).copied());
+        }
+        Ok(())
     }
 
     /// The result-only evaluation performed by `C4PlayerList::Remove`.
@@ -2410,6 +2500,10 @@ impl Engine {
         if self.players.is_empty() {
             return Ok(());
         }
+        self.finalize_legacy_object_links_unconditionally()
+    }
+
+    fn finalize_legacy_object_links_unconditionally(&mut self) -> Result<(), EngineError> {
         self.validate_object_player_references();
         self.assign_legacy_object_infos()?;
         self.rebuild_fow_view_objects();
