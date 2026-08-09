@@ -1891,6 +1891,17 @@ impl GameApp {
         else {
             return;
         };
+        self.record_player_group_file(&path, recorded_player_resource_name(core));
+    }
+
+    /// `C4PlayerInfoList::RecreatePlayers` records directly recreated player
+    /// groups separately because no `JoinPlayer` control exists to run
+    /// `C4ControlJoinPlayer::PreRec` (C4PlayerInfo.cpp:1594-1598).
+    pub(crate) fn record_recreated_player_file(&mut self, info_id: i32, path: &Path) {
+        self.record_player_group_file(path, format!("Recreate-{info_id}.c4p").into_bytes());
+    }
+
+    fn record_player_group_file(&mut self, path: &Path, target: Vec<u8>) {
         let Some(league_streaming) = self
             .recording
             .as_ref()
@@ -1898,11 +1909,10 @@ impl GameApp {
         else {
             return;
         };
-        let target = recorded_player_resource_name(core);
-        let prepared = Group::open(&path)
+        let prepared = open_group_path_for_folder_map(path)
             .map_err(|error| error.to_string())
             .and_then(|group| {
-                let local_file = packed_group_bytes(&path, self.process_group_maker.as_bytes())?;
+                let local_file = packed_group_bytes(path, self.process_group_maker.as_bytes())?;
                 let stream_chunk = if league_streaming {
                     let packed = if has_player_group_extension(&target) {
                         self.pack_stripped_stream_player(&group, &target)?
@@ -1925,7 +1935,7 @@ impl GameApp {
         let (local_file, stream_chunk) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to prepare player resource for record");
+                tracing::warn!(path = %path.display(), ?target, %error, "failed to prepare player group for record");
                 return;
             }
         };
@@ -1934,13 +1944,13 @@ impl GameApp {
         if let Some(stream_chunk) = stream_chunk {
             let Some(network) = self.network.as_ref() else {
                 tracing::warn!(
-                    resource_id = core.id,
-                    "league record stream disappeared before player resource append"
+                    ?target,
+                    "league record stream disappeared before player-group append"
                 );
                 return;
             };
             if let Err(error) = network.append_league_record_bytes(&stream_chunk) {
-                tracing::warn!(resource_id = core.id, %error, "failed to stream player resource into record");
+                tracing::warn!(?target, %error, "failed to stream player group into record");
                 return;
             }
         }
@@ -1948,7 +1958,7 @@ impl GameApp {
             return;
         };
         if let Err(error) = write_folder_save_entry(&session.output_path, &target, &local_file) {
-            tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to copy player resource into record");
+            tracing::warn!(path = %path.display(), ?target, %error, "failed to copy player group into record");
         }
     }
 

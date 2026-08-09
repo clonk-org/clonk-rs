@@ -4297,8 +4297,10 @@ impl GameApp {
         if check_league_rules && !self.check_classic_lobby_league_rules_start()? {
             return Ok(());
         }
-        if confirm_unassociated_savegame_players
-            && !self.startup_message_hidden("HideMsgPlrNoTakeOver")
+        let has_unassociated_savegame_players = self
+            .classic_lobby_authoritative_has_unassociated_savegame_players()
+            .unwrap_or(confirm_unassociated_savegame_players);
+        if has_unassociated_savegame_players && !self.startup_message_hidden("HideMsgPlrNoTakeOver")
         {
             let message = self.runtime_resource_text(
                 "IDS_MSG_NOTALLSAVEGAMEPLAYERSHAVE",
@@ -5177,7 +5179,40 @@ impl GameApp {
         Ok(())
     }
 
+    fn classic_lobby_authoritative_has_unassociated_savegame_players(&self) -> Option<bool> {
+        let save_game = self
+            .staged_network_host_scenario
+            .as_ref()
+            .and_then(|staged| staged.scenario.lobby_metadata())
+            .map(|metadata| metadata.head().is_save_game());
+        if save_game == Some(false) {
+            return Some(false);
+        }
+        let restore_snapshot = self.host_join_snapshot.as_ref().or_else(|| {
+            self.network_mode.as_ref().and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                }) => prepared.host_config().initial_join_snapshot.as_ref(),
+                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            })
+        })?;
+        let restore_infos = host_restore_player_info_entries(Some(restore_snapshot));
+        (!restore_infos.is_empty()).then(|| {
+            self.control_player_infos
+                .has_unassociated_restore_info(&restore_infos)
+        })
+    }
+
     fn classic_lobby_has_unassociated_savegame_players(&self) -> bool {
+        if let Some(has_unassociated) =
+            self.classic_lobby_authoritative_has_unassociated_savegame_players()
+        {
+            return has_unassociated;
+        }
+
+        // A synthetic/fallback lobby has no retained restore packet. Keep the
+        // visible-header projection as its best available approximation.
         self.classic_host_lobby.as_ref().is_some_and(|lobby| {
             lobby.controller.rows().iter().any(|row| {
                 matches!(

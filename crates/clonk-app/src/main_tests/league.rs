@@ -1911,10 +1911,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
     app.ingame_menu.replace(
         owner,
-        IngameMenuState::main_menu(
-            &MainMenuConditions::default(),
-            &IngameMenuLabels::default(),
-        ),
+        IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
     );
     let mut with_player_menu = vec![0_u8; app.graphics.surface().pixels().len()];
     app.render(&mut with_player_menu)
@@ -4641,7 +4638,8 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
         offline_random_seed: None,
     });
 
-    app.prepare_network_savegame_recreation();
+    app.prepare_network_savegame_recreation()
+        .expect("prepare associated savegame recreation");
 
     assert_eq!(app.deferred_network_savegame_recreation, vec![(3, 7)]);
     assert_eq!(

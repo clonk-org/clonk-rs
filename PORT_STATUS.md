@@ -424,6 +424,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
+- Open: **Malformed and duplicate direct-recreation player sources still have
+  edge semantics beyond the savegame-resume path.** Ordinary network, replay
+  and offline `RecreatePlayers` now process valid sources independently and in
+  native packet/player order, including provisional failure callbacks. Two
+  pre-join cases remain. First, `C4Record::AddFile` copies an external source as
+  opaque bytes before `Players.Join` attempts to open it
+  (`C4PlayerInfo.cpp:1594-1603`); `record_player_group_file` currently requires
+  the source to open as a C4Group, so a malformed/non-group `.c4p` is omitted
+  from the replay that records its failed join. Second,
+  `C4PlayerList::FileInUse` rejects a duplicate source filename before it
+  allocates a provisional player (`C4PlayerList.cpp:288-303`), while
+  `restore_runtime_join_players_with_external_paths` has no filename ledger;
+  it can attempt the second join and reaches its later runtime-number
+  validation/removal path instead. Neither case occurs for the distinct valid
+  lobby profiles involved in clonk-org/clonk-rs#205, but both can change a
+  malformed record's callbacks and round results. `parity verify` has no
+  player/savegame section and cannot cover either case.
+
 - Open: **macOS `-[NSApplication terminate:]` skips the league `Action=End`.**
   `C4Application::Quit` reaches `C4Game::Clear` → `Network.Clear()` →
   `LeagueEnd(); DeinitLeague();` (`src/C4Game.cpp:581`;

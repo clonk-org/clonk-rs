@@ -1149,7 +1149,7 @@ impl GameApp {
         Some(ScreenshotSaveOutcome { kind, path, result })
     }
 
-    pub(crate) fn prepare_network_savegame_recreation(&mut self) {
+    pub(crate) fn prepare_network_savegame_recreation(&mut self) -> Result<(), EngineError> {
         let restore_player_infos = self
             .loading_state
             .as_ref()
@@ -1161,7 +1161,7 @@ impl GameApp {
             .any(|restore| restore.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0)
         {
             self.deferred_network_savegame_recreation.clear();
-            return;
+            return Ok(());
         }
         self.deferred_network_savegame_recreation = route_network_savegame_recreation(
             &mut self.control_player_infos,
@@ -1172,6 +1172,10 @@ impl GameApp {
             &self.network_league_name,
             &self.control_player_infos,
         );
+        self.engine.remove_unassociated_savegame_player_objects(
+            &self.control_player_infos,
+            &restore_player_infos,
+        )?;
 
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
         let exact_teams = self.network_team_assignment.as_mut().map(|assignment| {
@@ -1214,6 +1218,7 @@ impl GameApp {
                 "routed joined savegame infos to deferred recreation"
             );
         }
+        Ok(())
     }
 
     pub(crate) fn save_options_advanced_changes(
@@ -1283,121 +1288,141 @@ impl GameApp {
     /// exist from here on, which `InitGameFinal`'s script calls rely on
     /// (C4Game.cpp:479 runs `InitPlayers` before :484).
     pub(crate) fn restore_offline_savegame_engine_players(
+        &mut self,
         engine: &mut Engine,
         scenario_path: &Path,
         savegame: &OfflineSavegameStartup,
-    ) -> Result<Vec<clonk_engine::RestoredRuntimeJoinPlayer>, EngineError> {
-        if savegame.runtime_players.is_empty() {
-            return Ok(Vec::new());
-        }
-        engine
-            .restore_offline_savegame_players_from_path(
-                scenario_path,
-                &savegame.runtime_players,
-                &savegame.external_player_paths,
-                savegame.save_game,
-            )
-            .map_err(EngineError::from)
-    }
-
-    /// The host-owned half: control sets, names and profile icons for players
-    /// [`Self::restore_offline_savegame_engine_players`] already installed.
-    pub(crate) fn wire_restored_offline_savegame_players(
-        &mut self,
-        savegame: &OfflineSavegameStartup,
-        restored: Vec<clonk_engine::RestoredRuntimeJoinPlayer>,
     ) -> Result<(Vec<i32>, Vec<PathBuf>), EngineError> {
         if savegame.runtime_players.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
         let mut local_players = Vec::new();
-
-        for (source, binding) in savegame.runtime_players.iter().zip(restored) {
-            let (
-                saved_mouse_control,
-                preferred_control_set,
-                prefers_mouse,
-                saved_pref_control_style,
-                saved_pref_auto_context_menu,
-                saved_player_name,
-            ) = {
-                let player = self
-                    .engine
-                    .player(binding.number)
-                    .ok_or(EngineError::UnknownPlayer(binding.number))?;
-                let (preferred_control_set, prefers_mouse) = player.control_preferences();
-                let (pref_control_style, pref_auto_context_menu) =
-                    player.control_style_preferences();
-                (
-                    player.mouse_control(),
-                    preferred_control_set,
-                    prefers_mouse,
-                    pref_control_style,
-                    pref_auto_context_menu,
-                    player.name().to_string(),
-                )
-            };
-            let current_info = self
-                .control_player_infos
-                .get(binding.player_info_id)
-                .cloned()
-                .unwrap_or_else(|| source.info.clone());
-            let script_player = current_info.is_script_player();
-            let player_name = if control_player_effective_name(&current_info).is_empty() {
-                saved_player_name
-            } else {
-                clonk_script::c4_string_from_bytes(control_player_effective_name(&current_info))
-            };
-            let locally_controlled = !script_player;
-            let control_init = LocalControlInit {
-                owner: binding.number,
-                preferred_set: preferred_control_set,
-                prefers_mouse,
-                gamepads_enabled: self.gamepads_enabled,
-                replay: false,
-                disable_mouse: !self.mouse_control_allowed,
-            };
-            let control = if locally_controlled {
-                let control = self
-                    .local_controls
-                    .initialize_after_restore(control_init, saved_mouse_control != 0);
-                local_players.push(binding.number);
-                control
-            } else {
-                self.local_controls.resolve(control_init)
-            };
-            self.engine.reinitialize_player_after_restore(
-                binding.number,
-                clonk_engine::PlayerAtClient::HOST,
-                "Local",
-                player_name,
-                control.runtime_control(),
-                script_player,
-                current_info.no_elimination_check(),
-                saved_pref_control_style,
-                saved_pref_auto_context_menu,
-            )?;
-            if let Some(player_path) = savegame.external_player_paths.get(&binding.player_info_id) {
-                self.local_player_profile_paths
-                    .insert(binding.player_info_id, player_path.clone());
-                let icon = load_local_player_big_icon(player_path);
-                self.cache_joined_player_big_icon(binding.player_info_id, icon.as_ref());
+        let mut joined_player_files = Vec::new();
+        for source in &savegame.runtime_players {
+            let result = engine.restore_offline_savegame_players_from_path(
+                scenario_path,
+                std::slice::from_ref(source),
+                &savegame.external_player_paths,
+                savegame.save_game,
+            );
+            if savegame.embedded_player_info_ids.contains(&source.info.id) {
+                self.control_player_infos
+                    .clear_recreated_temporary_player_file(source.info.id, false);
+            }
+            match result {
+                Ok(mut bindings) => {
+                    if let Some(binding) = bindings.pop() {
+                        let (
+                            saved_mouse_control,
+                            preferred_control_set,
+                            prefers_mouse,
+                            saved_pref_control_style,
+                            saved_pref_auto_context_menu,
+                            saved_player_name,
+                        ) = {
+                            let player = engine
+                                .player(binding.number)
+                                .ok_or(EngineError::UnknownPlayer(binding.number))?;
+                            let (preferred_control_set, prefers_mouse) =
+                                player.control_preferences();
+                            let (pref_control_style, pref_auto_context_menu) =
+                                player.control_style_preferences();
+                            (
+                                player.mouse_control(),
+                                preferred_control_set,
+                                prefers_mouse,
+                                pref_control_style,
+                                pref_auto_context_menu,
+                                player.name().to_string(),
+                            )
+                        };
+                        let current_info = self
+                            .control_player_infos
+                            .get(binding.player_info_id)
+                            .cloned()
+                            .unwrap_or_else(|| source.info.clone());
+                        let script_player = current_info.is_script_player();
+                        let player_name = if control_player_effective_name(&current_info).is_empty()
+                        {
+                            saved_player_name
+                        } else {
+                            clonk_script::c4_string_from_bytes(control_player_effective_name(
+                                &current_info,
+                            ))
+                        };
+                        let control_init = LocalControlInit {
+                            owner: binding.number,
+                            preferred_set: preferred_control_set,
+                            prefers_mouse,
+                            gamepads_enabled: self.gamepads_enabled,
+                            replay: false,
+                            disable_mouse: !self.mouse_control_allowed,
+                        };
+                        let control = if script_player {
+                            self.local_controls.resolve(control_init)
+                        } else {
+                            let control = self
+                                .local_controls
+                                .initialize_after_restore(control_init, saved_mouse_control != 0);
+                            local_players.push(binding.number);
+                            control
+                        };
+                        engine.reinitialize_player_after_restore(
+                            binding.number,
+                            clonk_engine::PlayerAtClient::HOST,
+                            "Local",
+                            player_name,
+                            control.runtime_control(),
+                            script_player,
+                            current_info.no_elimination_check(),
+                            saved_pref_control_style,
+                            saved_pref_auto_context_menu,
+                        )?;
+                        if let Some(player_path) =
+                            savegame.external_player_paths.get(&binding.player_info_id)
+                        {
+                            self.local_player_profile_paths
+                                .insert(binding.player_info_id, player_path.clone());
+                            let icon = load_local_player_big_icon(player_path);
+                            self.cache_joined_player_big_icon(
+                                binding.player_info_id,
+                                icon.as_ref(),
+                            );
+                            if let Ok(real_path) = offline_player_real_path(player_path) {
+                                joined_player_files.push(real_path);
+                            }
+                        }
+                    }
+                }
+                Err(error @ clonk_engine::RuntimeJoinPlayerRestoreError::ProvisionalRemoval(_)) => {
+                    return Err(EngineError::from(error));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        info_id = source.info.id,
+                        %error,
+                        "failed to recreate one offline savegame player; continuing"
+                    );
+                    if !matches!(
+                        error,
+                        clonk_engine::RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(_)
+                    ) {
+                        self.control_player_infos.mark_removed(
+                            source.info.id,
+                            false,
+                            i32::try_from(engine.frame()).unwrap_or(i32::MAX),
+                        );
+                    }
+                }
             }
         }
-
         self.local_controls.finalize_restored_mouse_owner(
-            self.engine
+            engine
                 .players()
                 .map(|player| (player.id(), player.status())),
         );
-        self.engine.set_local_players(local_players.iter().copied());
-        self.engine.finalize_restored_players()?;
+        engine.set_local_players(local_players.iter().copied());
         self.mouse_control = self.local_controls.mouse_owner().is_some();
-        let joined_player_files = savegame
-            .external_player_paths
-            .values()
-            .filter_map(|path| offline_player_real_path(path).ok())
-            .collect();
         Ok((local_players, joined_player_files))
     }
 

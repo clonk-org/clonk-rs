@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn loaded_object_preserves_negative_raw_construction() {
+    // C4Object::CompileFunc assigns Objects.txt Size directly to Con without
+    // clamping it in the compiler tail (C4Object.cpp:2777,2858-2891).
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition("NEGC", "Negative construction", "")
+        .expect("definition registers");
+
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("NEGC")
+                .with_loaded(true)
+                .with_construction(-1),
+        )
+        .expect("loaded object spawns");
+
+    assert_eq!(
+        engine
+            .object_snapshot(object)
+            .expect("loaded object remains live")
+            .construction,
+        -1
+    );
+}
+
+#[test]
 fn initial_component_gain_scales_the_raw_definition_count_once() {
     // ComponentConGain reads the raw Def->Component count and applies
     // Con exactly once (C4Object.cpp:519-526). This is observable when

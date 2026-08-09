@@ -2464,6 +2464,7 @@ impl GameApp {
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
             deferred_network_savegame_recreation: Vec::new(),
+            network_savegame_recreation_progress: None,
             generated_team_name_template,
             network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
@@ -4301,6 +4302,57 @@ impl GameApp {
         Ok(())
     }
 
+    fn complete_prepared_network_go(
+        &mut self,
+        network_savegame: bool,
+    ) -> Result<bool, EngineError> {
+        if !self.finalize_network_loaded_scenario(network_savegame)? {
+            return Ok(false);
+        }
+        self.advance_scenario_loader(100, "Scenario activation complete");
+        self.loading_state = None;
+        self.pending_client_start_status = None;
+        self.running_gui_mouse_owned = false;
+        self.running_world_mouse_owned = true;
+        self.mode = AppMode::Running;
+        Ok(true)
+    }
+
+    fn finish_network_go_activation_tail(&mut self) {
+        if let Some(network) = self.network.as_ref() {
+            network.reset_client_performance();
+        }
+        self.network_control_running = true;
+        self.refresh_network_client_next_control_ticks();
+        self.publish_running_host_reference();
+    }
+
+    fn try_finish_deferred_prepared_network_go(&mut self) -> Result<(), EngineError> {
+        let ready = self.mode == AppMode::Loading
+            && self
+                .runtime_network_committed_status
+                .is_some_and(|status| status.state == clonk_network::NETWORK_STATE_GO)
+            && self.loading_state.as_ref().is_some_and(|loading| {
+                loading.finished
+                    && loading
+                        .prepared_go
+                        .as_ref()
+                        .is_some_and(|prepared| prepared.local_reached)
+            });
+        if !ready {
+            return Ok(());
+        }
+        let network_savegame = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .is_some_and(|prepared| prepared.save_game);
+        if self.complete_prepared_network_go(network_savegame)? {
+            self.finish_network_go_activation_tail();
+        }
+        Ok(())
+    }
+
     fn handle_status_committed(
         &mut self,
         status: clonk_network::NetworkStatus,
@@ -4421,20 +4473,12 @@ impl GameApp {
             if prepared_go.is_some() {
                 let network_savegame =
                     prepared_go.is_some_and(|(_, _, network_savegame)| network_savegame);
-                self.finalize_network_loaded_scenario(network_savegame)?;
-                self.advance_scenario_loader(100, "Scenario activation complete");
-                self.loading_state = None;
-                self.pending_client_start_status = None;
-                self.running_gui_mouse_owned = false;
-                self.running_world_mouse_owned = true;
-                self.mode = AppMode::Running;
+                if self.complete_prepared_network_go(network_savegame)? {
+                    self.finish_network_go_activation_tail();
+                }
+            } else {
+                self.finish_network_go_activation_tail();
             }
-            if let Some(network) = self.network.as_ref() {
-                network.reset_client_performance();
-            }
-            self.network_control_running = true;
-            self.refresh_network_client_next_control_ticks();
-            self.publish_running_host_reference();
         } else if status.state == clonk_network::NETWORK_STATE_PAUSE {
             self.host_reference_paused = true;
             self.publish_running_host_reference();
@@ -6718,7 +6762,9 @@ impl GameApp {
                         let removes_client = remove.by_client == 0
                             && remove.client_id != 0
                             && self.control_clients.contains(remove.client_id);
-                        if removes_client {
+                        if removes_client
+                            || remove.by_client == 0 && remove.client_id != 0 && replaying
+                        {
                             self.remove_runtime_players_at_client(remove.client_id, true);
                         }
                         if self.control_clients.apply_remove(&remove) {
@@ -6733,83 +6779,7 @@ impl GameApp {
                                 .client_packet(remove.client_id)
                                 .is_some();
                             self.control_player_infos.on_client_part(remove.client_id);
-                            self.prune_host_local_alternate_colors();
-                            let mut updated_clients = HashSet::new();
-                            if had_player_info {
-                                self.recheck_team_memberships_without_random_rebalance();
-                                let executes_host_cascade =
-                                    matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
-                                if executes_host_cascade {
-                                    let restore_players = host_restore_player_info_entries(
-                                        self.host_join_snapshot.as_ref(),
-                                    );
-                                    let teams = self
-                                        .network_team_assignment
-                                        .as_ref()
-                                        .map(|assignment| assignment.teams().clone());
-                                    let alternate_colors =
-                                        &self.host_local_alternate_colors_by_resource;
-                                    let local_player_info_ids = &self.host_local_player_info_ids;
-                                    let attribute_updates = {
-                                        let mut oracle =
-                                            ProcessInitialHostTeamAssignmentOracle::new(
-                                                self.generated_team_name_template.clone(),
-                                            );
-                                        self.control_player_infos
-                                            .refresh_player_attributes_with_alternate_colors(
-                                                teams.as_ref(),
-                                                &restore_players,
-                                                &mut oracle,
-                                                |player| {
-                                                    host_runtime_alternate_color(
-                                                        alternate_colors,
-                                                        local_player_info_ids,
-                                                        player,
-                                                    )
-                                                },
-                                            )
-                                    };
-                                    match attribute_updates {
-                                        Ok(updates) => {
-                                            updated_clients.extend(
-                                                updates.into_iter().map(|update| update.client_id),
-                                            );
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(%error, "cannot refresh client-part player attributes");
-                                            self.status_text = format!(
-                                                "Client-part player attributes need unavailable native state: {error}"
-                                            );
-                                        }
-                                    }
-                                    updated_clients.extend(
-                                        self.recheck_random_teams_from_player_infos()
-                                            .into_iter()
-                                            .map(|update| update.client_id),
-                                    );
-                                    updated_clients.extend(
-                                        self.control_player_infos
-                                            .reset_league_projected_gains()
-                                            .into_iter()
-                                            .map(|update| update.client_id),
-                                    );
-                                }
-                            }
-                            let updates =
-                                self.control_player_infos.client_packets(&updated_clients);
-                            if let Some(network) = self.network.as_ref() {
-                                for update in updates {
-                                    if let Err(error) = network.broadcast_player_info(update) {
-                                        tracing::error!(%error, "failed to broadcast client-part PlayerInfo update");
-                                    }
-                                }
-                            }
-                            seed_engine_player_info_parameters(
-                                &mut self.engine,
-                                &self.network_league_name,
-                                &self.control_player_infos,
-                            );
-                            self.publish_current_host_player_infos();
+                            self.finish_control_client_part(had_player_info);
                         }
                         self.sync_classic_lobby_roster();
                         Ok(())
@@ -7117,6 +7087,76 @@ impl GameApp {
         Ok(())
     }
 
+    fn try_reach_loaded_network_go_barrier(&mut self) -> Result<(), EngineError> {
+        let ready_to_reach = self.mode == AppMode::Loading
+            && self.loading_state.as_ref().is_some_and(|loading| {
+                loading.finished
+                    && loading
+                        .prepared_go
+                        .as_ref()
+                        .is_some_and(|prepared| !prepared.local_reached)
+            });
+        if !ready_to_reach {
+            return Ok(());
+        }
+
+        // Network::FinalInit reaches and waits for the GO barrier before
+        // InitPlayers begins recreating players and retrieving their files
+        // (src/C4Network2.cpp:558-616; src/C4Game.cpp:459-483,2805-2850).
+        let client_control_tick = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+            self.network_control_clock
+                .map(NetworkControlClock::current_tick)
+        } else {
+            None
+        };
+        let reached = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+            match client_control_tick {
+                Some(current_control_tick) => {
+                    let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+                    match self
+                        .client_start_barrier
+                        .local_initialized_at(current_control_tick)
+                    {
+                        Some(_) => self.network.as_mut().map(|network| {
+                            network.acknowledge_requested_status_at_frame(
+                                current_control_tick,
+                                current_frame,
+                            )
+                        }),
+                        None => None,
+                    }
+                }
+                None => None,
+            }
+        } else {
+            self.network
+                .as_ref()
+                .map(NetworkManager::status_reached_current)
+        };
+        match reached {
+            Some(Ok(())) => {
+                if let Some(pending) = self
+                    .loading_state
+                    .as_mut()
+                    .and_then(|loading| loading.prepared_go.as_mut())
+                {
+                    pending.local_reached = true;
+                    if let Some(current_control_tick) = client_control_tick {
+                        pending.status.target_tick = current_control_tick;
+                    }
+                }
+                self.show_reached_network_start_wait()?;
+            }
+            Some(Err(error)) => {
+                self.status_text = format!("Unable to reach network Go barrier: {error}");
+            }
+            None => {
+                self.status_text = "Network Go barrier is unavailable".to_string();
+            }
+        }
+        Ok(())
+    }
+
     fn poll_loading(&mut self) -> Result<(), EngineError> {
         self.apply_pending_loading_resource_refresh()?;
         let mut completion: Option<(FrontendScenario, Result<Scenario, String>, bool)> = None;
@@ -7204,66 +7244,7 @@ impl GameApp {
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
                         self.finish_scenario_loading_failure(message, prepared_go)?;
                     } else if prepared_go {
-                        // C4Game::InitGameFinal calls CheckStatusReached only
-                        // after the already-opened scenario has initialized.
-                        // OnStatusAck starts control later, after every client
-                        // has acknowledged this exact barrier
-                        // (src/C4Network2.cpp:2017-2077,2091-2110).
                         self.mode = AppMode::Loading;
-                        let client_control_tick =
-                            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                                self.network_control_clock
-                                    .map(NetworkControlClock::current_tick)
-                            } else {
-                                None
-                            };
-                        let reached = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                            match client_control_tick {
-                                Some(current_control_tick) => {
-                                    let current_frame =
-                                        i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-                                    match self
-                                        .client_start_barrier
-                                        .local_initialized_at(current_control_tick)
-                                    {
-                                        Some(_) => self.network.as_mut().map(|network| {
-                                            network.acknowledge_requested_status_at_frame(
-                                                current_control_tick,
-                                                current_frame,
-                                            )
-                                        }),
-                                        None => None,
-                                    }
-                                }
-                                None => None,
-                            }
-                        } else {
-                            self.network
-                                .as_ref()
-                                .map(NetworkManager::status_reached_current)
-                        };
-                        match reached {
-                            Some(Ok(())) => {
-                                if let Some(pending) = self
-                                    .loading_state
-                                    .as_mut()
-                                    .and_then(|loading| loading.prepared_go.as_mut())
-                                {
-                                    pending.local_reached = true;
-                                    if let Some(current_control_tick) = client_control_tick {
-                                        pending.status.target_tick = current_control_tick;
-                                    }
-                                }
-                                self.show_reached_network_start_wait()?;
-                            }
-                            Some(Err(error)) => {
-                                self.status_text =
-                                    format!("Unable to reach network Go barrier: {error}");
-                            }
-                            None => {
-                                self.status_text = "Network Go barrier is unavailable".to_string();
-                            }
-                        }
                     } else {
                         self.advance_scenario_loader(100, "Scenario activation complete");
                         self.loading_state = None;
@@ -7276,6 +7257,8 @@ impl GameApp {
             }
         }
 
+        self.try_reach_loaded_network_go_barrier()?;
+        self.try_finish_deferred_prepared_network_go()?;
         Ok(())
     }
 
@@ -8188,7 +8171,7 @@ impl GameApp {
         }
         self.engine.set_local_players(local_players);
         self.engine
-            .finalize_restored_players()
+            .finalize_restored_players(false)
             .context("failed to run restored player FinalInit")?;
         let restored_music_enabled = self
             .engine

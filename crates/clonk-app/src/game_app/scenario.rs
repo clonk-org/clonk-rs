@@ -6,6 +6,275 @@
 
 use super::*;
 
+struct ReplayPlayerStartup {
+    player_infos: ControlPlayerInfoRegistry,
+    restart_player_infos: ControlPlayerInfoRegistry,
+    runtime_players: Vec<clonk_engine::RuntimeJoinPlayerSource>,
+    recreate_player_info_ids: HashSet<i32>,
+    unassociated_restore_players: Vec<clonk_engine::ControlPlayerInfoEntry>,
+    restore_savegame_infos_ran: bool,
+    restore_player_count: usize,
+    local_controls: LocalControlRegistry,
+    local_players: Vec<i32>,
+}
+
+fn control_player_info_registry_from_snapshot(
+    snapshot: &clonk_network::PlayerInfoListSnapshot,
+) -> ControlPlayerInfoRegistry {
+    let mut player_infos = ControlPlayerInfoRegistry::default();
+    player_infos.replace_snapshot(
+        snapshot.last_player_id,
+        snapshot
+            .clients
+            .iter()
+            .map(|client| clonk_engine::PlayerInfoControlData {
+                client_id: client.client_id,
+                flags: client.flags,
+                players: client.players.clone(),
+                by_client: 0,
+            }),
+    );
+    player_infos
+}
+
+fn prepare_replay_player_startup(
+    scenario_group: &Group,
+    current: Option<clonk_network::PlayerInfoListSnapshot>,
+    restore: &clonk_network::PlayerInfoListSnapshot,
+    save_game: bool,
+    restore_id_counter_authoritative: bool,
+) -> Option<ReplayPlayerStartup> {
+    let restart_player_infos = current
+        .as_ref()
+        .map(control_player_info_registry_from_snapshot)
+        .unwrap_or_default();
+    let restore_players = player_info_list_entries(restore).collect::<Vec<_>>();
+    let has_active_restore = restore_players
+        .iter()
+        .any(|info| info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0);
+    let current_info_count = current
+        .as_ref()
+        .map(|snapshot| snapshot.clients.len())
+        .unwrap_or_default();
+    let current_player_count = current
+        .as_ref()
+        .into_iter()
+        .flat_map(|snapshot| &snapshot.clients)
+        .map(|client| client.players.len())
+        .sum::<usize>();
+    if current.is_none() && !has_active_restore && !restore_id_counter_authoritative {
+        return None;
+    }
+
+    // A replay started in the middle of a game has no regular PlayerInfos:
+    // RestoreSavegameInfos adopts the restore list itself in that case
+    // (C4PlayerInfo.cpp:1411-1421).
+    let mut effective = if current_info_count == 0 && has_active_restore {
+        restore.clone()
+    } else {
+        current.unwrap_or_else(|| clonk_network::PlayerInfoListSnapshot {
+            last_player_id: 0,
+            clients: Vec::new(),
+        })
+    };
+    if save_game && has_active_restore && current_player_count != 0 {
+        for matching_level in 0..=3 {
+            for client_index in 0..effective.clients.len() {
+                for player_index in 0..effective.clients[client_index].players.len() {
+                    if effective.clients[client_index].players[player_index].savegame_player != 0 {
+                        continue;
+                    }
+                    let assigned = effective
+                        .clients
+                        .iter()
+                        .flat_map(|client| &client.players)
+                        .filter_map(|player| {
+                            (player.savegame_player != 0).then_some(player.savegame_player)
+                        })
+                        .collect::<HashSet<_>>();
+                    let current = effective.clients[client_index].players[player_index].clone();
+                    let Some(saved) = restore_players.iter().find(|saved| {
+                        !assigned.contains(&saved.id)
+                            && offline_savegame::savegame_players_match(
+                                &current,
+                                saved,
+                                matching_level,
+                            )
+                    }) else {
+                        continue;
+                    };
+                    effective.clients[client_index].players[player_index].savegame_player =
+                        saved.id;
+                }
+            }
+        }
+    }
+    // Loading SavePlayerInfos (or the old Game.txt fallback) overwrites the
+    // current replay list's allocator counter before InitPlayers performs any
+    // association (C4GameParameters.cpp:379-399).
+    if restore_id_counter_authoritative {
+        effective.last_player_id = restore.last_player_id;
+    }
+    let mut player_infos = control_player_info_registry_from_snapshot(&effective);
+    if current_player_count != 0 && has_active_restore {
+        route_network_savegame_recreation(&mut player_infos, &restore_players);
+    }
+
+    let mut runtime_players = Vec::new();
+    let mut recreate_player_info_ids = HashSet::new();
+    if has_active_restore {
+        for (client_id, info_id) in player_infos.recreation_players() {
+            let Some(mut info) = player_infos.get(info_id).cloned() else {
+                continue;
+            };
+            let recreate_filename = format!("Recreate-{info_id}.c4p");
+            let recreate_exists = scenario_group.exists(&recreate_filename);
+            if recreate_exists {
+                recreate_player_info_ids.insert(info_id);
+                info.filename = LegacyCString::from_bytes(recreate_filename.into_bytes())
+                    .expect("replay recreation filename is static ASCII");
+            }
+            if recreate_exists {
+                player_infos.clear_recreated_temporary_player_file(info_id, false);
+            }
+            runtime_players.push(clonk_engine::RuntimeJoinPlayerSource {
+                client_id,
+                at_client_name: "Replay".to_string(),
+                info,
+                // C4Player::Init loads unnamed portraits only for the
+                // C4ClientIDUnknown (-1) replay packet
+                // (C4Player.cpp:267-275).
+                load_unnamed_portraits: client_id == -1,
+            });
+        }
+    }
+    Some(ReplayPlayerStartup {
+        player_infos,
+        restart_player_infos,
+        runtime_players,
+        recreate_player_info_ids,
+        restore_player_count: restore_players.len(),
+        unassociated_restore_players: if has_active_restore && current_info_count != 0 {
+            restore_players
+        } else {
+            Vec::new()
+        },
+        restore_savegame_infos_ran: has_active_restore,
+        local_controls: LocalControlRegistry::default(),
+        local_players: Vec::new(),
+    })
+}
+
+fn restore_replay_savegame_players(
+    engine: &mut Engine,
+    scenario_path: &Path,
+    startup: &mut ReplayPlayerStartup,
+    external_player_paths: &HashMap<i32, PathBuf>,
+    save_game: bool,
+    gamepads_enabled: bool,
+    disable_mouse: bool,
+) -> Result<(), EngineError> {
+    for source in &startup.runtime_players {
+        let binding = match engine.restore_offline_savegame_players_from_path(
+            scenario_path,
+            std::slice::from_ref(source),
+            external_player_paths,
+            save_game,
+        ) {
+            Ok(mut restored) => restored.pop(),
+            Err(error) => {
+                tracing::warn!(
+                    info_id = source.info.id,
+                    %error,
+                    "failed to recreate one replay player; continuing with later players"
+                );
+                let empty_user_source = !source.info.is_script_player()
+                    && source.info.filename.is_empty()
+                    && !external_player_paths.contains_key(&source.info.id);
+                if !empty_user_source
+                    && !matches!(
+                        error,
+                        clonk_engine::RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(_)
+                    )
+                {
+                    startup.player_infos.mark_removed(
+                        source.info.id,
+                        false,
+                        i32::try_from(engine.frame()).unwrap_or(i32::MAX),
+                    );
+                }
+                None
+            }
+        };
+        let Some(binding) = binding else {
+            continue;
+        };
+        let (
+            saved_mouse_control,
+            preferred_control_set,
+            prefers_mouse,
+            saved_pref_control_style,
+            saved_pref_auto_context_menu,
+            saved_player_name,
+        ) = {
+            let player = engine
+                .player(binding.number)
+                .ok_or(EngineError::UnknownPlayer(binding.number))?;
+            let (preferred_control_set, prefers_mouse) = player.control_preferences();
+            let (pref_control_style, pref_auto_context_menu) = player.control_style_preferences();
+            (
+                player.mouse_control(),
+                preferred_control_set,
+                prefers_mouse,
+                pref_control_style,
+                pref_auto_context_menu,
+                player.name().to_string(),
+            )
+        };
+        let player_name = if control_player_effective_name(&source.info).is_empty() {
+            saved_player_name
+        } else {
+            clonk_script::c4_string_from_bytes(control_player_effective_name(&source.info))
+        };
+        let control_init = LocalControlInit {
+            owner: binding.number,
+            preferred_set: preferred_control_set,
+            prefers_mouse,
+            gamepads_enabled,
+            replay: true,
+            disable_mouse,
+        };
+        let locally_controlled = !source.info.is_script_player() && source.client_id == -1;
+        let control = if locally_controlled {
+            let control = startup
+                .local_controls
+                .initialize_after_restore(control_init, saved_mouse_control != 0);
+            startup.local_players.push(binding.number);
+            control
+        } else {
+            startup.local_controls.resolve(control_init)
+        };
+        engine.reinitialize_player_after_restore(
+            binding.number,
+            clonk_engine::PlayerAtClient::new(source.client_id),
+            "Replay",
+            player_name,
+            control.runtime_control(),
+            source.info.is_script_player(),
+            source.info.no_elimination_check(),
+            saved_pref_control_style,
+            saved_pref_auto_context_menu,
+        )?;
+    }
+    startup.local_controls.finalize_restored_mouse_owner(
+        engine
+            .players()
+            .map(|player| (player.id(), player.status())),
+    );
+    engine.set_local_players(startup.local_players.iter().copied());
+    Ok(())
+}
+
 impl GameApp {
     pub(crate) fn launch_classic_command_line_scenario(&mut self) -> Result<()> {
         if self.classic_command_line.direct_join.is_some() {
@@ -1024,6 +1293,7 @@ impl GameApp {
         self.control_playback = None;
         self.local_player_profile_paths.clear();
         self.deferred_network_savegame_recreation.clear();
+        self.network_savegame_recreation_progress = None;
         let prepared_go = self
             .loading_state
             .as_ref()
@@ -1162,15 +1432,14 @@ impl GameApp {
                 tracing::warn!(%error, "failed to present the savegame takeover warning");
             }
         }
-        let initial_game_data = prepared_initial_game_data.as_ref().or_else(|| {
-            offline_savegame
-                .as_ref()
-                .and_then(|save| save.initial_game_data.as_ref())
-        });
         let network_game = self.network.is_some();
         let replay = scenario_data
             .lobby_metadata()
             .is_some_and(|metadata| metadata.head().is_replay());
+        let replay_save_game = replay
+            && scenario_data
+                .lobby_metadata()
+                .is_some_and(|metadata| metadata.head().is_save_game());
         let replay_parameters = replay
             .then(|| {
                 scenario_data
@@ -1215,7 +1484,12 @@ impl GameApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let (control_playback, replay_player_infos, replay_startup_player_count) = if replay {
+        let (
+            control_playback,
+            mut replay_player_startup,
+            replay_initial_game_data,
+            replay_startup_player_count,
+        ) = if replay {
             let group = open_group_path_for_folder_map(&path).map_err(|error| {
                 ScenarioActivationError::Recoverable(format!(
                     "Failed to open replay {}: {error}",
@@ -1271,10 +1545,93 @@ impl GameApp {
             } else {
                 None
             };
-            (Some(playback), player_infos, startup_player_count)
+            let game_source =
+                read_optional_initial_network_game_source(&group).map_err(|error| {
+                    ScenarioActivationError::Recoverable(format!(
+                        "Replay {} has an unreadable Game.txt: {error}",
+                        scenario.title
+                    ))
+                })?;
+            let initial_game_data = game_source
+                .as_deref()
+                .map(clonk_engine::parse_initial_network_game_data)
+                .map(|data| {
+                    data.validate_runtime_application()
+                        .map(|()| data)
+                        .map_err(|error| {
+                            ScenarioActivationError::Recoverable(format!(
+                                "Replay {} has invalid Game.txt runtime data: {error}",
+                                scenario.title
+                            ))
+                        })
+                })
+                .transpose()?;
+            let languages = startup_language_sequence(self.app_paths.as_ref());
+            let language_packs = self
+                .app_paths
+                .as_ref()
+                .map(classic_language_packs)
+                .unwrap_or_default();
+            let restore_player_infos =
+                prepared_host_bootstrap::load_offline_savegame_restore_player_infos(
+                    &group,
+                    &path,
+                    &languages,
+                    &language_packs,
+                    replay_save_game.then_some(game_source.as_deref()).flatten(),
+                );
+            let restore_id_counter_authoritative =
+                group.exists("SavePlayerInfos.txt") || (replay_save_game && game_source.is_some());
+            let player_startup = prepare_replay_player_startup(
+                &group,
+                player_infos,
+                &restore_player_infos,
+                replay_save_game,
+                restore_id_counter_authoritative,
+            );
+            (
+                Some(playback),
+                player_startup,
+                initial_game_data,
+                startup_player_count,
+            )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
+        let replay_initial_team_registry = replay_player_startup
+            .as_ref()
+            .zip(scenario_data.initial_network_team_metadata().ok())
+            .map(|(startup, metadata)| {
+                let mut assignment =
+                    NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                        metadata,
+                        self.generated_team_name_template.clone(),
+                    );
+                // Replay PlayerInfos are projected before definitions and
+                // objects load. RestoreSavegameInfos performs a distinct
+                // second projection later (C4Game.cpp:2414-2430;
+                // C4PlayerInfo.cpp:819-831,1439-1443).
+                let (_, packets) = startup.restart_player_infos.retained_rows_snapshot();
+                for (_, _, players) in packets {
+                    for player in players {
+                        if player.team != 0 {
+                            assignment.generate_team_for_id(player.team);
+                        }
+                    }
+                }
+                startup
+                    .restart_player_infos
+                    .recheck_team_players(assignment.teams_mut());
+                runtime_teams_from_initial_metadata(assignment.teams())
+            });
+        let initial_game_data = prepared_initial_game_data
+            .as_ref()
+            .or(replay_initial_game_data.as_ref())
+            .or_else(|| {
+                offline_savegame
+                    .as_ref()
+                    .and_then(|save| save.initial_game_data.as_ref())
+            });
         let mut offline_team_metadata = if network_game || replay {
             None
         } else {
@@ -1313,6 +1670,16 @@ impl GameApp {
                 self.network_max_players = self
                     .network_max_players
                     .max(usize::try_from(startup.max_players()).unwrap_or(0));
+            }
+            if replay_save_game {
+                // Savegame parameter loading raises MaxPlayers to the full
+                // restore-list row count before InitPlayers starts joining
+                // (C4Game.cpp:242-250).
+                self.network_max_players = self.network_max_players.max(
+                    replay_player_startup
+                        .as_ref()
+                        .map_or(0, |startup| startup.restore_player_count),
+                );
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
@@ -1407,19 +1774,31 @@ impl GameApp {
         }
         engine.set_network_game(network_game);
         engine.set_network_control_mode(network_game);
-        engine.set_recording_active(false);
+        // StartRecord precedes InitPlayers and InitGameFinal, so profile-load
+        // failure callbacks and Script.Initialize already execute in control
+        // sync mode (C4Game.cpp:2467-2474,478-484,2901-2948).
+        let initial_recording_active =
+            !replay && (self.recording_enabled || self.network_is_league);
+        engine.set_recording_active(initial_recording_active);
         engine.set_replay_control(replay);
         engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            replay_player_startup
+                .as_ref()
+                .map(|startup| &startup.restart_player_infos)
+                .unwrap_or(&self.control_player_infos),
         );
         // Full C4Game::InitGame clears the consumed restart handoff and
         // snapshots the authoritative PlayerInfos before this round's script
         // selects which fields a later Restart should restore.
-        self.restart_restore_infos
-            .capture_player_infos(&self.control_player_infos);
+        self.restart_restore_infos.capture_player_infos(
+            replay_player_startup
+                .as_ref()
+                .map(|startup| &startup.restart_player_infos)
+                .unwrap_or(&self.control_player_infos),
+        );
         self.restart_restore_roster_items.clear();
         self.apply_material_library_to(&mut engine);
         if replay {
@@ -1448,15 +1827,14 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| &prepared.synchronized_rule_goal_lists);
-        let initial_record_music_enabled = (!replay
-            && (self.recording_enabled || self.network_is_league))
+        let initial_record_music_enabled = initial_recording_active
             .then_some(initial_game_data.is_some_and(|game_data| game_data.music_enabled));
         let initial_record_game_data = match scenario_data.apply_before_players_for_game_start(
             &mut engine,
             network_game,
             initial_game_data,
             prepared_team_configuration,
-            prepared_team_registry,
+            prepared_team_registry.or(replay_initial_team_registry),
             synchronized_rule_goal_lists,
             initial_record_music_enabled,
         ) {
@@ -1505,24 +1883,104 @@ impl GameApp {
         // `C4Game::Init` recreates the restored players in `InitPlayers`
         // before `InitGameFinal` makes any script call (C4Game.cpp:479,484),
         // so a constructor calling `GetPlayerByName` finds them.
+        if offline_savegame.is_some() {
+            self.local_controls = LocalControlRegistry::default();
+            self.mouse_control_allowed = !scenario_data.disables_mouse();
+        }
+        if let Some(savegame) = offline_savegame.as_ref() {
+            engine
+                .remove_unassociated_savegame_player_objects(
+                    &self.control_player_infos,
+                    &savegame.unassociated_restore_players,
+                )
+                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+            if !savegame.unassociated_restore_players.is_empty() {
+                engine.recheck_team_player_info_memberships(
+                    &ordered_control_player_team_memberships(&self.control_player_infos),
+                );
+            }
+        }
         let restored_offline_savegame_players = offline_savegame
             .as_ref()
             .map(|savegame| {
-                Self::restore_offline_savegame_engine_players(&mut engine, &path, savegame)
+                self.restore_offline_savegame_engine_players(&mut engine, &path, savegame)
                     .map_err(|error| scenario_activation_engine_error(&scenario.title, error))
             })
             .transpose()?;
+        if offline_savegame.is_some() {
+            engine
+                .finalize_restored_object_links()
+                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+        }
+        if let Some(startup) = replay_player_startup.as_mut() {
+            if startup.restore_savegame_infos_ran {
+                seed_engine_player_info_parameters(
+                    &mut engine,
+                    &self.network_league_name,
+                    &startup.player_infos,
+                );
+                engine
+                    .remove_unassociated_savegame_player_objects(
+                        &startup.player_infos,
+                        &startup.unassociated_restore_players,
+                    )
+                    .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+                engine.recheck_team_player_info_memberships(
+                    &ordered_control_player_team_memberships(&startup.player_infos),
+                );
+            }
+            let external_player_paths = startup
+                .runtime_players
+                .iter()
+                .filter(|source| !startup.recreate_player_info_ids.contains(&source.info.id))
+                .filter_map(|source| {
+                    let configured = path_from_group_name_bytes(source.info.filename.as_bytes());
+                    (!configured.as_os_str().is_empty()).then(|| {
+                        let path = if configured.exists() {
+                            configured
+                        } else {
+                            self.app_paths
+                                .as_ref()
+                                .map(|paths| paths.install_root().join(&configured))
+                                .unwrap_or(configured)
+                        };
+                        (source.info.id, path)
+                    })
+                })
+                .collect::<HashMap<_, _>>();
+            restore_replay_savegame_players(
+                &mut engine,
+                &path,
+                startup,
+                &external_player_paths,
+                replay_save_game,
+                self.gamepads_enabled,
+                scenario_data.disables_mouse(),
+            )
+            .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+        }
+        if replay {
+            engine
+                .finalize_restored_object_links()
+                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+        }
 
         // `InitGameFinal` skips the scenario constructor for savegames alone
         // (C4Game.cpp:2747); a regular scenario shipping restore infos still
         // runs `Initialize()`.
-        let save_game_round = offline_savegame
-            .as_ref()
-            .is_some_and(|savegame| savegame.save_game);
+        let save_game_round = replay_save_game
+            || offline_savegame
+                .as_ref()
+                .is_some_and(|savegame| savegame.save_game);
         let mut script_created_objects = false;
         if !network_game && !save_game_round {
             let objects_before_initialize = engine.active_object_count();
-            if let Err(err) = engine.initialize_scenario_script() {
+            let initialize = if replay {
+                engine.initialize_scenario_script_after_restored_object_links()
+            } else {
+                engine.initialize_scenario_script()
+            };
+            if let Err(err) = initialize {
                 tracing::error!(
                     scenario = %scenario.title,
                     path = %path.display(),
@@ -1532,6 +1990,16 @@ impl GameApp {
                 return Err(scenario_activation_engine_error(&scenario.title, err));
             }
             script_created_objects = engine.active_object_count() != objects_before_initialize;
+        }
+        if replay {
+            engine
+                .finalize_restored_player_initialization(!replay_save_game)
+                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
+        }
+        if let Some(savegame) = offline_savegame.as_ref() {
+            engine
+                .finalize_restored_player_initialization(!savegame.save_game)
+                .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
         }
 
         if let Some(description) = scenario_data.description() {
@@ -1545,6 +2013,14 @@ impl GameApp {
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
         if !replay {
+            let resumed_recording_player_infos = offline_savegame.as_ref().map(|savegame| {
+                let mut recording_player_infos = ControlPlayerInfoRegistry::default();
+                recording_player_infos.replace_snapshot(
+                    savegame.recording_last_player_id,
+                    [savegame.recording_player_info.clone()],
+                );
+                std::mem::replace(&mut self.control_player_infos, recording_player_infos)
+            });
             let recording_definition_save_paths = retained_definition_save_paths
                 .as_ref()
                 .map(|(executable, definitions)| (executable.as_str(), definitions.as_str()));
@@ -1565,25 +2041,41 @@ impl GameApp {
                     recording_definition_save_paths,
                 ),
             };
+            let mut fatal_recording_error = None;
             if let Err(error) = prepare_result {
                 let league_host = self.network_is_league
                     && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
                 if league_host {
-                    return Err(ScenarioActivationError::Recoverable(format!(
+                    fatal_recording_error = Some(ScenarioActivationError::Recoverable(format!(
                         "League recording could not start: {error}"
                     )));
+                } else {
+                    tracing::warn!(%error, "failed to prepare C++-compatible recording");
                 }
-                tracing::warn!(%error, "failed to prepare C++-compatible recording");
             }
             if let Err(error) = self.start_recording(self.network_is_league) {
                 let league_host = self.network_is_league
                     && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
                 if league_host {
-                    return Err(ScenarioActivationError::Recoverable(format!(
+                    fatal_recording_error = Some(ScenarioActivationError::Recoverable(format!(
                         "League recording could not start: {error}"
                     )));
+                } else {
+                    tracing::warn!(%error, "failed to start C++-compatible recording");
                 }
-                tracing::warn!(%error, "failed to start C++-compatible recording");
+            }
+            if let Some(resumed) = resumed_recording_player_infos {
+                self.control_player_infos = resumed;
+            }
+            if let Some(error) = fatal_recording_error {
+                return Err(error);
+            }
+            if let Some(savegame) = offline_savegame.as_ref() {
+                for source in &savegame.runtime_players {
+                    if let Some(path) = savegame.recreation_record_paths.get(&source.info.id) {
+                        self.record_recreated_player_file(source.info.id, path);
+                    }
+                }
             }
         }
         self.advance_scenario_loader(96, "Game runtime installed");
@@ -1591,7 +2083,9 @@ impl GameApp {
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
         self.input = InputDispatcher::new();
-        self.local_controls = LocalControlRegistry::default();
+        if offline_savegame.is_none() {
+            self.local_controls = LocalControlRegistry::default();
+        }
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
@@ -1606,6 +2100,15 @@ impl GameApp {
         self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = !scenario_data.disables_mouse();
         self.mouse_control = self.mouse_control_allowed;
+        if replay {
+            if let Some(startup) = replay_player_startup.as_mut() {
+                self.local_controls = std::mem::take(&mut startup.local_controls);
+                if let Some(owner) = startup.local_players.first().copied() {
+                    self.local_owner = owner;
+                }
+                self.mouse_control = self.local_controls.mouse_owner().is_some();
+            }
+        }
         if let Some(audio) = self.audio.as_mut() {
             audio.clear_object_sound_instances();
         }
@@ -1618,11 +2121,7 @@ impl GameApp {
                     .unwrap_or_else(|| startup.startup_player_count());
                 let (mut local_players, mut joined_player_files) =
                     match (offline_savegame.as_ref(), restored_offline_savegame_players) {
-                        (Some(savegame), Some(restored)) => self
-                            .wire_restored_offline_savegame_players(savegame, restored)
-                            .map_err(|error| {
-                                scenario_activation_engine_error(&scenario.title, error)
-                            })?,
+                        (Some(_), Some(restored)) => restored,
                         _ => (Vec::new(), Vec::new()),
                     };
                 let mut team_selection_players = Vec::new();
@@ -1850,39 +2349,12 @@ impl GameApp {
         // local RXMusic option is on, while configured-off clients retain a
         // restored or callback-enabled true value.
         self.runtime_music_enabled |= restored_music_enabled.unwrap_or(false);
-        if !replay_parameter_clients.is_empty() {
+        if replay {
             self.control_clients
                 .replace_snapshot(replay_parameter_clients);
         }
-        if let Some(player_infos) = replay_player_infos {
-            let mut clients = self.control_clients.snapshot();
-            for client in &player_infos.clients {
-                if !clients
-                    .iter()
-                    .any(|known| known.client_id == client.client_id)
-                {
-                    clients.push(clonk_engine::ClientCoreControlData {
-                        client_id: client.client_id,
-                        activated: true,
-                        observer: false,
-                        name: LegacyCString::default(),
-                        nick: LegacyCString::default(),
-                        lobby_ready: false,
-                    });
-                }
-            }
-            self.control_clients.replace_snapshot(clients);
-            self.control_player_infos.replace_snapshot(
-                player_infos.last_player_id,
-                player_infos.clients.into_iter().map(|client| {
-                    clonk_engine::PlayerInfoControlData {
-                        client_id: client.client_id,
-                        flags: client.flags,
-                        players: client.players,
-                        by_client: 0,
-                    }
-                }),
-            );
+        if let Some(startup) = replay_player_startup {
+            self.control_player_infos = startup.player_infos;
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
@@ -1984,6 +2456,7 @@ impl GameApp {
         self.recording_template = None;
         self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
+        self.network_savegame_recreation_progress = None;
         self.loading_state = None;
         self.engine = Engine::new();
         self.film_view_player = None;

@@ -150,7 +150,9 @@ impl Engine {
         // Objects.txt compiles Con/Size verbatim. Fresh non-Oversize
         // objects retain NewObject's FullCon ceiling; Oversize definitions
         // retain construction-scaled values above 100 percent.
-        let construction = if loaded || definition_oversize {
+        let construction = if loaded {
+            construction
+        } else if definition_oversize {
             construction.max(0)
         } else {
             construction.clamp(0, FULL_CON)

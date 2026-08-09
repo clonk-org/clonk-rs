@@ -4687,9 +4687,9 @@ impl SpawnConfig {
 
     pub fn with_construction(mut self, construction: i32) -> Self {
         // Final clamping needs the target definition and the loaded-object
-        // flag, both resolved by spawn_single. Preserve the raw nonnegative
-        // C4Object::Con value here (Oversize and Objects.txt may exceed 100%).
-        self.construction = construction.max(0);
+        // flag, both resolved by spawn_single. Preserve the raw C4Object::Con
+        // value here (Objects.txt may contain signed or over-100% values).
+        self.construction = construction;
         self
     }
 

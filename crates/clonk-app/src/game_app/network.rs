@@ -3098,6 +3098,7 @@ impl GameApp {
                         .filter(|info| info.is_joined())
                         .map(|info| clonk_engine::RuntimeJoinPlayerSource {
                             client_id: client.client_id,
+                            at_client_name: String::new(),
                             info: info.clone(),
                             load_unnamed_portraits: client.client_id
                                 == runtime_join.local_client_id,
@@ -4278,7 +4279,12 @@ impl GameApp {
                         );
                     }
                     NetworkEvent::ReadyTick { tick, controls } => {
-                        if self.mode == AppMode::Running {
+                        let recreating_after_go = self.mode == AppMode::Loading
+                            && self.network_savegame_recreation_progress.is_some()
+                            && self.runtime_network_committed_status.is_some_and(|status| {
+                                status.state == clonk_network::NETWORK_STATE_GO
+                            });
+                        if self.mode == AppMode::Running || recreating_after_go {
                             let expected_tick = self.expected_network_control_tick();
                             self.network_ticks.queue(expected_tick, tick, controls);
                         }
@@ -4302,19 +4308,78 @@ impl GameApp {
                                 }
                             }
                             NetworkControl::ClientUpdate(update) => {
+                                let removes_players = update.by_client == 0
+                                    && update.update_type
+                                        == clonk_engine::CLIENT_UPDATE_SET_OBSERVER
+                                    && self.control_clients.contains(update.client_id)
+                                    && !self.control_clients.is_observer(update.client_id);
                                 self.control_clients.apply_update(&update);
+                                if removes_players
+                                    && self.control_clients.is_observer(update.client_id)
+                                {
+                                    self.remove_runtime_players_at_client(update.client_id, true);
+                                    self.refresh_current_host_player_infos();
+                                }
+                                if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                                        network.notify_client_update_executed(update.clone())
+                                    }) {
+                                        tracing::error!(%error, "failed to report executed client update");
+                                    }
+                                }
                                 if update.by_client == 0 {
                                     self.publish_updated_host_join_snapshot();
                                 }
                                 self.sync_classic_lobby_roster();
                             }
                             NetworkControl::ClientRemove(remove) => {
+                                let local_client_id = self.network.as_ref().and_then(|network| {
+                                    i32::try_from(network.local_client_id()).ok()
+                                });
+                                if remove.by_client == 0
+                                    && remove.client_id != 0
+                                    && local_client_id == Some(remove.client_id)
+                                {
+                                    let aborted_wait = self
+                                        .blocking_resource_wait
+                                        .as_ref()
+                                        .filter(|wait| {
+                                            wait.scope == BlockingResourceScope::PlayerJoin
+                                        })
+                                        .and_then(|wait| {
+                                            wait.player_info_id
+                                                .map(|info_id| (wait.resource_id, info_id))
+                                        });
+                                    let network_savegame = self
+                                        .loading_state
+                                        .as_ref()
+                                        .and_then(|loading| loading.prepared_go.as_ref())
+                                        .is_some_and(|prepared| prepared.save_game);
+                                    self.change_network_control_to_local(remove.client_id);
+                                    if let Some(aborted_wait) = aborted_wait {
+                                        self.aborted_player_resource_joins.insert(aborted_wait);
+                                    }
+                                    if self.complete_prepared_network_go(network_savegame)? {
+                                        self.finish_network_go_activation_tail();
+                                    }
+                                    continue;
+                                }
+                                let removes_players = remove.by_client == 0
+                                    && remove.client_id != 0
+                                    && self.control_clients.contains(remove.client_id);
+                                if removes_players {
+                                    self.remove_runtime_players_at_client(remove.client_id, true);
+                                }
                                 if self.control_clients.apply_remove(&remove) {
                                     self.remove_classic_lobby_resources_at_client(remove.client_id);
                                     self.network_client_activity.remove_client(remove.client_id);
                                     self.control_messages.remove_client(remove.client_id);
+                                    let had_player_info = self
+                                        .control_player_infos
+                                        .client_packet(remove.client_id)
+                                        .is_some();
                                     self.control_player_infos.on_client_part(remove.client_id);
-                                    self.publish_current_host_player_infos();
+                                    self.finish_control_client_part(had_player_info);
                                     self.sync_classic_lobby_roster();
                                 }
                             }
@@ -5971,11 +6036,84 @@ impl GameApp {
         self.prune_host_local_alternate_colors();
     }
 
+    pub(crate) fn finish_control_client_part(&mut self, had_player_info: bool) {
+        self.prune_host_local_alternate_colors();
+        let mut updated_clients = HashSet::new();
+        if had_player_info {
+            self.recheck_team_memberships_without_random_rebalance();
+            if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+                let restore_players =
+                    host_restore_player_info_entries(self.host_join_snapshot.as_ref());
+                let teams = self
+                    .network_team_assignment
+                    .as_ref()
+                    .map(|assignment| assignment.teams().clone());
+                let alternate_colors = &self.host_local_alternate_colors_by_resource;
+                let local_player_info_ids = &self.host_local_player_info_ids;
+                let attribute_updates = {
+                    let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+                        self.generated_team_name_template.clone(),
+                    );
+                    self.control_player_infos
+                        .refresh_player_attributes_with_alternate_colors(
+                            teams.as_ref(),
+                            &restore_players,
+                            &mut oracle,
+                            |player| {
+                                host_runtime_alternate_color(
+                                    alternate_colors,
+                                    local_player_info_ids,
+                                    player,
+                                )
+                            },
+                        )
+                };
+                match attribute_updates {
+                    Ok(updates) => {
+                        updated_clients.extend(updates.into_iter().map(|update| update.client_id));
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "cannot refresh client-part player attributes");
+                        self.status_text = format!(
+                            "Client-part player attributes need unavailable native state: {error}"
+                        );
+                    }
+                }
+                updated_clients.extend(
+                    self.recheck_random_teams_from_player_infos()
+                        .into_iter()
+                        .map(|update| update.client_id),
+                );
+                updated_clients.extend(
+                    self.control_player_infos
+                        .reset_league_projected_gains()
+                        .into_iter()
+                        .map(|update| update.client_id),
+                );
+            }
+        }
+        let updates = self.control_player_infos.client_packets(&updated_clients);
+        if let Some(network) = self.network.as_ref() {
+            for update in updates {
+                if let Err(error) = network.broadcast_player_info(update) {
+                    tracing::error!(%error, "failed to broadcast client-part PlayerInfo update");
+                }
+            }
+        }
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
+        self.publish_current_host_player_infos();
+    }
+
     pub(crate) fn change_network_control_to_local(&mut self, local_client_id: i32) {
         // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
         let game_over_dialog_shown = self.game_over_dialog.is_some();
+        let local_client = self.control_clients.state(local_client_id).cloned();
         // Continuing the round alone is the opposite of following the host, and
         // this path also leaves `self.network` empty — the very condition the
         // rejoin poll waits for. Abandon it here or a worker-level failure
@@ -6029,7 +6167,21 @@ impl GameApp {
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
         self.clear_blocking_resource_wait();
-        self.admission_resources.clear();
+        if self.network_savegame_recreation_progress.is_some() {
+            let loading_resources = self
+                .admission_resources
+                .resources
+                .iter()
+                .filter_map(|(resource_id, state)| {
+                    matches!(state, AdmissionResourceState::Loading { .. }).then_some(*resource_id)
+                })
+                .collect::<Vec<_>>();
+            for resource_id in loading_resources {
+                self.admission_resources.mark_failed(resource_id);
+            }
+        } else {
+            self.admission_resources.clear();
+        }
         self.host_local_alternate_colors_by_resource.clear();
         self.host_local_player_info_ids.clear();
         self.pending_network_join_data = None;
@@ -6041,7 +6193,19 @@ impl GameApp {
         self.network_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.network_client_activity.clear();
-        self.control_clients.register(local_client_id, true, false);
+        if let Some(local_client) = local_client {
+            self.control_clients
+                .replace_snapshot([clonk_engine::ClientCoreControlData {
+                    client_id: local_client_id,
+                    activated: true,
+                    observer: false,
+                    name: local_client.name,
+                    nick: local_client.nick,
+                    lobby_ready: local_client.lobby_ready,
+                }]);
+        } else {
+            self.control_clients.register(local_client_id, true, false);
+        }
         self.engine.set_control_host(true);
         self.engine.set_network_control_mode(false);
     }
@@ -8207,13 +8371,409 @@ impl GameApp {
         })
     }
 
-    fn recreate_runtime_join_players(&mut self) -> Result<(), EngineError> {
-        let staged_sources = self
+    fn restore_one_ordinary_network_savegame_player(
+        &mut self,
+        scenario_path: &Path,
+        scenario_group: Option<&Group>,
+        source: &clonk_engine::RuntimeJoinPlayerSource,
+        external_path: Option<PathBuf>,
+        save_game: bool,
+        local_client_id: i32,
+    ) -> Result<(), EngineError> {
+        let configured = path_from_group_name_bytes(&normalize_legacy_path_bytes(
+            source.info.filename.as_bytes().to_vec(),
+        ));
+        let basename = configured
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or(configured);
+        let embedded_script = source.info.is_script_player()
+            && !source.info.filename.is_empty()
+            && scenario_group.is_some_and(|group| group.exists(&basename));
+        let record_path = external_path
+            .as_ref()
+            .cloned()
+            .or_else(|| embedded_script.then(|| scenario_path.join(&basename)));
+        if let Some(path) = record_path.as_deref() {
+            self.record_recreated_player_file(source.info.id, path);
+        }
+        if embedded_script {
+            self.control_player_infos
+                .clear_recreated_temporary_player_file(source.info.id, true);
+        }
+        let external_player_paths = external_path
+            .map(|path| HashMap::from([(source.info.id, path)]))
+            .unwrap_or_default();
+        let result = self.engine.restore_offline_savegame_players_from_path(
+            scenario_path,
+            std::slice::from_ref(source),
+            &external_player_paths,
+            save_game,
+        );
+        let binding = match result {
+            Ok(mut bindings) => bindings.pop(),
+            Err(error @ clonk_engine::RuntimeJoinPlayerRestoreError::ProvisionalRemoval(_)) => {
+                return Err(EngineError::from(error));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    info_id = source.info.id,
+                    %error,
+                    "failed to recreate one joined player; continuing with later players"
+                );
+                let empty_user_source = !source.info.is_script_player()
+                    && source.info.filename.is_empty()
+                    && external_player_paths.is_empty();
+                if !empty_user_source
+                    && !matches!(
+                        error,
+                        clonk_engine::RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(_)
+                    )
+                {
+                    self.control_player_infos.mark_removed(
+                        source.info.id,
+                        false,
+                        i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
+                    );
+                }
+                None
+            }
+        };
+        let Some(binding) = binding else {
+            return Ok(());
+        };
+        let (
+            saved_mouse_control,
+            preferred_control_set,
+            prefers_mouse,
+            saved_pref_control_style,
+            saved_pref_auto_context_menu,
+            saved_player_name,
+        ) = {
+            let player = self
+                .engine
+                .player(binding.number)
+                .ok_or(EngineError::UnknownPlayer(binding.number))?;
+            let (preferred_control_set, prefers_mouse) = player.control_preferences();
+            let (pref_control_style, pref_auto_context_menu) = player.control_style_preferences();
+            (
+                player.mouse_control(),
+                preferred_control_set,
+                prefers_mouse,
+                pref_control_style,
+                pref_auto_context_menu,
+                player.name().to_string(),
+            )
+        };
+        let current_info = self
+            .control_player_infos
+            .get(binding.player_info_id)
+            .cloned()
+            .unwrap_or_else(|| source.info.clone());
+        let script_player = current_info.is_script_player();
+        let player_name = if control_player_effective_name(&current_info).is_empty() {
+            saved_player_name
+        } else {
+            clonk_script::c4_string_from_bytes(control_player_effective_name(&current_info))
+        };
+        let locally_controlled = !script_player && source.client_id == local_client_id;
+        let control_init = LocalControlInit {
+            owner: binding.number,
+            preferred_set: preferred_control_set,
+            prefers_mouse,
+            gamepads_enabled: self.gamepads_enabled,
+            replay: false,
+            disable_mouse: !self.mouse_control_allowed,
+        };
+        let control = if locally_controlled {
+            self.local_controls
+                .initialize_after_restore(control_init, saved_mouse_control != 0)
+        } else {
+            self.local_controls.resolve(control_init)
+        };
+        self.engine.reinitialize_player_after_restore(
+            binding.number,
+            clonk_engine::PlayerAtClient::new(source.client_id),
+            source.at_client_name.clone(),
+            player_name,
+            control.runtime_control(),
+            script_player,
+            current_info.no_elimination_check(),
+            saved_pref_control_style,
+            saved_pref_auto_context_menu,
+        )?;
+        let local_players = self.local_controls.owners().collect::<Vec<_>>();
+        if let Some(owner) = local_players.first().copied() {
+            self.local_owner = owner;
+        }
+        self.engine.set_local_players(local_players);
+        Ok(())
+    }
+
+    fn stage_ordinary_network_recreated_script_files(&mut self) {
+        let Some(scenario_path) = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.scenario.path.as_deref())
+        else {
+            return;
+        };
+        let Ok(scenario_group) = open_group_path_for_folder_map(scenario_path) else {
+            return;
+        };
+        let staged_info_ids = self
+            .deferred_network_savegame_recreation
+            .iter()
+            .filter_map(|(_, info_id)| {
+                let info = self.control_player_infos.get(*info_id)?;
+                if !info.is_script_player() || info.filename.is_empty() {
+                    return None;
+                }
+                let configured = path_from_group_name_bytes(&normalize_legacy_path_bytes(
+                    info.filename.as_bytes().to_vec(),
+                ));
+                let basename = configured.file_name().map(PathBuf::from)?;
+                scenario_group.exists(&basename).then_some(*info_id)
+            })
+            .collect::<Vec<_>>();
+        for info_id in staged_info_ids {
+            // RecreatePlayerFiles extracts every embedded script profile and
+            // calls DiscardResource before RecreatePlayers can block on an
+            // earlier user resource (C4PlayerInfo.cpp:1448-1521).
+            self.control_player_infos.discard_player_resource(info_id);
+        }
+    }
+
+    /// Advance native's outer-client/inner-player RecreatePlayers walk until
+    /// its current row needs a loading profile. Earlier rows are fully joined
+    /// and InitControl-initialized before this returns `false`.
+    fn advance_ordinary_network_savegame_recreation(
+        &mut self,
+        save_game: bool,
+    ) -> Result<bool, EngineError> {
+        if self.deferred_network_savegame_recreation.is_empty() {
+            self.local_controls.finalize_restored_mouse_owner(
+                self.engine
+                    .players()
+                    .map(|player| (player.id(), player.status())),
+            );
+            self.mouse_control = self.local_controls.mouse_owner().is_some();
+            self.network_savegame_recreation_progress = None;
+            return Ok(true);
+        }
+        let scenario_path = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.scenario.path.clone())
+            .ok_or_else(|| {
+                EngineError::from(clonk_engine::RuntimeJoinPlayerRestoreError::MissingScenarioPath)
+            })?;
+        let scenario_group = open_group_path_for_folder_map(&scenario_path).ok();
+        let local_client_id = self
+            .network_savegame_recreation_progress
+            .as_ref()
+            .map(|progress| progress.local_client_id)
+            .unwrap_or(0);
+        loop {
+            let cursor = self
+                .network_savegame_recreation_progress
+                .as_ref()
+                .map_or(0, |progress| progress.cursor);
+            let Some((client_id, info_id)) = self
+                .deferred_network_savegame_recreation
+                .get(cursor)
+                .copied()
+            else {
+                self.local_controls.finalize_restored_mouse_owner(
+                    self.engine
+                        .players()
+                        .map(|player| (player.id(), player.status())),
+                );
+                self.mouse_control = self.local_controls.mouse_owner().is_some();
+                self.network_savegame_recreation_progress = None;
+                self.deferred_network_savegame_recreation.clear();
+                return Ok(true);
+            };
+
+            let active_client = self
+                .network_savegame_recreation_progress
+                .as_ref()
+                .and_then(|progress| progress.active_client.clone());
+            let client_name = if active_client
+                .as_ref()
+                .is_some_and(|(active_id, _)| *active_id == client_id)
+            {
+                active_client.map(|(_, name)| name).unwrap_or_default()
+            } else if let Some(client) = self.control_clients.state(client_id) {
+                let name = clonk_script::c4_string_from_bytes(client.name.as_bytes());
+                if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                    progress.active_client = Some((client_id, name.clone()));
+                }
+                name
+            } else {
+                let mut next = cursor;
+                while self
+                    .deferred_network_savegame_recreation
+                    .get(next)
+                    .is_some_and(|(candidate, _)| *candidate == client_id)
+                {
+                    next += 1;
+                }
+                if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                    progress.cursor = next;
+                    progress.active_client = None;
+                }
+                continue;
+            };
+
+            let Some(info) = self.control_player_infos.get(info_id).cloned() else {
+                if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                    progress.cursor += 1;
+                }
+                continue;
+            };
+            let mut source = clonk_engine::RuntimeJoinPlayerSource {
+                client_id,
+                at_client_name: client_name,
+                info,
+                load_unnamed_portraits: client_id == local_client_id,
+            };
+            let configured = path_from_group_name_bytes(&normalize_legacy_path_bytes(
+                source.info.filename.as_bytes().to_vec(),
+            ));
+            let basename = configured
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| configured.clone());
+            let embedded_script = source.info.is_script_player()
+                && !configured.as_os_str().is_empty()
+                && scenario_group
+                    .as_ref()
+                    .is_some_and(|group| group.exists(&basename));
+            let mut skip_source = false;
+            let external_path = if embedded_script {
+                None
+            } else if let Some(resource) = source.info.resource.clone() {
+                let aborted = self
+                    .aborted_player_resource_joins
+                    .contains(&(resource.id, source.info.id));
+                let status = self.admission_resources.ensure_by_core(&resource).clone();
+                if !aborted && matches!(status, AdmissionResourceState::Loading { removed: false })
+                {
+                    let name = control_player_effective_name(&source.info);
+                    let player_name = if name.is_empty() {
+                        resource.filename.to_string_lossy().into_owned()
+                    } else {
+                        legacy_presentation_text(name)
+                    };
+                    let template =
+                        self.runtime_resource_text("IDS_NET_RES_PLRFILE", "player file for %s");
+                    let display_name = format_resource_string(template, &[&player_name]);
+                    self.begin_blocking_resource_wait_at(
+                        BlockingResourceScope::PlayerJoin,
+                        resource.id,
+                        Some(source.info.id),
+                        display_name,
+                        Instant::now(),
+                    )?;
+                    return Ok(false);
+                }
+                if matches!(
+                    status,
+                    AdmissionResourceState::Unavailable(AdmissionResourceUnavailable::Unloadable)
+                ) && !configured.as_os_str().is_empty()
+                {
+                    self.control_player_infos
+                        .discard_player_resource(source.info.id);
+                    source.info.resource = None;
+                    source.info.flags &= !clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE;
+                    Some(if configured.exists() {
+                        configured
+                    } else {
+                        self.app_paths
+                            .as_ref()
+                            .map(|paths| paths.install_root().join(&configured))
+                            .unwrap_or(configured)
+                    })
+                } else if aborted || !matches!(status, AdmissionResourceState::Complete { .. }) {
+                    if source.info.is_script_player() {
+                        source.info.filename = LegacyCString::default();
+                        source.info.resource = None;
+                    } else {
+                        skip_source = true;
+                    }
+                    None
+                } else {
+                    self.admission_resources
+                        .complete_path(resource.id)
+                        .map(Path::to_path_buf)
+                }
+            } else if configured.as_os_str().is_empty() {
+                skip_source = !source.info.is_script_player();
+                None
+            } else {
+                Some(if configured.exists() {
+                    configured
+                } else {
+                    self.app_paths
+                        .as_ref()
+                        .map(|paths| paths.install_root().join(&configured))
+                        .unwrap_or(configured)
+                })
+            };
+
+            if !skip_source {
+                self.restore_one_ordinary_network_savegame_player(
+                    &scenario_path,
+                    scenario_group.as_ref(),
+                    &source,
+                    external_path,
+                    save_game,
+                    local_client_id,
+                )?;
+            }
+            if let Some(progress) = self.network_savegame_recreation_progress.as_mut() {
+                progress.cursor += 1;
+            }
+        }
+    }
+
+    fn recreate_runtime_join_players(&mut self, save_game: bool) -> Result<(), EngineError> {
+        let (network_runtime_join, runtime_join_sources) = self
             .loading_state
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
-            .map(|prepared| prepared.runtime_join_players.clone())
+            .map(|prepared| {
+                (
+                    prepared.network_runtime_join,
+                    prepared.runtime_join_players.clone(),
+                )
+            })
             .unwrap_or_default();
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let ordinary_recreation = !network_runtime_join;
+        let staged_sources = if ordinary_recreation {
+            self.deferred_network_savegame_recreation
+                .iter()
+                .filter_map(|(client_id, info_id)| {
+                    self.control_player_infos
+                        .get(*info_id)
+                        .cloned()
+                        .map(|info| clonk_engine::RuntimeJoinPlayerSource {
+                            client_id: *client_id,
+                            at_client_name: String::new(),
+                            info,
+                            load_unnamed_portraits: *client_id == local_client_id,
+                        })
+                })
+                .collect()
+        } else {
+            runtime_join_sources
+        };
         if staged_sources.is_empty() {
             return Ok(());
         }
@@ -8222,10 +8782,17 @@ impl GameApp {
         // original client is no longer present. Do this before opening any
         // embedded player group, so a departed client's stale filename is
         // never treated as a load failure.
-        let sources = staged_sources
+        let mut sources = staged_sources
             .into_iter()
             .filter(|source| self.control_clients.contains(source.client_id))
             .collect::<Vec<_>>();
+        for source in &mut sources {
+            source.at_client_name = self
+                .control_clients
+                .state(source.client_id)
+                .map(|client| clonk_script::c4_string_from_bytes(client.name.as_bytes()))
+                .unwrap_or_default();
+        }
         if sources.is_empty() {
             self.deferred_network_savegame_recreation.clear();
             return Ok(());
@@ -8237,16 +8804,165 @@ impl GameApp {
             .ok_or_else(|| {
                 EngineError::from(clonk_engine::RuntimeJoinPlayerRestoreError::MissingScenarioPath)
             })?;
-        let restored = self
-            .engine
-            .restore_runtime_join_players_from_path(&scenario_path, &sources)
-            .map_err(EngineError::from)?;
+        let mut external_player_paths = HashMap::new();
+        let ordinary_scenario_group = ordinary_recreation
+            .then(|| open_group_path_for_folder_map(&scenario_path).ok())
+            .flatten();
+        if ordinary_recreation {
+            sources.retain_mut(|source| {
+                let configured = path_from_group_name_bytes(&normalize_legacy_path_bytes(
+                    source.info.filename.as_bytes().to_vec(),
+                ));
+                let basename = configured
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| configured.clone());
+                let configured_empty = configured.as_os_str().is_empty();
+                let embedded_script = source.info.is_script_player()
+                    && !configured_empty
+                    && ordinary_scenario_group
+                        .as_ref()
+                        .is_some_and(|group| group.exists(&basename));
+                if embedded_script {
+                    return true;
+                }
+                let resource_id = source.info.resource.as_ref().map(|resource| resource.id);
+                let path = if let Some(resource_id) = resource_id {
+                    if self
+                        .aborted_player_resource_joins
+                        .contains(&(resource_id, source.info.id))
+                    {
+                        if source.info.is_script_player() {
+                            source.info.filename = LegacyCString::default();
+                            source.info.resource = None;
+                            return true;
+                        }
+                        tracing::warn!(
+                            info_id = source.info.id,
+                            resource_id,
+                            "skipping recreated savegame user after resource wait was aborted"
+                        );
+                        return false;
+                    }
+                    self.admission_resources
+                        .complete_path(resource_id)
+                        .map(Path::to_path_buf)
+                } else {
+                    (!configured_empty).then(|| {
+                        if configured.exists() {
+                            configured
+                        } else {
+                            self.app_paths
+                                .as_ref()
+                                .map(|paths| paths.install_root().join(&configured))
+                                .unwrap_or(configured)
+                        }
+                    })
+                };
+                let Some(path) = path else {
+                    if source.info.is_script_player() && resource_id.is_some() {
+                        source.info.filename = LegacyCString::default();
+                        source.info.resource = None;
+                        return true;
+                    }
+                    if source.info.is_script_player()
+                        && source.info.resource.is_none()
+                        && configured_empty
+                    {
+                        return true;
+                    }
+                    tracing::warn!(
+                        info_id = source.info.id,
+                        "skipping recreated savegame player whose current player file is unavailable"
+                    );
+                    return false;
+                };
+                external_player_paths.insert(source.info.id, path);
+                true
+            });
+            if sources.is_empty() {
+                self.deferred_network_savegame_recreation.clear();
+                return Ok(());
+            }
+        }
 
-        let local_client_id = self
-            .network
-            .as_ref()
-            .and_then(|network| i32::try_from(network.local_client_id()).ok())
-            .unwrap_or(0);
+        let mut restored_sources = Vec::with_capacity(sources.len());
+        let mut restored = Vec::with_capacity(sources.len());
+        for source in &sources {
+            let embedded_filename = (!source.info.filename.is_empty()).then(|| {
+                let filename = path_from_group_name_bytes(&normalize_legacy_path_bytes(
+                    source.info.filename.as_bytes().to_vec(),
+                ));
+                filename.file_name().map(PathBuf::from).unwrap_or(filename)
+            });
+            let record_path = external_player_paths
+                .get(&source.info.id)
+                .cloned()
+                .or_else(|| {
+                    embedded_filename
+                        .as_ref()
+                        .map(|name| scenario_path.join(name))
+                });
+            if let Some(path) = record_path.as_deref() {
+                self.record_recreated_player_file(source.info.id, path);
+            }
+            if ordinary_recreation
+                && source.info.is_script_player()
+                && embedded_filename.as_ref().is_some_and(|filename| {
+                    ordinary_scenario_group
+                        .as_ref()
+                        .is_some_and(|group| group.exists(filename))
+                })
+            {
+                self.control_player_infos
+                    .clear_recreated_temporary_player_file(source.info.id, true);
+            }
+            let result = if ordinary_recreation {
+                self.engine.restore_offline_savegame_players_from_path(
+                    &scenario_path,
+                    std::slice::from_ref(source),
+                    &external_player_paths,
+                    save_game,
+                )
+            } else {
+                self.engine.restore_runtime_join_players_from_path(
+                    &scenario_path,
+                    std::slice::from_ref(source),
+                )
+            };
+            match result {
+                Ok(mut bindings) => {
+                    if let Some(binding) = bindings.pop() {
+                        restored_sources.push(source.clone());
+                        restored.push(binding);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        info_id = source.info.id,
+                        %error,
+                        "failed to recreate one joined player; continuing with later players"
+                    );
+                    let empty_user_source = !source.info.is_script_player()
+                        && source.info.filename.is_empty()
+                        && !external_player_paths.contains_key(&source.info.id);
+                    if !empty_user_source
+                        && !matches!(
+                            error,
+                            clonk_engine::RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(_)
+                        )
+                    {
+                        self.control_player_infos.mark_removed(
+                            source.info.id,
+                            false,
+                            i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
+                        );
+                    }
+                }
+            }
+        }
+        sources = restored_sources;
+
         let mut rebound_local_controls = LocalControlRegistry::default();
         let mut local_players = Vec::new();
 
@@ -8334,7 +9050,6 @@ impl GameApp {
             self.local_owner = owner;
         }
         self.engine.set_local_players(local_players);
-        self.engine.finalize_restored_players()?;
         self.mouse_control = self.local_controls.mouse_owner().is_some();
         self.deferred_network_savegame_recreation.clear();
         Ok(())
@@ -8343,39 +9058,62 @@ impl GameApp {
     pub(crate) fn finalize_network_loaded_scenario(
         &mut self,
         network_savegame: bool,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         // Network.FinalInit runs after InitGame but before InitPlayers and
         // InitGameFinal. Ordinary network player joins remain host-issued
         // controls; scenario Initialize runs only after the status barrier
         // (pristine 9ffa0a5d src/C4Game.cpp:455-482;
         // src/C4Network2.cpp:558-615, src/C4Game.cpp:2699-2736).
-        self.engine.game_start_synchronize()?;
         let network_runtime_join = self
             .loading_state
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .is_some_and(|prepared| prepared.network_runtime_join);
         if network_runtime_join {
+            self.engine.game_start_synchronize()?;
             // C4Game::InitPlayers handles NetworkRuntimeJoin in an exclusive
             // first branch. Parameters.RestorePlayerInfos must not run the
             // ordinary RestoreSavegameInfos association path first.
             self.deferred_network_savegame_recreation.clear();
+            self.recreate_runtime_join_players(network_savegame)?;
         } else {
-            self.prepare_network_savegame_recreation();
+            if self.network_savegame_recreation_progress.is_none() {
+                self.engine.game_start_synchronize()?;
+                self.prepare_network_savegame_recreation()?;
+                self.stage_ordinary_network_recreated_script_files();
+                self.local_controls = LocalControlRegistry::default();
+                self.engine.set_local_players([]);
+                let local_client_id = self
+                    .network
+                    .as_ref()
+                    .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                    .unwrap_or(0);
+                self.network_savegame_recreation_progress =
+                    Some(NetworkSavegameRecreationProgress {
+                        local_client_id,
+                        ..Default::default()
+                    });
+            }
+            if !self.advance_ordinary_network_savegame_recreation(network_savegame)? {
+                return Ok(false);
+            }
         }
-        self.recreate_runtime_join_players()?;
+        self.engine.finalize_restored_object_links()?;
         // C4Game::InitGameFinal runs Script.Initialize only for a fresh
         // scenario. A savegame already contains the initialized script and
         // object state, so invoking it again would duplicate mutations
         // (pristine 9ffa0a5d src/C4Game.cpp:2724-2734).
         if !network_savegame {
             let objects_before_initialize = self.engine.active_object_count();
-            self.engine.initialize_scenario_script()?;
+            self.engine
+                .initialize_scenario_script_after_restored_object_links()?;
             self.script_created_objects =
                 self.engine.active_object_count() != objects_before_initialize;
         } else {
             self.script_created_objects = false;
         }
+        self.engine
+            .finalize_restored_player_initialization(!network_savegame)?;
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
         self.apply_focus_selection();
@@ -8387,7 +9125,7 @@ impl GameApp {
         self.refresh_focus();
         self.advance_scenario_loader(98, "Network final initialization complete");
         self.advance_scenario_loader(99, "Runtime presentation initialized");
-        Ok(())
+        Ok(true)
     }
 
     /// `C4GraphicsResource::Init` remains re-callable while a network round

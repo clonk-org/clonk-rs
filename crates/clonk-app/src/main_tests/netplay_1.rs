@@ -558,7 +558,9 @@ fn control_buffered_inside_the_presend_horizon_is_not_a_catch_up_backlog() {
         .expect("fixture installs a control clock");
     clock.observe_control_send_time_ms(300);
     assert_eq!(
-        clock.calculate_performance().map(|change| change.control_presend),
+        clock
+            .calculate_performance()
+            .map(|change| change.control_presend),
         Some(12),
         "a 300 ms link sizes the horizon at twelve frames"
     );
@@ -583,7 +585,9 @@ fn a_shallow_presend_horizon_keeps_the_cpp_overflow_limit() {
         .expect("fixture installs a control clock");
     clock.observe_control_send_time_ms(110);
     assert_eq!(
-        clock.calculate_performance().map(|change| change.control_presend),
+        clock
+            .calculate_performance()
+            .map(|change| change.control_presend),
         Some(5)
     );
 
@@ -3578,6 +3582,119 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     );
     assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
     reset_cached_app_paths();
+}
+
+#[test]
+fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
+    // The savegame section caption remains while restore users exist, but
+    // FindUnassociatedRestoreInfo scans joined rows for an association/current
+    // ID match instead of treating that caption as evidence
+    // (C4PlayerInfoListBox.cpp:1372-1397; C4PlayerInfo.cpp:1125-1139).
+    let mut app = new_menu_app(640, 480);
+    let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+    install_test_free_savegame_player_row(&mut app, 50);
+    let lobby = app.classic_host_lobby.as_mut().expect("test lobby");
+    let rows = lobby
+        .controller
+        .rows()
+        .iter()
+        .filter(|row| !matches!(row, LobbyRosterRow::Player(player) if player.client_id == -1))
+        .cloned()
+        .collect();
+    lobby.controller.set_rows(rows);
+
+    app.control_player_infos.replace_snapshot(
+        91,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 91,
+                savegame_player: 50,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    );
+    let mut snapshot = clonk_network::HostConfig::default()
+        .initial_join_snapshot
+        .expect("default host JoinData");
+    snapshot.parameters.restore_player_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 50,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 0,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 50,
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            }],
+        }],
+    };
+    app.host_join_snapshot = Some(snapshot);
+
+    assert!(app
+        .classic_host_lobby
+        .as_ref()
+        .unwrap()
+        .controller
+        .rows()
+        .iter()
+        .any(|row| matches!(row, LobbyRosterRow::Header(header)
+            if header.kind == LobbyRosterHeader::UnassignedSavegamePlayers)));
+    app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+        countdown_seconds: 5,
+        check_league_rules: true,
+        confirm_unassociated_savegame_players: true,
+    }])
+    .expect("start an entirely assigned savegame");
+    assert!(app.message_dialogs.is_empty());
+    assert_eq!(
+        commands.take_submitted_lobby_countdowns(),
+        vec![clonk_network::LobbyCountdownPacket::new(5)]
+    );
+}
+
+#[test]
+fn classic_host_regular_scenario_never_warns_about_restore_rows() {
+    // C4GameLobby::Start asks FindUnassociatedRestoreInfo only when the
+    // synchronized scenario is a savegame (C4GameLobby.cpp:452-464).
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("regular-scenario warning user data");
+    let content = tempdir().expect("regular-scenario warning content");
+    let scenario = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+    app.staged_network_host_scenario = Some(prepare_minimal_host_lobby(&app, scenario));
+    let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+    let mut snapshot = clonk_network::HostConfig::default()
+        .initial_join_snapshot
+        .expect("default host JoinData");
+    snapshot.parameters.restore_player_infos = clonk_network::PlayerInfoListSnapshot {
+        last_player_id: 50,
+        clients: vec![clonk_network::ClientPlayerInfosSnapshot {
+            client_id: 0,
+            flags: 0,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 50,
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            }],
+        }],
+    };
+    app.host_join_snapshot = Some(snapshot);
+
+    app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+        countdown_seconds: 5,
+        check_league_rules: true,
+        confirm_unassociated_savegame_players: true,
+    }])
+    .expect("start regular scenario despite retained restore rows");
+
+    assert!(app.message_dialogs.is_empty());
+    assert_eq!(
+        commands.take_submitted_lobby_countdowns(),
+        vec![clonk_network::LobbyCountdownPacket::new(5)]
+    );
 }
 
 #[test]
