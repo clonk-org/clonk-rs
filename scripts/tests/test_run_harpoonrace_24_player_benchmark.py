@@ -18,7 +18,9 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def benchmark_network_line(local_client_id=1, players=24, lag_ms=12):
+def benchmark_network_line(
+    local_client_id=1, players=24, lag_ms=12, host_route_lag_ms=9
+):
     peers = [
         client_id
         for client_id in range(players + 1)
@@ -36,12 +38,15 @@ def benchmark_network_line(local_client_id=1, players=24, lag_ms=12):
         f"nonnegative_ping_peer_count={len(peers)} "
         f"nonnegative_lag_peer_count={len(peers)} "
         f"max_nonnegative_ping_ms=7 max_nonnegative_lag_ms={lag_ms} "
+        f"host_message_route_lag_ms={host_route_lag_ms} "
         "max_packet_loss=0 control_presend=4 "
         "avg_control_send_time_us=26813"
     )
 
 
-def benchmark_network_evidence(local_client_id=1, players=24, lag_ms=12):
+def benchmark_network_evidence(
+    local_client_id=1, players=24, lag_ms=12, host_route_lag_ms=9
+):
     peers = [
         client_id
         for client_id in range(players + 1)
@@ -59,6 +64,7 @@ def benchmark_network_evidence(local_client_id=1, players=24, lag_ms=12):
         "nonnegative_lag_peer_count": len(peers),
         "max_nonnegative_ping_ms": 7,
         "max_nonnegative_lag_ms": lag_ms,
+        "host_message_route_lag_ms": host_route_lag_ms,
         "max_packet_loss": 0,
         "control_presend": 4,
         "avg_control_send_time_us": 26_813,
@@ -74,9 +80,23 @@ class BenchmarkLineTests(unittest.TestCase):
         "tcp_preferred_message_routes=1 udp_preferred_message_routes=1 "
         "unknown_preferred_message_routes=0 nonnegative_ping_peer_count=2 "
         "nonnegative_lag_peer_count=2 max_nonnegative_ping_ms=7 "
-        "max_nonnegative_lag_ms=12 max_packet_loss=3 control_presend=4 "
+        "max_nonnegative_lag_ms=12 host_message_route_lag_ms=9 "
+        "max_packet_loss=3 control_presend=4 "
         "avg_control_send_time_us=26813"
     )
+
+    def test_per_player_input_line_is_parsed_with_raw_samples(self):
+        parsed = MODULE.parse_benchmark_input_player_line(
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT_PLAYER player=2 "
+            "elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 "
+            "pending_inputs=0 input_latency_sample_count=2 "
+            "input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 "
+            "input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 "
+            "input_latency_samples_ns=[100000000,101000000]"
+        )
+
+        self.assertEqual(parsed["player"], 2)
+        self.assertEqual(parsed["input_latency_samples_ns"], [100_000_000, 101_000_000])
 
     def test_parses_exact_preferred_message_route_network_evidence(self):
         evidence = MODULE.parse_benchmark_network_line(self.NETWORK_LINE)
@@ -87,6 +107,7 @@ class BenchmarkLineTests(unittest.TestCase):
         self.assertEqual(evidence["tcp_preferred_message_routes"], 1)
         self.assertEqual(evidence["udp_preferred_message_routes"], 1)
         self.assertEqual(evidence["max_nonnegative_lag_ms"], 12)
+        self.assertEqual(evidence["host_message_route_lag_ms"], 9)
         self.assertEqual(evidence["control_presend"], 4)
         self.assertEqual(evidence["avg_control_send_time_us"], 26_813)
 
@@ -580,6 +601,276 @@ class BenchmarkLineTests(unittest.TestCase):
             any("maximum message-route lag 101ms" in failure for failure in failures)
         )
 
+    def test_async_control_gates_the_host_route_not_idle_peer_lag(self):
+        report = {
+            "elapsed_seconds": 25.0,
+            "successful_present_submissions": 0,
+            "presentation_submission_fps": 0.0,
+            "refreshed_frames": 0,
+            "simulation_frames": 962,
+            "simulation_fps": 38.48,
+            "automatic_graphics_skips": 0,
+            "average_graphics_pass_ms": 0.0,
+            "max_graphics_pass_ms": 0.0,
+            "graphics_pass_sample_count": 0,
+            "graphics_pass_p50_ms": 0.0,
+            "graphics_pass_p95_ms": 0.0,
+            "graphics_pass_p99_ms": 0.0,
+            "graphics_pass_samples_ns": [],
+            "benchmark_context": {
+                "runtime_players": 24,
+                "synchronized_player_infos": 24,
+                "activated_nonhost_clients": 24,
+                "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
+                "runtime_players_with_exactly_one_live_sf5b_crew": 0,
+            },
+            "network_evidence": benchmark_network_evidence(
+                lag_ms=15_000,
+                host_route_lag_ms=99,
+            ),
+        }
+        network = report["network_evidence"]
+        network["preferred_message_route_peer_ids"].remove(24)
+        network["preferred_message_route_peer_count"] -= 1
+        network["tcp_preferred_message_routes"] -= 1
+        network["nonnegative_ping_peer_count"] -= 1
+        network["nonnegative_lag_peer_count"] -= 1
+
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            control_mode=2,
+        )
+
+        self.assertEqual(failures, [])
+        report["network_evidence"]["host_message_route_lag_ms"] = 101
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            control_mode=2,
+        )
+        self.assertTrue(
+            any("host message-route lag 101ms" in failure for failure in failures)
+        )
+
+        report["network_evidence"]["host_message_route_lag_ms"] = -1
+        report["network_evidence"]["preferred_message_route_peer_ids"].remove(0)
+        report["network_evidence"]["preferred_message_route_peer_count"] -= 1
+        report["network_evidence"]["tcp_preferred_message_routes"] -= 1
+        report["network_evidence"]["nonnegative_ping_peer_count"] -= 1
+        report["network_evidence"]["nonnegative_lag_peer_count"] -= 1
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            control_mode=2,
+        )
+        self.assertTrue(any("host route" in failure for failure in failures))
+
+    def test_grouped_fleet_separates_player_and_client_context(self):
+        report = {
+            "elapsed_seconds": 25.0,
+            "successful_present_submissions": 0,
+            "presentation_submission_fps": 0.0,
+            "refreshed_frames": 0,
+            "simulation_frames": 962,
+            "simulation_fps": 38.48,
+            "automatic_graphics_skips": 0,
+            "average_graphics_pass_ms": 0.0,
+            "max_graphics_pass_ms": 0.0,
+            "graphics_pass_sample_count": 0,
+            "graphics_pass_p50_ms": 0.0,
+            "graphics_pass_p95_ms": 0.0,
+            "graphics_pass_p99_ms": 0.0,
+            "graphics_pass_samples_ns": [],
+            "benchmark_context": {
+                "runtime_players": 24,
+                "synchronized_player_infos": 24,
+                "activated_nonhost_clients": 12,
+                "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
+                "runtime_players_with_exactly_one_live_sf5b_crew": 0,
+            },
+            "network_evidence": benchmark_network_evidence(players=12),
+        }
+
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            expected_clients=12,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            control_mode=2,
+        )
+
+        self.assertEqual(failures, [])
+
+    def test_grouped_input_requires_evidence_for_each_local_player(self):
+        samples = [50_000_000] * 100
+        aggregate = {
+            "elapsed_seconds": 25.0,
+            "submitted_inputs": 100,
+            "executed_inputs": 100,
+            "pending_inputs": 0,
+            "input_latency_sample_count": 100,
+            "input_latency_p50_ms": 50.0,
+            "input_latency_p95_ms": 50.0,
+            "input_latency_p99_ms": 50.0,
+            "input_latency_max_ms": 50.0,
+            "input_latency_samples_ns": samples,
+        }
+        report = {
+            "elapsed_seconds": 25.0,
+            "successful_present_submissions": 0,
+            "presentation_submission_fps": 0.0,
+            "refreshed_frames": 0,
+            "simulation_frames": 962,
+            "simulation_fps": 38.48,
+            "automatic_graphics_skips": 0,
+            "average_graphics_pass_ms": 0.0,
+            "max_graphics_pass_ms": 0.0,
+            "graphics_pass_sample_count": 0,
+            "graphics_pass_p50_ms": 0.0,
+            "graphics_pass_p95_ms": 0.0,
+            "graphics_pass_p99_ms": 0.0,
+            "graphics_pass_samples_ns": [],
+            "benchmark_context": {
+                "runtime_players": 24,
+                "synchronized_player_infos": 24,
+                "activated_nonhost_clients": 12,
+                "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
+                "runtime_players_with_exactly_one_live_sf5b_crew": 0,
+            },
+            "network_evidence": benchmark_network_evidence(players=12),
+            "input_probe": aggregate,
+            "input_probe_players": [{"player": 1, **aggregate}],
+        }
+
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            expected_clients=12,
+            expected_local_players=2,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            input_probe_interval_ms=500,
+            maximum_input_latency_ms=100.0,
+            minimum_input_success_percent=95.0,
+            control_mode=2,
+        )
+
+        self.assertTrue(any("per-player input results" in failure for failure in failures))
+
+        second = {"player": 2, **aggregate}
+        report["input_probe_players"] = [report["input_probe_players"][0], second]
+        report["input_probe"] = {
+            **aggregate,
+            "submitted_inputs": 200,
+            "executed_inputs": 200,
+            "input_latency_sample_count": 200,
+            "input_latency_samples_ns": samples + samples,
+        }
+        passing = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            expected_clients=12,
+            expected_local_players=2,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            input_probe_interval_ms=500,
+            maximum_input_latency_ms=100.0,
+            minimum_input_success_percent=95.0,
+            control_mode=2,
+        )
+        self.assertEqual(passing, [])
+
+        first_samples = [50_000_000] * 120
+        second_samples = [50_000_000] * 94 + [101_000_000] * 6
+        report["input_probe_players"] = [
+            {
+                "player": 1,
+                **aggregate,
+                "submitted_inputs": 120,
+                "executed_inputs": 120,
+                "input_latency_sample_count": 120,
+                "input_latency_samples_ns": first_samples,
+            },
+            {
+                "player": 2,
+                **aggregate,
+                "input_latency_p95_ms": 101.0,
+                "input_latency_p99_ms": 101.0,
+                "input_latency_max_ms": 101.0,
+                "input_latency_samples_ns": second_samples,
+            },
+        ]
+        report["input_probe"] = {
+            **aggregate,
+            "submitted_inputs": 220,
+            "executed_inputs": 220,
+            "input_latency_sample_count": 220,
+            "input_latency_p99_ms": 101.0,
+            "input_latency_max_ms": 101.0,
+            "input_latency_samples_ns": first_samples + second_samples,
+        }
+        per_player_failure = MODULE.benchmark_failures(
+            report,
+            expected_seconds=25,
+            expected_players=24,
+            expected_clients=12,
+            expected_local_players=2,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+            input_probe_interval_ms=500,
+            maximum_input_latency_ms=100.0,
+            minimum_input_success_percent=95.0,
+            control_mode=2,
+        )
+        self.assertTrue(
+            any("player 2: input latency 94.000%" in failure for failure in per_player_failure)
+        )
+
     def test_rare_cpp_automatic_skip_is_reported_but_not_an_independent_failure(self):
         # C++ src/C4Application.cpp:463-476 deliberately skips the next
         # graphics pass after an over-budget pass. Smoothness is governed by
@@ -925,6 +1216,56 @@ class ExactReferenceTests(unittest.TestCase):
             event.kwargs["startup_to_player_info_admission_ms"], 9_200.0
         )
 
+    def test_grouped_player_admission_flattens_every_clients_profiles(self):
+        reference = (
+            "[Reference]\r\nState=Lobby\r\nMaxPlayers=3\r\n"
+            'Title="HarpoonRace"\r\n'
+            "  [PlayerInfos]\r\n"
+            "    [Client]\r\n    ID=1\r\n"
+            "      [Player]\r\n      Name=LoadPlayer-01\r\n      Flags=Joined\r\n"
+            "      [Player]\r\n      Name=LoadPlayer-02\r\n      Flags=Joined\r\n"
+            "    [Client]\r\n    ID=2\r\n"
+            "      [Player]\r\n      Name=LoadPlayer-03\r\n      Flags=Joined\r\n"
+            "  [Client]\r\n  ID=1\r\n  Activated=true\r\n  Name=LoadClient-01\r\n"
+            "  [Client]\r\n  ID=2\r\n  Activated=true\r\n  Name=LoadClient-02\r\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = MODULE.FleetRunner.__new__(MODULE.FleetRunner)
+            runner.host = {"process": mock.Mock(poll=mock.Mock(return_value=None))}
+            runner.arguments = SimpleNamespace(base_port=31_111, join_timeout=1.0, players=3)
+            runner.clients = [
+                {
+                    "index": 1,
+                    "name": "LoadClient-01",
+                    "client_name": "LoadClient-01",
+                    "player_indices": [1, 2],
+                    "player_names": ["LoadPlayer-01", "LoadPlayer-02"],
+                    "launched_monotonic": 1.0,
+                    "process": mock.Mock(poll=mock.Mock(return_value=None)),
+                },
+                {
+                    "index": 2,
+                    "name": "LoadClient-02",
+                    "client_name": "LoadClient-02",
+                    "player_indices": [3],
+                    "player_names": ["LoadPlayer-03"],
+                    "launched_monotonic": 1.0,
+                    "process": mock.Mock(poll=mock.Mock(return_value=None)),
+                },
+            ]
+            runner.admission_samples = []
+            runner.artifact_dir = Path(temporary)
+            runner.event = mock.Mock()
+            with mock.patch.object(MODULE, "fetch_reference", return_value=reference), mock.patch.object(
+                MODULE.time, "monotonic", side_effect=[2.0, 2.1, 2.2]
+            ):
+                runner.wait_for_player_admission()
+
+        self.assertEqual(
+            [(sample["index"], sample["client_index"]) for sample in runner.admission_samples],
+            [(1, 1), (2, 1), (3, 2)],
+        )
+
     def test_joined_lobby_is_rechecked_immediately_before_start(self):
         one_player_reference = (
             "[Reference]\r\n"
@@ -977,6 +1318,47 @@ class ExactReferenceTests(unittest.TestCase):
 
 
 class IsolatedInputTests(unittest.TestCase):
+    def test_twenty_four_profiles_are_balanced_across_twelve_clients(self):
+        groups = MODULE.distribute_player_indices(24, 12)
+        self.assertEqual(len(groups), 12)
+        self.assertTrue(all(len(group) == 2 for group in groups))
+        self.assertEqual(groups[0], [1, 2])
+        self.assertEqual(groups[-1], [23, 24])
+
+        runner = MODULE.FleetRunner.__new__(MODULE.FleetRunner)
+        runner.binary = Path("/clonk-app")
+        command = runner.client_command(
+            index=1,
+            config=Path("/client/config.ini"),
+            profiles=[
+                Path("/profiles/LoadPlayer-01.c4p"),
+                Path("/profiles/LoadPlayer-02.c4p"),
+            ],
+            tcp_port=31_121,
+            udp_port=31_122,
+            reference_port=31_111,
+        )
+        self.assertEqual(
+            command[5:7],
+            [
+                "/profiles/LoadPlayer-01.c4p",
+                "/profiles/LoadPlayer-02.c4p",
+            ],
+        )
+        self.assertEqual(command[7], "/join:127.0.0.1:31111")
+
+    def test_client_process_count_is_distinct_from_player_count(self):
+        arguments = MODULE.build_argument_parser().parse_args(
+            ["--players", "24", "--clients", "12", "--base-port", "31111"]
+        )
+        runner = MODULE.FleetRunner.__new__(MODULE.FleetRunner)
+        runner.arguments = arguments
+
+        ports = runner.port_plan()
+
+        self.assertEqual(len(ports["clients"]), 12)
+        self.assertEqual(ports["clients"][-1]["index"], 12)
+
     def test_scratch_defaults_to_the_platform_temp_directory(self):
         with mock.patch.object(
             MODULE.platform, "system", return_value="Darwin"
@@ -1040,6 +1422,7 @@ class IsolatedInputTests(unittest.TestCase):
                 tcp_port=31_121,
                 udp_port=31_122,
                 reference_port=31_111,
+                control_mode=1,
                 width=800,
                 height=600,
             )
@@ -1054,6 +1437,7 @@ class IsolatedInputTests(unittest.TestCase):
             )
             self.assertIn("PortTCP=31121\n", text)
             self.assertIn("PortUDP=31122\n", text)
+            self.assertIn("ControlMode=1\n", text)
 
             profile = root / "LoadPlayer-01.c4p"
             big_icon = root / "source-icon.png"
@@ -1187,6 +1571,129 @@ class LogEvidenceTests(unittest.TestCase):
 
 
 class ProcessLifecycleTests(unittest.TestCase):
+    def test_collect_results_rejects_overlapping_input_owners_across_clients(self):
+        def input_metrics(player=None):
+            metrics = {
+                "elapsed_seconds": 1.0,
+                "submitted_inputs": 2,
+                "executed_inputs": 2,
+                "pending_inputs": 0,
+                "input_latency_sample_count": 2,
+                "input_latency_p50_ms": 10.0,
+                "input_latency_p95_ms": 10.0,
+                "input_latency_p99_ms": 10.0,
+                "input_latency_max_ms": 10.0,
+                "input_latency_samples_ns": [10_000_000, 10_000_000],
+            }
+            return metrics if player is None else {"player": player, **metrics}
+
+        def report(local_client_id):
+            player_reports = [input_metrics(0), input_metrics(1)]
+            return {
+                "elapsed_seconds": 1.0,
+                "successful_present_submissions": 0,
+                "presentation_submission_fps": 0.0,
+                "refreshed_frames": 0,
+                "simulation_frames": 38,
+                "simulation_fps": 38.0,
+                "automatic_graphics_skips": 0,
+                "average_graphics_pass_ms": 0.0,
+                "max_graphics_pass_ms": 0.0,
+                "graphics_pass_sample_count": 0,
+                "graphics_pass_p50_ms": 0.0,
+                "graphics_pass_p95_ms": 0.0,
+                "graphics_pass_p99_ms": 0.0,
+                "graphics_pass_samples_ns": [],
+                "benchmark_context": {
+                    "runtime_players": 4,
+                    "synchronized_player_infos": 4,
+                    "activated_nonhost_clients": 2,
+                    "runtime_crew_objects": 4,
+                    "runtime_players_with_live_crew": 4,
+                    "runtime_players_with_exactly_one_live_sf5b_crew": 0,
+                },
+                "network_evidence": benchmark_network_evidence(
+                    local_client_id=local_client_id,
+                    players=2,
+                ),
+                "input_probe": {
+                    **input_metrics(),
+                    "submitted_inputs": 4,
+                    "executed_inputs": 4,
+                    "input_latency_sample_count": 4,
+                    "input_latency_samples_ns": [10_000_000] * 4,
+                },
+                "input_probe_players": player_reports,
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            clients = []
+            for client_index, player_indices in ((1, [1, 2]), (2, [3, 4])):
+                stdout = root / f"client-{client_index:02d}.stdout"
+                stderr = root / f"client-{client_index:02d}.stderr"
+                stdout.write_text("", encoding="utf-8")
+                stderr.write_text("", encoding="utf-8")
+                clients.append(
+                    {
+                        "index": client_index,
+                        "name": f"LoadClient-{client_index:02d}",
+                        "client_name": f"LoadClient-{client_index:02d}",
+                        "player_indices": player_indices,
+                        "player_names": [
+                            f"LoadPlayer-{player_index:02d}"
+                            for player_index in player_indices
+                        ],
+                        "stdout_path": stdout,
+                        "stderr_path": stderr,
+                        "session_log_path": root / f"client-{client_index:02d}.log",
+                        "all_report_barrier_observed": True,
+                        "exit_code": 0,
+                        "process": SimpleNamespace(pid=100 + client_index),
+                        "supervisor_terminated": False,
+                        "command": [f"client-{client_index:02d}"],
+                    }
+                )
+
+            runner = MODULE.FleetRunner.__new__(MODULE.FleetRunner)
+            runner.arguments = SimpleNamespace(
+                players=4,
+                clients=2,
+                measurement_seconds=1,
+                minimum_simulation_fps=38.0,
+                minimum_presentation_fps=35.0,
+                maximum_graphics_p99_ms=25.0,
+                maximum_network_lag_ms=100.0,
+                skip_sf5b_crew_assertion=True,
+                runtime_only=True,
+                input_probe_interval_ms=500,
+                maximum_input_latency_ms=100.0,
+                minimum_input_success_percent=95.0,
+                control_mode=2,
+            )
+            runner.clients = clients
+            runner.host = None
+            runner.failures = []
+            runner.artifact_dir = root
+            runner.admission_samples = []
+            runner.started_utc = "2026-08-09T00:00:00+00:00"
+            runner.started_monotonic = MODULE.time.monotonic()
+
+            with mock.patch.object(
+                MODULE,
+                "extract_benchmark_report",
+                side_effect=[report(1), report(2)],
+            ):
+                result = runner.collect_results()
+
+        self.assertEqual(result["result"], "fail")
+        self.assertTrue(
+            any(
+                "input player owners are not the exact runtime fleet" in failure
+                for failure in result["failures"]
+            )
+        )
+
     def test_input_fingerprint_rejects_same_name_source_and_parent_content_byte_drift(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)

@@ -951,6 +951,8 @@ fn run() -> Result<()> {
         let mut render_floor = RenderFloor::default();
         let mut presentation_detail = PresentationDetailGovernor::default();
         let mut presentation_benchmark = presentation_benchmark_from_env();
+        let mut presentation_benchmark_runtime_readiness =
+            PresentationBenchmarkRuntimeReadiness::default();
         let presentation_benchmark_asserts_native_tick =
             presentation_benchmark_asserts_native_tick();
         let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
@@ -1201,12 +1203,10 @@ fn run() -> Result<()> {
                     // before probes and simulation so its window is exactly
                     // half-open: [started, deadline).
                     let benchmark_now = Instant::now();
+                    let benchmark_runtime_ready =
+                        presentation_benchmark_runtime_readiness.ready(app.mode);
                     if let Some(report) = presentation_benchmark.as_mut().and_then(|benchmark| {
-                        benchmark.poll(
-                            app.mode == AppMode::Running,
-                            benchmark_now,
-                            app.engine.frame(),
-                        )
+                        benchmark.poll(benchmark_runtime_ready, benchmark_now, app.engine.frame())
                     }) {
                         finish_app_presentation_benchmark(
                             event_target,
@@ -1242,6 +1242,8 @@ fn run() -> Result<()> {
                             return;
                         }
                     };
+                    presentation_benchmark_runtime_readiness
+                        .observe(app.mode, simulation_pass.executed_frames);
                     if simulation_pass.skipped_render_frames > 0 {
                         tracing::trace!(
                             frames = simulation_pass.executed_frames,

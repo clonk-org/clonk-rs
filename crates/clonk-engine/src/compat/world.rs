@@ -1641,6 +1641,7 @@ pub(crate) struct HostDefinitionTables {
     linked_script_hosts: Rc<Vec<(String, Arc<ScriptEngine>)>>,
     standard_crew_names: Option<String>,
     definition_crew_names: Rc<HashMap<String, String>>,
+    pub(crate) reloadable_definitions: Rc<HashSet<String>>,
     reference_parameter_slots: Rc<HashMap<String, u32>>,
     direct_call_function_names: Rc<HashSet<String>>,
 }
@@ -1724,6 +1725,7 @@ impl HostDefinitionTables {
         linked_script_hosts: Vec<(String, Arc<ScriptEngine>)>,
         standard_crew_names: Option<String>,
         definition_crew_names: HashMap<String, String>,
+        reloadable_definitions: HashSet<String>,
     ) -> Self {
         Self {
             color_by_owner: Rc::new(color_by_owner),
@@ -1745,6 +1747,7 @@ impl HostDefinitionTables {
             linked_script_hosts: Rc::new(linked_script_hosts),
             standard_crew_names,
             definition_crew_names: Rc::new(definition_crew_names),
+            reloadable_definitions: Rc::new(reloadable_definitions),
         }
     }
 
@@ -1822,6 +1825,7 @@ pub(crate) struct LazyHostWorldProvider {
     source: *const (),
     object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
     objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
+    player: Option<unsafe fn(*const (), i32) -> Option<PlayerState>>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
     master_order: Option<
         unsafe fn(*const (), &HashMap<ObjectId, ObjectStatus>, &HashSet<usize>) -> Vec<ObjectId>,
@@ -1870,6 +1874,7 @@ impl LazyHostWorldProvider {
             source,
             object,
             objects,
+            player: None,
             landscape,
             master_order: None,
             landscape_dimensions: None,
@@ -1877,6 +1882,22 @@ impl LazyHostWorldProvider {
             sector_map_borrow: None,
             legacy_find_object: None,
         }
+    }
+
+    /// Supply one callback-entry player projection on first value access.
+    /// Player-number and order queries continue to use the separately seeded
+    /// C4PlayerList order without cloning each C4Player.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`]: player storage must
+    /// remain stable and unmutated until every context clone is dropped.
+    pub(crate) unsafe fn with_player(
+        mut self,
+        player: unsafe fn(*const (), i32) -> Option<PlayerState>,
+    ) -> Self {
+        self.player = Some(player);
+        self
     }
 
     /// Supply the source's callback-entry forward master list without copying
@@ -1967,6 +1988,12 @@ impl LazyHostWorldProvider {
         // SAFETY: see `object`; excluded indices are never dereferenced by a
         // conforming provider.
         unsafe { (self.objects)(self.source, excluded) }
+    }
+
+    fn player(self, id: i32) -> Option<PlayerState> {
+        // SAFETY: see `object`; player storage obeys the same synchronous
+        // source-lifetime contract as object storage.
+        unsafe { (self.player?)(self.source, id) }
     }
 
     fn landscape(self) -> Option<Landscape> {
@@ -2109,7 +2136,10 @@ pub struct HostWorldContext {
     pathfinder_transfer_zones_enabled: bool,
     /// Shared process-presentation sink for the global Game.PathFinder graph.
     pub(crate) pathfinder_debug: Rc<RefCell<PathfinderDebugSnapshot>>,
-    pub(crate) players: Rc<HashMap<i32, PlayerState>>,
+    /// Callback-local player snapshots. Engine contexts seed only the live
+    /// numeric IDs; each state is projected from the paused engine on first
+    /// access and then shared by every clone of this context.
+    player_states: Rc<HashMap<i32, OnceCell<PlayerState>>>,
     /// Runtime-only `C4Player::FoWViewObjs` membership. PlayerState omits
     /// this list, but AssignDeath needs it before Death is called to decide
     /// whether a dead living object retains its view range.
@@ -2339,7 +2369,7 @@ impl Default for HostWorldContext {
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
             pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
-            players: Rc::new(HashMap::new()),
+            player_states: Rc::new(HashMap::new()),
             player_fow_view_objects: Rc::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
             player_info_ids: Rc::new(HashSet::new()),
@@ -2467,6 +2497,15 @@ impl HostWorldContext {
         Rc::make_mut(self.object_store.get_mut()).complete = false;
         if self.landscape.get().is_some_and(Option::is_none) {
             self.landscape = OnceCell::new();
+        }
+        if provider.player.is_some() {
+            self.player_states = Rc::new(
+                self.player_order
+                    .iter()
+                    .copied()
+                    .map(|id| (id, OnceCell::new()))
+                    .collect(),
+            );
         }
         self
     }
@@ -2749,7 +2788,12 @@ impl HostWorldContext {
             active_message_board_input: None,
             player_order: Rc::new(player_ids),
             player_info_ids: Rc::new(player_info_ids),
-            players: Rc::new(players),
+            player_states: Rc::new(
+                players
+                    .into_iter()
+                    .map(|(id, state)| (id, OnceCell::from(state)))
+                    .collect(),
+            ),
             player_fow_view_objects: Rc::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
             teams: Rc::new(Vec::new()),
@@ -2858,10 +2902,10 @@ impl HostWorldContext {
         owner: i32,
         range: i32,
     ) {
-        let player_ids = if self.players.contains_key(&owner) {
+        let player_ids = if self.player_states.contains_key(&owner) {
             vec![owner]
         } else {
-            self.players.keys().copied().collect()
+            self.player_order.as_ref().clone()
         };
         let memberships = Rc::make_mut(&mut self.player_fow_view_objects);
         for player in player_ids {
@@ -2882,10 +2926,10 @@ impl HostWorldContext {
         new_owner: i32,
         range: i32,
     ) {
-        let old_player_ids = if self.players.contains_key(&old_owner) {
+        let old_player_ids = if self.player_states.contains_key(&old_owner) {
             vec![old_owner]
         } else {
-            self.players.keys().copied().collect()
+            self.player_order.as_ref().clone()
         };
         let memberships = Rc::make_mut(&mut self.player_fow_view_objects);
         for player in old_player_ids {
@@ -2969,18 +3013,29 @@ impl HostWorldContext {
         let player_order = Rc::make_mut(&mut self.player_order);
         player_order.clear();
         for id in players {
-            if self.players.contains_key(&id) && !player_order.contains(&id) {
+            if self.player_states.contains_key(&id) && !player_order.contains(&id) {
                 player_order.push(id);
             }
         }
 
         let fallback_start = player_order.len();
-        for id in self.players.keys().copied() {
+        for id in self.player_states.keys().copied() {
             if !player_order.contains(&id) {
                 player_order.push(id);
             }
         }
         player_order[fallback_start..].sort_unstable();
+        self
+    }
+
+    /// Install the already-validated native C4PlayerList order. Engine
+    /// callback contexts use this before attaching their lazy player source;
+    /// fixture contexts continue to use [`Self::with_player_order`].
+    pub(crate) fn with_live_player_order<I>(mut self, players: I) -> Self
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        self.player_order = Rc::new(players.into_iter().collect());
         self
     }
 
@@ -3435,10 +3490,10 @@ impl HostWorldContext {
     /// Seed `FnReloadDef`'s synchronous answer and its request channel.
     pub(crate) fn with_definition_reloads(
         mut self,
-        reloadable: std::collections::HashSet<String>,
+        reloadable: Rc<std::collections::HashSet<String>>,
         requests: Rc<RefCell<Vec<String>>>,
     ) -> Self {
-        self.reloadable_definitions = Some(Rc::new(reloadable));
+        self.reloadable_definitions = Some(reloadable);
         self.definition_reload_requests = requests;
         self
     }
@@ -4700,8 +4755,24 @@ impl HostWorldContext {
         self.player_order.as_ref()
     }
 
+    pub(crate) fn has_player(&self, id: i32) -> bool {
+        self.player_states.contains_key(&id)
+    }
+
     pub(crate) fn player(&self, id: i32) -> Option<&PlayerState> {
-        self.players.get(&id)
+        let state = self.player_states.get(&id)?;
+        if state.get().is_none() {
+            let projected = self.lazy_world?.player(id)?;
+            let _ = state.set(projected);
+        }
+        state.get()
+    }
+
+    pub(crate) fn player_states(&self) -> impl Iterator<Item = (i32, &PlayerState)> {
+        self.player_order
+            .iter()
+            .copied()
+            .filter_map(|id| self.player(id).map(|state| (id, state)))
     }
 
     pub(crate) fn control_key_name(

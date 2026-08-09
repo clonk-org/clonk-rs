@@ -15758,6 +15758,129 @@ mod tests {
         client_loop.await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn central_client_recovers_a_missing_due_tick_after_go_without_requesting_the_future() {
+        async fn next_request<S>(transport: &mut crate::ControlTransport<S>) -> ControlMessage
+        where
+            S: AsyncRead + AsyncWrite + Unpin,
+        {
+            loop {
+                match transport.read_message().await.unwrap() {
+                    request @ ControlMessage::Request { .. } => return request,
+                    ControlMessage::Ping(ping) => {
+                        transport
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("expected control request, got {other:?}"),
+                }
+            }
+        }
+
+        // C++ requests missing controls every two seconds (oracle-src-pinned
+        // src/C4GameControlNetwork.h:31), then clears the finite startup target
+        // when GO starts normal control execution (oracle-src-pinned
+        // src/C4Network2.cpp:2101-2109; src/C4GameControlNetwork.h:144;
+        // src/C4GameControlNetwork.cpp:329-337). Rust extends that liveness into
+        // the asynchronous runtime worker, but only through the latest control
+        // tick the application has actually reached.
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.register(1).unwrap();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+
+        host_transport
+            .send_message(ControlMessage::Status(running))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(ClientEvent::Status(status)) if status == running
+        ));
+        command_tx
+            .send(ClientCommand::SubmitStatusAck(running))
+            .await
+            .unwrap();
+        assert_eq!(
+            host_transport.read_message().await.unwrap(),
+            ControlMessage::StatusAck(running)
+        );
+        host_transport
+            .send_message(ControlMessage::StatusAck(running))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(ClientEvent::StatusAck(status)) if status == running
+        ));
+
+        let local = legacy_packet(1, 0, 0x21);
+        command_tx
+            .send(ClientCommand::SubmitControl(local.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            host_transport.read_message().await.unwrap(),
+            ControlMessage::Control(local)
+        );
+
+        let reached_at = tokio::time::Instant::now();
+        command_tx
+            .send(ClientCommand::ControlTickReached {
+                tick: 0,
+                reached_at,
+            })
+            .await
+            .unwrap();
+        tokio::time::advance(CONTROL_REQUEST_INTERVAL).await;
+        assert_eq!(
+            timeout(Duration::from_millis(1), next_request(&mut host_transport))
+                .await
+                .expect("missing due runtime control was not requested"),
+            ControlMessage::Request { from_tick: 0 }
+        );
+
+        let recovered = legacy_packet(BROADCAST_CLIENT_ID, 0, 0x30);
+        host_transport
+            .send_message(ControlMessage::Control(recovered.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(ClientEvent::Ready { packet }) if packet == recovered
+        ));
+
+        tokio::time::advance(CONTROL_REQUEST_INTERVAL).await;
+        assert!(
+            timeout(Duration::from_millis(1), next_request(&mut host_transport))
+                .await
+                .is_err(),
+            "recovery crossed the last runtime control tick the application reached"
+        );
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn client_graceful_part_sends_exact_cpp_removal_frame_before_close() {
         // C4Network2ClientList::DeleteClient asks CloseConns to send a negative

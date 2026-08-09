@@ -349,6 +349,8 @@ std::thread_local! {
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
 }
@@ -10514,6 +10516,8 @@ impl Engine {
     /// "unpacked" is simply the stored path being a directory.
     /// The definitions a reload could re-open — those holding a `Filename`.
     pub fn reloadable_definition_ids(&self) -> std::collections::HashSet<String> {
+        #[cfg(test)]
+        RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         self.definitions
             .iter()
             .filter(|(_, definition)| definition.source_path().is_some())

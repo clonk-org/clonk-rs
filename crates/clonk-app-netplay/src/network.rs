@@ -389,6 +389,12 @@ enum NetworkRole {
 const MAX_CONTROL_RATE: i32 = 20;
 const MAX_CONTROL_PRESEND: i32 = 15;
 const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
+/// Central/async mode publishes host-route timing while every process is still
+/// initializing its player batch. The immediate-attack estimator must not seed
+/// from that transient. Count one second of simulation so the grace stays
+/// stable when scripts change ControlRate; even the maximum 20-frame cadence
+/// reaches the first adaptive sample inside the benchmark's two-second warmup.
+const HOST_ROUTED_STARTUP_SIMULATION_FRAMES: u64 = 38;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlPreSendChange {
@@ -414,6 +420,9 @@ pub struct NetworkControlClock {
     /// Sizes PreSend from the delivery-time tail rather than its mean. See
     /// `ControlLatencyEstimator` and the PORT_STATUS divergence entry.
     latency: ControlLatencyEstimator,
+    /// Simulation frames represented by completed control intervals after GO.
+    startup_simulation_frames_completed: u64,
+    last_completed_control_frame: Option<u64>,
 }
 
 impl NetworkControlClock {
@@ -430,6 +439,8 @@ impl NetworkControlClock {
             target_tick: None,
             local_activated: None,
             latency: ControlLatencyEstimator::new(),
+            startup_simulation_frames_completed: 0,
+            last_completed_control_frame: None,
         }
     }
 
@@ -547,7 +558,7 @@ impl NetworkControlClock {
         i64::from(self.avg_control_send_time_us)
     }
 
-    fn update_control_presend(&mut self) -> Option<ControlPreSendChange> {
+    fn update_control_presend(&mut self, control_mode: i32) -> Option<ControlPreSendChange> {
         let ping_sample = self.control_send_time_ms.filter(|sample| *sample != 0);
         if let Some(control_send_time_ms) = ping_sample {
             // Both fields and both expressions are `int32_t` in C++. Preserve
@@ -558,6 +569,11 @@ impl NetworkControlClock {
                 .wrapping_mul(149)
                 .wrapping_add(control_send_time_ms.wrapping_mul(1_000))
                 / 150;
+        }
+        if control_mode != 0
+            && self.startup_simulation_frames_completed < HOST_ROUTED_STARTUP_SIMULATION_FRAMES
+        {
+            return None;
         }
         // The C++ average above stays exactly as C++ computes it because it is
         // the script- and dialog-visible ACT field. Only the PreSend decision
@@ -617,7 +633,14 @@ impl NetworkControlClock {
     /// Keeping it separate from tick advancement ensures a SetPreSend in the
     /// current control cannot affect the sample that was already consumed.
     pub fn calculate_performance(&mut self) -> Option<ControlPreSendChange> {
-        self.update_control_presend()
+        self.calculate_performance_for_mode(0)
+    }
+
+    pub fn calculate_performance_for_mode(
+        &mut self,
+        control_mode: i32,
+    ) -> Option<ControlPreSendChange> {
+        self.update_control_presend(control_mode)
     }
 
     /// Consume the tick whose control frame was admitted by `tick_for_frame`.
@@ -625,6 +648,20 @@ impl NetworkControlClock {
     /// already have changed the cadence before execution completes.
     pub fn complete_control_frame(&mut self) {
         self.control_tick = self.control_tick.wrapping_add(1);
+    }
+
+    /// Consume a control frame and credit only the game frames that elapsed
+    /// since the preceding admitted control. A CID_Set in the current batch
+    /// can change `control_rate` before this method runs, so the current rate is
+    /// not an exact duration for the interval just completed.
+    pub fn complete_control_frame_at(&mut self, frame: u64) {
+        self.control_tick = self.control_tick.wrapping_add(1);
+        if let Some(previous) = self.last_completed_control_frame.replace(frame) {
+            self.startup_simulation_frames_completed = self
+                .startup_simulation_frames_completed
+                .saturating_add(frame.saturating_sub(previous))
+                .min(HOST_ROUTED_STARTUP_SIMULATION_FRAMES);
+        }
     }
 
     /// `C4CVT_ControlRate`: preserve the absolute FrameCounter phase while
@@ -15096,6 +15133,133 @@ Message=Server says Andr\xe9\r\n\
             saturated.complete_control_frame();
         }
         assert_eq!(saturated.control_presend(), 15);
+    }
+
+    /// Native samples performance before it executes the decoded control batch
+    /// (oracle-src-pinned src/C4GameControlNetwork.cpp:102-115 and
+    /// src/C4GameControl.cpp:284-317). Central mode sends controls through the
+    /// host, so startup route timing and the host's wait for a different client
+    /// must not become this client's steady input latency.
+    #[test]
+    fn host_routed_startup_wait_does_not_seed_client_presend() {
+        let mut clock = NetworkControlClock::new(0, 2);
+
+        for frame in (0..=38).step_by(2) {
+            clock.observe_control_send_time_ms(40);
+            clock.observe_control_lateness_ms(5_000);
+            clock.calculate_performance_for_mode(1);
+            clock.complete_control_frame_at(frame);
+        }
+
+        assert_eq!(
+            clock.control_presend(),
+            1,
+            "startup route and JoinPlayer timing are not steady delivery samples"
+        );
+        assert_eq!(clock.control_latency_budget(), Duration::ZERO);
+
+        clock.observe_control_send_time_ms(40);
+        clock.observe_control_lateness_ms(300);
+        assert_eq!(
+            clock.calculate_performance_for_mode(1),
+            Some(ControlPreSendChange {
+                control_presend: 12,
+                target_fps: 38,
+            }),
+            "steady host-routed delivery includes the client's measured lateness"
+        );
+        assert_eq!(clock.control_latency_budget(), Duration::from_millis(300));
+    }
+
+    #[test]
+    fn host_routed_slow_client_grows_presend_after_startup() {
+        let mut clock = NetworkControlClock::new(0, 2);
+
+        for frame in (0..=38).step_by(2) {
+            clock.observe_control_send_time_ms(20);
+            clock.observe_control_lateness_ms(5_000);
+            clock.calculate_performance_for_mode(2);
+            clock.complete_control_frame_at(frame);
+        }
+
+        clock.observe_control_send_time_ms(20);
+        clock.observe_control_lateness_ms(300);
+        let change = clock
+            .calculate_performance_for_mode(2)
+            .expect("an actually slow async client must buy delivery headroom");
+
+        assert!(
+            change.control_presend > 1,
+            "host-route ping alone must not hide the local client's measured lateness"
+        );
+        assert_eq!(clock.control_latency_budget(), Duration::from_millis(300));
+    }
+
+    #[test]
+    fn host_routed_startup_grace_counts_simulation_frames_across_control_rates() {
+        // GO queues the initial player controls before normal frame execution;
+        // performance sampling precedes each decoded batch
+        // (oracle-src-pinned src/C4Network2.cpp:2101-2109,
+        // src/C4Network2Players.cpp:465-482, and
+        // src/C4GameControlNetwork.cpp:404-430).
+        for mode in [1, 2] {
+            for control_rate in [1_u64, 2, 20] {
+                let mut clock = NetworkControlClock::new(0, control_rate as i32);
+                let mut frame = 0_u64;
+
+                while clock.startup_simulation_frames_completed
+                    < HOST_ROUTED_STARTUP_SIMULATION_FRAMES
+                {
+                    clock.observe_control_send_time_ms(40);
+                    clock.observe_control_lateness_ms(5_000);
+                    assert_eq!(
+                        clock.calculate_performance_for_mode(mode),
+                        None,
+                        "mode {mode}, ControlRate {control_rate} adapted during startup"
+                    );
+                    clock.complete_control_frame_at(frame);
+                    frame = frame.saturating_add(control_rate);
+                }
+
+                clock.observe_control_send_time_ms(40);
+                clock.observe_control_lateness_ms(300);
+                assert!(
+                    clock.calculate_performance_for_mode(mode).is_some(),
+                    "mode {mode}, ControlRate {control_rate} did not adapt after startup"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_routed_startup_grace_uses_admitted_frames_across_a_rate_change() {
+        let mut clock = NetworkControlClock::new(0, 2);
+
+        for frame in (0_u64..=34).step_by(2) {
+            clock.observe_control_send_time_ms(40);
+            clock.observe_control_lateness_ms(5_000);
+            assert_eq!(clock.calculate_performance_for_mode(2), None);
+            clock.complete_control_frame_at(frame);
+        }
+
+        clock.observe_control_send_time_ms(40);
+        clock.observe_control_lateness_ms(5_000);
+        assert_eq!(clock.calculate_performance_for_mode(2), None);
+        assert_eq!(clock.adjust_control_rate(2), 4);
+        clock.complete_control_frame_at(36);
+
+        clock.observe_control_send_time_ms(40);
+        clock.observe_control_lateness_ms(5_000);
+        assert_eq!(
+            clock.calculate_performance_for_mode(2),
+            None,
+            "the rate change cannot credit four frames to the two-frame interval"
+        );
+        clock.complete_control_frame_at(40);
+
+        clock.observe_control_send_time_ms(40);
+        clock.observe_control_lateness_ms(300);
+        assert!(clock.calculate_performance_for_mode(2).is_some());
     }
 
     /// A slow *machine* is invisible to ping, and therefore invisible to

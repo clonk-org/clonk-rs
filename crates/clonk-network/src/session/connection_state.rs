@@ -562,6 +562,7 @@ pub(crate) struct ClientControlState {
     pub(crate) coordinator: ControlCoordinator,
     pending_unregistered: BTreeMap<ClientId, BTreeMap<Tick, ControlPacket>>,
     target_tick: Option<Tick>,
+    runtime_recovery_horizon: Option<Tick>,
     central_expected_tick: Tick,
     // The bool records whether central mode already surfaced this future
     // complete packet before the contiguous ready cursor reached it.
@@ -576,6 +577,7 @@ impl ClientControlState {
             coordinator: ControlCoordinator::with_start_tick(CLIENT_BACKLOG_LIMIT, start_tick),
             pending_unregistered: BTreeMap::new(),
             target_tick: None,
+            runtime_recovery_horizon: None,
             central_expected_tick: start_tick,
             pending_complete: BTreeMap::new(),
         }
@@ -600,6 +602,7 @@ impl ClientControlState {
             } else {
                 None
             },
+            runtime_recovery_horizon: None,
             central_expected_tick: start_tick,
             pending_complete: BTreeMap::new(),
         };
@@ -658,6 +661,13 @@ impl ClientControlState {
         self.target_tick = None;
     }
 
+    pub(crate) fn note_runtime_control_tick_reached(&mut self, tick: Tick) {
+        self.runtime_recovery_horizon = Some(
+            self.runtime_recovery_horizon
+                .map_or(tick, |horizon| horizon.max(tick)),
+        );
+    }
+
     pub(crate) fn expected_tick(&self) -> Tick {
         if self.mode == 0 {
             self.coordinator.current_tick()
@@ -667,7 +677,11 @@ impl ClientControlState {
     }
 
     pub(crate) fn recovery_tick(&self) -> Option<Tick> {
-        let target_tick = self.target_tick?;
+        let target_tick = self
+            .target_tick
+            .into_iter()
+            .chain(self.runtime_recovery_horizon)
+            .max()?;
         let expected_tick = self.expected_tick();
         let request_tick = if self.mode == 0 {
             self.coordinator

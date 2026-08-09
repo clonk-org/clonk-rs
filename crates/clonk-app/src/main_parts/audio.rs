@@ -44,6 +44,31 @@ pub(crate) const fn retained_gpu_present_outcome(
     }
 }
 
+struct DeferredRetainedFramePreparation<F> {
+    prepare: Option<F>,
+}
+
+impl<F> DeferredRetainedFramePreparation<F> {
+    fn new(prepare: F) -> Self {
+        Self {
+            prepare: Some(prepare),
+        }
+    }
+
+    fn prepare<T, E>(&mut self) -> std::result::Result<T, E>
+    where
+        F: FnOnce() -> std::result::Result<T, E>,
+    {
+        self.prepare
+            .take()
+            .expect("Pixels invokes its FnOnce render callback at most once")()
+    }
+
+    fn outcome(&self) -> RetainedGpuPresentOutcome {
+        retained_gpu_present_outcome(self.prepare.is_none())
+    }
+}
+
 /// Present Pixels' ordinary CPU buffer while retaining whether a surface frame
 /// was actually available.
 pub(crate) fn present_pixels_frame(
@@ -124,6 +149,24 @@ mod window_api_tests {
             retained_gpu_present_outcome(true),
             RetainedGpuPresentOutcome::Presented
         );
+    }
+
+    #[test]
+    fn retained_frame_preparation_waits_for_an_acquired_drawable() {
+        // C4GraphicsSystem::StartDrawing returns before any draw work when the
+        // application window is hidden (src/C4GraphicsSystem.cpp:96-106).
+        let preparation_count = std::cell::Cell::new(0);
+        let mut preparation = DeferredRetainedFramePreparation::new(|| {
+            preparation_count.set(preparation_count.get() + 1);
+            Ok::<_, std::convert::Infallible>(())
+        });
+
+        assert_eq!(preparation.outcome(), RetainedGpuPresentOutcome::Skipped);
+        assert_eq!(preparation_count.get(), 0);
+
+        preparation.prepare().unwrap();
+        assert_eq!(preparation.outcome(), RetainedGpuPresentOutcome::Presented);
+        assert_eq!(preparation_count.get(), 1);
     }
 
     #[test]
@@ -700,42 +743,64 @@ pub(crate) fn present_retained_gpu_frame(
         scale: geometry.scale(),
         crop_top: geometry.crop_top(),
     };
-    let frame = app.render_retained_gpu_frame(presentation)?;
-    // The landscape draw inside the frame produces the shader composer's
-    // inputs; hand them over before the renderer syncs textures. Always set,
-    // including None, so a frame that composed no landscape clears any plan
-    // left by the previous one.
-    renderer.set_pending_shader_landscape(app.graphics.take_shader_landscape_plan());
-    let layers = frame
-        .layers
-        .iter()
-        .map(|layer| gpu_renderer::GpuSceneLayer::new(&layer.scene, layer.presentation))
-        .collect::<Vec<_>>();
     let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
     let request_current_readback =
         !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
     let mut previous_native_readback = None;
     let mut readback = None;
-    let mut render_callback_invoked = false;
-    let submission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        pixels.render_with(|encoder, surface_view, context| {
-            render_callback_invoked = true;
-            if request_native_save_readback {
-                previous_native_readback =
-                    renderer.readback_last_presentation(&context.device, encoder)?;
-            }
-            readback = renderer.render_layers(
-                &context.device,
-                &context.queue,
-                encoder,
-                surface_view,
-                &layers,
-                request_current_readback
-                    || (request_native_save_readback && previous_native_readback.is_none()),
-            )?;
-            Ok(())
-        })
-    }));
+    let (submission, outcome, frame_preparation_error) = {
+        let mut frame_preparation_error = None;
+        let mut frame_preparation = DeferredRetainedFramePreparation::new(|| {
+            let frame = app.render_retained_gpu_frame(presentation)?;
+            let shader_landscape = app.graphics.take_shader_landscape_plan();
+            Ok::<_, anyhow::Error>((frame, shader_landscape))
+        });
+        let submission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pixels.render_with(|encoder, surface_view, context| {
+                let (frame, shader_landscape) = match frame_preparation.prepare() {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        frame_preparation_error = Some(error);
+                        return Err(
+                            std::io::Error::other("retained GPU frame preparation failed").into(),
+                        );
+                    }
+                };
+                // The landscape draw inside the frame produces the shader
+                // composer's inputs; hand them over before the renderer syncs
+                // textures. Always set, including None, so a frame that composed
+                // no landscape clears any plan left by the previous one.
+                renderer.set_pending_shader_landscape(shader_landscape);
+                let layers = frame
+                    .layers
+                    .iter()
+                    .map(|layer| gpu_renderer::GpuSceneLayer::new(&layer.scene, layer.presentation))
+                    .collect::<Vec<_>>();
+                if request_native_save_readback {
+                    previous_native_readback =
+                        renderer.readback_last_presentation(&context.device, encoder)?;
+                }
+                readback = renderer.render_layers(
+                    &context.device,
+                    &context.queue,
+                    encoder,
+                    surface_view,
+                    &layers,
+                    request_current_readback
+                        || (request_native_save_readback && previous_native_readback.is_none()),
+                )?;
+                Ok(())
+            })
+        }));
+        (
+            submission,
+            frame_preparation.outcome(),
+            frame_preparation_error,
+        )
+    };
+    if let Some(error) = frame_preparation_error {
+        return Err(error);
+    }
     match submission {
         Ok(Ok(())) => renderer
             .check_health()
@@ -764,7 +829,6 @@ pub(crate) fn present_retained_gpu_frame(
         }
     }
 
-    let outcome = retained_gpu_present_outcome(render_callback_invoked);
     if outcome == RetainedGpuPresentOutcome::Skipped {
         // Pixels acquired no drawable. Keep screenshot/save requests queued so
         // the next real presentation can fulfill them from an actual frame.

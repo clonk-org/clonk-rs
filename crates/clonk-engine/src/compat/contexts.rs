@@ -4982,9 +4982,8 @@ impl EffectHostContext {
 
         let players = self
             .world
-            .players
-            .iter()
-            .map(|(&id, state)| {
+            .player_states()
+            .map(|(id, state)| {
                 let state = self.player_overrides.get(&id).unwrap_or(state);
                 (
                     id,

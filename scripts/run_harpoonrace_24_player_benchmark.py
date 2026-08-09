@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Run one real HarpoonRace host and a 24-player rendered client fleet.
+"""Run one real HarpoonRace host and a 24-player network fleet.
 
 The host follows the classic C++ lobby path: it opens HarpoonRace without a
 local player, applies ``/set maxplayer 24`` while still in the lobby, admits
-24 distinct directory-backed ``.c4p`` profiles, and starts only after the
+24 distinct directory-backed ``.c4p`` profiles across configurable clients,
+and starts only after the
 host's exact HTTP reference exposes every PlayerInfo.
 
-This is intentionally an opt-in, process-level benchmark.  It opens 25 native
-windows and should be run from an interactive desktop session on otherwise
-idle hardware.  Results and raw samples are retained below ``target/``.
+This is intentionally an opt-in, process-level benchmark. It opens one native
+window per client and should be run from an interactive desktop session on
+otherwise idle hardware. Results and raw samples are retained below ``target/``.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ MACHINE_FAIL_PREFIX = MACHINE_PREFIX + "result=fail"
 MACHINE_CONTEXT_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_CONTEXT "
 MACHINE_NETWORK_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_NETWORK "
 MACHINE_INPUT_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_INPUT "
+MACHINE_INPUT_PLAYER_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_INPUT_PLAYER "
 FLEET_LOG_FILTER = "info,wgpu_core::device=warn"
 NATIVE_GAME_TICK_MS = 28.0
 BENCHMARK_WARMUP_SECONDS = 2.0
@@ -122,6 +124,7 @@ NETWORK_INTEGER_FIELDS = {
     "nonnegative_lag_peer_count",
     "max_nonnegative_ping_ms",
     "max_nonnegative_lag_ms",
+    "host_message_route_lag_ms",
     "max_packet_loss",
     "control_presend",
     "avg_control_send_time_us",
@@ -281,6 +284,25 @@ def parse_benchmark_input_line(line: str) -> dict[str, Any]:
         raise ValueError("benchmark input counts cannot be negative")
     if any(sample < 0 for sample in fields["input_latency_samples_ns"]):
         raise ValueError("input latency samples cannot be negative")
+    return fields
+
+
+def parse_benchmark_input_player_line(line: str) -> dict[str, Any]:
+    """Parse one player's complete input-latency probe result."""
+
+    line = line.strip()
+    if not line.startswith(MACHINE_INPUT_PLAYER_PREFIX):
+        raise ValueError("line is not a per-player benchmark input result")
+    fields = parse_benchmark_input_line(
+        MACHINE_INPUT_PREFIX + line[len(MACHINE_INPUT_PLAYER_PREFIX) :]
+    )
+    try:
+        player = int(fields["player"], 10)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("per-player benchmark input result has no valid player") from error
+    if player < 0:
+        raise ValueError("per-player benchmark input player cannot be negative")
+    fields["player"] = player
     return fields
 
 
@@ -449,6 +471,11 @@ def extract_benchmark_report(
                 f"observed {len(input_lines)}"
             )
         report["input_probe"] = parse_benchmark_input_line(input_lines[0])
+    report["input_probe_players"] = [
+        parse_benchmark_input_player_line(line)
+        for line in combined_lines
+        if line.startswith(MACHINE_INPUT_PLAYER_PREFIX)
+    ]
     return report
 
 
@@ -490,15 +517,20 @@ def benchmark_failures(
     minimum_presentation_fps: float,
     maximum_graphics_p99_ms: float,
     maximum_network_lag_ms: float,
+    expected_clients: int | None = None,
+    expected_local_players: int = 1,
     require_sf5b_crew: bool = True,
     require_presentation: bool = True,
     input_probe_interval_ms: int = 0,
     maximum_input_latency_ms: float = 100.0,
     minimum_input_success_percent: float = 95.0,
+    control_mode: int = 0,
 ) -> list[str]:
     """Apply the benchmark's local acceptance contract."""
 
     failures: list[str] = []
+    if expected_clients is None:
+        expected_clients = expected_players
     if report["elapsed_seconds"] < expected_seconds:
         failures.append(
             "measured window "
@@ -532,52 +564,70 @@ def benchmark_failures(
                 f"graphics p99 {report['graphics_pass_p99_ms']:.6f}ms is not "
                 f"below {maximum_graphics_p99_ms:.6f}ms"
             )
-    context_fields = [
+    player_context_fields = [
         "runtime_players",
         "synchronized_player_infos",
-        "activated_nonhost_clients",
         "runtime_players_with_live_crew",
     ]
     if require_sf5b_crew:
-        context_fields.append(
+        player_context_fields.append(
             "runtime_players_with_exactly_one_live_sf5b_crew"
         )
-    for field in context_fields:
+    for field in player_context_fields:
         observed = report["benchmark_context"][field]
         if observed != expected_players:
             failures.append(
                 f"benchmark context {field}={observed}, expected "
                 f"{expected_players}"
             )
+    activated_clients = report["benchmark_context"]["activated_nonhost_clients"]
+    if activated_clients != expected_clients:
+        failures.append(
+            "benchmark context activated_nonhost_clients="
+            f"{activated_clients}, expected {expected_clients}"
+        )
 
     network = report["network_evidence"]
     local_client_id = network["local_client_id"]
-    expected_peer_ids = set(range(expected_players + 1))
+    host_routed_control = control_mode != 0
+    expected_peer_ids = set(range(expected_clients + 1))
     expected_peer_ids.discard(local_client_id)
     observed_peer_ids = set(network["preferred_message_route_peer_ids"])
-    if observed_peer_ids != expected_peer_ids:
+    if host_routed_control and 0 not in observed_peer_ids:
+        failures.append("host route is absent from preferred message routes")
+    elif not host_routed_control and observed_peer_ids != expected_peer_ids:
         failures.append(
             "preferred message-route peer coverage "
             f"{sorted(observed_peer_ids)}, expected {sorted(expected_peer_ids)} "
             f"for local client {local_client_id}"
         )
-    expected_peer_count = len(expected_peer_ids)
-    for field, label in (
-        ("nonnegative_ping_peer_count", "ping"),
-        ("nonnegative_lag_peer_count", "lag"),
-    ):
-        observed = network[field]
-        if observed != expected_peer_count:
-            failures.append(
-                f"nonnegative preferred-message-route {label} coverage "
-                f"{observed}/{expected_peer_count}"
-            )
-    max_lag_ms = network["max_nonnegative_lag_ms"]
+    if not host_routed_control:
+        expected_peer_count = len(expected_peer_ids)
+        for field, label in (
+            ("nonnegative_ping_peer_count", "ping"),
+            ("nonnegative_lag_peer_count", "lag"),
+        ):
+            observed = network[field]
+            if observed != expected_peer_count:
+                failures.append(
+                    f"nonnegative preferred-message-route {label} coverage "
+                    f"{observed}/{expected_peer_count}"
+                )
+    max_lag_ms = network[
+        "host_message_route_lag_ms"
+        if host_routed_control
+        else "max_nonnegative_lag_ms"
+    ]
+    lag_label = (
+        "host message-route lag"
+        if host_routed_control
+        else "maximum message-route lag"
+    )
     if max_lag_ms < 0:
-        failures.append("benchmark produced no nonnegative message-route lag sample")
+        failures.append(f"benchmark produced no nonnegative {lag_label} sample")
     elif max_lag_ms > maximum_network_lag_ms:
         failures.append(
-            f"maximum message-route lag {max_lag_ms}ms exceeds "
+            f"{lag_label} {max_lag_ms}ms exceeds "
             f"{maximum_network_lag_ms:.3f}ms"
         )
 
@@ -623,8 +673,51 @@ def benchmark_failures(
                     interval_ms=input_probe_interval_ms,
                     maximum_latency_ms=maximum_input_latency_ms,
                     minimum_success_percent=minimum_input_success_percent,
+                    local_players=expected_local_players,
                 )
             )
+            player_reports = report.get("input_probe_players", [])
+            player_ids = [player_report["player"] for player_report in player_reports]
+            if len(player_reports) != expected_local_players or len(player_ids) != len(
+                set(player_ids)
+            ):
+                failures.append(
+                    f"per-player input results {len(player_reports)}, expected "
+                    f"{expected_local_players} unique local players"
+                )
+            else:
+                for player_report in player_reports:
+                    failures.extend(
+                        f"player {player_report['player']}: {failure}"
+                        for failure in input_probe_failures(
+                            player_report,
+                            expected_seconds=expected_seconds,
+                            interval_ms=input_probe_interval_ms,
+                            maximum_latency_ms=maximum_input_latency_ms,
+                            minimum_success_percent=minimum_input_success_percent,
+                        )
+                    )
+                for field in (
+                    "submitted_inputs",
+                    "executed_inputs",
+                    "pending_inputs",
+                    "input_latency_sample_count",
+                ):
+                    total = sum(player_report[field] for player_report in player_reports)
+                    if total != input_probe[field]:
+                        failures.append(
+                            f"per-player {field} total {total} does not match "
+                            f"aggregate {input_probe[field]}"
+                        )
+                per_player_samples = sorted(
+                    sample
+                    for player_report in player_reports
+                    for sample in player_report["input_latency_samples_ns"]
+                )
+                if per_player_samples != sorted(input_probe["input_latency_samples_ns"]):
+                    failures.append(
+                        "per-player input latency samples do not match aggregate samples"
+                    )
     return failures
 
 
@@ -635,6 +728,7 @@ def input_probe_failures(
     interval_ms: int,
     maximum_latency_ms: float,
     minimum_success_percent: float,
+    local_players: int = 1,
 ) -> list[str]:
     """Validate every local input probe against its exact raw evidence."""
 
@@ -664,7 +758,9 @@ def input_probe_failures(
     # submissions for every interval. Permit one missed pair at the boundary,
     # but count every pending input against the denominator below.
     minimum_submissions = max(
-        0, 2 * ((expected_seconds * 1_000) // interval_ms) - 2
+        0,
+        2 * local_players * ((expected_seconds * 1_000) // interval_ms)
+        - 2 * local_players,
     )
     if submitted < minimum_submissions:
         failures.append(
@@ -882,6 +978,7 @@ def write_process_config(
     tcp_port: int,
     udp_port: int,
     reference_port: int,
+    control_mode: int,
     width: int,
     height: int,
 ) -> None:
@@ -904,7 +1001,7 @@ def write_process_config(
         "MasterServerSignUp=false\n"
         "EnableUPnP=false\n"
         "NoRuntimeJoin=true\n"
-        "ControlMode=0\n"
+        f"ControlMode={control_mode}\n"
         "ControlRate=2\n"
         "AsyncMaxWait=2\n"
         "\n"
@@ -1200,6 +1297,41 @@ def reference_has_fleet(
     )
 
 
+def distribute_player_indices(players: int, clients: int) -> list[list[int]]:
+    """Assign every ordered player profile to one balanced client process."""
+
+    if players <= 0 or clients <= 0 or clients > players:
+        raise ValueError("clients and players must be positive, with clients <= players")
+    base, extra = divmod(players, clients)
+    groups: list[list[int]] = []
+    next_player = 1
+    for client_offset in range(clients):
+        count = base + int(client_offset < extra)
+        groups.append(list(range(next_player, next_player + count)))
+        next_player += count
+    return groups
+
+
+def configured_client_count(arguments: argparse.Namespace) -> int:
+    clients = getattr(arguments, "clients", None)
+    return arguments.players if clients is None else clients
+
+
+def client_player_assignments(client: dict[str, Any]) -> list[tuple[int, str]]:
+    names = client.get("player_names")
+    if names is None:
+        return [
+            (
+                client.get("player_index", client.get("index", 0)),
+                client["player_name"],
+            )
+        ]
+    indices = client.get("player_indices")
+    if indices is None or len(indices) != len(names):
+        raise ValueError("client player names and indices must have equal lengths")
+    return list(zip(indices, names, strict=True))
+
+
 def file_log_statistics(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {
@@ -1373,6 +1505,9 @@ class FleetRunner:
             )
         if self.arguments.players <= 0:
             raise FleetFailure("--players must be positive")
+        clients = configured_client_count(self.arguments)
+        if clients <= 0 or clients > self.arguments.players:
+            raise FleetFailure("--clients must be positive and no greater than --players")
         if self.arguments.measurement_seconds <= 0:
             raise FleetFailure("--measurement-seconds must be positive")
         finite_nonnegative = {
@@ -1431,7 +1566,7 @@ class FleetRunner:
         if self.arguments.window_width <= 0 or self.arguments.window_height <= 0:
             raise FleetFailure("window dimensions must be positive")
         maximum_port = (
-            self.arguments.base_port + 10 + (self.arguments.players - 1) * 2 + 1
+            self.arguments.base_port + 10 + (clients - 1) * 2 + 1
         )
         if self.arguments.base_port < 1024 or maximum_port > 65_535:
             raise FleetFailure(
@@ -1523,7 +1658,7 @@ class FleetRunner:
                     "tcp": base + 10 + (index - 1) * 2,
                     "udp": base + 11 + (index - 1) * 2,
                 }
-                for index in range(1, self.arguments.players + 1)
+                for index in range(1, configured_client_count(self.arguments) + 1)
             ],
         }
 
@@ -1645,7 +1780,7 @@ class FleetRunner:
         *,
         index: int,
         config: Path,
-        profile: Path,
+        profiles: Sequence[Path],
         tcp_port: int,
         udp_port: int,
         reference_port: int,
@@ -1657,7 +1792,7 @@ class FleetRunner:
             str(config),
             "--player-name",
             client_name,
-            str(profile),
+            *(str(profile) for profile in profiles),
             f"/join:127.0.0.1:{reference_port}",
             "/nosignup",
             f"/tcpport:{tcp_port}",
@@ -1667,24 +1802,31 @@ class FleetRunner:
     def dry_run_plan(self) -> dict[str, Any]:
         ports = self.port_plan()
         placeholder = Path("<RUN>")
+        profile_groups = distribute_player_indices(
+            self.arguments.players, len(ports["clients"])
+        )
         clients = [
             self.client_command(
                 index=client["index"],
                 config=placeholder
                 / f"client-{client['index']:02d}"
                 / "config.ini",
-                profile=placeholder
-                / "profiles"
-                / f"LoadPlayer-{client['index']:02d}.c4p",
+                profiles=[
+                    placeholder / "profiles" / f"LoadPlayer-{player_index:02d}.c4p"
+                    for player_index in player_indices
+                ],
                 tcp_port=client["tcp"],
                 udp_port=client["udp"],
                 reference_port=ports["reference"],
             )
-            for client in ports["clients"]
+            for client, player_indices in zip(
+                ports["clients"], profile_groups, strict=True
+            )
         ]
         return {
             "topology": "one local classic console host plus rendered GUI clients",
             "players": self.arguments.players,
+            "clients": len(ports["clients"]),
             "host_has_player": False,
             "scenario": str(self.scenario),
             "ports": ports,
@@ -1732,7 +1874,8 @@ class FleetRunner:
             "topology": {
                 "kind": "single-machine-process-fleet",
                 "host_processes": 1,
-                "rendered_client_processes": self.arguments.players,
+                "rendered_client_processes": configured_client_count(self.arguments),
+                "remote_player_profiles": self.arguments.players,
                 "host_has_player": False,
                 "limitations": [
                     "All rendered clients share one CPU and GPU; this measures "
@@ -1783,6 +1926,8 @@ class FleetRunner:
             },
             "settings": {
                 "players": self.arguments.players,
+                "clients": configured_client_count(self.arguments),
+                "control_mode": self.arguments.control_mode,
                 "measurement_seconds": self.arguments.measurement_seconds,
                 "join_stagger_ms": self.arguments.join_stagger_ms,
                 "settle_seconds": self.arguments.settle_seconds,
@@ -1968,6 +2113,7 @@ class FleetRunner:
             tcp_port=ports["host_tcp"],
             udp_port=ports["host_udp"],
             reference_port=ports["reference"],
+            control_mode=self.arguments.control_mode,
             width=self.arguments.window_width,
             height=self.arguments.window_height,
         )
@@ -1979,26 +2125,23 @@ class FleetRunner:
         profile_evidence.mkdir(parents=True, exist_ok=True)
         clients: list[dict[str, Any]] = []
         profile_manifest: list[dict[str, Any]] = []
-        for port_spec in ports["clients"]:
+        profile_groups = distribute_player_indices(
+            self.arguments.players, len(ports["clients"])
+        )
+        for port_spec, player_indices in zip(
+            ports["clients"], profile_groups, strict=True
+        ):
             index = port_spec["index"]
             client_root = self.scratch / f"client-{index:02d}"
             config = client_root / "config.ini"
-            profile_name = f"LoadPlayer-{index:02d}"
             client_name = f"LoadClient-{index:02d}"
-            profile = profiles_root / f"{profile_name}.c4p"
-            write_distinct_profile(
-                profile,
-                profile_name,
-                index,
-                self.arguments.players,
-                big_icon=self.profile_big_icon,
-            )
             write_process_config(
                 config,
                 name=client_name,
                 tcp_port=port_spec["tcp"],
                 udp_port=port_spec["udp"],
                 reference_port=ports["reference"],
+                control_mode=self.arguments.control_mode,
                 width=self.arguments.window_width,
                 height=self.arguments.window_height,
             )
@@ -2009,32 +2152,46 @@ class FleetRunner:
             shutil.copy2(
                 config, client_evidence / "config.initial.ini"
             )
-            evidence = profile_evidence / f"{profile_name}.Player.txt"
-            shutil.copy2(profile / "Player.txt", evidence)
-            icon_evidence = profile_evidence / f"{profile_name}.BigIcon.png"
-            shutil.copy2(profile / "BigIcon.png", icon_evidence)
-            profile_manifest.append(
-                {
-                    "index": index,
-                    "client_name": client_name,
-                    "player_name": profile_name,
-                    "profile_path": str(profile),
-                    "player_core_sha256": sha256_file(profile / "Player.txt"),
-                    "big_icon_sha256": sha256_file(
-                        profile / "BigIcon.png"
-                    ),
-                    "tcp_port": port_spec["tcp"],
-                    "udp_port": port_spec["udp"],
-                }
-            )
+            profiles: list[Path] = []
+            player_names: list[str] = []
+            for player_index in player_indices:
+                profile_name = f"LoadPlayer-{player_index:02d}"
+                profile = profiles_root / f"{profile_name}.c4p"
+                write_distinct_profile(
+                    profile,
+                    profile_name,
+                    player_index,
+                    self.arguments.players,
+                    big_icon=self.profile_big_icon,
+                )
+                evidence = profile_evidence / f"{profile_name}.Player.txt"
+                shutil.copy2(profile / "Player.txt", evidence)
+                icon_evidence = profile_evidence / f"{profile_name}.BigIcon.png"
+                shutil.copy2(profile / "BigIcon.png", icon_evidence)
+                profiles.append(profile)
+                player_names.append(profile_name)
+                profile_manifest.append(
+                    {
+                        "index": player_index,
+                        "client_index": index,
+                        "client_name": client_name,
+                        "player_name": profile_name,
+                        "profile_path": str(profile),
+                        "player_core_sha256": sha256_file(profile / "Player.txt"),
+                        "big_icon_sha256": sha256_file(profile / "BigIcon.png"),
+                        "tcp_port": port_spec["tcp"],
+                        "udp_port": port_spec["udp"],
+                    }
+                )
             clients.append(
                 {
                     "index": index,
                     "root": client_root,
                     "config": config,
-                    "profile": profile,
+                    "profiles": profiles,
+                    "player_indices": player_indices,
                     "client_name": client_name,
-                    "player_name": profile_name,
+                    "player_names": player_names,
                     "tcp_port": port_spec["tcp"],
                     "udp_port": port_spec["udp"],
                 }
@@ -2067,7 +2224,7 @@ class FleetRunner:
             command = self.client_command(
                 index=spec["index"],
                 config=spec["config"],
-                profile=spec["profile"],
+                profiles=spec["profiles"],
                 tcp_port=spec["tcp_port"],
                 udp_port=spec["udp_port"],
                 reference_port=reference_port,
@@ -2088,7 +2245,11 @@ class FleetRunner:
                 time.sleep(self.arguments.join_stagger_ms / 1_000.0)
 
     def wait_for_player_admission(self) -> None:
-        expected = {client["player_name"]: client for client in self.clients}
+        expected = {
+            player_name: (player_index, client)
+            for client in self.clients
+            for player_index, player_name in client_player_assignments(client)
+        }
         expected_player_names = set(expected)
         expected_client_names = {
             client["client_name"] for client in self.clients
@@ -2122,7 +2283,7 @@ class FleetRunner:
                 continue
             now = time.monotonic()
             current_players = reference_player_names(last_reference)
-            for player_name, client in expected.items():
+            for player_name, (player_index, client) in expected.items():
                 if player_name in admitted:
                     continue
                 if player_name in current_players:
@@ -2131,7 +2292,8 @@ class FleetRunner:
                         now - client["launched_monotonic"]
                     ) * 1_000.0
                     sample = {
-                        "index": client["index"],
+                        "index": player_index,
+                        "client_index": client["index"],
                         "client_name": client["client_name"],
                         "player_name": player_name,
                         "startup_to_player_info_admission_ms": latency_ms,
@@ -2211,7 +2373,9 @@ class FleetRunner:
             state="Lobby",
             max_players=self.arguments.players,
             player_names={
-                client["player_name"] for client in self.clients
+                player_name
+                for client in self.clients
+                for _, player_name in client_player_assignments(client)
             },
             client_names={
                 client["client_name"] for client in self.clients
@@ -2584,6 +2748,7 @@ class FleetRunner:
         average_control_send_time_us: list[float] = []
         protocol_totals = {"tcp": 0, "udp": 0, "unknown": 0}
         local_client_ids: list[int] = []
+        input_player_owners: list[int] = []
 
         for client in sorted(self.clients, key=lambda record: record["index"]):
             stdout = (
@@ -2634,6 +2799,8 @@ class FleetRunner:
                         report,
                         expected_seconds=self.arguments.measurement_seconds,
                         expected_players=self.arguments.players,
+                        expected_clients=configured_client_count(self.arguments),
+                        expected_local_players=len(client_player_assignments(client)),
                         minimum_simulation_fps=(
                             self.arguments.minimum_simulation_fps
                         ),
@@ -2659,6 +2826,7 @@ class FleetRunner:
                         minimum_input_success_percent=(
                             self.arguments.minimum_input_success_percent
                         ),
+                        control_mode=self.arguments.control_mode,
                     )
                 )
             except (ValueError, OverflowError) as error:
@@ -2676,6 +2844,10 @@ class FleetRunner:
                 retained_texture_log_failures(client_log_statistics)
             )
             if report is not None:
+                input_player_owners.extend(
+                    player_report["player"]
+                    for player_report in report.get("input_probe_players", [])
+                )
                 graphics_ms = [
                     sample / 1_000_000.0
                     for sample in report["graphics_pass_samples_ns"]
@@ -2728,7 +2900,10 @@ class FleetRunner:
                 {
                     "index": client["index"],
                     "client_name": client["client_name"],
-                    "player_name": client["player_name"],
+                    "player_names": [
+                        player_name
+                        for _, player_name in client_player_assignments(client)
+                    ],
                     "pid": client["process"].pid,
                     "exit_code": client["exit_code"],
                     "supervisor_terminated_after_all_reports": (
@@ -2743,7 +2918,9 @@ class FleetRunner:
                 }
             )
 
-        expected_local_client_ids = set(range(1, self.arguments.players + 1))
+        expected_local_client_ids = set(
+            range(1, configured_client_count(self.arguments) + 1)
+        )
         observed_local_client_ids = set(local_client_ids)
         if (
             len(local_client_ids) == len(self.clients)
@@ -2757,6 +2934,14 @@ class FleetRunner:
                 f"observed={sorted(local_client_ids)} "
                 f"expected={sorted(expected_local_client_ids)}"
             )
+        if self.arguments.input_probe_interval_ms > 0:
+            expected_input_player_owners = list(range(self.arguments.players))
+            if sorted(input_player_owners) != expected_input_player_owners:
+                self.failures.append(
+                    "benchmark input player owners are not the exact runtime fleet: "
+                    f"observed={sorted(input_player_owners)} "
+                    f"expected={expected_input_player_owners}"
+                )
 
         host_errors: list[str] = []
         if self.host is not None:
@@ -2808,6 +2993,7 @@ class FleetRunner:
             "finished_utc": utc_now(),
             "duration_seconds": time.monotonic() - self.started_monotonic,
             "players_requested": self.arguments.players,
+            "clients_requested": configured_client_count(self.arguments),
             "players_admitted_before_start": len(self.admission_samples),
             "clients_with_reports": sum(
                 client["report"] is not None for client in raw_clients
@@ -2841,7 +3027,7 @@ class FleetRunner:
                     "minimum_success_percent": (
                         self.arguments.minimum_input_success_percent
                     ),
-                    "minimum_submissions": (
+                    "minimum_submissions_per_local_player": (
                         0
                         if self.arguments.input_probe_interval_ms == 0
                         else max(
@@ -2856,8 +3042,8 @@ class FleetRunner:
                     ),
                 },
                 "preferred_message_route_topology": (
-                    "full mesh benchmark requirement; C++ relay fallback "
-                    "remains valid engine behavior"
+                    "host route required in central/async mode; exact peer "
+                    "coverage required in decentral mode"
                 ),
                 "automatic_graphics_skips": (
                     "reported; bounded by presentation FPS"
@@ -2920,8 +3106,9 @@ class FleetRunner:
             "host_errors": host_errors,
             "failures": self.failures,
             "limitations": [
-                f"All {self.arguments.players} rendered clients ran on one "
-                "machine and shared its CPU and GPU. Compare only matching "
+                f"All {self.arguments.players} players across "
+                f"{configured_client_count(self.arguments)} rendered clients ran "
+                "on one machine and shared its CPU and GPU. Compare only matching "
                 "topology/hardware fingerprints.",
                 "The post-measurement snapshot exports current preferred-route "
                 "ping/lag/loss, not a time series. Startup-to-admission timing "
@@ -3059,7 +3246,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Host a classic HarpoonRace lobby, admit 24 distinct player "
-            "clients, and retain process-level performance evidence."
+            "profiles across configurable client processes, and retain "
+            "process-level performance evidence."
         )
     )
     parser.add_argument(
@@ -3097,6 +3285,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=24,
         help="number of distinct remote player profiles (default: 24)",
+    )
+    parser.add_argument(
+        "--clients",
+        type=int,
+        default=None,
+        help="number of remote client processes (default: one per player)",
+    )
+    parser.add_argument(
+        "--control-mode",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help="network control mode: 0 decentral, 1 central, 2 asynchronous",
     )
     parser.add_argument(
         "--measurement-seconds",

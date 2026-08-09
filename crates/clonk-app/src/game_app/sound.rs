@@ -718,6 +718,10 @@ impl GameApp {
                         // C++ GetControl::CalcPerformance precedes decoded
                         // Control.Execute. Its flash therefore precedes (and
                         // may be replaced by) a SetPreSend flash in this batch.
+                        let control_mode = self
+                            .runtime_network_committed_control_mode
+                            .or(self.runtime_network_control_mode)
+                            .unwrap_or(0);
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             if let Some(cost) = control_tick_cost {
                                 clock.observe_control_send_time_ms(cost.send_time_ms);
@@ -725,14 +729,15 @@ impl GameApp {
                                     clock.observe_control_lateness_ms(lateness_ms);
                                 }
                             }
-                            if let Some(change) = clock.calculate_performance() {
+                            if let Some(change) = clock.calculate_performance_for_mode(control_mode)
+                            {
                                 self.apply_control_presend_change(change)?;
                             }
                         }
                         let control_result = self.apply_ready_controls(tick, controls);
                         if control_result.is_ok() {
                             if let Some(clock) = self.network_control_clock.as_mut() {
-                                clock.complete_control_frame();
+                                clock.complete_control_frame_at(frame);
                             }
                         }
                         // A request is an already-performed process-local

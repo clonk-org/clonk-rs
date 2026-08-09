@@ -55,6 +55,10 @@ class HazardRunnerTests(unittest.TestCase):
         self.assertIn("500", command)
         self.assertIn("--measurement-seconds", command)
         self.assertIn("25", command)
+        self.assertEqual(arguments.players, 24)
+        self.assertEqual(command[command.index("--players") + 1], "24")
+        self.assertEqual(arguments.clients, 12)
+        self.assertEqual(command[command.index("--clients") + 1], "12")
         self.assertEqual(
             arguments.measurement_seconds
             * len(MODULE.HAZARD_COMPETITIVE_SCENARIOS),
@@ -62,6 +66,8 @@ class HazardRunnerTests(unittest.TestCase):
         )
         self.assertIn("--minimum-simulation-fps", command)
         self.assertIn("38.0", command)
+        self.assertEqual(command[command.index("--control-mode") + 1], "2")
+        self.assertNotIn("--tcp-only", command)
 
     def test_full_matrix_continues_and_rejects_child_fingerprint_drift(self):
         arguments = MODULE.build_argument_parser().parse_args([])

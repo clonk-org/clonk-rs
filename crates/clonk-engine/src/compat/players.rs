@@ -130,16 +130,20 @@ pub(crate) fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let filter = parse_player_type_filter(args.first(), "GetPlayerCount")?;
     with_host_context(Ok(Value::Int(0)), |context| {
-        let count = context
-            .player_ids()
-            .iter()
-            .filter(|id| {
-                context
-                    .player_state(**id)
-                    .map(|player| player_type_matches(player, filter))
-                    .unwrap_or(false)
-            })
-            .count();
+        let count = if filter == 0 {
+            context.player_ids().len()
+        } else {
+            context
+                .player_ids()
+                .iter()
+                .filter(|id| {
+                    context
+                        .player_state(**id)
+                        .map(|player| player_type_matches(player, filter))
+                        .unwrap_or(false)
+                })
+                .count()
+        };
         Ok(Value::Int(truncate_to_i32(count as u64)))
     })
 }
@@ -200,17 +204,21 @@ pub(crate) fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError>
         // requested matching entry (C4PlayerList.cpp:139-153). Preserve that
         // early-exit behavior instead of materializing every match: Race's
         // per-frame scoreboard calls this once for every player.
-        let matching = context
-            .player_ids()
-            .iter()
-            .copied()
-            .filter(|id| {
-                context
-                    .player_state(*id)
-                    .is_some_and(|player| player_type_matches(player, filter))
-            })
-            .nth(index as usize)
-            .unwrap_or(OWNER_NONE);
+        let matching = if filter == 0 {
+            context.player_ids().get(index as usize).copied()
+        } else {
+            context
+                .player_ids()
+                .iter()
+                .copied()
+                .filter(|id| {
+                    context
+                        .player_state(*id)
+                        .is_some_and(|player| player_type_matches(player, filter))
+                })
+                .nth(index as usize)
+        }
+        .unwrap_or(OWNER_NONE);
         Ok(Value::Int(matching))
     })
 }
@@ -2894,7 +2902,7 @@ pub(crate) fn do_scoreboard_show(args: &[Value]) -> Result<Value, RuntimeError> 
     Ok(with_host_context(Value::Bool(false), |context| {
         if for_player != 0 {
             let player = for_player.wrapping_sub(1);
-            if !context.world.players.contains_key(&player) {
+            if !context.world.has_player(player) {
                 return Value::Bool(false);
             }
             if !context.world.local_players.contains(&player) {

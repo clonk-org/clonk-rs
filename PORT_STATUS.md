@@ -3948,6 +3948,26 @@ an ordered-map model gap.
   layer can help a machine that cannot execute ticks fast enough; that needs
   adaptive `ControlRate` or a smaller scenario.
 
+- **Periodic resource discovery rotates after the stock 15-ID packet cap**
+  (`crates/clonk-network/src/resource_catalog.rs`; C++
+  `C4Network2ResList::SendDiscover`, LegacyClonk 7d43b47
+  `src/C4Network2Res.cpp:1677-1699`). Approved 2026-08-09.
+  C++ prepends registrations, traverses from `pFirst` for every retry, and its
+  16-slot `C4PacketResDiscover` array rejects the sixteenth insertion
+  (`src/C4Network2IO.cpp:1735-1756`). A catalog with more than 15 entries thus
+  advertises the same newest 15 every second; older loading resources never
+  receive a status response and eventually hit the discovery timeout
+  (`src/C4Network2Res.cpp:943-980,1621-1652`). Rust deliberately retains a
+  cursor across periodic broadcasts, emits the next contiguous newest-first
+  page, and wraps only after reaching the end. Each packet keeps the exact
+  15-ID limit and order, while every entry in a fixed catalog receives a
+  discovery opportunity. Initial per-peer discovery still uses C++'s first
+  page; only the periodic retry selection differs. The cursor advances solely
+  from deterministic catalog order and changes resource-transfer liveness and
+  discovery traffic, not packet encoding, resource bytes, control order, or
+  simulation state. Pinned by
+  `periodic_discovery_eventually_advertises_every_loading_resource`.
+
 - **Published resources advertise 10 KiB chunks, not 100 KiB**
   (`crates/clonk-network/src/host_resource_core.rs`, `STOCK_CHUNK_SIZE`; C++
   `C4NetResChunkSize`, LegacyClonk 7d43b47 src/C4Network2Res.h:27). Approved
@@ -4008,6 +4028,23 @@ an ordered-map model gap.
   ping estimate and can no longer stand in for a missing one, so a participant
   that samples a zero control send time keeps C++'s untouched horizon. See "the
   zero-ping arm" below.
+  Extended 2026-08-09: central and async clients keep the adaptive envelope
+  dormant for the first 38 admitted simulation frames after GO. C++ starts
+  sampling immediately, but GO queues the initial player batch before ordinary
+  frame execution (`src/C4Network2.cpp:2101-2109`,
+  `src/C4Network2Players.cpp:465-482`, `src/C4Game.cpp:796-801`), so those
+  samples measure scenario/player construction rather than steady control
+  delivery. Rust still feeds every route-ping sample into C++'s exact 1/150 ACT
+  average during this grace period; it suppresses only adaptive-envelope
+  seeding and automatic PreSend changes. The grace counts the actual admitted
+  frame numbers rather than control packets, so ControlRate changes cannot
+  stretch it, and the first adaptive sample remains inside the benchmark's
+  two-second warmup at every legal rate. A genuinely slow route therefore has
+  no adaptive lookahead during the 38-frame grace plus, at most, one control
+  interval before the next sample. Pinned by
+  `host_routed_startup_wait_does_not_seed_client_presend`,
+  `host_routed_startup_grace_counts_simulation_frames_across_control_rates`, and
+  `host_routed_startup_grace_uses_admitted_frames_across_a_rate_change`.
   C++ derives the horizon from `pConn->getPingTime()` and nothing else, and
   `iTargetFPS` is a hardcoded 38 rather than a measurement. A client that is
   slow rather than *distant* — a weak machine, a saturated uplink queue —
@@ -4087,6 +4124,24 @@ an ordered-map model gap.
   — a host moves from PreSend 9-14 to C++'s 1, i.e.
   `(PreSend + ControlRate) * 28 ms` falls from ~308-448 ms to ~84 ms — and the
   test plus the C++ read above are what pin it.
+
+- **Clients recover a missing due control after GO without requesting future
+  ticks** (`crates/clonk-network/src/session/client_loop.rs` and
+  `session/connection_state.rs`; C++ `C4GameControlNetwork::CheckCompleteCtrl`,
+  LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:679-738). Approved
+  2026-08-09.
+  C++ retries a missing range every two seconds only while
+  `iControlReady < iTargetTick`; entering the running state clears that target
+  to -1 (`src/C4Network2.cpp:2101-2109`,
+  `src/C4GameControlNetwork.h:31,144`,
+  `src/C4GameControlNetwork.cpp:329-337`), so a control lost after GO can stall a
+  client indefinitely. Rust deliberately extends recovery beyond that boundary,
+  but caps it at the latest control tick the app has actually reached. The
+  horizon is monotonic, stale notifications cannot move it backward, and a
+  client never asks for a future tick. Replayed aggregate controls are the same
+  tick-stamped bytes every participant already executes, so the change affects
+  liveness and transport traffic, not simulation order or state. Pinned by
+  `central_client_recovers_a_missing_due_tick_after_go_without_requesting_the_future`.
 
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
