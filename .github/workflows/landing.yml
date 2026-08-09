@@ -45,6 +45,71 @@ jobs:
             exit 1
           fi
 
+  # The merge queue creates the exact commit that will land. Release commits
+  # package there, while still read-only, so the post-merge workflow only has
+  # to promote already-tested immutable artifacts.
+  release-context:
+    name: Resolve release candidate
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.release.outputs.release }}
+      version: ${{ steps.release.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Resolve the merge-group release
+        id: release
+        env:
+          # The push-only `head_commit` field is absent here. The merge-group
+          # payload carries the exact candidate commit and its squash subject.
+          MERGE_SUBJECT: ${{ github.event.merge_group.head_commit.message }}
+        run: |
+          subject=${MERGE_SUBJECT%%$'\n'*}
+          if [[ "$subject" != "chore: release "* ]]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pattern='^chore: release ([0-9]+\.[0-9]+\.[0-9]+) \(#[0-9]+\)$'
+          if [[ ! "$subject" =~ $pattern ]]; then
+            echo "malformed release subject: $subject" >&2
+            exit 1
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+  release-build:
+    name: Build release candidate
+    needs: release-context
+    if: needs.release-context.outputs.release == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      source-sha: ${{ github.sha }}
+      version: ${{ needs.release-context.outputs.version }}
+
+  release-qualification:
+    name: Qualify release candidate
+    needs: release-context
+    if: needs.release-context.outputs.release == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/exact-sha-qualification.yml
+    with:
+      source-sha: ${{ github.sha }}
+      concurrency-suffix: ${{ github.sha }}
+      # Only trusted main publishes reusable caches. A merge-group cache is
+      # scoped to its ephemeral ref and no later candidate can restore it.
+      publish-recording-host-cache: false
+      # Publication resolves an exact seven-artifact inventory from this run.
+      upload-diagnostics: false
+
   linux:
     name: Linux / ${{ matrix.name }}
     if: github.event_name != 'pull_request'
@@ -301,6 +366,9 @@ jobs:
     timeout-minutes: 5
     needs:
       - pull-request-title
+      - release-context
+      - release-build
+      - release-qualification
       - linux
       - windows-smoke
     defaults:
@@ -311,6 +379,10 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           TITLE_RESULT: ${{ needs.pull-request-title.result }}
+          RELEASE_CONTEXT_RESULT: ${{ needs.release-context.result }}
+          RELEASE_BUILD_RESULT: ${{ needs.release-build.result }}
+          RELEASE_QUALIFICATION_RESULT: ${{ needs.release-qualification.result }}
+          IS_RELEASE: ${{ needs.release-context.outputs.release }}
           LINUX_RESULT: ${{ needs.linux.result }}
           WINDOWS_SMOKE_RESULT: ${{ needs.windows-smoke.result }}
         run: |
@@ -325,10 +397,35 @@ jobs:
 
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             require_result title "$TITLE_RESULT" success
+            require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
+            require_result release-build "$RELEASE_BUILD_RESULT" skipped
+            require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
             require_result linux "$LINUX_RESULT" skipped
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
+          elif [[ "$EVENT_NAME" == "merge_group" ]]; then
+            require_result title "$TITLE_RESULT" skipped
+            require_result release-context "$RELEASE_CONTEXT_RESULT" success
+            case "$IS_RELEASE" in
+              true)
+                require_result release-build "$RELEASE_BUILD_RESULT" success
+                require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" success
+                ;;
+              false)
+                require_result release-build "$RELEASE_BUILD_RESULT" skipped
+                require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
+                ;;
+              *)
+                echo "::error::release context output was '$IS_RELEASE'"
+                failed=1
+                ;;
+            esac
+            require_result linux "$LINUX_RESULT" success
+            require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
           else
             require_result title "$TITLE_RESULT" skipped
+            require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
+            require_result release-build "$RELEASE_BUILD_RESULT" skipped
+            require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
             require_result linux "$LINUX_RESULT" success
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
           fi

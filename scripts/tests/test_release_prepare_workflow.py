@@ -48,15 +48,13 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
 
     def test_publish_resolver_has_no_legacy_preparation_ancestor(self):
         workflow = PUBLISH.read_text(encoding="utf-8")
-        resolve = workflow.split("\n  resolve:\n", 1)[1].split(
-            "\n  build:\n", 1
-        )[0]
+        publish = workflow.split("\n  publish:\n", 1)[1]
 
         self.assertNotIn("\n  prepare:\n", workflow)
-        self.assertNotIn("needs: [prepare]", resolve)
-        self.assertNotIn("needs.prepare", resolve)
-        self.assertIn("ref: ${{ github.sha }}", resolve)
-        self.assertIn("RESOLVED_SHA: ${{ github.sha }}", resolve)
+        self.assertNotIn("needs: [prepare]", publish)
+        self.assertNotIn("needs.prepare", publish)
+        self.assertIn("ref: ${{ github.sha }}", publish)
+        self.assertIn("RESOLVED_SHA: ${{ github.sha }}", publish)
 
     def test_app_created_pr_runs_the_repository_checks(self):
         workflow = PREPARE.read_text(encoding="utf-8")

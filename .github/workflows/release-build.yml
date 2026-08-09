@@ -61,12 +61,53 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      - name: Validate the release source
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "requested release version is invalid: ${REQUESTED_VERSION}" >&2
+            exit 1
+          fi
+          actual_version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          print(re.search(r'^version = "([^"]+)"$', section.group(1), re.M).group(1))
+          PY
+          )
+          if [[ "$actual_version" != "$REQUESTED_VERSION" ]]; then
+            echo "workspace version ${actual_version} does not match requested release ${REQUESTED_VERSION}" >&2
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # A merge-group ref cannot publish a reusable cache. Restore only from
+      # the trusted-main producers that already own each platform's build
+      # graph, so moving the release build before merge does not make it cold.
+      - name: Restore trusted-main Linux build cache
+        if: matrix.runner == 'ubuntu-latest'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: release-${{ matrix.artifact }}
-          cache-on-failure: true
+          shared-key: full-parity
+          save-if: false
+
+      - name: Restore trusted-main Windows build cache
+        if: matrix.runner == 'windows-latest'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          save-if: false
+
+      - name: Restore trusted-main macOS build cache
+        if: matrix.runner == 'macos-latest'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: recording-host-oracles
+          save-if: false
 
       - name: Install Linux build dependencies
         if: matrix.runner == 'ubuntu-latest'
@@ -297,6 +338,8 @@ jobs:
             target/dist/clonk-rust-*.exe
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+          overwrite: true
 
       # Its own artifact rather than another line in the glob above:
       # upload-artifact roots the archive at the least common ancestor of the
@@ -309,6 +352,8 @@ jobs:
           path: target/dist/components/*.zip
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+          overwrite: true
 
       # `publish` generates the manifest with this binary instead of compiling
       # xtask a third time. It runs on ubuntu, which is where this was built.
@@ -319,3 +364,5 @@ jobs:
           path: target/release/xtask-engine-tools
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+          overwrite: true

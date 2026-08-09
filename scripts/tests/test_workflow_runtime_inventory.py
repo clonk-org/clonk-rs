@@ -206,6 +206,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_exact_msvc_runtime_build_is_post_merge_and_release_gated(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertNotIn("Build the Windows packaging tool", landing)
         self.assertNotIn("Build the runtime exactly as a release ships it", landing)
@@ -220,8 +221,22 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "--locked --timings",
             step_script(MAIN_WORKFLOW, "Refresh the shipped MSVC runtime cache"),
         )
-        release_gate = step_script(RELEASE_WORKFLOW, "Require exact-SHA validation")
-        self.assertIn("for workflow in landing.yml rust.yml", release_gate)
+        for fragment in (
+            "if: needs.release-context.outputs.release == 'true'",
+            "uses: ./.github/workflows/release-build.yml",
+            "source-sha: ${{ github.sha }}",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, landing)
+
+        artifact_resolver = step_script(
+            RELEASE_WORKFLOW, "Resolve exact-SHA release artifacts"
+        )
+        self.assertIn("--workflow landing.yml", artifact_resolver)
+        self.assertNotIn("rust.yml", artifact_resolver)
+        self.assertIn(
+            "run-id: ${{ steps.artifacts.outputs.run-id }}", release
+        )
 
     def test_installer_smoke_compiles_the_release_icon_branch(self):
         script = step_script(
