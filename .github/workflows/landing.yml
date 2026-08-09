@@ -249,7 +249,17 @@ jobs:
 
       - name: Install NSIS
         run: |
-          choco install nsis --version 3.12.0 --yes --no-progress
+          for attempt in 1 2 3; do
+            if choco install nsis --version 3.12.0 --yes --no-progress; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "Chocolatey failed to install pinned NSIS after $attempt attempts" >&2
+              exit 1
+            fi
+            echo "Chocolatey NSIS install failed on attempt $attempt; retrying" >&2
+            sleep "$((attempt * 10))"
+          done
           nsis_dir='/c/Program Files (x86)/NSIS'
           if [[ ! -x "$nsis_dir/makensis.exe" ]]; then
             echo "chocolatey installed nsis but $nsis_dir/makensis.exe is missing" >&2

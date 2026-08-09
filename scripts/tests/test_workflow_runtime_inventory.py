@@ -246,6 +246,25 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                 self.assertIn('"$nsis_dir/makensis.exe" /VERSION', script)
                 self.assertIn("expected NSIS v3.12", script)
 
+    def test_windows_installer_toolchain_retries_transient_download_failures(self):
+        scripts = (
+            step_script(LANDING_WORKFLOW, "Install NSIS"),
+            step_script(
+                RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
+            ),
+        )
+        for script in scripts:
+            with self.subTest(script=script):
+                self.assertIn("for attempt in 1 2 3; do", script)
+                self.assertIn(
+                    "if choco install nsis --version 3.12.0 --yes --no-progress; then",
+                    script,
+                )
+                self.assertIn('if [[ "$attempt" -eq 3 ]]; then', script)
+                self.assertIn('sleep "$((attempt * 10))"', script)
+                self.assertNotIn("--ignore-checksums", script)
+                self.assertNotIn("--allow-empty-checksums", script)
+
     def test_universal_release_verifies_every_shipped_binary(self):
         script = step_script(
             RELEASE_BUILD_WORKFLOW, "Check the macOS build is universal"
