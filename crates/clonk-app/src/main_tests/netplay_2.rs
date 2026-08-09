@@ -12539,6 +12539,162 @@ fn regular_network_scenario_recreates_fileless_script_player_without_runtime_dat
 }
 
 #[test]
+fn dragon_rock_network_restore_makes_script_npcs_hostile_to_joined_users() {
+    // Dragon Rock's SavePlayerInfos restores script player 10 on team 2 before
+    // the synchronized user JoinPlayer runs. Native RecreatePlayers owns that
+    // order, and the later ScenarioInit writes mutual team hostility
+    // (C4Game.cpp:2827-2863; C4Player.cpp:756-757,1022-1033).
+    let fixture = tempdir().expect("Dragon Rock network fixture");
+    let scenario_path = fixture.path().join("Drachenfels.c4s");
+    let script_player_path = scenario_path.join("ScriptPlr-1.c4p");
+    fs::create_dir_all(&script_player_path).expect("create embedded script player group");
+    fs::write(
+        script_player_path.join("Player.txt"),
+        b"[Player]\nName=Ala Kadabra\n",
+    )
+    .expect("write embedded script player core");
+    let native = |bytes: &[u8]| {
+        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
+            .expect("test native string has no NUL")
+    };
+    let restore = clonk_engine::ControlPlayerInfoEntry {
+        id: 1,
+        name: native(b"Ala Kadabra"),
+        filename: native(b"ScriptPlr-1.c4p"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+            | clonk_engine::PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+            | clonk_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+            | clonk_engine::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+        game_number: 10,
+        team: 2,
+        ..Default::default()
+    };
+    let mut current_script = restore.clone();
+    current_script.savegame_player = restore.id;
+    let user_info_id = 2;
+    let current_user = clonk_engine::ControlPlayerInfoEntry {
+        id: user_info_id,
+        name: native(b"Network user"),
+        team: 1,
+        ..Default::default()
+    };
+
+    let mut app = new_state_only_running_sandbox_app();
+    let provisional_owner = app.local_owner;
+    app.remove_local_control_assignment(provisional_owner);
+    app.engine.retain_restored_players([]);
+    app.engine.set_local_players([]);
+    let (network, _events) = NetworkManager::test_stub_for_client_id(3);
+    app.network = Some(network);
+    app.control_clients.replace_snapshot([
+        clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: native(b"Host"),
+            ..Default::default()
+        },
+        clonk_engine::ClientCoreControlData {
+            client_id: 3,
+            activated: true,
+            name: native(b"Network client"),
+            ..Default::default()
+        },
+    ]);
+    app.control_player_infos = ControlPlayerInfoRegistry::default();
+    app.control_player_infos.replace_snapshot(
+        user_info_id,
+        [
+            clonk_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![current_script],
+                ..Default::default()
+            },
+            clonk_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![current_user],
+                ..Default::default()
+            },
+        ],
+    );
+    let mut scenario = FrontendScenario::fallback();
+    scenario.path = Some(scenario_path);
+    let (_sender, receiver) = mpsc::channel();
+    app.loading_state = Some(ScenarioLoadingState {
+        scenario,
+        refreshed_resources: None,
+        refreshed_tooltip_font: None,
+        refreshed_native_font_source: None,
+        refreshed_global_gui_failures: None,
+        refreshed_gui_sheet_overrides: None,
+        refresh_requested: false,
+        receiver,
+        finished: false,
+        last_progress: 0,
+        log: Vec::new(),
+        prepared_go: Some(PreparedGoLoadingState {
+            status: clonk_network::NetworkStatus {
+                state: clonk_network::NETWORK_STATE_GO,
+                control_mode: 2,
+                target_tick: 0,
+            },
+            local_reached: true,
+            save_game: false,
+            network_runtime_join: false,
+            restore_player_infos: vec![restore],
+            runtime_join_players: Vec::new(),
+            pending_client_runtime_join: None,
+            initial_game_data: None,
+            random_seed: 0,
+            use_fair_crew: false,
+            fair_crew_strength: 0,
+            fair_crew_forced: false,
+            allow_debug: true,
+            auto_frame_skip: true,
+            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
+                Vec::new(),
+                Vec::new(),
+            ),
+            team_configuration: TeamConfiguration::default(),
+            team_registry: Vec::new(),
+            definition_modules: None,
+        }),
+        offline_startup_players: None,
+        offline_savegame: None,
+        offline_random_seed: None,
+    });
+
+    app.finalize_network_loaded_scenario(false)
+        .expect("restore Dragon Rock's script player before network joins");
+    let packed_player = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    ))
+    .expect("read embedded network player fixture");
+    app.apply_join_player_control(clonk_engine::JoinPlayerControlData {
+        filename: native(b"NetworkUser.c4p"),
+        at_client: 3,
+        info_id: user_info_id,
+        source: clonk_engine::JoinPlayerSource::Embedded(packed_player),
+        by_client: 0,
+    })
+    .expect("execute synchronized user JoinPlayer after restore");
+
+    let user = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == user_info_id)
+        .expect("network user joined on team 1");
+    let script = app
+        .engine
+        .player(10)
+        .expect("Dragon Rock script player 10 was restored");
+    assert_eq!((user.team(), script.team()), (Some(1), Some(2)));
+    assert!(user.is_hostile_towards(10));
+    assert!(script.is_hostile_towards(user.id()));
+}
+
+#[test]
 fn network_savegame_finalization_does_not_rerun_scenario_initialize() {
     let install_probe = |app: &mut GameApp| {
         app.engine.clear_scenario_script();
