@@ -1240,6 +1240,9 @@ pub(crate) async fn run_client_loop_with_routes(
                         break;
                     }
                     ClientCommand::ControlTickReached { tick, reached_at } => {
+                        resource_state
+                            .control
+                            .note_runtime_control_tick_reached(tick);
                         client_performance.record_cadence(tick, reached_at);
                     }
                     ClientCommand::ControlTickConsumed {

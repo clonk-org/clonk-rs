@@ -4108,6 +4108,24 @@ an ordered-map model gap.
   `(PreSend + ControlRate) * 28 ms` falls from ~308-448 ms to ~84 ms — and the
   test plus the C++ read above are what pin it.
 
+- **Clients recover a missing due control after GO without requesting future
+  ticks** (`crates/clonk-network/src/session/client_loop.rs` and
+  `session/connection_state.rs`; C++ `C4GameControlNetwork::CheckCompleteCtrl`,
+  LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:679-738). Approved
+  2026-08-09.
+  C++ retries a missing range every two seconds only while
+  `iControlReady < iTargetTick`; entering the running state clears that target
+  to -1 (`src/C4Network2.cpp:2101-2109`,
+  `src/C4GameControlNetwork.h:31,144`,
+  `src/C4GameControlNetwork.cpp:329-337`), so a control lost after GO can stall a
+  client indefinitely. Rust deliberately extends recovery beyond that boundary,
+  but caps it at the latest control tick the app has actually reached. The
+  horizon is monotonic, stale notifications cannot move it backward, and a
+  client never asks for a future tick. Replayed aggregate controls are the same
+  tick-stamped bytes every participant already executes, so the change affects
+  liveness and transport traffic, not simulation order or state. Pinned by
+  `central_client_recovers_a_missing_due_tick_after_go_without_requesting_the_future`.
+
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
   C++ `C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47
