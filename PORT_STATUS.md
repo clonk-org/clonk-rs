@@ -3966,10 +3966,14 @@ an ordered-map model gap.
   `update_control_presend`; C++ `C4GameControlNetwork::CalcPerformance`,
   LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:404-430). Approved
   2026-07-27.
+  Narrowed 2026-08-09 (clonk-org/clonk-rs#222): lateness now only *refines* a
+  ping estimate and can no longer stand in for a missing one, so a participant
+  that samples a zero control send time keeps C++'s untouched horizon. See "the
+  zero-ping arm" below.
   C++ derives the horizon from `pConn->getPingTime()` and nothing else, and
   `iTargetFPS` is a hardcoded 38 rather than a measurement. A client that is
-  slow rather than *distant* — a weak machine, a saturated uplink queue, a host
-  that waited on somebody else — therefore never buys itself any headroom, and
+  slow rather than *distant* — a weak machine, a saturated uplink queue —
+  therefore never buys itself any headroom, and
   its input misses the async deadline on essentially every tick and is dropped
   silently. C++ already computes the right quantity in the same function,
   `AddPerf(pCtrl->getTime() - iWaitStart)`, and spends it only on the F7 "wait
@@ -4002,6 +4006,49 @@ an ordered-map model gap.
   players still lose 10 s over an 11 s session because the host pays the full
   `AsyncMaxWait` budget on every tick before giving up on it. That residual
   needs adaptive `ControlRate` or demotion, not a wider horizon.
+  **The zero-ping arm, removed 2026-08-09** (clonk-org/clonk-rs#222). C++ gates
+  the whole calculation on a nonzero send time, `if (iControlSendTime)`
+  (src/C4GameControlNetwork.cpp:432-446); in central and async mode that value is
+  `iHostPing`, and a host has no connection to itself, so a C++ host samples zero
+  every control tick and keeps the constructor's `iControlPreSend(1)` (:32) for
+  the whole round. The port samples the same zero — `host_control_send_time_ms`
+  filters the host's own id out of the client list
+  (`crates/clonk-network/src/session/host_state.rs:307-326`) and central/async
+  returns `host_ping` unchanged
+  (`crates/clonk-network/src/session/connection_state.rs:440-442`) — but the
+  divergence let measured lateness drive the decision alone, so a host sized its
+  horizon purely from how long it waited for the slowest client. PreSend cannot
+  shorten that wait: it selects when a participant *sends*, never when it
+  *executes*, and every participant still executes tick T at frame
+  `T * ControlRate`. The wait was therefore charged as permanent input latency
+  and bought nothing back. On the shipped defaults a host ran PreSend 9-14 where
+  C++ runs 1, which is `(PreSend + ControlRate) * 28 ms` = ~308-448 ms of input
+  latency against C++'s ~84 ms.
+  The divergence's own justification listed "a host that waited on somebody else"
+  among the delays the horizon should cover; that part was mistaken, for the
+  reason above, and is withdrawn. The part that stands — a client that is *itself*
+  slow rather than distant must buy headroom — is untouched: any participant with
+  a nonzero ping still takes `max(ping, measured lateness)`.
+  **Still open.** A non-host client with a good ping keeps a lateness sample that
+  the host's wait for a straggler still inflates, so it keeps paying input latency
+  for a delay it did not cause. Separating that needs the host to say *which*
+  client it waited for (`ControlCoordinator::clients_missing`,
+  `ClientPerformanceStats::wait_ms`), which is a host->client signal this change
+  deliberately does not add. A clamp to the async budget was considered and
+  rejected: the budget bounds a straggler's wait *and* a slow client's own
+  lateness alike, so the clamp cannot tell them apart either, and it would
+  under-size the horizon of exactly the client the divergence protects.
+  Pinned by `a_participant_with_no_ping_sample_keeps_the_cpp_initial_horizon`.
+  The three tests covering the lateness term all seed a nonzero ping first and
+  are unaffected.
+  **Not measurable with `cargo xtask chaos`.** The harness sizes its horizon with
+  its own `Lookahead::Adaptive` and never constructs a `NetworkControlClock`, so
+  it cannot observe the zero-ping arm: all six profiles reproduce
+  `chaos/baseline.json` to the microsecond after the change. That is a
+  no-regression result, not a confirmation of the win. The win is the arithmetic
+  — a host moves from PreSend 9-14 to C++'s 1, i.e.
+  `(PreSend + ControlRate) * 28 ms` falls from ~308-448 ms to ~84 ms — and the
+  test plus the C++ read above are what pin it.
 
 - **PreSend is sized from the delivery-time envelope, not the mean**
   (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;

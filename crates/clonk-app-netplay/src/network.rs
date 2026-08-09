@@ -567,17 +567,24 @@ impl NetworkControlClock {
         //
         // The decision also takes the larger of the route ping and the control
         // lateness actually measured for the tick just consumed. Ping alone is
-        // blind to a client that is slow rather than distant — a weak machine, a
-        // saturated uplink queue, a host that waited on somebody else — and that
-        // blindness is what silently drops a struggling player's input. Taking
-        // the maximum rather than replacing keeps a punctual client on exactly
-        // C++'s horizon, so the extra input latency is charged only where it
-        // buys something.
+        // blind to a client that is slow rather than distant — a weak machine or
+        // a saturated uplink queue — and that blindness is what silently drops a
+        // struggling player's input. Taking the maximum rather than replacing
+        // keeps a punctual client on exactly C++'s horizon, so the extra input
+        // latency is charged only where it buys something.
+        //
+        // Lateness only ever *refines* a ping estimate, never substitutes for a
+        // missing one: C++ gates the whole calculation on a nonzero control send
+        // time (`if (iControlSendTime)`, src/C4GameControlNetwork.cpp:432-446).
+        // A host samples zero on every tick, because `host_control_send_time_ms`
+        // filters its own id out of the client list, and would otherwise size
+        // its horizon purely from waiting on the slowest client — a delay its
+        // own PreSend cannot shorten, since PreSend moves when a participant
+        // sends and never when it executes.
         let sample = match (ping_sample, self.control_lateness_ms) {
             (Some(ping), Some(lateness)) => ping.max(lateness),
             (Some(ping), None) => ping,
-            (None, Some(lateness)) => lateness,
-            (None, None) => return None,
+            (None, _) => return None,
         };
         self.latency.observe(sample);
         let next = self
@@ -15126,6 +15133,46 @@ Message=Server says Andr\xe9\r\n\
              ping-only chose {}, measured chose {}",
             ping_only.control_presend(),
             measured.control_presend()
+        );
+    }
+
+    /// Lateness refines a ping estimate; it cannot stand in for a missing one.
+    ///
+    /// C++ gates the entire PreSend calculation on a nonzero control send time —
+    /// `if (iControlSendTime)` (oracle-src-pinned
+    /// src/C4GameControlNetwork.cpp:432-446). In central and async mode that
+    /// value is `iHostPing`, and a host has no connection to itself, so it
+    /// samples zero on every control tick and keeps the constructor's
+    /// `iControlPreSend(1)` (:32) for the whole round.
+    ///
+    /// The port matches that sampling — `host_control_send_time_ms` filters the
+    /// host's own id out of the client list
+    /// (crates/clonk-network/src/session/host_state.rs:307-326) — but then let
+    /// measured lateness drive the decision on its own, so a host sized its
+    /// horizon purely from how long it waited for the slowest client. That is a
+    /// delay its own PreSend cannot shorten: PreSend moves when a participant
+    /// *sends*, never when it *executes*, so the wait is charged as permanent
+    /// input latency and buys nothing back.
+    #[test]
+    fn a_participant_with_no_ping_sample_keeps_the_cpp_initial_horizon() {
+        let mut host = NetworkControlClock::new(0, 1);
+
+        for _ in 0..32 {
+            host.observe_control_send_time_ms(0);
+            host.observe_control_lateness_ms(300);
+            assert_eq!(
+                host.calculate_performance(),
+                None,
+                "a zero control send time must leave the horizon untouched"
+            );
+            host.complete_control_frame();
+        }
+
+        assert_eq!(host.control_presend(), 1);
+        assert_eq!(
+            host.avg_control_send_time(),
+            0,
+            "and the script-visible ACT stays at C++'s untouched average"
         );
     }
 
