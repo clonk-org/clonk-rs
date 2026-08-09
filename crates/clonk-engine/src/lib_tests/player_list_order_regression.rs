@@ -33,6 +33,129 @@ fn register_joining_player(engine: &mut Engine, name: &str) -> i32 {
     )
 }
 
+fn engine_with_player_count(count: i32) -> Engine {
+    let mut engine = Engine::new();
+    for player in 0..count {
+        engine
+            .register_player(PlayerConfig::new(player, format!("Player {player}")))
+            .expect("player registers");
+    }
+    engine
+}
+
+#[test]
+fn callback_world_defers_full_player_state_projection_until_player_data_is_read() {
+    // Indexed player natives traverse C4PlayerList links, while a value native
+    // dereferences only its requested C4Player (C4Script.cpp:1078-1082,2804-2820).
+    let engine = engine_with_player_count(24);
+
+    HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(|count| count.set(0));
+    let world = engine.host_world_context();
+    assert_eq!(world.player_ids().len(), 24);
+    assert_eq!(
+        HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "constructing a callback world and reading its linked-list order must not clone all player state"
+    );
+
+    assert_eq!(
+        world.player(7).map(|player| player.name.as_str()),
+        Some("Player 7")
+    );
+    assert_eq!(
+        HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "a value query materializes only its requested callback-local player"
+    );
+    assert_eq!(
+        world.player(7).map(|player| player.name.as_str()),
+        Some("Player 7")
+    );
+    assert_eq!(
+        HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "repeated value queries share the first callback-local projection"
+    );
+}
+
+#[test]
+fn untyped_get_player_count_reads_only_the_live_player_order() {
+    // The untyped native calls C4PlayerList::GetCount directly, without
+    // dereferencing any C4Player (C4Script.cpp:2804-2809).
+    let engine = engine_with_player_count(24);
+
+    HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(|count| count.set(0));
+    let (result, _) =
+        compat::with_effect_context(None, &[], engine.host_world_context(), 1, || {
+            compat::get_player_count(&[])
+        });
+    assert_eq!(result.expect("GetPlayerCount succeeds"), Value::Int(24));
+    assert_eq!(
+        HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "the untyped count must not project any player value state"
+    );
+}
+
+#[test]
+fn untyped_get_player_by_index_reads_only_the_requested_list_link() {
+    // The untyped native calls the unfiltered C4PlayerList::GetByIndex walk
+    // and returns its Number (C4Script.cpp:2812-2820;
+    // C4PlayerList.cpp:139-145).
+    let engine = engine_with_player_count(24);
+
+    HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(|count| count.set(0));
+    let (result, _) =
+        compat::with_effect_context(None, &[], engine.host_world_context(), 1, || {
+            compat::get_player_by_index(&[Value::Int(7)])
+        });
+    assert_eq!(result.expect("GetPlayerByIndex succeeds"), Value::Int(7));
+    assert_eq!(
+        HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "the untyped index walk must not project player value state"
+    );
+}
+
+#[test]
+fn callback_worlds_share_the_reloadable_definition_table_between_definition_changes() {
+    // ReloadDef resolves the definition and its stored Filename only after
+    // the network gate (C4Game.cpp:2310-2325); neither changes per callback.
+    let mut definition = Definition::from_script("TEST", "Test", "").expect("definition compiles");
+    definition.set_source_path(Some(std::path::PathBuf::from("Test.c4d")));
+    let mut engine = Engine::new();
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+
+    RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS.with(|count| count.set(0));
+    assert!(engine
+        .host_world_context()
+        .definition_reload_accepted("TEST"));
+    assert!(engine
+        .host_world_context()
+        .definition_reload_accepted("TEST"));
+    assert_eq!(
+        RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "unchanged definition metadata must build one shared reload table"
+    );
+
+    let mut added = Definition::from_script("NEXT", "Next", "").expect("definition compiles");
+    added.set_source_path(Some(std::path::PathBuf::from("Next.c4d")));
+    engine
+        .register_definition(added)
+        .expect("new definition registers");
+    assert!(engine
+        .host_world_context()
+        .definition_reload_accepted("NEXT"));
+    assert_eq!(
+        RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS.with(Cell::get),
+        2,
+        "a definition change invalidates and rebuilds the shared reload table"
+    );
+}
+
 #[test]
 fn replay_player_info_counter_install_preserves_exact_persisted_value() {
     let mut engine = Engine::new();

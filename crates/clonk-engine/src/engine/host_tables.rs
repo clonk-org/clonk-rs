@@ -225,6 +225,7 @@ impl Engine {
                         .map(|names| (id.as_str().to_string(), names.to_string()))
                 })
                 .collect(),
+            self.reloadable_definition_ids(),
         ));
         *cache = Some(Rc::clone(&tables));
         tables
@@ -469,6 +470,24 @@ impl Engine {
         result
     }
 
+    /// Project one C4Player into callback-local state on its first value
+    /// query. Numeric validity and indexed order are seeded separately, so
+    /// callbacks that do not inspect player data clone none of it.
+    ///
+    /// # Safety
+    ///
+    /// The engine is synchronously paused and its player map remains stable
+    /// until the host context is dropped.
+    unsafe fn lazy_host_world_player(source: *const (), id: i32) -> Option<PlayerState> {
+        let engine = source.cast::<Self>();
+        let players = unsafe { &*std::ptr::addr_of!((*engine).players) };
+        players.get(&id).map(|player| {
+            #[cfg(test)]
+            HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+            player.to_state()
+        })
+    }
+
     /// Clone the landscape shell only when a callback first invokes a terrain
     /// host API.
     ///
@@ -579,15 +598,12 @@ impl Engine {
         HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let definition_metadata = self.definition_metadata_table();
         let host_definition_tables = self.host_definition_tables();
+        let reloadable_definitions = Rc::clone(&host_definition_tables.reloadable_definitions);
         let solid_mask_metadata = self.solid_mask_metadata_table();
         let transfer_zones = self.transfer_zones.states();
-        let players: HashMap<i32, PlayerState> = self
-            .players
-            .values()
-            .map(|player| (player.id(), player.to_state()))
-            .collect();
+        let player_order = self.player_ids_in_order();
         let local_players: Vec<i32> = self.local_players.as_ref().map_or_else(
-            || players.keys().copied().collect(),
+            || player_order.clone(),
             |players| players.iter().copied().collect(),
         );
         let crew_selection = self.crew_selection_states();
@@ -610,7 +626,7 @@ impl Engine {
             Rc::clone(&self.scenario_values),
             Rc::clone(&self.default_rank_names),
             transfer_zones,
-            players,
+            HashMap::new(),
             crew_selection,
             self.next_object_id,
             self.team_home_base_rule,
@@ -658,6 +674,7 @@ impl Engine {
             Rc::clone(&self.league_name),
             Rc::clone(&self.player_info_league_progress_data),
         )
+        .with_player_info_ids(self.players.values().map(Player::player_info_id))
         .with_league_scores(Rc::clone(&self.player_info_league_scores))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
@@ -672,7 +689,7 @@ impl Engine {
             Rc::clone(&self.host_requests.particle_reload_requests),
         )
         .with_definition_reloads(
-            self.reloadable_definition_ids(),
+            reloadable_definitions,
             Rc::clone(&self.host_requests.definition_reload_requests),
         )
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
@@ -709,7 +726,7 @@ impl Engine {
             self.control_host,
             Rc::clone(&self.host_requests.player_info_updates),
         )
-        .with_player_order(self.player_order.iter().copied())
+        .with_live_player_order(player_order)
         .with_local_players(local_players)
         .with_shared_physical_viewport_players(Rc::clone(&self.physical_viewport_players))
         .with_active_message_board_input(self.active_message_board_input.clone())
@@ -762,6 +779,7 @@ impl Engine {
             // execution. APIs such as FindBase walk the forward list, but
             // most callbacks never inspect it, so snapshot it on first use.
             .with_master_order(Self::lazy_host_world_master_order)
+            .with_player(Self::lazy_host_world_player)
             .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
             .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
             .with_sector_map_borrow(Self::lazy_host_world_sector_map_borrow)
