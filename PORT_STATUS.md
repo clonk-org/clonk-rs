@@ -3948,6 +3948,26 @@ an ordered-map model gap.
   layer can help a machine that cannot execute ticks fast enough; that needs
   adaptive `ControlRate` or a smaller scenario.
 
+- **Periodic resource discovery rotates after the stock 15-ID packet cap**
+  (`crates/clonk-network/src/resource_catalog.rs`; C++
+  `C4Network2ResList::SendDiscover`, LegacyClonk 7d43b47
+  `src/C4Network2Res.cpp:1677-1699`). Approved 2026-08-09.
+  C++ prepends registrations, traverses from `pFirst` for every retry, and its
+  16-slot `C4PacketResDiscover` array rejects the sixteenth insertion
+  (`src/C4Network2IO.cpp:1735-1756`). A catalog with more than 15 entries thus
+  advertises the same newest 15 every second; older loading resources never
+  receive a status response and eventually hit the discovery timeout
+  (`src/C4Network2Res.cpp:943-980,1621-1652`). Rust deliberately retains a
+  cursor across periodic broadcasts, emits the next contiguous newest-first
+  page, and wraps only after reaching the end. Each packet keeps the exact
+  15-ID limit and order, while every entry in a fixed catalog receives a
+  discovery opportunity. Initial per-peer discovery still uses C++'s first
+  page; only the periodic retry selection differs. The cursor advances solely
+  from deterministic catalog order and changes resource-transfer liveness and
+  discovery traffic, not packet encoding, resource bytes, control order, or
+  simulation state. Pinned by
+  `periodic_discovery_eventually_advertises_every_loading_resource`.
+
 - **Published resources advertise 10 KiB chunks, not 100 KiB**
   (`crates/clonk-network/src/host_resource_core.rs`, `STOCK_CHUNK_SIZE`; C++
   `C4NetResChunkSize`, LegacyClonk 7d43b47 src/C4Network2Res.h:27). Approved

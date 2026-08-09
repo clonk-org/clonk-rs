@@ -177,6 +177,36 @@ fn cpp_discovery_uses_reverse_registration_order_and_stops_at_fifteen_ids() {
 }
 
 #[test]
+fn periodic_discovery_eventually_advertises_every_loading_resource() {
+    // C++ starts each SendDiscover at pFirst, so its fixed 15-ID packet omits
+    // the same older resources forever (src/C4Network2Res.cpp:1677-1699;
+    // src/C4Network2IO.cpp:1745-1750). Repeated Rust broadcasts keep the packet
+    // cap and traversal order but must advance to the resources left behind.
+    let mut catalog = ResourceCatalog::new(0);
+    (0..16).for_each(|resource_id| {
+        assert!(catalog.register(ResourceRegistration {
+            resource_id,
+            chunk_count: 1,
+            binary_compatible: false,
+            loading: true,
+        }));
+    });
+
+    let packets = [100, 101]
+        .into_iter()
+        .flat_map(|now_seconds| catalog.on_timer(now_seconds))
+        .filter_map(|action| match action {
+            ResourceCatalogAction::Broadcast {
+                packet: ResourcePacket::Discover(discover),
+            } => Some(discover.resource_ids),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(packets, vec![(1..16).rev().collect::<Vec<_>>(), vec![0]]);
+}
+
+#[test]
 fn cpp_registration_reuses_an_existing_resource_id() {
     // AddByCore returns the existing list entry before allocating/inserting a
     // duplicate resource (src/C4Network2Res.cpp:1473-1477).

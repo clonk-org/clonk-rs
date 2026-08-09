@@ -282,6 +282,11 @@ pub struct ResourceCatalog {
     next_resource_id: i32,
     resources: Vec<ResourceState>,
     last_discover_at: Option<u64>,
+    /// Index into the current non-removed traversal for the next periodic
+    /// discovery packet. C++ restarts at the front and starves entries after
+    /// its 15-ID cap; advancing between broadcasts keeps the wire limit and
+    /// linked-list order while eventually reaching every resource.
+    next_periodic_discovery_index: usize,
     last_status_at: Option<u64>,
     /// Concurrent requests allowed to one peer for one file. See
     /// [`RESOURCE_MAX_LOAD_PER_PEER_PER_FILE`] for why this and not the global
@@ -334,6 +339,7 @@ impl ResourceCatalog {
             next_resource_id: local_client_id.wrapping_shl(16),
             resources: Vec::new(),
             last_discover_at: None,
+            next_periodic_discovery_index: 0,
             last_status_at: None,
             max_loads_per_peer: RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
             max_loads: RESOURCE_MAX_LOADS,
@@ -445,14 +451,36 @@ impl ResourceCatalog {
 
     /// Builds the exact stock discovery set in linked-list traversal order.
     pub fn discovery_packet(&self) -> ResourceDiscoverPacket {
+        self.discovery_packet_from(0)
+    }
+
+    fn discovery_packet_from(&self, start: usize) -> ResourceDiscoverPacket {
         let mut packet = ResourceDiscoverPacket {
             resource_ids: Vec::new(),
         };
         self.resources
             .iter()
             .filter(|resource| !resource.removed)
+            .skip(start)
             .take_while(|resource| packet.add_resource_id(resource.registration.resource_id))
             .for_each(drop);
+        packet
+    }
+
+    fn periodic_discovery_packet(&mut self) -> ResourceDiscoverPacket {
+        let resource_count = self
+            .resources
+            .iter()
+            .filter(|resource| !resource.removed)
+            .count();
+        if self.next_periodic_discovery_index >= resource_count {
+            self.next_periodic_discovery_index = 0;
+        }
+        let packet = self.discovery_packet_from(self.next_periodic_discovery_index);
+        self.next_periodic_discovery_index += packet.resource_ids.len();
+        if self.next_periodic_discovery_index >= resource_count {
+            self.next_periodic_discovery_index = 0;
+        }
         packet
     }
 
@@ -720,7 +748,7 @@ impl ResourceCatalog {
                 .for_each(|resource| {
                     resource.discovery_started_at.get_or_insert(now_seconds);
                 });
-            let packet = self.discovery_packet();
+            let packet = self.periodic_discovery_packet();
             if !packet.resource_ids.is_empty() {
                 self.last_discover_at = Some(now_seconds);
                 actions.push(ResourceCatalogAction::Broadcast {
