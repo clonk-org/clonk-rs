@@ -6,8 +6,10 @@ name: Release prepare
 #
 # Needs no game content, so it runs while `content/` access is irrelevant to it.
 #
-# Merging the resulting pull request is what publishes: `release.yml` tags,
-# builds and releases from the `chore: release <version>` commit on main.
+# Preparation targets opening the pull request within two minutes. Its merge
+# group builds and qualifies the exact release commit before it lands; after
+# landing, `release.yml` promotes those artifacts, tags the commit and publishes
+# the GitHub Release.
 
 on:
   schedule:
@@ -36,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: read
     defaults:
       run:
@@ -55,19 +58,45 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.release-app.outputs.token }}
           REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          pr=$(
-            gh pr list \
-              --repo "$REPOSITORY" \
-              --base main \
-              --head release/next \
-              --state open \
-              --json url \
-              --jq '.[0].url // empty'
-          )
+          pull_requests=$(gh pr list \
+            --repo "$REPOSITORY" \
+            --base main \
+            --head release/next \
+            --state all \
+            --limit 100 \
+            --json url,state,createdAt,body)
+
+          # A rerun keeps the same run id. Find its pull request even when the
+          # first attempt already merged it; otherwise the rerun would recreate
+          # the same release from the original, now-stale main SHA.
+          pr=$(jq -c --arg run "$RUN_URL" \
+            '[.[] | select((.body // "") | contains($run))]
+             | sort_by(.createdAt) | last // empty' <<<"$pull_requests")
+          if [[ -z "$pr" ]]; then
+            # A different run may already own release/next. Do not replace its
+            # release commit; resume its queue request below instead.
+            pr=$(jq -c \
+              '[.[] | select(.state == "OPEN")]
+               | sort_by(.createdAt) | last // empty' <<<"$pull_requests")
+          fi
+
           if [[ -n "$pr" ]]; then
-            echo "release pull request is already in flight: $pr"
+            url=$(jq -r '.url' <<<"$pr")
+            state=$(jq -r '.state' <<<"$pr")
+            if [[ "$state" == "CLOSED" ]]; then
+              echo "release pull request from this workflow run was closed: $url" >&2
+              exit 1
+            fi
+            if [[ "$state" != "OPEN" && "$state" != "MERGED" ]]; then
+              echo "unexpected release pull request state '$state': $url" >&2
+              exit 1
+            fi
+            echo "release pull request is already in state $state: $url"
             echo "open=true" >> "$GITHUB_OUTPUT"
+            echo "url=$url" >> "$GITHUB_OUTPUT"
+            echo "state=$state" >> "$GITHUB_OUTPUT"
           else
             echo "open=false" >> "$GITHUB_OUTPUT"
           fi
@@ -97,7 +126,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/release-tools
-          key: git-cliff-${{ runner.os }}-${{ hashFiles('scripts/prepare-release.sh') }}
+          # Key the binary by its pinned version, not by unrelated edits to the
+          # caller script. The broad fallback recovers the already-populated
+          # trusted-main cache created under the former script-hash key; the
+          # script still verifies the executable reports exactly v2.13.1.
+          key: git-cliff-${{ runner.os }}-v2.13.1
+          restore-keys: git-cliff-${{ runner.os }}-
 
       - name: Populate the cargo registry
         if: steps.existing.outputs.open != 'true'
@@ -139,11 +173,13 @@ jobs:
           echo "prepared=true" >> "$GITHUB_OUTPUT"
 
       - name: Open the pull request
+        id: pull-request
         if: steps.prepare.outputs.prepared == 'true'
         env:
           BASE_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ steps.release-app.outputs.token }}
           REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           VERSION: ${{ steps.prepare.outputs.version }}
         run: |
           branch="release/next"
@@ -152,7 +188,6 @@ jobs:
           git checkout -b "$branch"
           git add -- Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore: release ${VERSION}"
-          release_sha=$(git rev-parse HEAD)
 
           # Seed the protected branch at an existing main commit, then push
           # only the three generated release files. This keeps the App's
@@ -186,13 +221,64 @@ jobs:
             --title "chore: release ${VERSION}" \
             --body "Automated release preparation for v${VERSION}.
 
-          Merging this publishes v${VERSION}: \`release.yml\` tags the merge commit, builds the platform assets and publishes the GitHub Release.
+          The merge queue builds and qualifies the exact release commit before it lands. After landing, \`release.yml\` promotes those artifacts, tags the commit and publishes the GitHub Release.
 
-          Required checks and the merge queue gate this pull request." \
+          Required checks and the merge queue gate this pull request.
+
+          Prepared by workflow run ${RUN_URL}." \
             --base main \
             --head "$branch"
           )
           echo "opened $pr"
-          gh pr merge "$pr" \
+          echo "url=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure the release pull request is queued
+        if: steps.pull-request.outputs.url != '' || steps.existing.outputs.state == 'OPEN'
+        env:
+          GH_TOKEN: ${{ steps.release-app.outputs.token }}
+          PR_URL: ${{ steps.pull-request.outputs.url || steps.existing.outputs.url }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          details=$(gh pr view "$PR_URL" --repo "$REPOSITORY" \
+            --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')
+          IFS=$'\t' read -r state head_sha <<<"$details"
+          if [[ "$state" == "MERGED" ]]; then
+            echo "release pull request merged before queue verification"
+            exit 0
+          fi
+          if [[ "$state" != "OPEN" || -z "$head_sha" ]]; then
+            echo "cannot queue release pull request in state '$state'" >&2
+            exit 1
+          fi
+          gh pr merge "$PR_URL" --repo "$REPOSITORY" \
             --auto --squash \
-            --match-head-commit "$release_sha"
+            --match-head-commit "$head_sha"
+
+      - name: Enforce release preparation SLO
+        # A rerun after this gate failed must measure the already-opened pull
+        # request against the original run timestamp instead of turning green
+        # by skipping every preparation step.
+        if: steps.pull-request.outputs.url != '' || steps.existing.outputs.url != ''
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release-app.outputs.token }}
+          PR_URL: ${{ steps.pull-request.outputs.url || steps.existing.outputs.url }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          run_created_at=$(GH_TOKEN="$ACTIONS_TOKEN" gh api \
+            "repos/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --jq '.created_at')
+          pr_created_at=$(gh pr view "$PR_URL" --repo "$REPOSITORY" \
+            --json createdAt --jq '.createdAt')
+          run_created=$(date -u -d "$run_created_at" +%s)
+          pr_created=$(date -u -d "$pr_created_at" +%s)
+          elapsed=$((pr_created - run_created))
+          echo "release pull request opened ${elapsed}s after workflow dispatch"
+          if [[ "$elapsed" -lt 0 ]]; then
+            echo "existing release pull request predates this workflow dispatch; SLO already satisfied"
+            exit 0
+          fi
+          if [[ "$elapsed" -gt 120 ]]; then
+            echo "release preparation exceeded its 120s SLO" >&2
+            exit 1
+          fi
