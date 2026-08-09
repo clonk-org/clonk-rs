@@ -7,6 +7,7 @@ from _repo import REPOSITORY
 LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
 MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
+RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.yml"
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 
@@ -39,7 +40,12 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_checkouts_do_not_persist_credentials(self):
         marker = "uses: actions/checkout@"
 
-        for workflow in (LANDING_WORKFLOW, MAIN_WORKFLOW, RELEASE_WORKFLOW):
+        for workflow in (
+            LANDING_WORKFLOW,
+            MAIN_WORKFLOW,
+            RELEASE_WORKFLOW,
+            RELEASE_BUILD_WORKFLOW,
+        ):
             source = workflow.read_text(encoding="utf-8")
             blocks = [
                 block.split("\n      - ", 1)[0]
@@ -88,7 +94,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn("run: scripts/configure-msvc-runtime.sh", landing)
         self.assertNotIn("run: scripts/validate-msvc-runtime.sh", landing)
 
-        for workflow in (MAIN_WORKFLOW, RELEASE_WORKFLOW):
+        for workflow in (MAIN_WORKFLOW, RELEASE_BUILD_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 self.assertEqual(
                     workflow.read_text(encoding="utf-8").count(
@@ -155,7 +161,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_thinlto_cache_is_published_only_by_trusted_main(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        release_build = RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
         restore = (
             "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
             " # v6.1.0"
@@ -169,8 +175,8 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn(save, landing)
         self.assertEqual(main.count(restore), 1)
         self.assertEqual(main.count(save), 1)
-        self.assertEqual(release.count(restore), 1)
-        self.assertNotIn(save, release)
+        self.assertEqual(release_build.count(restore), 1)
+        self.assertNotIn(save, release_build)
 
         trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
         for guard in (
@@ -188,7 +194,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "'scripts/configure-msvc-runtime.sh') }}"
         )
         self.assertNotIn("clonk-msvc-thinlto", landing)
-        for workflow in (main, release):
+        for workflow in (main, release_build):
             with self.subTest(workflow=workflow):
                 self.assertIn(production_key, workflow)
                 self.assertNotIn("restore-keys:", workflow)
@@ -223,7 +229,9 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_windows_installer_toolchain_is_exactly_pinned(self):
         scripts = (
             step_script(LANDING_WORKFLOW, "Install NSIS"),
-            step_script(RELEASE_WORKFLOW, "Install the Windows installer toolchain"),
+            step_script(
+                RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
+            ),
         )
         for script in scripts:
             with self.subTest(script=script):
@@ -235,7 +243,9 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                 self.assertIn("expected NSIS v3.12", script)
 
     def test_universal_release_verifies_every_shipped_binary(self):
-        script = step_script(RELEASE_WORKFLOW, "Check the macOS build is universal")
+        script = step_script(
+            RELEASE_BUILD_WORKFLOW, "Check the macOS build is universal"
+        )
 
         self.assertIn("for binary in clonk-app clonk-game c4group", script)
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from test_release_content_handoff import WORKFLOW, step_script
 
+BUILD_WORKFLOW = WORKFLOW.with_name("release-build.yml")
+
 
 def job_block(name):
     source = WORKFLOW.read_text(encoding="utf-8")
@@ -21,6 +23,20 @@ def job_block(name):
 
 
 class ReleaseWorkflowTopologyTests(unittest.TestCase):
+    def test_release_artifact_build_is_a_reusable_workflow(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        build = job_block("build")
+
+        self.assertTrue(BUILD_WORKFLOW.exists())
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", reusable)
+        self.assertIn("source-sha:", reusable)
+        self.assertIn("version:", reusable)
+        self.assertIn("uses: ./.github/workflows/release-build.yml", build)
+        self.assertIn("source-sha: ${{ needs.resolve.outputs.sha }}", build)
+        self.assertIn("version: ${{ needs.resolve.outputs.version }}", build)
+        self.assertIn("needs: [resolve, build]", job_block("publish"))
+
     def test_release_commits_have_a_sha_specific_concurrency_lane(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
