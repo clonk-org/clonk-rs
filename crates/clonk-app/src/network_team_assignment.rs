@@ -7,10 +7,11 @@ use thiserror::Error;
 
 use crate::prepared_host_bootstrap::ProcessInitialHostTeamAssignmentOracle;
 
-/// Host-owned scenario team state after the initial PlayerInfo assignment.
+/// Synchronized scenario team state after the initial PlayerInfo assignment.
 ///
-/// C++ keeps this `C4TeamList` alive for later local and remote runtime
-/// PlayerInfo requests (`src/C4Network2Players.cpp:160-205`).
+/// Every peer keeps this `C4TeamList` alive while incoming PlayerInfo packets
+/// generate/recheck teams; only the control host admits later update requests
+/// (`src/C4Network2Players.cpp:160-205,245-258`).
 #[derive(Debug, Clone)]
 pub(crate) struct NetworkTeamAssignmentState {
     teams: InitialNetworkTeamMetadata,

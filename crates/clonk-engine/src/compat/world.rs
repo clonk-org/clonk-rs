@@ -1645,6 +1645,71 @@ pub(crate) struct HostDefinitionTables {
     direct_call_function_names: Rc<HashSet<String>>,
 }
 
+fn script_for_host_identity_from_hosts(
+    scenario_script: Option<&Arc<ScriptEngine>>,
+    linked_script_hosts: &[(String, Arc<ScriptEngine>)],
+    definition_scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    identity: clonk_script::ScriptHostIdentity,
+) -> Option<(String, Option<DefinitionId>, Arc<ScriptEngine>)> {
+    if let Some(script) = scenario_script.filter(|script| script.host_identity() == identity) {
+        return Some(("Game.Script".to_string(), None, Arc::clone(script)));
+    }
+    if let Some((name, script)) = linked_script_hosts
+        .iter()
+        .find(|(_, script)| script.host_identity() == identity)
+    {
+        return Some((name.clone(), None, Arc::clone(script)));
+    }
+    let mut matches = definition_scripts
+        .iter()
+        .filter(|(_, script)| script.host_identity() == identity)
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(definition, _)| *definition);
+    matches.first().map(|(definition, script)| {
+        (
+            (*definition).clone(),
+            Some((*definition).clone()),
+            Arc::clone(script),
+        )
+    })
+}
+
+fn resolve_engine_global_script_from_hosts(
+    scenario_script: Option<&Arc<ScriptEngine>>,
+    linked_script_hosts: &[(String, Arc<ScriptEngine>)],
+    definition_scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    name: &str,
+) -> Option<(Arc<ScriptEngine>, clonk_script::ScriptFunctionResolution)> {
+    let resolve = |script: &Arc<ScriptEngine>| {
+        let resolution = script.resolve_global_function(name)?;
+        let exact_script = script_for_host_identity_from_hosts(
+            scenario_script,
+            linked_script_hosts,
+            definition_scripts,
+            resolution.host_identity,
+        )
+        .map(|(_, _, script)| script)
+        .or_else(|| {
+            (script.host_identity() == resolution.host_identity).then(|| Arc::clone(script))
+        })?;
+        Some((exact_script, resolution))
+    };
+
+    if let Some(resolved) = scenario_script.and_then(resolve) {
+        return Some(resolved);
+    }
+    for (_, script) in linked_script_hosts {
+        if let Some(resolved) = resolve(script) {
+            return Some(resolved);
+        }
+    }
+    let mut definitions = definition_scripts.iter().collect::<Vec<_>>();
+    definitions.sort_by_key(|(definition, _)| *definition);
+    definitions
+        .into_iter()
+        .find_map(|(_, script)| resolve(script))
+}
+
 impl HostDefinitionTables {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -1681,6 +1746,20 @@ impl HostDefinitionTables {
             standard_crew_names,
             definition_crew_names: Rc::new(definition_crew_names),
         }
+    }
+
+    pub(crate) fn resolves_engine_global_script(
+        &self,
+        scenario_script: Option<&Arc<ScriptEngine>>,
+        name: &str,
+    ) -> bool {
+        resolve_engine_global_script_from_hosts(
+            scenario_script,
+            self.linked_script_hosts.as_ref(),
+            self.scripts.as_ref(),
+            name,
+        )
+        .is_some()
     }
 }
 
@@ -1759,6 +1838,12 @@ pub(crate) struct LazyHostWorldProvider {
     /// that *writes* terrain still materializes the private copy `landscape`
     /// returns.
     landscape_borrow: Option<unsafe fn(*const ()) -> Option<*const Landscape>>,
+    /// The engine's callback-entry `Game.Objects.Sectors`. Bounded
+    /// C4FindObject walks read these existing lists directly
+    /// (oracle-src-pinned src/C4FindObject.cpp:315-355); rebuilding them from
+    /// cloned callback objects is both redundant and quadratic across many
+    /// object callbacks.
+    sector_map_borrow: Option<unsafe fn(*const ()) -> Option<*const SectorMap>>,
     legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
 }
 
@@ -1789,6 +1874,7 @@ impl LazyHostWorldProvider {
             master_order: None,
             landscape_dimensions: None,
             landscape_borrow: None,
+            sector_map_borrow: None,
             legacy_find_object: None,
         }
     }
@@ -1846,6 +1932,23 @@ impl LazyHostWorldProvider {
         self
     }
 
+    /// Supply a borrow of the source sector map for read-only bounded finds.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`], and additionally: the
+    /// returned pointer must stay valid and unaliased-by-`&mut` for as long as
+    /// any `HostWorldContext` carrying this provider is alive. A caller must
+    /// stop using it as soon as callback-local object geometry, status or
+    /// ordering differs from the source.
+    pub(crate) fn with_sector_map_borrow(
+        mut self,
+        sector_map_borrow: unsafe fn(*const ()) -> Option<*const SectorMap>,
+    ) -> Self {
+        self.sector_map_borrow = Some(sector_map_borrow);
+        self
+    }
+
     pub(crate) fn with_legacy_find_object(
         mut self,
         legacy_find_object: unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>,
@@ -1894,6 +1997,16 @@ impl LazyHostWorldProvider {
     unsafe fn landscape_borrow<'a>(self) -> Option<&'a Landscape> {
         // SAFETY: see `object` and `with_landscape_borrow`.
         unsafe { (self.landscape_borrow?)(self.source).map(|landscape| &*landscape) }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must not retain the returned reference past the lifetime of
+    /// the `HostWorldContext` that owns this provider, or after that context's
+    /// object/sector preview diverges from the callback-entry source.
+    unsafe fn sector_map_borrow<'a>(self) -> Option<&'a SectorMap> {
+        // SAFETY: see `object` and `with_sector_map_borrow`.
+        unsafe { (self.sector_map_borrow?)(self.source).map(|sectors| &*sectors) }
     }
 }
 
@@ -1985,6 +2098,10 @@ pub struct HostWorldContext {
     /// one, and an eager build per host context made every tick quadratic
     /// in the object count.
     sectors: RefCell<Option<Rc<SectorMap>>>,
+    /// Whether read-only queries may still observe the engine's
+    /// callback-entry sector map. Same-call geometry/status changes clear
+    /// this and use the owned `sectors` cache above.
+    borrowed_sector_map_valid: Cell<bool>,
     pub(crate) transfer_zones: Rc<Vec<TransferZoneState>>,
     /// Last values written to the game-global C4PathFinder by an obstructed
     /// MoveTo search. FnGetPath reuses them instead of resetting defaults.
@@ -2217,6 +2334,7 @@ impl Default for HostWorldContext {
             definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
+            borrowed_sector_map_valid: Cell::new(false),
             transfer_zones: Rc::new(Vec::new()),
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
@@ -2333,6 +2451,7 @@ impl HostWorldContext {
             self.landscape = OnceCell::from(landscape.map(Rc::new));
         }
         self.sectors = RefCell::new(None);
+        self.borrowed_sector_map_valid.set(false);
         self
     }
 
@@ -2340,6 +2459,8 @@ impl HostWorldContext {
     /// remain complete; only engine callback contexts opt into this state.
     pub(crate) fn with_lazy_world_provider(mut self, provider: LazyHostWorldProvider) -> Self {
         self.lazy_world = Some(provider);
+        self.borrowed_sector_map_valid
+            .set(provider.sector_map_borrow.is_some());
         if provider.master_order.is_some() {
             self.master_order = OnceCell::new();
         }
@@ -2354,11 +2475,31 @@ impl HostWorldContext {
     /// path for ordinary self-only callbacks and the aliasing boundary for a
     /// live engine object held through `&mut` during the script call.
     pub(crate) fn with_seeded_object(mut self, index: usize, object: HostWorldObject) -> Self {
-        self.seed_object(index, object);
+        self.seed_object_inner(index, object);
         self
     }
 
     pub(crate) fn seed_object(&mut self, index: usize, object: HostWorldObject) {
+        // Public seeding adds an object absent from the source. NewObject
+        // links only that target into C4LSectors before its lifecycle
+        // callbacks (C4Game.cpp:1121-1142; C4GameObjects.cpp:54-70), so
+        // preserve every unrelated callback-entry link and add the fresh
+        // target against the already projected master order.
+        self.materialize_sector_map_for_incremental_update();
+        let record = host_sector_record(&object, self.definitions.as_ref());
+        self.seed_object_inner(index, object);
+        let master_order = self.master_object_ids().to_vec();
+        let mut cache = self.sectors.borrow_mut();
+        if let Some(sectors) = cache.as_mut() {
+            let sectors = Rc::make_mut(sectors);
+            sectors.set_master_order(master_order);
+            if let Some(record) = record {
+                sectors.add(record);
+            }
+        }
+    }
+
+    fn seed_object_inner(&mut self, index: usize, object: HostWorldObject) {
         let id = object.id;
         let store = Rc::make_mut(self.object_store.get_mut());
         store.removed.remove(&id);
@@ -2370,7 +2511,6 @@ impl HostWorldContext {
                 store.indices.get(object_id).copied().unwrap_or(usize::MAX)
             });
         }
-        self.sectors = RefCell::new(None);
     }
 
     pub(crate) fn with_definition_tables(
@@ -2599,6 +2739,7 @@ impl HostWorldContext {
             definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
+            borrowed_sector_map_valid: Cell::new(false),
             transfer_zones: Rc::new(transfer_zones),
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
@@ -3205,33 +3346,12 @@ impl HostWorldContext {
         &self,
         identity: clonk_script::ScriptHostIdentity,
     ) -> Option<(String, Option<DefinitionId>, Arc<ScriptEngine>)> {
-        if let Some(script) = self
-            .scenario_script
-            .as_ref()
-            .filter(|script| script.host_identity() == identity)
-        {
-            return Some(("Game.Script".to_string(), None, Arc::clone(script)));
-        }
-        if let Some((name, script)) = self
-            .linked_script_hosts
-            .iter()
-            .find(|(_, script)| script.host_identity() == identity)
-        {
-            return Some((name.clone(), None, Arc::clone(script)));
-        }
-        let mut matches = self
-            .definition_scripts
-            .iter()
-            .filter(|(_, script)| script.host_identity() == identity)
-            .collect::<Vec<_>>();
-        matches.sort_by_key(|(definition, _)| *definition);
-        matches.first().map(|(definition, script)| {
-            (
-                (*definition).clone(),
-                Some((*definition).clone()),
-                Arc::clone(script),
-            )
-        })
+        script_for_host_identity_from_hosts(
+            self.scenario_script.as_ref(),
+            self.linked_script_hosts.as_ref(),
+            self.definition_scripts.as_ref(),
+            identity,
+        )
     }
 
     /// Resolve a function strictly through `Game.ScriptEngine`, then return
@@ -3242,30 +3362,12 @@ impl HostWorldContext {
         &self,
         name: &str,
     ) -> Option<(Arc<ScriptEngine>, clonk_script::ScriptFunctionResolution)> {
-        let resolve = |script: &Arc<ScriptEngine>| {
-            let resolution = script.resolve_global_function(name)?;
-            let exact_script = self
-                .script_for_host_identity(resolution.host_identity)
-                .map(|(_, _, script)| script)
-                .or_else(|| {
-                    (script.host_identity() == resolution.host_identity).then(|| Arc::clone(script))
-                })?;
-            Some((exact_script, resolution))
-        };
-
-        if let Some(resolved) = self.scenario_script.as_ref().and_then(resolve) {
-            return Some(resolved);
-        }
-        for (_, script) in self.linked_script_hosts.iter() {
-            if let Some(resolved) = resolve(script) {
-                return Some(resolved);
-            }
-        }
-        let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
-        definitions.sort_by_key(|(definition, _)| *definition);
-        definitions
-            .into_iter()
-            .find_map(|(_, script)| resolve(script))
+        resolve_engine_global_script_from_hosts(
+            self.scenario_script.as_ref(),
+            self.linked_script_hosts.as_ref(),
+            self.definition_scripts.as_ref(),
+            name,
+        )
     }
 
     /// Native functions owned by `Game.ScriptEngine` are registered on each
@@ -3512,11 +3614,87 @@ impl HostWorldContext {
         }
     }
 
+    /// Thread StatusActivate/StatusDeactivate's `stMain` mutation between
+    /// callbacks in one deferred effect batch.
+    fn preview_master_status_change(
+        &mut self,
+        id: ObjectId,
+        status: ObjectStatus,
+    ) -> Vec<ObjectId> {
+        let mut ids = self.master_object_ids().to_vec();
+        ids.retain(|candidate| *candidate != id);
+        if status == ObjectStatus::Normal {
+            let Some(object) = self.get(id) else {
+                return ids;
+            };
+            let is_line = self
+                .definitions
+                .get(object.definition_id())
+                .is_some_and(|metadata| metadata.line != 0);
+            if is_line || object.unsorted {
+                ids.push(id);
+            } else {
+                let sort_category = object.category() & CATEGORY_SORT_LIMIT;
+                let definition_id = object.definition_id().to_string();
+                let mut predecessor = None;
+                let mut found_cluster = false;
+                if object.category() & crate::CATEGORY_STATIC_BACK == 0 {
+                    for (position, other_id) in ids.iter().copied().enumerate() {
+                        let Some(other) = self
+                            .get(other_id)
+                            .filter(|other| other.status().is_active() && !other.unsorted)
+                        else {
+                            continue;
+                        };
+                        if other.category() & CATEGORY_SORT_LIMIT == sort_category
+                            && other.definition_id() == definition_id
+                        {
+                            found_cluster = true;
+                            break;
+                        }
+                        predecessor = Some(position);
+                    }
+                }
+                if !found_cluster {
+                    predecessor = None;
+                    for (position, other_id) in ids.iter().copied().enumerate() {
+                        let Some(other) = self
+                            .get(other_id)
+                            .filter(|other| other.status().is_active() && !other.unsorted)
+                        else {
+                            continue;
+                        };
+                        if other.category() & CATEGORY_SORT_LIMIT <= sort_category {
+                            break;
+                        }
+                        predecessor = Some(position);
+                    }
+                }
+                ids.insert(predecessor.map_or(0, |position| position + 1), id);
+            }
+        }
+        if let Some(order) = self.master_order.get_mut() {
+            *Rc::make_mut(order) = ids.clone();
+        }
+        ids
+    }
+
     /// Carry mask-driving foreign-object writes between callbacks in one
     /// deferred effect batch. C++ mutates the live object immediately; a
     /// cloned host world must therefore seed the next callback from the
     /// preceding callback's final geometry and graphics state.
     pub(crate) fn preview_object_update(&mut self, id: ObjectId, update: &ObjectUpdate) {
+        let changes_sector = update.change_def.is_some()
+            || update.position.is_some()
+            || update.resolved_docon_position.is_some()
+            || update.rotation.is_some()
+            || update.construction.is_some()
+            || update.status.is_some()
+            || update.shape_override.is_some();
+        let incrementally_updates_sector = changes_sector;
+        if incrementally_updates_sector {
+            self.materialize_sector_map_for_incremental_update();
+        }
         if update.status.is_some() {
             let _ = self.master_object_ids();
         }
@@ -3594,6 +3772,19 @@ impl HostWorldContext {
                 state.local_vars = local_vars.clone();
             }
         }
+        if incrementally_updates_sector {
+            if update.status.is_some() {
+                let object = object.clone();
+                let master_order = self.preview_master_status_change(id, object.status());
+                self.preview_object_status_sector(&object, &master_order);
+            } else if object.status().is_active() {
+                let record = host_sector_record(object, self.definitions.as_ref());
+                let master_order = self.master_object_ids().to_vec();
+                if let Some(record) = record {
+                    self.preview_object_sector_update(record, &master_order);
+                }
+            }
+        }
     }
 
     /// Carry the in-flight effect list of the object whose callbacks are
@@ -3629,6 +3820,7 @@ impl HostWorldContext {
     }
 
     pub(crate) fn preview_object_destroyed(&mut self, id: ObjectId) {
+        self.materialize_sector_map_for_incremental_update();
         let _ = self.master_object_ids();
         let store = Rc::make_mut(self.object_store.get_mut());
         store.objects.remove(&id);
@@ -3637,12 +3829,21 @@ impl HostWorldContext {
         // this entry through an exclusive borrow for the rest of the call.
         store.order.retain(|object_id| *object_id != id);
         store.removed.insert(id);
-        Rc::make_mut(
+        let master_order = Rc::make_mut(
             self.master_order
                 .get_mut()
                 .expect("master order was initialized above"),
-        )
-        .retain(|object_id| *object_id != id);
+        );
+        master_order.retain(|object_id| *object_id != id);
+        let master_order = master_order.clone();
+        if self.sector_map().is_some() {
+            let mut cache = self.sectors.borrow_mut();
+            if let Some(sectors) = cache.as_mut() {
+                let sectors = Rc::make_mut(sectors);
+                sectors.remove(id);
+                sectors.set_master_order(master_order);
+            }
+        }
         self.solid_mask_instance_sequences.borrow_mut().remove(&id);
     }
 
@@ -3685,6 +3886,7 @@ impl HostWorldContext {
     /// observable ordering state.
     pub(crate) fn with_sector_map(mut self, sectors: Option<SectorMap>) -> Self {
         self.sectors = RefCell::new(sectors.map(Rc::new));
+        self.borrowed_sector_map_valid.set(false);
         self
     }
 
@@ -4336,8 +4538,56 @@ impl HostWorldContext {
             .or_else(|| self.landscape_ref().map(landscape_extent))
     }
 
+    /// Preserve the callback-entry sector lists before applying one of C++'s
+    /// synchronous, incremental `C4GameObjects::UpdatePos` mutations. A full
+    /// rebuild would recreate every list from the current master order and
+    /// lose the physical order retained by unrelated entries.
+    fn materialize_sector_map_for_incremental_update(&self) {
+        let needs_clone = self.sectors.borrow().is_none() && self.borrowed_sector_map_valid.get();
+        let borrowed = needs_clone
+            .then(|| {
+                // SAFETY: the provider and its Engine source live for this
+                // synchronous callback, and the map is cloned before its
+                // borrowed validity is cleared below.
+                unsafe {
+                    self.lazy_world
+                        .and_then(|provider| provider.sector_map_borrow())
+                        .cloned()
+                }
+            })
+            .flatten();
+        self.borrowed_sector_map_valid.set(false);
+        if let Some(sectors) = borrowed {
+            *self.sectors.borrow_mut() = Some(Rc::new(sectors));
+        }
+    }
+
+    /// Read the callback-entry engine sectors until a same-call mutation
+    /// makes them stale. Owned fixture maps and callback-local mutations use
+    /// the existing materialized cache instead.
+    fn with_read_sector_map<T>(&self, read: impl FnOnce(&SectorMap) -> T) -> Option<T> {
+        if let Some(sectors) = self.sectors.borrow().clone() {
+            return Some(read(sectors.as_ref()));
+        }
+        if self.borrowed_sector_map_valid.get() {
+            // SAFETY: the provider and its Engine source live for this
+            // synchronous callback. Mutation previews clear the validity bit
+            // before they can alias or diverge from the source sector map.
+            if let Some(sectors) = unsafe {
+                self.lazy_world
+                    .and_then(|provider| provider.sector_map_borrow())
+            } {
+                return Some(read(sectors));
+            }
+        }
+        self.sector_map().map(|sectors| read(sectors.as_ref()))
+    }
+
     /// The sector map over this context's objects, built on first use.
     fn sector_map(&self) -> Option<Rc<SectorMap>> {
+        if let Some(sectors) = self.sectors.borrow().clone() {
+            return Some(sectors);
+        }
         self.materialize_objects();
         let (width, height) = self.landscape_dimensions()?;
         let mut cache = self.sectors.borrow_mut();
@@ -4373,6 +4623,7 @@ impl HostWorldContext {
         object: &HostWorldObject,
         master_order: &[ObjectId],
     ) {
+        self.materialize_sector_map_for_incremental_update();
         if self.sector_map().is_none() {
             return;
         }
@@ -4398,6 +4649,7 @@ impl HostWorldContext {
         record: SectorObject,
         master_order: &[ObjectId],
     ) {
+        self.materialize_sector_map_for_incremental_update();
         if self.sector_map().is_none() {
             return;
         }
@@ -4411,14 +4663,14 @@ impl HostWorldContext {
     }
 
     pub(crate) fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
-        self.sector_map().map(|sectors| {
+        self.with_read_sector_map(|sectors| {
             let area = sectors.area(rect);
             sectors.object_ids_in_area(&area)
         })
     }
 
     pub(crate) fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
-        self.sector_map().map(|sectors| {
+        self.with_read_sector_map(|sectors| {
             let area = sectors.area(rect);
             sectors.shape_ids_in_area(&area)
         })
@@ -4428,7 +4680,7 @@ impl HostWorldContext {
         &self,
         rect: DefinitionRect,
     ) -> Option<Vec<Vec<ObjectId>>> {
-        self.sector_map().map(|sectors| {
+        self.with_read_sector_map(|sectors| {
             let area = sectors.area(rect);
             sectors.object_id_lists_in_area(&area)
         })
@@ -4438,7 +4690,7 @@ impl HostWorldContext {
         &self,
         rect: DefinitionRect,
     ) -> Option<Vec<Vec<ObjectId>>> {
-        self.sector_map().map(|sectors| {
+        self.with_read_sector_map(|sectors| {
             let area = sectors.area(rect);
             sectors.shape_id_lists_in_area(&area)
         })

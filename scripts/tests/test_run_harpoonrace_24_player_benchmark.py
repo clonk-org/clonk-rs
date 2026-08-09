@@ -138,6 +138,99 @@ class BenchmarkLineTests(unittest.TestCase):
         )
         self.assertEqual(report["simulation_fps"], 35.0)
 
+    def test_parses_input_latency_evidence_with_raw_samples(self):
+        line = (
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT elapsed_seconds=60 "
+            "submitted_inputs=240 executed_inputs=240 pending_inputs=0 "
+            "input_latency_sample_count=240 input_latency_p50_ms=50 "
+            "input_latency_p95_ms=100 input_latency_p99_ms=125 "
+            "input_latency_max_ms=150 "
+            "input_latency_samples_ns=[50000000,100000000,125000000,150000000]"
+        )
+
+        report = MODULE.parse_benchmark_input_line(line)
+
+        self.assertEqual(report["submitted_inputs"], 240)
+        self.assertEqual(report["input_latency_samples_ns"][2], 125_000_000)
+
+    def test_input_probe_rejects_inconsistent_pending_or_sample_accounting(self):
+        report = {
+            "elapsed_seconds": 60.0,
+            "submitted_inputs": 240,
+            "executed_inputs": 238,
+            "pending_inputs": 1,
+            "input_latency_sample_count": 238,
+            "input_latency_p50_ms": 50.0,
+            "input_latency_p95_ms": 100.0,
+            "input_latency_p99_ms": 100.0,
+            "input_latency_max_ms": 100.0,
+            "input_latency_samples_ns": [100_000_000] * 238,
+        }
+
+        failures = MODULE.input_probe_failures(
+            report,
+            expected_seconds=60,
+            interval_ms=500,
+            maximum_latency_ms=100.0,
+            minimum_success_percent=95.0,
+        )
+
+        self.assertTrue(
+            any("executed plus pending inputs" in failure for failure in failures)
+        )
+
+    def test_input_probe_accepts_exactly_95_percent_with_pending_inputs(self):
+        samples = [100_000_000] * 228
+        report = {
+            "elapsed_seconds": 60.0,
+            "submitted_inputs": 240,
+            "executed_inputs": 228,
+            "pending_inputs": 12,
+            "input_latency_sample_count": 228,
+            "input_latency_p50_ms": 100.0,
+            "input_latency_p95_ms": 100.0,
+            "input_latency_p99_ms": 100.0,
+            "input_latency_max_ms": 100.0,
+            "input_latency_samples_ns": samples,
+        }
+
+        self.assertEqual(
+            MODULE.input_probe_failures(
+                report,
+                expected_seconds=60,
+                interval_ms=500,
+                maximum_latency_ms=100.0,
+                minimum_success_percent=95.0,
+            ),
+            [],
+        )
+
+    def test_input_probe_requires_expected_volume_and_95_percent_threshold(self):
+        samples = [100_000_000] * 225 + [101_000_000] * 12
+        report = {
+            "elapsed_seconds": 60.0,
+            "submitted_inputs": 237,
+            "executed_inputs": 237,
+            "pending_inputs": 0,
+            "input_latency_sample_count": 237,
+            "input_latency_p50_ms": 100.0,
+            "input_latency_p95_ms": 101.0,
+            "input_latency_p99_ms": 101.0,
+            "input_latency_max_ms": 101.0,
+            "input_latency_samples_ns": samples,
+        }
+
+        failures = MODULE.input_probe_failures(
+            report,
+            expected_seconds=60,
+            interval_ms=500,
+            maximum_latency_ms=100.0,
+            minimum_success_percent=95.0,
+        )
+
+        self.assertTrue(any("minimum expected volume" in failure for failure in failures))
+        self.assertTrue(any("within 100.000ms" in failure for failure in failures))
+
     def test_rejects_duplicate_machine_results(self):
         metric = (
             "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=1 "
@@ -153,6 +246,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 "
             "synchronized_player_infos=24 activated_nonhost_clients=24 "
             "runtime_crew_objects=24 "
+            "runtime_players_with_live_crew=24 "
             "runtime_players_with_exactly_one_live_sf5b_crew=24"
         )
         with self.assertRaisesRegex(ValueError, "exactly one metric"):
@@ -167,18 +261,17 @@ class BenchmarkLineTests(unittest.TestCase):
                 "",
             )
 
-    def test_context_requires_the_per_player_live_sf5b_gate(self):
-        # HarpoonRace creates one SF5B and adds it to each C4Player::Crew
-        # (HarpoonRace.c4s/Script.c:66-73; src/C4Player.cpp:1173-1202).
+    def test_context_requires_the_generic_per_player_live_crew_gate(self):
         context = (
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 "
             "synchronized_player_infos=24 activated_nonhost_clients=24 "
-            "runtime_crew_objects=24"
+            "runtime_crew_objects=24 "
+            "runtime_players_with_exactly_one_live_sf5b_crew=24"
         )
 
         with self.assertRaisesRegex(
             ValueError,
-            "runtime_players_with_exactly_one_live_sf5b_crew",
+            "runtime_players_with_live_crew",
         ):
             MODULE.parse_benchmark_context_line(context)
 
@@ -198,6 +291,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 "
             "synchronized_player_infos=24 activated_nonhost_clients=24 "
             "runtime_crew_objects=24 "
+            "runtime_players_with_live_crew=24 "
             "runtime_players_with_exactly_one_live_sf5b_crew=24"
         )
 
@@ -222,6 +316,7 @@ class BenchmarkLineTests(unittest.TestCase):
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 "
             "synchronized_player_infos=24 activated_nonhost_clients=24 "
             "runtime_crew_objects=24 "
+            "runtime_players_with_live_crew=24 "
             "runtime_players_with_exactly_one_live_sf5b_crew=24"
         )
 
@@ -243,6 +338,7 @@ class BenchmarkLineTests(unittest.TestCase):
                 "synchronized_player_infos": 24,
                 "activated_nonhost_clients": 24,
                 "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
                 "runtime_players_with_exactly_one_live_sf5b_crew": 24,
             },
         )
@@ -304,6 +400,7 @@ class BenchmarkLineTests(unittest.TestCase):
                 "synchronized_player_infos": 24,
                 "activated_nonhost_clients": 24,
                 "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
                 "runtime_players_with_exactly_one_live_sf5b_crew": 24,
             },
             "network_evidence": benchmark_network_evidence(),
@@ -355,6 +452,79 @@ class BenchmarkLineTests(unittest.TestCase):
             any("presentation FPS" in failure for failure in failures)
         )
 
+    def test_runtime_only_acceptance_allows_an_occluded_client(self):
+        report = {
+            "elapsed_seconds": 300.0,
+            "successful_present_submissions": 0,
+            "presentation_submission_fps": 0.0,
+            "refreshed_frames": 0,
+            "simulation_frames": 11_400,
+            "simulation_fps": 38.0,
+            "automatic_graphics_skips": 0,
+            "average_graphics_pass_ms": 0.0,
+            "max_graphics_pass_ms": 0.0,
+            "graphics_pass_sample_count": 0,
+            "graphics_pass_p50_ms": 0.0,
+            "graphics_pass_p95_ms": 0.0,
+            "graphics_pass_p99_ms": 0.0,
+            "graphics_pass_samples_ns": [],
+            "benchmark_context": {
+                "runtime_players": 4,
+                "synchronized_player_infos": 4,
+                "activated_nonhost_clients": 4,
+                "runtime_crew_objects": 4,
+                "runtime_players_with_live_crew": 4,
+                "runtime_players_with_exactly_one_live_sf5b_crew": 0,
+            },
+            "network_evidence": benchmark_network_evidence(players=4),
+        }
+
+        self.assertEqual(
+            MODULE.benchmark_failures(
+                report,
+                expected_seconds=300,
+                expected_players=4,
+                minimum_simulation_fps=38.0,
+                minimum_presentation_fps=35.0,
+                maximum_graphics_p99_ms=25.0,
+                maximum_network_lag_ms=100.0,
+                require_sf5b_crew=False,
+                require_presentation=False,
+            ),
+            [],
+        )
+
+        report["simulation_fps"] = 37.999
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=300,
+            expected_players=4,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+        )
+        self.assertTrue(any("simulation FPS" in failure for failure in failures))
+
+        report["simulation_fps"] = 38.0
+        report["benchmark_context"]["runtime_players_with_live_crew"] = 3
+        failures = MODULE.benchmark_failures(
+            report,
+            expected_seconds=300,
+            expected_players=4,
+            minimum_simulation_fps=38.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+            require_sf5b_crew=False,
+            require_presentation=False,
+        )
+        self.assertTrue(
+            any("runtime_players_with_live_crew" in failure for failure in failures)
+        )
+
     def test_acceptance_requires_exact_mesh_complete_samples_and_low_lag(self):
         report = {
             "elapsed_seconds": 60.0,
@@ -376,6 +546,7 @@ class BenchmarkLineTests(unittest.TestCase):
                 "synchronized_player_infos": 24,
                 "activated_nonhost_clients": 24,
                 "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
                 "runtime_players_with_exactly_one_live_sf5b_crew": 24,
             },
             "network_evidence": benchmark_network_evidence(
@@ -433,6 +604,7 @@ class BenchmarkLineTests(unittest.TestCase):
                 "synchronized_player_infos": 24,
                 "activated_nonhost_clients": 24,
                 "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
                 "runtime_players_with_exactly_one_live_sf5b_crew": 24,
             },
             "network_evidence": benchmark_network_evidence(),
@@ -475,6 +647,7 @@ class BenchmarkLineTests(unittest.TestCase):
                 "synchronized_player_infos": 24,
                 "activated_nonhost_clients": 24,
                 "runtime_crew_objects": 24,
+                "runtime_players_with_live_crew": 24,
                 "runtime_players_with_exactly_one_live_sf5b_crew": 24,
             },
             "network_evidence": benchmark_network_evidence(),
@@ -496,6 +669,32 @@ class BenchmarkLineTests(unittest.TestCase):
 
 
 class ExactReferenceTests(unittest.TestCase):
+    def test_reads_a_generic_scenario_title_from_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            (scenario / "Scenario.txt").write_text(
+                "[Head]\nTitle=Deep Sea\n", encoding="cp1252"
+            )
+
+            self.assertEqual(
+                MODULE.scenario_title_from_file(scenario), "Deep Sea"
+            )
+
+    def test_prefers_the_us_title_resource_used_by_the_lobby_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            (scenario / "Scenario.txt").write_text(
+                "[Head]\nTitle=Predator\n", encoding="cp1252"
+            )
+            (scenario / "Title.txt").write_text(
+                "DE:AH - Predator\r\nUS:AH - Predator\r\n",
+                encoding="cp1252",
+            )
+
+            self.assertEqual(
+                MODULE.scenario_title_from_file(scenario), "AH - Predator"
+            )
+
     REFERENCE = (
         "[Reference]\r\n"
         "State=Lobby\r\n"
@@ -792,18 +991,27 @@ class IsolatedInputTests(unittest.TestCase):
                 "LC_LOG": "trace",
                 "RUST_LOG": "wgpu_core=trace",
                 "LC_CONFIG_FILE": "/tmp/not-the-fleet-config.ini",
+                "LC_RUST_ENGINE_RANDOM_SEED": "991",
+                "LC_RUST_ENGINE_MAP_SEED": "992",
+                "LC_RUST_ENGINE_STARTUP_PLAYERS": "99",
                 "UNRELATED": "kept",
             }
         )
         self.assertEqual(environment["LC_LOG"], MODULE.FLEET_LOG_FILTER)
         self.assertNotIn("RUST_LOG", environment)
         self.assertNotIn("LC_CONFIG_FILE", environment)
+        self.assertNotIn("LC_RUST_ENGINE_RANDOM_SEED", environment)
+        self.assertNotIn("LC_RUST_ENGINE_MAP_SEED", environment)
+        self.assertNotIn("LC_RUST_ENGINE_STARTUP_PLAYERS", environment)
         self.assertEqual(environment["UNRELATED"], "kept")
 
-    def test_client_benchmark_keeps_running_for_supervisor_acceptance(self):
+    def test_client_benchmark_keeps_running_and_enables_its_input_probe(self):
         runner = MODULE.FleetRunner.__new__(MODULE.FleetRunner)
         runner.workspace = Path("/tmp/harpoonrace-workspace")
-        runner.arguments = SimpleNamespace(measurement_seconds=60)
+        runner.arguments = SimpleNamespace(
+            measurement_seconds=60,
+            input_probe_interval_ms=500,
+        )
 
         environment = runner.process_environment(
             Path("/tmp/harpoonrace-client"),
@@ -817,6 +1025,10 @@ class IsolatedInputTests(unittest.TestCase):
         self.assertNotIn(
             "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK", environment
         )
+        self.assertEqual(
+            environment["LC_APP_PRESENTATION_BENCHMARK_INPUT_INTERVAL_MS"], "500"
+        )
+        self.assertEqual(environment["LC_GAME_UPDATE_RECOVERY_COMPLETE"], "1")
 
     def test_generated_config_and_profile_are_stable_and_loadable_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -833,6 +1045,7 @@ class IsolatedInputTests(unittest.TestCase):
             )
             text = config.read_text(encoding="utf-8")
             self.assertIn("ConfigResetSafety=42\n", text)
+            self.assertIn("Language=US\nLanguageEx=US\n", text)
             self.assertIn(
                 "[Network]\n"
                 "LocalName=LoadClient-01\n"
@@ -974,6 +1187,111 @@ class LogEvidenceTests(unittest.TestCase):
 
 
 class ProcessLifecycleTests(unittest.TestCase):
+    def test_input_fingerprint_rejects_same_name_source_and_parent_content_byte_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            source = workspace / "crates" / "app" / "src" / "main.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("first\n", encoding="utf-8")
+            before = MODULE.scoped_paths_fingerprint(workspace, ("crates",))
+
+            # The dirty path/status name is unchanged; only its bytes move.
+            source.write_text("other\n", encoding="utf-8")
+            after = MODULE.scoped_paths_fingerprint(workspace, ("crates",))
+
+            runner = MODULE.FleetRunner.__new__(MODULE.FleetRunner)
+            runner.artifact_dir = workspace / "artifacts"
+            runner.artifact_dir.mkdir()
+            runner.failures = []
+            runner.initial_input_fingerprint = {
+                "full_sha256": before["sha256"],
+            }
+            with mock.patch.object(
+                runner,
+                "capture_input_fingerprint",
+                return_value={"full_sha256": after["sha256"]},
+            ):
+                runner.verify_input_fingerprint_invariance()
+
+            self.assertNotEqual(before["sha256"], after["sha256"])
+            self.assertEqual(
+                runner.failures,
+                ["benchmark input fingerprint changed during the run"],
+            )
+
+            scenario = workspace / "content" / "Hazard.c4f" / "DM_Baldoon.c4s"
+            scenario.mkdir(parents=True)
+            (scenario / "Scenario.txt").write_text("[Head]\n", encoding="ascii")
+            material = scenario.parent / "Material.c4g" / "TexMap.txt"
+            material.parent.mkdir()
+            material.write_text("first\n", encoding="ascii")
+            for runtime_group in (
+                workspace / "planet" / "System.c4g",
+                workspace / "content" / "Objects.c4d",
+                workspace / "content" / "Hazard.c4d",
+            ):
+                runtime_group.mkdir(parents=True)
+                (runtime_group / "Names.txt").write_text("stable\n", encoding="ascii")
+            graphics = workspace / "planet" / "Graphics.c4g" / "Graphics.txt"
+            graphics.parent.mkdir()
+            graphics.write_text("first\n", encoding="ascii")
+            binary = workspace / "clonk-app"
+            binary.write_bytes(b"binary")
+            profile_icon = workspace / "BigIcon.png"
+            profile_icon.write_bytes(b"icon")
+            runner.workspace = workspace
+            runner.binary = binary
+            runner.scenario = scenario
+            runner.profile_big_icon = profile_icon
+
+            content_before = runner.capture_input_fingerprint()
+            material.write_text("other\n", encoding="ascii")
+            content_after = runner.capture_input_fingerprint()
+
+            self.assertNotEqual(
+                content_before["matrix_invariant_sha256"],
+                content_after["matrix_invariant_sha256"],
+            )
+
+            graphics_before = content_after
+            graphics.write_text("other\n", encoding="ascii")
+            graphics_after = runner.capture_input_fingerprint()
+
+            self.assertNotEqual(
+                graphics_before["matrix_invariant_sha256"],
+                graphics_after["matrix_invariant_sha256"],
+            )
+
+    def test_workspace_status_probe_failure_fails_closed(self):
+        workspace = Path("/tmp/harpoonrace-status-probe")
+        failure = MODULE.subprocess.CalledProcessError(
+            128,
+            ["git", "status", "--porcelain=v1"],
+            stderr="fatal: expected submodule path 'content' not to be a symbolic link",
+        )
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=failure):
+            with self.assertRaisesRegex(
+                MODULE.FleetFailure,
+                "workspace status capture failed",
+            ):
+                MODULE.workspace_status_porcelain(workspace)
+
+    def test_content_status_probe_failure_fails_closed(self):
+        content = Path("/tmp/harpoonrace-content-status-probe")
+        failure = MODULE.subprocess.CalledProcessError(
+            128,
+            ["git", "status", "--porcelain=v1"],
+            stderr="fatal: content repository is unavailable",
+        )
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=failure):
+            with self.assertRaisesRegex(
+                MODULE.FleetFailure,
+                "content status capture failed",
+            ):
+                MODULE.content_status_porcelain(content)
+
     def test_completion_deadline_includes_the_app_warmup(self):
         self.assertEqual(
             MODULE.benchmark_completion_timeout_seconds(60, 300.0),
@@ -1075,6 +1393,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=1 "
             "synchronized_player_infos=1 activated_nonhost_clients=1 "
             "runtime_crew_objects=1 "
+            "runtime_players_with_live_crew=1 "
             "runtime_players_with_exactly_one_live_sf5b_crew=1\n"
         ) + benchmark_network_line(local_client_id=1, players=1) + "\n"
         with tempfile.TemporaryDirectory() as temporary:
@@ -1167,6 +1486,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=2 "
             "synchronized_player_infos=2 activated_nonhost_clients=2 "
             "runtime_crew_objects=2 "
+            "runtime_players_with_live_crew=2 "
             "runtime_players_with_exactly_one_live_sf5b_crew=2\n"
         ) + benchmark_network_line(local_client_id=1, players=2) + "\n"
         with tempfile.TemporaryDirectory() as temporary:

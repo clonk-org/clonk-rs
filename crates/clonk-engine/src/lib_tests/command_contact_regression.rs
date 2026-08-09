@@ -343,6 +343,47 @@ protected func QueryWorld()
 }
 
 #[test]
+fn set_position_without_a_solid_mask_bake_does_not_materialize_the_landscape() {
+    // C4Object::ForcePosition only reaches UpdateSolidMask after its changed
+    // X/Y gate (oracle-src-pinned src/C4Movement.cpp:552-561). An ordinary
+    // object has no C4SolidMask raster to remove, so that callback-local
+    // bookkeeping must not deep-clone the landscape.
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(100, 100));
+    let mover = Definition::from_script(
+        "MOVE",
+        "Unmasked mover",
+        r#"#strict
+func Move() { SetPosition(20, 30); return(0); }
+"#,
+    )
+    .expect("mover compiles");
+    engine.register_definition(mover).expect("mover registers");
+    let mover = engine
+        .spawn_object(SpawnConfig::new("MOVE").with_position(Vector2::new(10, 10)))
+        .expect("mover spawns");
+    let mover_index = engine.find_object_index(mover).expect("mover exists");
+
+    HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(mover_index, "Move", Vec::new())
+            .expect("move callback succeeds"),
+        Value::Nil,
+    );
+    assert_eq!(
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "removing an absent solid-mask bake must not clone the callback landscape"
+    );
+    assert_eq!(
+        engine.objects[mover_index].state.position,
+        Vector2::new(20, 30),
+        "the callback still applies its position update"
+    );
+}
+
+#[test]
 fn lazy_master_order_ignores_stale_object_index_cache() {
     let mut engine = Engine::new();
     engine
@@ -852,7 +893,10 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
     // (oracle-src-pinned src/C4Sector.cpp:107 reads Game.Landscape.Width/Height
     // and nothing else). Forcing the callback-local landscape copy for two
     // integers costs a full deep clone on the first FindObjects of every
-    // script call, which is the hot path while many flames are alive.
+    // script call, which is the hot path while many flames are alive. A
+    // bounded C4FindObject walk reads the existing Game.Objects.Sectors lists
+    // directly (oracle-src-pinned src/C4FindObject.cpp:315-355), so it must
+    // not first clone every object into a second callback-local sector map.
     let mut engine = Engine::with_seed(0);
     engine
         .register_script_definition("SECT", "Sector", "")
@@ -864,6 +908,7 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
             .expect("object spawns");
     }
 
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
     HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
     let context = engine.host_world_context();
     let found = context
@@ -879,6 +924,798 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
         0,
         "sector sizing must not clone the landscape shell"
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "a read-only sector walk must borrow the authoritative candidate lists"
+    );
+}
+
+#[test]
+fn sector_query_rebuilds_after_callback_local_position_update() {
+    // C4Object::ForcePosition immediately calls UpdatePos, which reinserts the
+    // object in Game.Objects.Sectors before the next script query
+    // (oracle-src-pinned src/C4Movement.cpp:536-545;
+    // src/C4Object.cpp:346-354). A callback-local preview must therefore stop
+    // borrowing the callback-entry sector lists as soon as position changes.
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("SECT", "Sector", "")
+        .expect("definition registers");
+    engine.set_landscape(Landscape::flat(400, 100));
+    let object = engine
+        .spawn_object(SpawnConfig::new("SECT").with_position(Vector2::new(10, 10)))
+        .expect("object spawns");
+
+    let mut context = engine.host_world_context();
+    assert!(
+        context
+            .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 50, 100))
+            .expect("sector map present")
+            .contains(&object),
+        "the callback-entry sectors contain the object's old position"
+    );
+
+    context.preview_object_update(
+        object,
+        &ObjectUpdate::new().with_position(Vector2::new(310, 10)),
+    );
+
+    assert!(
+        !context
+            .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 50, 100))
+            .expect("sector map present")
+            .contains(&object),
+        "the rebuilt sectors drop the object's old position"
+    );
+    assert!(
+        context
+            .object_sector_ids_in_rect(DefinitionRect::new(300, 0, 50, 100))
+            .expect("sector map present")
+            .contains(&object),
+        "the rebuilt sectors expose the callback-local position"
+    );
+}
+
+#[test]
+fn set_position_updates_bounded_find_sectors_in_the_same_script_call() {
+    // C4Object::ForcePosition calls UpdatePos before returning, so the next
+    // bounded FindObjects in the same script call walks the new sector links
+    // (oracle-src-pinned src/C4Movement.cpp:536-545;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    engine
+        .register_definition(
+            Definition::from_script(
+                "SECT",
+                "Sector mover",
+                r#"#strict
+public func MoveAndFind()
+{
+    SetPosition(310, 10);
+    return GetLength(FindObjects([C4FO_InRect, 300, 0, 50, 100]));
+}
+"#,
+            )
+            .expect("mover compiles"),
+        )
+        .expect("mover registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("SECT").with_position(Vector2::new(10, 10)))
+        .expect("mover spawns");
+    let index = engine.find_object_index(object).expect("mover exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "MoveAndFind", Vec::new())
+            .expect("move-and-find callback succeeds"),
+        Value::Int(1),
+        "the moved object must be discoverable through its new sector"
+    );
+}
+
+#[test]
+fn set_rotation_updates_bounded_shape_find_sectors_in_the_same_script_call() {
+    // C4Object::SetRotation calls UpdateFace(true), whose UpdateShape updates
+    // the covered sector area before returning to script
+    // (oracle-src-pinned src/C4Object.cpp:322-365,5637-5647;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 200));
+    let mut definition = Definition::from_script(
+        "ROTR",
+        "Sector rotator",
+        r#"#strict
+public func RotateAndFind()
+{
+    SetR(90);
+    return GetLength(FindObjects([C4FO_AtRect, 260, 100, 1, 1]));
+}
+"#,
+    )
+    .expect("rotator compiles");
+    definition.set_rotateable(1);
+    definition.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
+    engine
+        .register_definition(definition)
+        .expect("rotator registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("ROTR").with_position(Vector2::new(200, 100)))
+        .expect("rotator spawns");
+    let index = engine.find_object_index(object).expect("rotator exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "RotateAndFind", Vec::new())
+            .expect("rotate-and-find callback succeeds"),
+        Value::Int(1),
+        "the rotated shape must be discoverable through its new sectors"
+    );
+}
+
+#[test]
+fn change_def_updates_bounded_shape_find_sectors_in_the_same_script_call() {
+    // C4Object::ChangeDef installs the new definition and calls
+    // UpdateFace(true), so its new shape-sector links are visible before the
+    // suspended script frame resumes (oracle-src-pinned
+    // src/C4Object.cpp:1207-1254,322-365;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 200));
+    let mut replacement = Definition::from_script("NEW1", "Wide replacement", "#strict\n")
+        .expect("replacement compiles");
+    replacement.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
+    engine
+        .register_definition(replacement)
+        .expect("replacement registers");
+    let mut original = Definition::from_script(
+        "OLD1",
+        "Narrow original",
+        r#"#strict
+public func ChangeAndFind()
+{
+    ChangeDef(NEW1);
+    return GetLength(FindObjects([C4FO_AtRect, 130, 100, 1, 1]));
+}
+"#,
+    )
+    .expect("original compiles");
+    original.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+    engine
+        .register_definition(original)
+        .expect("original registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("OLD1").with_position(Vector2::new(200, 100)))
+        .expect("original spawns");
+    let index = engine.find_object_index(object).expect("original exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "ChangeAndFind", Vec::new())
+            .expect("change-and-find callback succeeds"),
+        Value::Int(1),
+        "the replacement shape must be discoverable through its new sectors"
+    );
+}
+
+#[test]
+fn do_con_updates_bounded_shape_find_sectors_after_keep_bottom_move() {
+    // C4Object::DoCon first refreshes the shape through UpdateFace(true),
+    // then calls UpdatePos again after moving a straight object's center to
+    // keep its old bottom (oracle-src-pinned src/C4Object.cpp:1445-1505;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 250));
+    let mut definition = Definition::from_script(
+        "GROW",
+        "Sector grower",
+        r#"#strict
+public func GrowAndFind()
+{
+    DoCon(50);
+    return GetLength(FindObjects([C4FO_AtRect, 200, 30, 1, 1]));
+}
+
+public func FindAtNewTop()
+{
+    return GetLength(FindObjects([C4FO_AtRect, 200, 30, 1, 1]));
+}
+"#,
+    )
+    .expect("grower compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 80)));
+    engine
+        .register_definition(definition)
+        .expect("grower registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("GROW")
+                .with_position(Vector2::new(200, 100))
+                .with_construction(FULL_CON / 2),
+        )
+        .expect("grower spawns");
+    let index = engine.find_object_index(object).expect("grower exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "FindAtNewTop", Vec::new())
+            .expect("pre-growth find callback succeeds"),
+        Value::Int(0),
+        "the incomplete shape must not cover its eventual full-construction top"
+    );
+    assert_eq!(
+        engine
+            .call_object_function(index, "GrowAndFind", Vec::new())
+            .expect("grow-and-find callback succeeds"),
+        Value::Int(1),
+        "the grown object must be discoverable at its keep-bottom position"
+    );
+}
+
+#[test]
+fn do_con_refreshes_shape_sectors_before_content_ejection_callback() {
+    // UpdateFace(true) performs UpdateShape -> UpdatePos before DoCon ejects
+    // incomplete objects' contents, so Ejection observes the intermediate
+    // grown shape before the later keep-bottom move
+    // (oracle-src-pinned src/C4Object.cpp:1445-1505;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 250));
+    let mut grower = Definition::from_script(
+        "GROW",
+        "Callback grower",
+        r#"#strict
+local ejection_count;
+
+protected func Ejection(object child)
+{
+    ejection_count = GetLength(FindObjects(
+        [C4FO_AtRect, 200, 110, 1, 1],
+        [C4FO_ID, GROW]));
+}
+
+public func GrowAndReadEjection()
+{
+    DoCon(25);
+    return ejection_count;
+}
+"#,
+    )
+    .expect("grower compiles");
+    grower.set_c4_callback_convention(true);
+    grower.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 80)));
+    engine
+        .register_definition(grower)
+        .expect("grower registers");
+    engine
+        .register_script_definition("ITEM", "Contained item", "#strict\n")
+        .expect("item registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("GROW")
+                .with_position(Vector2::new(200, 100))
+                .with_construction(FULL_CON / 4),
+        )
+        .expect("grower spawns");
+    engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(object))
+        .expect("contained item spawns");
+    let index = engine.find_object_index(object).expect("grower exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "GrowAndReadEjection", Vec::new())
+            .expect("grow-and-read callback succeeds"),
+        Value::Int(1),
+        "Ejection must see the UpdateFace shape sectors before keep-bottom adjustment"
+    );
+}
+
+#[test]
+fn exit_updates_sectors_before_ejection_callback() {
+    // C4Object::Exit installs its new position and runs UpdateFace(true) ->
+    // UpdatePos before Ejection/Departure, so the container's Ejection
+    // callback finds the exiting object at its outside coordinates
+    // (oracle-src-pinned src/C4Object.cpp:1532-1563;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    let mut container = Definition::from_script(
+        "CONT",
+        "Exit observer",
+        r#"#strict
+local ejection_count;
+
+protected func Ejection(object item)
+{
+    ejection_count = GetLength(FindObjects(
+        [C4FO_InRect, 300, 0, 50, 100],
+        [C4FO_ID, ITEM]));
+}
+"#,
+    )
+    .expect("container compiles");
+    container.set_c4_callback_convention(true);
+    engine
+        .register_definition(container)
+        .expect("container registers");
+    engine
+        .register_definition(
+            Definition::from_script(
+                "ITEM",
+                "Exiting item",
+                r#"#strict
+public func Leave()
+{
+    return Exit(this(), 310, 10);
+}
+"#,
+            )
+            .expect("item compiles"),
+        )
+        .expect("item registers");
+    let container = engine
+        .spawn_object(SpawnConfig::new("CONT"))
+        .expect("container spawns");
+    let item = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+        .expect("item spawns contained");
+    let item_index = engine.find_object_index(item).expect("item exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(item_index, "Leave", Vec::new())
+            .expect("exit callback succeeds"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(container)
+            .expect("container remains")
+            .local_vars
+            .get("ejection_count"),
+        Some(&Value::Int(1)),
+        "Ejection must see the child's post-Exit sector"
+    );
+}
+
+#[test]
+fn enter_updates_sectors_before_collection2_callback() {
+    // C4Object::Enter copies the container motion and runs UpdateFace(true)
+    // before Collection2/Entrance, so Collection2 finds the newly contained
+    // object at the container's coordinates (oracle-src-pinned
+    // src/C4Object.cpp:1566-1636; src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    let mut container = Definition::from_script(
+        "CONT",
+        "Enter observer",
+        r#"#strict
+local collection_count;
+
+protected func Collection2(object item)
+{
+    collection_count = GetLength(FindObjects(
+        [C4FO_InRect, 0, 0, 50, 100],
+        [C4FO_ID, ITEM]));
+}
+"#,
+    )
+    .expect("container compiles");
+    container.set_c4_callback_convention(true);
+    engine
+        .register_definition(container)
+        .expect("container registers");
+    engine
+        .register_definition(
+            Definition::from_script(
+                "ITEM",
+                "Entering item",
+                r#"#strict
+public func Go(object container)
+{
+    return Enter(container);
+}
+"#,
+            )
+            .expect("item compiles"),
+        )
+        .expect("item registers");
+    let container = engine
+        .spawn_object(SpawnConfig::new("CONT").with_position(Vector2::new(10, 10)))
+        .expect("container spawns");
+    let item = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_position(Vector2::new(310, 10)))
+        .expect("item spawns outside");
+    let item_index = engine.find_object_index(item).expect("item exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(item_index, "Go", vec![object_reference_value(container)],)
+            .expect("enter callback succeeds"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(container)
+            .expect("container remains")
+            .local_vars
+            .get("collection_count"),
+        Some(&Value::Int(1)),
+        "Collection2 must see the item's post-Enter sector"
+    );
+}
+
+#[test]
+fn set_vertex_permanent_update_refreshes_shape_sectors() {
+    // VTX_SetPermanentUpd runs C4Object::UpdateShape(true), which restores
+    // the definition rectangle as well as the edited own vertices and calls
+    // UpdatePos before SetVertex returns (oracle-src-pinned
+    // src/C4Script.cpp:1238-1275; src/C4Object.cpp:322-350;
+    // src/C4Shape.cpp:421-450; src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    let mut definition = Definition::from_script(
+        "VRTX",
+        "Permanent vertex editor",
+        r#"#strict
+public func RestoreAndFind()
+{
+    SetShape(0, 0, 1, 1);
+    SetVertex(0, VTX_X, 0, this(), VTX_SetPermanentUpd);
+    return [GetLength(FindObjects([C4FO_AtRect, 130, 5, 1, 1])), GetObjWidth()];
+}
+"#,
+    )
+    .expect("vertex editor compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+    engine
+        .register_definition(definition)
+        .expect("vertex editor registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("VRTX").with_position(Vector2::new(200, 10)))
+        .expect("vertex editor spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("vertex editor exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "RestoreAndFind", Vec::new())
+            .expect("restore-and-find callback succeeds"),
+        Value::Array(vec![Value::Int(1), Value::Int(80)]),
+        "the permanent UpdateShape must restore and relink the definition rectangle"
+    );
+}
+
+#[test]
+fn collect_updates_sectors_after_post_callback_copy_motion() {
+    // C4Object::Collect deliberately enters with fCopyMotion=false, runs
+    // Collection/Hit at the item's old position, and only then CopyMotion
+    // calls UpdatePos when it snaps to the collector (oracle-src-pinned
+    // src/C4Object.cpp:5693-5714; src/C4Movement.cpp:518-529;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    let mut collector = Definition::from_script(
+        "COLL",
+        "Sector collector",
+        r#"#strict
+public func TakeAndFind(object item)
+{
+    if (!Collect(item)) return -1;
+    return GetLength(FindObjects(
+        [C4FO_InRect, 0, 0, 50, 100],
+        [C4FO_ID, ITEM]));
+}
+"#,
+    )
+    .expect("collector compiles");
+    collector.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+    engine
+        .register_definition(collector)
+        .expect("collector registers");
+    let mut item =
+        Definition::from_script("ITEM", "Collected item", "#strict\n").expect("item compiles");
+    item.set_collectible(true);
+    engine.register_definition(item).expect("item registers");
+    let collector = engine
+        .spawn_object(SpawnConfig::new("COLL").with_position(Vector2::new(10, 10)))
+        .expect("collector spawns");
+    let item = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_position(Vector2::new(310, 10)))
+        .expect("item spawns");
+    let collector_index = engine
+        .find_object_index(collector)
+        .expect("collector exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                collector_index,
+                "TakeAndFind",
+                vec![object_reference_value(item)],
+            )
+            .expect("collect-and-find callback succeeds"),
+        Value::Int(1),
+        "the collected item must be discoverable at its post-callback CopyMotion position"
+    );
+}
+
+#[test]
+fn status_activation_refreshes_sectors_after_shape_rebuild() {
+    // StatusActivate first adds the inactive object with its current shape,
+    // then UpdateFace(true) rebuilds Shape from the definition and UpdatePos
+    // relinks that final geometry before UpdateTransferZone
+    // (oracle-src-pinned src/C4Object.cpp:5972-5985,322-365;
+    // src/C4FindObject.cpp:315-355).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    let mut definition = Definition::from_script(
+        "ACTV",
+        "Sector activator",
+        r#"#strict
+public func ActivateAndFind()
+{
+    SetObjectStatus(C4OS_NORMAL);
+    return [GetLength(FindObjects([C4FO_AtRect, 130, 5, 1, 1])), GetObjWidth()];
+}
+"#,
+    )
+    .expect("activator compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(-80, 0, 80, 10)));
+    engine
+        .register_definition(definition)
+        .expect("activator registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("ACTV")
+                .with_position(Vector2::new(200, 10))
+                .with_shape_rect(DefinitionRect::new(0, 0, 1, 1))
+                .with_status(ObjectStatus::Inactive),
+        )
+        .expect("inactive object spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("inactive object exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "ActivateAndFind", Vec::new())
+            .expect("activate-and-find callback succeeds"),
+        Value::Array(vec![Value::Int(1), Value::Int(80)]),
+        "activation must relink the definition shape after clearing the inactive override"
+    );
+}
+
+#[test]
+fn callback_geometry_update_preserves_unrelated_physical_sector_order() {
+    // C4LSectors::Update mutates only the moved object's affected lists; a
+    // preceding master-list rank refresh does not reorder unrelated physical
+    // sector links (oracle-src-pinned src/C4Sector.cpp:107-147;
+    // src/C4GameObjects.cpp:732-736). A bounded FindObjects after SetPosition
+    // must therefore retain the callback-entry order of the untouched sector.
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    engine
+        .register_script_definition("ORDR", "Ordered candidate", "#strict\n")
+        .expect("candidate definition registers");
+    engine
+        .register_definition(
+            Definition::from_script(
+                "MOVR",
+                "Sector mover",
+                r#"#strict
+public func MoveAndFindOrdered()
+{
+    SetPosition(310, 10);
+    return FindObjects([C4FO_InRect, 0, 0, 50, 100]);
+}
+"#,
+            )
+            .expect("mover compiles"),
+        )
+        .expect("mover registers");
+    let older = engine
+        .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(10, 10)))
+        .expect("older candidate spawns");
+    let newer = engine
+        .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(20, 10)))
+        .expect("newer candidate spawns");
+    for x in 100..116 {
+        engine
+            .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(x, 10)))
+            .expect("unrelated candidate spawns");
+    }
+    let mover = engine
+        .spawn_object(SpawnConfig::new("MOVR").with_position(Vector2::new(210, 10)))
+        .expect("mover spawns");
+
+    let older_index = engine.find_object_index(older).expect("older exists");
+    let newer_index = engine.find_object_index(newer).expect("newer exists");
+    engine.objects[older_index].state.category = CATEGORY_OBJECT;
+    engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
+    engine
+        .pending_object_order_commands
+        .push(ObjectOrderCommand::SortByCategory);
+    engine.execute_object_order_commands();
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    let mover_index = engine.find_object_index(mover).expect("mover exists");
+    assert_eq!(
+        engine
+            .call_object_function(mover_index, "MoveAndFindOrdered", Vec::new())
+            .expect("ordered move-and-find callback succeeds"),
+        Value::Array(vec![
+            object_reference_value(newer),
+            object_reference_value(older),
+        ]),
+        "moving an unrelated object must not rebuild and reorder this sector"
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        3,
+        "only the caller and two returned candidates materialize; the first sector mutation clones the entry map instead of every object"
+    );
+}
+
+#[test]
+fn effect_batch_geometry_preview_preserves_callback_entry_sector_order() {
+    // Consecutive effect callbacks share one live C4Object graph. A foreign
+    // SetPosition in the first timer performs only that object's UpdatePos;
+    // the next timer must retain unrelated physical sector-list order even
+    // when it differs from stMain after SortByCategory
+    // (oracle-src-pinned src/C4Effect.cpp:330-357;
+    // src/C4Sector.cpp:107-147; src/C4GameObjects.cpp:732-736).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(400, 100));
+    engine
+        .register_script_definition("ORDR", "Ordered candidate", "#strict\n")
+        .expect("candidate definition registers");
+    engine
+        .register_script_definition("MOVR", "Foreign mover", "#strict\n")
+        .expect("mover definition registers");
+    engine
+        .register_script_definition("STAT", "Foreign status target", "#strict\n")
+        .expect("status definition registers");
+    for id in ["CHG1", "CHG2"] {
+        engine
+            .register_script_definition(id, id, "#strict\n")
+            .expect("change definition registers");
+    }
+    engine
+        .register_script_definition("DEAD", "Foreign removal target", "#strict\n")
+        .expect("removal definition registers");
+    let mut observer = Definition::from_script(
+        "FXOR",
+        "Effect order observer",
+        r#"#strict 3
+local mover, status_target, change_target, removal_target;
+local expected_first, expected_second;
+
+public func Arm(object moved, object status_object, object changed,
+                object removed, object first, object second)
+{
+    mover = moved;
+    status_target = status_object;
+    change_target = changed;
+    removal_target = removed;
+    expected_first = first;
+    expected_second = second;
+    AddEffect("Move", this(), 10, 1, this());
+    AddEffect("Observe", this(), 20, 1, this());
+}
+
+func FxMoveTimer()
+{
+    SetPosition(310, 10, mover);
+    SetObjectStatus(C4OS_INACTIVE, status_target);
+    ChangeDef(CHG2, change_target);
+    RemoveObject(removal_target);
+    return 0;
+}
+
+func FxObserveTimer()
+{
+    var found = FindObjects(
+        [C4FO_InRect, 0, 0, 50, 100],
+        [C4FO_ID, ORDR]);
+    if (GetLength(found) == 2 &&
+        found[0] == expected_first && found[1] == expected_second)
+        SetR(17);
+    else
+        SetR(23);
+    return 0;
+}
+"#,
+    )
+    .expect("effect observer compiles");
+    observer.set_c4_callback_convention(true);
+    engine
+        .register_definition(observer)
+        .expect("effect observer registers");
+    let older = engine
+        .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(10, 10)))
+        .expect("older candidate spawns");
+    let newer = engine
+        .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(20, 10)))
+        .expect("newer candidate spawns");
+    let mover = engine
+        .spawn_object(SpawnConfig::new("MOVR").with_position(Vector2::new(210, 10)))
+        .expect("foreign mover spawns");
+    let status_target = engine
+        .spawn_object(SpawnConfig::new("STAT").with_position(Vector2::new(260, 10)))
+        .expect("foreign status target spawns");
+    let change_target = engine
+        .spawn_object(SpawnConfig::new("CHG1").with_position(Vector2::new(270, 10)))
+        .expect("foreign change target spawns");
+    let removal_target = engine
+        .spawn_object(SpawnConfig::new("DEAD").with_position(Vector2::new(280, 10)))
+        .expect("foreign removal target spawns");
+    let observer = engine
+        .spawn_object(SpawnConfig::new("FXOR").with_position(Vector2::new(210, 20)))
+        .expect("effect observer spawns");
+
+    let older_index = engine.find_object_index(older).expect("older exists");
+    let newer_index = engine.find_object_index(newer).expect("newer exists");
+    engine.objects[older_index].state.category = CATEGORY_OBJECT;
+    engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
+    engine
+        .pending_object_order_commands
+        .push(ObjectOrderCommand::SortByCategory);
+    engine.execute_object_order_commands();
+
+    let observer_index = engine.find_object_index(observer).expect("observer exists");
+    engine
+        .call_object_function(
+            observer_index,
+            "Arm",
+            vec![
+                object_reference_value(mover),
+                object_reference_value(status_target),
+                object_reference_value(change_target),
+                object_reference_value(removal_target),
+                object_reference_value(newer),
+                object_reference_value(older),
+            ],
+        )
+        .expect("effects arm");
+    let observer_index = engine
+        .find_object_index(observer)
+        .expect("observer remains");
+    let move_effect = engine.objects[observer_index]
+        .state
+        .effects
+        .iter()
+        .find(|effect| effect.name == "Move")
+        .cloned()
+        .expect("move effect exists");
+    let observe_effect = engine.objects[observer_index]
+        .state
+        .effects
+        .iter()
+        .find(|effect| effect.name == "Observe")
+        .cloned()
+        .expect("observe effect exists");
+    let definition_id = engine.objects[observer_index].definition_id.clone();
+
+    engine
+        .dispatch_object_effect_events(
+            observer_index,
+            &definition_id,
+            vec![
+                EffectEvent::timer(move_effect),
+                EffectEvent::timer(observe_effect),
+            ],
+        )
+        .expect("effect batch executes");
+
+    assert_eq!(
+        engine.objects[observer_index].state.rotation, 17,
+        "the second timer must keep the callback-entry physical sector order"
     );
 }
 

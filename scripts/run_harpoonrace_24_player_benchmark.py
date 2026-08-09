@@ -40,9 +40,29 @@ MACHINE_PASS = MACHINE_PREFIX + "result=pass native_tick_budget_ms=28"
 MACHINE_FAIL_PREFIX = MACHINE_PREFIX + "result=fail"
 MACHINE_CONTEXT_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_CONTEXT "
 MACHINE_NETWORK_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_NETWORK "
+MACHINE_INPUT_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_INPUT "
 FLEET_LOG_FILTER = "info,wgpu_core::device=warn"
 NATIVE_GAME_TICK_MS = 28.0
 BENCHMARK_WARMUP_SECONDS = 2.0
+WORKSPACE_STATUS_PATHS = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo",
+    "crates",
+    "planet",
+    "scripts",
+    "third_party",
+    "xtask",
+)
+BENCHMARK_SOURCE_FINGERPRINT_PATHS = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo",
+    "crates",
+    "third_party",
+)
 GO_LOG_PATTERN = re.compile(
     r"^(?P<timestamp_utc>"
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
@@ -75,6 +95,22 @@ FLOAT_METRICS = {
 }
 REQUIRED_METRICS = INTEGER_METRICS | FLOAT_METRICS | {
     "graphics_pass_samples_ns"
+}
+INPUT_INTEGER_METRICS = {
+    "submitted_inputs",
+    "executed_inputs",
+    "pending_inputs",
+    "input_latency_sample_count",
+}
+INPUT_FLOAT_METRICS = {
+    "elapsed_seconds",
+    "input_latency_p50_ms",
+    "input_latency_p95_ms",
+    "input_latency_p99_ms",
+    "input_latency_max_ms",
+}
+REQUIRED_INPUT_METRICS = INPUT_INTEGER_METRICS | INPUT_FLOAT_METRICS | {
+    "input_latency_samples_ns"
 }
 NETWORK_INTEGER_FIELDS = {
     "local_client_id",
@@ -195,6 +231,7 @@ def parse_benchmark_context_line(line: str) -> dict[str, int]:
         "synchronized_player_infos",
         "activated_nonhost_clients",
         "runtime_crew_objects",
+        "runtime_players_with_live_crew",
         "runtime_players_with_exactly_one_live_sf5b_crew",
     }
     missing = sorted(required - fields.keys())
@@ -202,6 +239,48 @@ def parse_benchmark_context_line(line: str) -> dict[str, int]:
         raise ValueError(
             "benchmark context is missing required fields: " + ", ".join(missing)
         )
+    return fields
+
+
+def parse_benchmark_input_line(line: str) -> dict[str, Any]:
+    """Parse one complete input-latency probe result."""
+
+    line = line.strip()
+    if not line.startswith(MACHINE_INPUT_PREFIX):
+        raise ValueError("line is not a presentation benchmark input result")
+    fields: dict[str, Any] = {}
+    for token in line[len(MACHINE_INPUT_PREFIX) :].split():
+        if "=" not in token:
+            raise ValueError(f"benchmark input token has no value: {token!r}")
+        key, raw = token.split("=", 1)
+        if key in fields:
+            raise ValueError(f"duplicate benchmark input field: {key}")
+        if key == "input_latency_samples_ns":
+            if not raw.startswith("[") or not raw.endswith("]"):
+                raise ValueError("input latency samples must use a bracketed list")
+            values = raw[1:-1]
+            fields[key] = (
+                [] if not values else [int(value, 10) for value in values.split(",")]
+            )
+        elif key in INPUT_INTEGER_METRICS:
+            fields[key] = int(raw, 10)
+        elif key in INPUT_FLOAT_METRICS:
+            value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError(f"non-finite benchmark input field: {key}")
+            fields[key] = value
+        else:
+            fields[key] = raw
+    missing = sorted(REQUIRED_INPUT_METRICS - fields.keys())
+    if missing:
+        raise ValueError(
+            "benchmark input result is missing required fields: "
+            + ", ".join(missing)
+        )
+    if any(fields[field] < 0 for field in INPUT_INTEGER_METRICS):
+        raise ValueError("benchmark input counts cannot be negative")
+    if any(sample < 0 for sample in fields["input_latency_samples_ns"]):
+        raise ValueError("input latency samples cannot be negative")
     return fields
 
 
@@ -305,7 +384,12 @@ def parse_benchmark_network_line(line: str) -> dict[str, Any]:
     return fields
 
 
-def extract_benchmark_report(stdout: str, stderr: str) -> dict[str, Any]:
+def extract_benchmark_report(
+    stdout: str,
+    stderr: str,
+    *,
+    require_input_probe: bool = False,
+) -> dict[str, Any]:
     """Require exactly one complete metric/context/network triple.
 
     Fleet acceptance belongs to the supervisor after every participant has
@@ -350,6 +434,21 @@ def extract_benchmark_report(stdout: str, stderr: str) -> dict[str, Any]:
     report["network_evidence"] = parse_benchmark_network_line(
         network_lines[0]
     )
+    input_lines = [
+        line for line in combined_lines if line.startswith(MACHINE_INPUT_PREFIX)
+    ]
+    if require_input_probe and len(input_lines) != 1:
+        raise ValueError(
+            "expected exactly one benchmark input result, "
+            f"observed {len(input_lines)}"
+        )
+    if input_lines:
+        if len(input_lines) != 1:
+            raise ValueError(
+                "expected exactly one benchmark input result, "
+                f"observed {len(input_lines)}"
+            )
+        report["input_probe"] = parse_benchmark_input_line(input_lines[0])
     return report
 
 
@@ -391,6 +490,11 @@ def benchmark_failures(
     minimum_presentation_fps: float,
     maximum_graphics_p99_ms: float,
     maximum_network_lag_ms: float,
+    require_sf5b_crew: bool = True,
+    require_presentation: bool = True,
+    input_probe_interval_ms: int = 0,
+    maximum_input_latency_ms: float = 100.0,
+    minimum_input_success_percent: float = 95.0,
 ) -> list[str]:
     """Apply the benchmark's local acceptance contract."""
 
@@ -401,38 +505,44 @@ def benchmark_failures(
             f"{report['elapsed_seconds']:.6f}s is shorter than "
             f"{expected_seconds}s"
         )
-    if report["successful_present_submissions"] <= 0:
-        failures.append("benchmark produced no successful presentation")
-    if report["refreshed_frames"] <= 0:
-        failures.append("benchmark produced no refreshed frame")
-    if report["average_graphics_pass_ms"] > NATIVE_GAME_TICK_MS:
-        failures.append(
-            "average graphics pass "
-            f"{report['average_graphics_pass_ms']:.6f}ms exceeds the "
-            f"native {NATIVE_GAME_TICK_MS:.0f}ms game tick"
-        )
     if report["simulation_fps"] < minimum_simulation_fps:
         failures.append(
             f"simulation FPS {report['simulation_fps']:.6f} is below "
             f"{minimum_simulation_fps:.6f}"
         )
-    if report["presentation_submission_fps"] < minimum_presentation_fps:
-        failures.append(
-            "presentation FPS "
-            f"{report['presentation_submission_fps']:.6f} is below "
-            f"{minimum_presentation_fps:.6f}"
-        )
-    if report["graphics_pass_p99_ms"] >= maximum_graphics_p99_ms:
-        failures.append(
-            f"graphics p99 {report['graphics_pass_p99_ms']:.6f}ms is not "
-            f"below {maximum_graphics_p99_ms:.6f}ms"
-        )
-    for field in (
+    if require_presentation:
+        if report["successful_present_submissions"] <= 0:
+            failures.append("benchmark produced no successful presentation")
+        if report["refreshed_frames"] <= 0:
+            failures.append("benchmark produced no refreshed frame")
+        if report["average_graphics_pass_ms"] > NATIVE_GAME_TICK_MS:
+            failures.append(
+                "average graphics pass "
+                f"{report['average_graphics_pass_ms']:.6f}ms exceeds the "
+                f"native {NATIVE_GAME_TICK_MS:.0f}ms game tick"
+            )
+        if report["presentation_submission_fps"] < minimum_presentation_fps:
+            failures.append(
+                "presentation FPS "
+                f"{report['presentation_submission_fps']:.6f} is below "
+                f"{minimum_presentation_fps:.6f}"
+            )
+        if report["graphics_pass_p99_ms"] >= maximum_graphics_p99_ms:
+            failures.append(
+                f"graphics p99 {report['graphics_pass_p99_ms']:.6f}ms is not "
+                f"below {maximum_graphics_p99_ms:.6f}ms"
+            )
+    context_fields = [
         "runtime_players",
         "synchronized_player_infos",
         "activated_nonhost_clients",
-        "runtime_players_with_exactly_one_live_sf5b_crew",
-    ):
+        "runtime_players_with_live_crew",
+    ]
+    if require_sf5b_crew:
+        context_fields.append(
+            "runtime_players_with_exactly_one_live_sf5b_crew"
+        )
+    for field in context_fields:
         observed = report["benchmark_context"][field]
         if observed != expected_players:
             failures.append(
@@ -483,7 +593,7 @@ def benchmark_failures(
             f"graphics sample count {sample_count} does not match "
             f"{report['successful_present_submissions']} submissions"
         )
-    if samples_ns:
+    if samples_ns and require_presentation:
         raw_p99_ms = nearest_rank_percentile(samples_ns, 0.99) / 1_000_000.0
         if raw_p99_ms >= maximum_graphics_p99_ms:
             failures.append(
@@ -501,6 +611,96 @@ def benchmark_failures(
                 f"p99 ({report['graphics_pass_p99_ms']:.6f}ms versus "
                 f"{raw_p99_ms:.6f}ms)"
             )
+    if input_probe_interval_ms > 0:
+        input_probe = report.get("input_probe")
+        if input_probe is None:
+            failures.append("benchmark input probe result is missing")
+        else:
+            failures.extend(
+                input_probe_failures(
+                    input_probe,
+                    expected_seconds=expected_seconds,
+                    interval_ms=input_probe_interval_ms,
+                    maximum_latency_ms=maximum_input_latency_ms,
+                    minimum_success_percent=minimum_input_success_percent,
+                )
+            )
+    return failures
+
+
+def input_probe_failures(
+    report: dict[str, Any],
+    *,
+    expected_seconds: int,
+    interval_ms: int,
+    maximum_latency_ms: float,
+    minimum_success_percent: float,
+) -> list[str]:
+    """Validate every local input probe against its exact raw evidence."""
+
+    failures: list[str] = []
+    samples_ns = report["input_latency_samples_ns"]
+    sample_count = report["input_latency_sample_count"]
+    submitted = report["submitted_inputs"]
+    executed = report["executed_inputs"]
+    pending = report["pending_inputs"]
+    if sample_count != len(samples_ns):
+        failures.append(
+            f"input sample count {sample_count} does not match "
+            f"{len(samples_ns)} raw samples"
+        )
+    if executed + pending != submitted:
+        failures.append(
+            f"executed plus pending inputs {executed + pending} do not match "
+            f"submitted inputs {submitted}"
+        )
+    if executed != sample_count:
+        failures.append(
+            f"executed inputs {executed} do not match input sample count {sample_count}"
+        )
+    # The app emits two distinct unmatched release controls per interval.
+    # They traverse synchronized control dispatch but cannot change clean
+    # benchmark player state. A full measured window therefore has two
+    # submissions for every interval. Permit one missed pair at the boundary,
+    # but count every pending input against the denominator below.
+    minimum_submissions = max(
+        0, 2 * ((expected_seconds * 1_000) // interval_ms) - 2
+    )
+    if submitted < minimum_submissions:
+        failures.append(
+            f"input submission count {submitted} is below the minimum expected "
+            f"volume {minimum_submissions} for {expected_seconds}s at {interval_ms}ms"
+        )
+    if samples_ns:
+        raw_ms = [sample / 1_000_000.0 for sample in samples_ns]
+        raw_metrics = {
+            "input_latency_p50_ms": nearest_rank_percentile(raw_ms, 0.50),
+            "input_latency_p95_ms": nearest_rank_percentile(raw_ms, 0.95),
+            "input_latency_p99_ms": nearest_rank_percentile(raw_ms, 0.99),
+            "input_latency_max_ms": max(raw_ms),
+        }
+        for field, raw_value in raw_metrics.items():
+            if not math.isclose(
+                raw_value, report[field], rel_tol=0.0, abs_tol=0.001
+            ):
+                failures.append(
+                    f"reported {field} does not match raw samples "
+                    f"({report[field]:.6f}ms versus {raw_value:.6f}ms)"
+                )
+        within_threshold = sum(
+            sample <= maximum_latency_ms for sample in raw_ms
+        )
+        success_percent = (
+            100.0 * within_threshold / submitted if submitted else 0.0
+        )
+        if success_percent < minimum_success_percent:
+            failures.append(
+                f"input latency {success_percent:.3f}% is within "
+                f"{maximum_latency_ms:.3f}ms, expected at least "
+                f"{minimum_success_percent:.3f}%"
+            )
+    else:
+        failures.append("benchmark input probe produced no raw samples")
     return failures
 
 
@@ -526,6 +726,47 @@ def sha256_tree(path: Path) -> str:
     return digest.hexdigest()
 
 
+def json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def scoped_paths_fingerprint(
+    root: Path,
+    relative_paths: Sequence[str | Path],
+) -> dict[str, Any]:
+    """Hash the names, kinds, modes, and bytes of explicit input paths."""
+
+    entries: list[dict[str, Any]] = []
+    for relative in sorted(Path(path) for path in relative_paths):
+        path = root / relative
+        entry: dict[str, Any] = {"path": relative.as_posix()}
+        if path.is_file():
+            entry.update(
+                {
+                    "kind": "file",
+                    "mode": path.stat().st_mode & 0o777,
+                    "sha256": sha256_file(path),
+                }
+            )
+        elif path.is_dir():
+            entry.update(
+                {
+                    "kind": "directory",
+                    "sha256": sha256_tree(path),
+                }
+            )
+        else:
+            entry["kind"] = "missing"
+        entries.append(entry)
+    return {"sha256": json_sha256(entries), "paths": entries}
+
+
 def command_output(arguments: Sequence[str], cwd: Path) -> str | None:
     try:
         return subprocess.run(
@@ -537,6 +778,63 @@ def command_output(arguments: Sequence[str], cwd: Path) -> str | None:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def workspace_status_porcelain(workspace: Path) -> list[str]:
+    """Capture benchmark-relevant workspace changes without probing ``content``.
+
+    Worktrees in this repository may represent the content submodule as a
+    symlink, which makes an unscoped ``git status`` exit 128. The manifest
+    records the content revision separately, while this command covers the
+    tracked/untracked sources that can change the benchmark executable or its
+    orchestration contract. Status capture is provenance, so a failure must not
+    be represented as a clean worktree.
+    """
+
+    arguments = [
+        "git",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        *WORKSPACE_STATUS_PATHS,
+    ]
+    try:
+        result = subprocess.run(
+            arguments,
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise FleetFailure(f"workspace status capture failed: {error}") from error
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() if isinstance(error.stderr, str) else ""
+        suffix = f": {detail}" if detail else f" (exit {error.returncode})"
+        raise FleetFailure(f"workspace status capture failed{suffix}") from error
+    return result.stdout.splitlines()
+
+
+def content_status_porcelain(content: Path) -> list[str]:
+    """Capture dirty content inputs, failing closed when Git cannot inspect them."""
+
+    arguments = ["git", "status", "--porcelain=v1", "--untracked-files=all"]
+    try:
+        result = subprocess.run(
+            arguments,
+            cwd=content,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise FleetFailure(f"content status capture failed: {error}") from error
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() if isinstance(error.stderr, str) else ""
+        suffix = f": {detail}" if detail else f" (exit {error.returncode})"
+        raise FleetFailure(f"content status capture failed{suffix}") from error
+    return result.stdout.splitlines()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -563,12 +861,16 @@ def controlled_process_environment(
 
     The app gives ``LC_CONFIG_FILE`` precedence over its ``--config`` flag.
     Ambient logging can either hide errors or turn dependency tracing into a
-    benchmark observer effect, so both inputs are normalized here.
+    benchmark observer effect, while parity probes can override the pinned
+    scenario seeds and startup roster, so those inputs are normalized here.
     """
 
     environment = inherited.copy()
     environment.pop("LC_CONFIG_FILE", None)
     environment.pop("RUST_LOG", None)
+    environment.pop("LC_RUST_ENGINE_RANDOM_SEED", None)
+    environment.pop("LC_RUST_ENGINE_MAP_SEED", None)
+    environment.pop("LC_RUST_ENGINE_STARTUP_PLAYERS", None)
     environment["LC_LOG"] = FLEET_LOG_FILTER
     return environment
 
@@ -589,6 +891,8 @@ def write_process_config(
         f"Name={name}\n"
         'Participants=""\n'
         "ConfigResetSafety=42\n"
+        "Language=US\n"
+        "LanguageEx=US\n"
         "\n"
         "[Network]\n"
         f"LocalName={name}\n"
@@ -759,6 +1063,37 @@ def reference_is_lobby(
             or fields.get("MaxPlayers") == str(max_players)
         )
     )
+
+
+def scenario_title_from_file(scenario: Path) -> str:
+    """Read the exact scenario title used by the classic lobby reference."""
+
+    title_text = scenario / "Title.txt"
+    try:
+        localized = title_text.read_text(encoding="cp1252")
+    except FileNotFoundError:
+        localized = ""
+    except OSError as error:
+        raise FleetFailure(
+            f"could not read scenario title from {title_text}: {error}"
+        ) from error
+    for line in localized.splitlines():
+        language, separator, title = line.partition(":")
+        if separator and language.casefold() == "us" and title.strip():
+            return title.strip()
+
+    scenario_text = scenario / "Scenario.txt"
+    try:
+        for line in scenario_text.read_text(encoding="cp1252").splitlines():
+            if line.startswith("Title="):
+                title = line.removeprefix("Title=").strip()
+                if title:
+                    return title
+    except OSError as error:
+        raise FleetFailure(
+            f"could not read scenario title from {scenario_text}: {error}"
+        ) from error
+    raise FleetFailure(f"scenario title missing from {scenario_text}")
 
 
 def _reference_section_records(
@@ -969,6 +1304,7 @@ class FleetRunner:
         self.scenario = Path(arguments.scenario)
         if not self.scenario.is_absolute():
             self.scenario = (self.workspace / self.scenario).resolve()
+        self.scenario_title = getattr(arguments, "scenario_title", None)
         self.profile_big_icon = (
             self.workspace / DEFAULT_PROFILE_BIG_ICON
         ).resolve()
@@ -986,6 +1322,7 @@ class FleetRunner:
         self.admission_samples: list[dict[str, Any]] = []
         self.reference_before_start = ""
         self.go_command_sent: dict[str, Any] | None = None
+        self.initial_input_fingerprint: dict[str, Any] | None = None
         self.cleaned = False
         self.cleanup_in_progress = False
 
@@ -1025,6 +1362,10 @@ class FleetRunner:
             )
         if not self.scenario.is_dir():
             raise FleetFailure(f"HarpoonRace scenario not found: {self.scenario}")
+        if self.scenario_title is None:
+            self.scenario_title = scenario_title_from_file(self.scenario)
+        elif not self.scenario_title.strip():
+            raise FleetFailure("--scenario-title must not be empty")
         if not self.profile_big_icon.is_file():
             raise FleetFailure(
                 "benchmark player BigIcon not found: "
@@ -1054,6 +1395,12 @@ class FleetRunner:
             "--maximum-network-lag-ms": (
                 self.arguments.maximum_network_lag_ms
             ),
+            "--maximum-input-latency-ms": (
+                self.arguments.maximum_input_latency_ms
+            ),
+            "--minimum-input-success-percent": (
+                self.arguments.minimum_input_success_percent
+            ),
         }
         invalid = [
             name
@@ -1072,9 +1419,15 @@ class FleetRunner:
             "--minimum-presentation-fps",
             "--maximum-graphics-p99-ms",
             "--maximum-network-lag-ms",
+            "--maximum-input-latency-ms",
+            "--minimum-input-success-percent",
         ):
             if finite_nonnegative[required_positive] == 0.0:
                 raise FleetFailure(f"{required_positive} must be positive")
+        if self.arguments.minimum_input_success_percent > 100.0:
+            raise FleetFailure("--minimum-input-success-percent must be at most 100")
+        if self.arguments.input_probe_interval_ms < 0:
+            raise FleetFailure("--input-probe-interval-ms must be nonnegative")
         if self.arguments.window_width <= 0 or self.arguments.window_height <= 0:
             raise FleetFailure("window dimensions must be positive")
         maximum_port = (
@@ -1083,6 +1436,79 @@ class FleetRunner:
         if self.arguments.base_port < 1024 or maximum_port > 65_535:
             raise FleetFailure(
                 f"base port range is invalid: {self.arguments.base_port}..{maximum_port}"
+            )
+
+    def runtime_data_paths(self) -> list[Path]:
+        paths = [
+            self.workspace / "planet",
+            self.workspace / "content" / "Objects.c4d",
+            self.scenario.parent,
+            self.scenario.parent.with_suffix(".c4d"),
+        ]
+        return [path for path in dict.fromkeys(paths) if path.is_dir()]
+
+    def capture_input_fingerprint(self) -> dict[str, Any]:
+        content = self.workspace / "content"
+        runtime_data = [
+            {"path": str(path), "tree_sha256": sha256_tree(path)}
+            for path in self.runtime_data_paths()
+        ]
+        matrix_invariant = {
+            "workspace_commit": command_output(
+                ["git", "rev-parse", "HEAD"], self.workspace
+            ),
+            "workspace_source": scoped_paths_fingerprint(
+                self.workspace,
+                BENCHMARK_SOURCE_FINGERPRINT_PATHS,
+            ),
+            "binary": {
+                "path": str(self.binary),
+                "sha256": sha256_file(self.binary),
+                "size_bytes": self.binary.stat().st_size,
+            },
+            "runner": {
+                "path": str(Path(__file__).resolve()),
+                "sha256": sha256_file(Path(__file__).resolve()),
+            },
+            "content_revision": command_output(
+                ["git", "rev-parse", "HEAD"], content
+            ),
+            "runtime_data": runtime_data,
+            "profile_big_icon": {
+                "path": str(self.profile_big_icon),
+                "sha256": sha256_file(self.profile_big_icon),
+            },
+        }
+        scenario = {
+            "path": str(self.scenario),
+            "tree_sha256": sha256_tree(self.scenario),
+        }
+        full = {
+            "matrix_invariant": matrix_invariant,
+            "scenario": scenario,
+        }
+        return {
+            "schema_version": 1,
+            "full_sha256": json_sha256(full),
+            "matrix_invariant_sha256": json_sha256(matrix_invariant),
+            **full,
+        }
+
+    def verify_input_fingerprint_invariance(self) -> None:
+        if self.initial_input_fingerprint is None:
+            self.failures.append("benchmark input fingerprint was not captured")
+            return
+        try:
+            final = self.capture_input_fingerprint()
+        except (FleetFailure, OSError) as error:
+            self.failures.append(
+                f"final benchmark input fingerprint capture failed: {error}"
+            )
+            return
+        write_json(self.artifact_dir / "input-fingerprint-final.json", final)
+        if final["full_sha256"] != self.initial_input_fingerprint["full_sha256"]:
+            self.failures.append(
+                "benchmark input fingerprint changed during the run"
             )
 
     def port_plan(self) -> dict[str, Any]:
@@ -1146,6 +1572,12 @@ class FleetRunner:
                 "LC_CACHE_DIR": str(process_root / "cache"),
                 "LC_TEMP_DIR": str(process_root / "tmp"),
                 "LC_LOGS_DIR": str(log_root / "session"),
+                # The fleet starts several direct game binaries against one
+                # read-only install. A launcher normally performs recovery
+                # once before that handoff; repeating the exclusive recovery
+                # lock in every client conflicts with the host's shared
+                # install-use lock.
+                "LC_GAME_UPDATE_RECOVERY_COMPLETE": "1",
                 "LC_PIN_SEED": "1",
                 "RUST_BACKTRACE": environment.get("RUST_BACKTRACE", "1"),
             }
@@ -1168,6 +1600,17 @@ class FleetRunner:
             environment.pop(
                 "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK", None
             )
+            input_probe_interval_ms = getattr(
+                self.arguments, "input_probe_interval_ms", 0
+            )
+            if input_probe_interval_ms > 0:
+                environment[
+                    "LC_APP_PRESENTATION_BENCHMARK_INPUT_INTERVAL_MS"
+                ] = str(input_probe_interval_ms)
+            else:
+                environment.pop(
+                    "LC_APP_PRESENTATION_BENCHMARK_INPUT_INTERVAL_MS", None
+                )
         else:
             environment.pop("LC_APP_PRESENTATION_BENCHMARK_SECONDS", None)
             environment.pop(
@@ -1176,6 +1619,7 @@ class FleetRunner:
             environment.pop(
                 "LC_APP_PRESENTATION_BENCHMARK_KEEP_RUNNING", None
             )
+            environment.pop("LC_APP_PRESENTATION_BENCHMARK_INPUT_INTERVAL_MS", None)
         return environment
 
     def host_command(
@@ -1259,6 +1703,7 @@ class FleetRunner:
             "minimum_presentation_fps": (
                 self.arguments.minimum_presentation_fps
             ),
+            "runtime_only": self.arguments.runtime_only,
             "maximum_graphics_p99_ms": self.arguments.maximum_graphics_p99_ms,
             "maximum_network_lag_ms": self.arguments.maximum_network_lag_ms,
         }
@@ -1271,12 +1716,19 @@ class FleetRunner:
 
     def write_manifest(self, ports: dict[str, Any]) -> None:
         cargo_lock = self.workspace / "Cargo.lock"
-        content_revision = command_output(
-            ["git", "rev-parse", "HEAD"], self.workspace / "content"
-        )
+        content = self.workspace / "content"
+        content_revision = command_output(["git", "rev-parse", "HEAD"], content)
+        runtime_data = [
+            {
+                "path": str(path),
+                "tree_sha256": sha256_tree(path),
+            }
+            for path in self.runtime_data_paths()
+        ]
         manifest = {
             "schema_version": 1,
             "started_utc": self.started_utc,
+            "input_fingerprint": self.initial_input_fingerprint,
             "topology": {
                 "kind": "single-machine-process-fleet",
                 "host_processes": 1,
@@ -1294,13 +1746,9 @@ class FleetRunner:
                 "commit": command_output(
                     ["git", "rev-parse", "HEAD"], self.workspace
                 ),
-                "status_porcelain": (
-                    command_output(
-                        ["git", "status", "--porcelain=v1"], self.workspace
-                    )
-                    or ""
-                ).splitlines(),
+                "status_porcelain": workspace_status_porcelain(self.workspace),
                 "content_revision": content_revision,
+                "content_status_porcelain": content_status_porcelain(content),
                 "cargo_lock_sha256": (
                     sha256_file(cargo_lock) if cargo_lock.is_file() else None
                 ),
@@ -1314,6 +1762,7 @@ class FleetRunner:
             "scenario": {
                 "path": str(self.scenario),
                 "tree_sha256": sha256_tree(self.scenario),
+                "runtime_data": runtime_data,
             },
             "profile_big_icon": {
                 "path": str(self.profile_big_icon),
@@ -1345,6 +1794,7 @@ class FleetRunner:
                 "minimum_presentation_fps": (
                     self.arguments.minimum_presentation_fps
                 ),
+                "runtime_only": self.arguments.runtime_only,
                 "maximum_graphics_p99_ms": (
                     self.arguments.maximum_graphics_p99_ms
                 ),
@@ -1918,7 +2368,18 @@ class FleetRunner:
                     if client["stderr_path"].is_file()
                     else ""
                 )
-                report = extract_benchmark_report(stdout, stderr)
+                report = extract_benchmark_report(
+                    stdout,
+                    stderr,
+                    require_input_probe=(
+                        getattr(
+                            getattr(self, "arguments", None),
+                            "input_probe_interval_ms",
+                            0,
+                        )
+                        > 0
+                    ),
+                )
             except (ValueError, OverflowError):
                 pass
             clients.append(
@@ -2161,7 +2622,13 @@ class FleetRunner:
                     f"process exit code is {client['exit_code']!r}, expected 0"
                 )
             try:
-                report = extract_benchmark_report(stdout, stderr)
+                report = extract_benchmark_report(
+                    stdout,
+                    stderr,
+                    require_input_probe=(
+                        self.arguments.input_probe_interval_ms > 0
+                    ),
+                )
                 client_failures.extend(
                     benchmark_failures(
                         report,
@@ -2178,6 +2645,19 @@ class FleetRunner:
                         ),
                         maximum_network_lag_ms=(
                             self.arguments.maximum_network_lag_ms
+                        ),
+                        require_sf5b_crew=(
+                            not self.arguments.skip_sf5b_crew_assertion
+                        ),
+                        require_presentation=(not self.arguments.runtime_only),
+                        input_probe_interval_ms=(
+                            self.arguments.input_probe_interval_ms
+                        ),
+                        maximum_input_latency_ms=(
+                            self.arguments.maximum_input_latency_ms
+                        ),
+                        minimum_input_success_percent=(
+                            self.arguments.minimum_input_success_percent
                         ),
                     )
                 )
@@ -2343,12 +2823,38 @@ class FleetRunner:
                 "minimum_presentation_fps": (
                     self.arguments.minimum_presentation_fps
                 ),
+                "presentation_required": not self.arguments.runtime_only,
                 "maximum_graphics_p99_ms_exclusive": (
                     self.arguments.maximum_graphics_p99_ms
                 ),
                 "maximum_network_lag_ms_inclusive": (
                     self.arguments.maximum_network_lag_ms
                 ),
+                "sf5b_crew_assertion": (
+                    not self.arguments.skip_sf5b_crew_assertion
+                ),
+                "input_probe": {
+                    "interval_ms": self.arguments.input_probe_interval_ms,
+                    "maximum_latency_ms_inclusive": (
+                        self.arguments.maximum_input_latency_ms
+                    ),
+                    "minimum_success_percent": (
+                        self.arguments.minimum_input_success_percent
+                    ),
+                    "minimum_submissions": (
+                        0
+                        if self.arguments.input_probe_interval_ms == 0
+                        else max(
+                            0,
+                            2
+                            * (
+                                self.arguments.measurement_seconds * 1_000
+                                // self.arguments.input_probe_interval_ms
+                            )
+                            - 2,
+                        )
+                    ),
+                },
                 "preferred_message_route_topology": (
                     "full mesh benchmark requirement; C++ relay fallback "
                     "remains valid engine behavior"
@@ -2469,6 +2975,7 @@ class FleetRunner:
 
         ports = self.port_plan()
         self.validate_ports(ports)
+        self.initial_input_fingerprint = self.capture_input_fingerprint()
         self.open_artifacts()
         try:
             self.write_manifest(ports)
@@ -2486,7 +2993,7 @@ class FleetRunner:
                 self.arguments.host_timeout,
                 lambda reference: reference_is_lobby(
                     reference,
-                    title="HarpoonRace",
+                    title=self.scenario_title,
                 ),
             )
             (self.artifact_dir / "reference-lobby-initial.txt").write_text(
@@ -2500,7 +3007,7 @@ class FleetRunner:
                 self.arguments.host_timeout,
                 lambda reference: reference_is_lobby(
                     reference,
-                    title="HarpoonRace",
+                    title=self.scenario_title,
                     max_players=self.arguments.players,
                 ),
             )
@@ -2522,6 +3029,7 @@ class FleetRunner:
         finally:
             self.cleanup()
 
+        self.verify_input_fingerprint_invariance()
         summary = self.collect_results()
         self.write_benchmark_timing()
         write_json(self.artifact_dir / "summary.json", summary)
@@ -2565,6 +3073,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--scenario",
         default=str(workspace / DEFAULT_SCENARIO),
         help="HarpoonRace .c4s directory",
+    )
+    parser.add_argument(
+        "--scenario-title",
+        default=None,
+        help="exact classic lobby title (default: read Scenario.txt)",
     )
     parser.add_argument(
         "--artifact-dir",
@@ -2651,6 +3164,43 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=100.0,
         help=(
             "inclusive maximum current preferred-message-route lag per client"
+        ),
+    )
+    parser.add_argument(
+        "--input-probe-interval-ms",
+        type=int,
+        default=0,
+        help=(
+            "synchronized no-op release-control probe interval; "
+            "0 disables it (default: 0)"
+        ),
+    )
+    parser.add_argument(
+        "--maximum-input-latency-ms",
+        type=float,
+        default=100.0,
+        help="inclusive input-latency response threshold when probing",
+    )
+    parser.add_argument(
+        "--minimum-input-success-percent",
+        type=float,
+        default=95.0,
+        help="minimum raw input samples within the latency threshold",
+    )
+    parser.add_argument(
+        "--skip-sf5b-crew-assertion",
+        action="store_true",
+        help=(
+            "do not require HarpoonRace's one-live-SF5B-per-player context; "
+            "all other fleet assertions remain exact"
+        ),
+    )
+    parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help=(
+            "require simulation and input evidence without requiring GPU "
+            "presentations from covered client windows"
         ),
     )
     parser.add_argument("--window-width", type=int, default=800)

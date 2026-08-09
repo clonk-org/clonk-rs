@@ -1196,6 +1196,39 @@ fn run() -> Result<()> {
                         now,
                         next_graphics_deadline,
                     );
+                    // The runtime/input benchmark follows the scheduler even
+                    // when a covered window has no drawable surface. Poll
+                    // before probes and simulation so its window is exactly
+                    // half-open: [started, deadline).
+                    let benchmark_now = Instant::now();
+                    if let Some(report) = presentation_benchmark.as_mut().and_then(|benchmark| {
+                        benchmark.poll(
+                            app.mode == AppMode::Running,
+                            benchmark_now,
+                            app.engine.frame(),
+                        )
+                    }) {
+                        finish_app_presentation_benchmark(
+                            event_target,
+                            &event_handler_exit_code,
+                            &app,
+                            report,
+                            presentation_benchmark_asserts_native_tick,
+                            presentation_benchmark_keeps_running,
+                        );
+                        if !presentation_benchmark_keeps_running {
+                            return;
+                        }
+                    }
+                    if let Some((started, deadline)) = presentation_benchmark
+                        .as_ref()
+                        .and_then(PresentationBenchmark::measurement_window)
+                    {
+                        let probe_now = Instant::now();
+                        if probe_now < deadline {
+                            app.submit_due_input_latency_benchmark_pair(started, probe_now);
+                        }
+                    }
                     let simulation_pass = match advance_simulation_pass_within(
                         &mut app,
                         &mut frame_schedule,
@@ -1388,33 +1421,6 @@ fn run() -> Result<()> {
                                         graphics_duration,
                                         true,
                                     );
-                                    if let Some(report) = benchmark.poll(
-                                        app.mode == AppMode::Running,
-                                        completed_at,
-                                        app.engine.frame(),
-                                    ) {
-                                        let network_evidence =
-                                            inspect_presentation_benchmark_network(&app);
-                                        finish_presentation_benchmark(
-                                            event_target,
-                                            &event_handler_exit_code,
-                                            report,
-                                            presentation_benchmark_asserts_native_tick,
-                                            app.engine.players().count(),
-                                            app.control_player_infos.nonremoved_player_count(),
-                                            app.control_clients
-                                                .activated_client_ids()
-                                                .into_iter()
-                                                .filter(|client_id| *client_id != 0)
-                                                .count(),
-                                            runtime_crew_object_count(&app.snapshot),
-                                            runtime_players_with_exactly_one_live_sf5b_crew(
-                                                &app.snapshot,
-                                            ),
-                                            network_evidence,
-                                            presentation_benchmark_keeps_running,
-                                        );
-                                    }
                                 }
                                 false
                             }
@@ -1645,33 +1651,6 @@ fn run() -> Result<()> {
                                     graphics_duration,
                                     refreshed,
                                 );
-                                if let Some(report) = benchmark.poll(
-                                    app.mode == AppMode::Running,
-                                    completed_at,
-                                    app.engine.frame(),
-                                ) {
-                                    let network_evidence =
-                                        inspect_presentation_benchmark_network(&app);
-                                    finish_presentation_benchmark(
-                                        event_target,
-                                        &event_handler_exit_code,
-                                        report,
-                                        presentation_benchmark_asserts_native_tick,
-                                        app.engine.players().count(),
-                                        app.control_player_infos.nonremoved_player_count(),
-                                        app.control_clients
-                                            .activated_client_ids()
-                                            .into_iter()
-                                            .filter(|client_id| *client_id != 0)
-                                            .count(),
-                                        runtime_crew_object_count(&app.snapshot),
-                                        runtime_players_with_exactly_one_live_sf5b_crew(
-                                            &app.snapshot,
-                                        ),
-                                        network_evidence,
-                                        presentation_benchmark_keeps_running,
-                                    );
-                                }
                             }
                         }
                         Ok(RetainedGpuPresentOutcome::Skipped) => {
@@ -2442,6 +2421,7 @@ impl GameApp {
             frames_per_second: 0,
             frames_since_second: 0,
             presentation_stats: PresentationStats::default(),
+            input_latency_benchmark: input_latency_benchmark_from_env(),
             full_speed: false,
             frame_skip: 1,
             auto_frame_skip: configured_auto_frame_skip(&native_config),
@@ -6461,6 +6441,7 @@ impl GameApp {
                                 || !had_client_packet);
                     self.admission_resources
                         .register_player_info_resources(&info.players);
+                    self.generate_incoming_player_info_teams(&info.players);
                     self.control_player_infos.apply(info);
                     let rebalance_updates = self.recheck_team_memberships_from_player_infos();
                     if local_origin {
@@ -6611,7 +6592,18 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::PlayerControl(data) => {
-                    self.execute_player_control_failsafe(data.player, data.command, data.data)
+                    let outcome =
+                        self.execute_player_control_failsafe(data.player, data.command, data.data);
+                    if outcome.is_ok() && runtime_player_has_live_crew(&self.snapshot, data.player)
+                    {
+                        if let (Some(tick), Some(benchmark)) = (
+                            self.executing_ready_tick,
+                            self.input_latency_benchmark.as_mut(),
+                        ) {
+                            benchmark.record_execution(tick, &data, Instant::now());
+                        }
+                    }
+                    outcome
                 }
                 NetworkControl::PlayerCommand(data) => self.execute_player_command_failsafe(data),
                 NetworkControl::PlayerSelect(data) => {

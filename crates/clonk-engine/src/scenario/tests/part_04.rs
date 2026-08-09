@@ -1583,6 +1583,191 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn auto_generated_assigned_team_initializes_runtime_join() {
+        // C4Player::Init resolves a nonzero assigned team through
+        // GetGenerateTeamByID before deciding whether runtime team selection
+        // must postpone ScenarioInit. GenerateDefaultTeams creates every
+        // missing ID through the requested one (C4Player.cpp:299-320;
+        // C4Teams.cpp:386-420).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static init_count;\n\
+             global func Initialize() { init_count = 0; }\n\
+             global func InitializePlayer() { init_count = init_count + 1; }\n",
+        );
+        std::fs::write(scenario_dir.join("Teams.txt"), "[Teams]\n")
+            .expect("write empty custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Assigned".to_string(),
+                player_info_id: 4,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: Some(4),
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("assigned-team join succeeds");
+
+        assert!(matches!(outcome, crate::JoinPlayerOutcome::Initialized(_)));
+        assert_eq!(
+            engine
+                .teams()
+                .iter()
+                .map(|team| team.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(engine.player(0).and_then(crate::Player::team), Some(4));
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_count")
+                .map(|cell| cell.borrow().clone()),
+            Some(clonk_script::Value::Int(1))
+        );
+    }
+
+    #[test]
+    fn auto_generated_new_team_initializes_runtime_join() {
+        // GetGenerateTeamByID treats TEAMID_New (-1) as the next sequential
+        // team and returns that generated team to C4Player::Init's postponed-
+        // selection check without rewriting the player's assigned Team value
+        // (C4Player.cpp:299-320; C4Teams.cpp:403-420).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static init_count;\n\
+             global func Initialize() { init_count = 0; }\n\
+             global func InitializePlayer() { init_count = init_count + 1; }\n",
+        );
+        std::fs::write(scenario_dir.join("Teams.txt"), "[Teams]\n")
+            .expect("write empty custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Generated".to_string(),
+                player_info_id: 5,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: Some(-1),
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("new-team join succeeds");
+
+        assert!(matches!(outcome, crate::JoinPlayerOutcome::Initialized(_)));
+        assert_eq!(
+            engine
+                .teams()
+                .iter()
+                .map(|team| team.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(engine.player(0).and_then(crate::Player::team), Some(-1));
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_count")
+                .map(|cell| cell.borrow().clone()),
+            Some(clonk_script::Value::Int(1))
+        );
+    }
+
+    #[test]
+    fn new_team_join_does_not_generate_past_retained_last_team_id() {
+        // TEAMID_New first becomes GetLargestTeamID() + 1. If serialized
+        // iLastTeamID is already higher, GenerateDefaultTeams creates
+        // nothing and GetGenerateTeamByID returns null, so C4Player::Init
+        // postpones ScenarioInit (C4Player.cpp:299-320;
+        // C4Teams.cpp:386-420).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static init_count;\n\
+             global func Initialize() { init_count = 0; }\n\
+             global func InitializePlayer() { init_count = init_count + 1; }\n",
+        );
+        std::fs::write(scenario_dir.join("Teams.txt"), "[Teams]\n")
+            .expect("write empty custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        engine.set_initial_network_team_metadata(&InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: true,
+            last_team_id: 4,
+            team_distribution: InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        });
+
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Unresolved".to_string(),
+                player_info_id: 6,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: Some(-1),
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("new-team join registers");
+
+        assert_eq!(
+            outcome,
+            crate::JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+        assert!(engine.teams().is_empty());
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_count")
+                .map(|cell| cell.borrow().clone()),
+            Some(clonk_script::Value::Nil)
+        );
+    }
+
+    #[test]
     fn synchronized_team_choice_resumes_scenario_init_like_cpp() {
         // DoTeamSelection first changes PS_TeamSelection to
         // PS_TeamSelectionPending. When CID_InitScenarioPlayer executes,
@@ -2612,4 +2797,3 @@ public func ActualizePhase(pClonk)
 
         assert_eq!((joined.start_x, joined.start_y), (120, 130));
     }
-

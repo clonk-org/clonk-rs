@@ -26,6 +26,21 @@ fn call(engine: &mut Engine, function: &str, args: Vec<Value>) -> Value {
 }
 
 #[test]
+fn default_timer_uses_the_parameterless_game_speed_cadence() {
+    // Parameterless SetGameSpeed selects 38 updates per second and installs
+    // the integer 1000 / 38 delay (src/C4Script.cpp:5219-5230). Use the same
+    // cadence by default so a healthy game has headroom above 38 updates/s.
+    let mut engine = speed_engine();
+    assert_eq!(engine.game_tick_delay_ms(), 26);
+    assert!(300_000 / engine.game_tick_delay_ms() >= 5 * 60 * 38);
+    assert_eq!(
+        call(&mut engine, "ResetSpeed", Vec::new()),
+        Value::Bool(true)
+    );
+    assert_eq!(engine.game_tick_delay_ms(), 26);
+}
+
+#[test]
 fn set_game_speed_validates_and_restarts_the_application_timer() {
     let mut engine = speed_engine();
     assert_eq!(engine.game_tick_delay_ms(), DEFAULT_GAME_TICK_DELAY_MS);

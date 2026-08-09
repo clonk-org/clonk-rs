@@ -218,6 +218,10 @@ pub enum MenuCommandKind {
 mod command_definition_snapshot_cache_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/fire_callback_resolver_regression.rs"]
+mod fire_callback_resolver_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/signed_action_direction_regression.rs"]
 mod signed_action_direction_regression;
 
@@ -344,6 +348,7 @@ std::thread_local! {
     static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
 }
@@ -373,8 +378,11 @@ use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, Transfe
 pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
-/// C4Game::OpenGame's normal application timer before SetGameSpeed changes it.
-pub const DEFAULT_GAME_TICK_DELAY_MS: u64 = 28;
+/// Product default: C++ parameterless SetGameSpeed's integer 1000 / 38 timer.
+/// The oracle's OpenGame default is 28 ms; PORT_STATUS.md records why the port
+/// deliberately starts at the faster, still deterministic 26 ms cadence.
+pub const DEFAULT_GAME_TARGET_FPS: u64 = 38;
+pub const DEFAULT_GAME_TICK_DELAY_MS: u64 = 1_000 / DEFAULT_GAME_TARGET_FPS;
 
 pub(crate) fn next_game_tick_delay_revision() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -12773,6 +12781,10 @@ mod component_con_regression;
 #[cfg(test)]
 #[path = "lib_tests/command_contact_regression.rs"]
 mod command_contact_regression;
+
+#[cfg(test)]
+#[path = "lib_tests/pending_spawn_sector_regression.rs"]
+mod pending_spawn_sector_regression;
 
 #[cfg(test)]
 #[path = "lib_tests/include_local_order_regression.rs"]

@@ -565,6 +565,22 @@ impl Engine {
         event: &str,
     ) -> bool {
         let callback_name = format!("Fx{}{event}", effect.name);
+        if effect.command_target.is_none() && effect.command_id.is_none() {
+            if !self
+                .global_script_functions
+                .as_ref()
+                .is_some_and(|functions| functions.contains_key(&callback_name))
+            {
+                return false;
+            }
+            let scenario_script = self
+                .scenario_script
+                .as_ref()
+                .map(ScenarioScript::script_arc);
+            return self
+                .host_definition_tables()
+                .resolves_engine_global_script(scenario_script.as_ref(), &callback_name);
+        }
         resolve_effect_script_callback(effect, &callback_name, &self.host_world_context()).is_some()
     }
 
