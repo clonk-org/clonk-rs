@@ -79,7 +79,7 @@ use clonk_engine::{
 use clonk_graphics::{
     stdgl_blit_sampling, BlitSampling, Color, GpuBlend, GpuCommand, GpuOuterModulation,
     GpuPrimitiveTopology, GpuSampler, GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle,
-    GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex, PixelFormat,
+    GpuSolidVertex, GpuSpriteQuad, GpuTextureId, GpuTextureResource, GpuVertex, PixelFormat,
     Point as SurfacePoint, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
     SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont, Transform as GraphicsTransform,
 };
@@ -2942,6 +2942,38 @@ mod tests {
         assert!(vertices
             .iter()
             .all(|vertex| vertex.sample_tile == [0.0, 0.0, 2.0, 1.0]));
+    }
+
+    #[test]
+    fn simple_gpu_sprite_capture_avoids_temporary_batching() {
+        let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        reset_gpu_sprite_batch_fallbacks();
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 4.0, 4.0),
+            (0.0, 0.0, 4.0, 4.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            false,
+        ));
+
+        assert_eq!(gpu_sprite_batch_fallbacks(), 0);
     }
 
     #[test]
@@ -12239,6 +12271,89 @@ mod tests {
         assert_eq!(
             graphics.surface().get_pixel(22, 8),
             Some(Color::opaque(220, 220, 0))
+        );
+    }
+
+    #[test]
+    fn unfogged_definition_particles_capture_in_compatible_batches() {
+        let definition = |name: &str, additive| ParticleRenderDefinition {
+            image: ImageData::new(1, 1, vec![255; 4]),
+            facet: ParticleFacet::new(0, 0, 1, 1),
+            length: 1,
+            aspect: 1.0,
+            core: ParticleDefCore {
+                name: name.to_owned(),
+                additive,
+                ..ParticleDefCore::default()
+            },
+            draw_proc: ParticleDrawProc::Std,
+        };
+        let particle = |definition_id: &str, x| ParticleSnapshot {
+            definition_id: definition_id.to_owned(),
+            position: FloatVector2::new(x, 4.0),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: 1.0,
+            parameter_b: 0x00ff_ffff,
+            layer: ParticleLayer::Global,
+            pxs_fixed: None,
+            pxs_slot: None,
+        };
+        let mut graphics = test_graphics(8, 8, 8, "particle batches");
+        graphics.set_particle_sprites(Arc::new(HashMap::from([
+            ("Fire".to_owned(), definition("Fire", 0)),
+            ("Fire2".to_owned(), definition("Fire2", 1)),
+        ])));
+        let particles = vec![
+            particle("Fire", 2.0),
+            particle("Fire", 3.0),
+            particle("Fire2", 4.0),
+            particle("Fire2", 5.0),
+        ];
+
+        graphics.begin_gpu_scene_capture();
+        graphics.draw_definition_particles(&particles, &ParticleLayer::Global, None, None);
+        let scene = graphics
+            .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
+            .expect("particle scene capture");
+
+        let [fire2, fire] = scene.commands.as_slice() else {
+            panic!("expected one adjacent batch per definition");
+        };
+        let batch = |command: &GpuCommand, expected_blend, expected_rects| {
+            let GpuCommand::SpriteBatch {
+                quads,
+                blend,
+                mod2,
+                gamma,
+                outer_modulation,
+                ..
+            } = command
+            else {
+                panic!("expected a compact sprite batch");
+            };
+            assert_eq!(*blend, expected_blend);
+            assert!(!mod2);
+            assert!(!gamma);
+            assert_eq!(*outer_modulation, GpuOuterModulation::Combine);
+            assert_eq!(
+                quads.iter().map(|quad| quad.rect).collect::<Vec<_>>(),
+                expected_rects,
+                "instances retain native newest-first painter order",
+            );
+            assert!(quads
+                .iter()
+                .all(|quad| { quad.uv == [0.0, 0.0, 1.0, 1.0] && quad.modulation == 0x00ff_ffff }));
+        };
+        batch(
+            fire2,
+            GpuBlend::Additive,
+            vec![[4.0, 3.0, 6.0, 5.0], [3.0, 3.0, 5.0, 5.0]],
+        );
+        batch(
+            fire,
+            GpuBlend::Normal,
+            vec![[2.0, 3.0, 4.0, 5.0], [1.0, 3.0, 3.0, 5.0]],
         );
     }
 

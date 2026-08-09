@@ -1,70 +1,112 @@
 use clonk_app_render::gpu_renderer::RetainedGpuRenderer;
-use clonk_graphics::{
-    Color, GammaRamp, GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuPresentation, GpuSampler,
-    GpuScene, GpuTextureId, GpuTextureResource, GpuVertex,
+use clonk_engine::{
+    particles::{ParticleDefCore, ParticleDrawProc},
+    FloatVector2, ParticleLayer, ParticleSnapshot,
 };
+use clonk_frontend::{
+    CursorAtlas, DefinitionSprite, GraphicsSystem, HudGraphics, ImageData, ParticleFacet,
+    ParticleRenderDefinition,
+};
+use clonk_graphics::{BitmapFont, GammaRamp, GpuPresentation, GpuScene};
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use pixels::wgpu;
+use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const PARTICLE_QUADS: usize = 16_384;
+const FIRE_PARTICLES: usize = 1_000;
+const FIRE2_PARTICLES: usize = 1_000;
+const PARTICLE_QUADS: usize = FIRE_PARTICLES + FIRE2_PARTICLES;
 const FRAME_EXTENT: [u32; 2] = [800, 600];
 const AMORTIZED_FRAMES: u32 = 16;
 
-fn particle_quad(index: usize) -> [GpuVertex; 4] {
-    let x = (index % 200) as f32 * 4.0;
-    let y = (index / 200 % 150) as f32 * 4.0;
-    let alpha = ((index % 192) + 32) as f32 / 255.0;
-    let modulation = [1.0, 0.75, 0.5, alpha];
-    [
-        GpuVertex::new([x, y, 1.0], [0.0, 0.0], modulation),
-        GpuVertex::new([x + 8.0, y, 1.0], [1.0, 0.0], modulation),
-        GpuVertex::new([x, y + 8.0, 1.0], [0.0, 1.0], modulation),
-        GpuVertex::new([x + 8.0, y + 8.0, 1.0], [1.0, 1.0], modulation),
-    ]
+fn definition(
+    name: &str,
+    image: ImageData,
+    facet: ParticleFacet,
+    length: i32,
+    additive: bool,
+) -> ParticleRenderDefinition {
+    ParticleRenderDefinition {
+        image,
+        facet,
+        length,
+        aspect: 1.0,
+        core: ParticleDefCore {
+            name: name.to_owned(),
+            additive: i32::from(additive),
+            attach: 1,
+            ..ParticleDefCore::default()
+        },
+        draw_proc: ParticleDrawProc::Std,
+    }
+}
+
+fn particle(definition_id: &str, index: usize, life: i32) -> ParticleSnapshot {
+    let column = index % 50;
+    let row = index / 50;
+    ParticleSnapshot {
+        definition_id: definition_id.to_owned(),
+        position: FloatVector2::new(10.0 + column as f32 * 15.0, 10.0 + row as f32 * 14.0),
+        velocity: FloatVector2::new(0.0, 0.0),
+        life,
+        parameter_a: 8.0,
+        parameter_b: 0x00ff_ffff,
+        layer: ParticleLayer::Global,
+        pxs_fixed: None,
+        pxs_slot: None,
+    }
+}
+
+fn capture_fixture() -> (GraphicsSystem, Vec<ParticleSnapshot>, GammaRamp) {
+    let mut graphics = GraphicsSystem::new(
+        FRAME_EXTENT[0],
+        FRAME_EXTENT[1],
+        FRAME_EXTENT[1] as i32,
+        "particle render benchmark",
+        Arc::new(BitmapFont::new()),
+        Arc::new(HashMap::<String, DefinitionSprite>::new()),
+        Arc::new(CursorAtlas::empty()),
+        Arc::new(HudGraphics::default()),
+    );
+    graphics.set_particle_sprites(Arc::new(HashMap::from([
+        (
+            "Fire".to_owned(),
+            definition(
+                "Fire",
+                ImageData::new(26, 26, vec![255; 26 * 26 * 4]),
+                ParticleFacet::new(0, 0, 26, 26),
+                1,
+                false,
+            ),
+        ),
+        (
+            "Fire2".to_owned(),
+            definition(
+                "Fire2",
+                ImageData::new(256, 32, vec![255; 256 * 32 * 4]),
+                ParticleFacet::new(0, 0, 32, 32),
+                8,
+                true,
+            ),
+        ),
+    ])));
+    let particles = (0..FIRE_PARTICLES)
+        .map(|index| particle("Fire", index, 0))
+        .chain((0..FIRE2_PARTICLES).map(|index| particle("Fire2", index, index as i32 % 8)))
+        .collect();
+    (graphics, particles, GammaRamp::identity())
 }
 
 fn particle_scene() -> GpuScene {
-    let texture = GpuTextureId::fresh();
-    let commands = (0..PARTICLE_QUADS)
-        .map(|index| GpuCommand::Quad {
-            texture,
-            owner_mask: None,
-            vertices: particle_quad(index),
-            clip: None,
-            blend: GpuBlend::Additive,
-            base_mod2: false,
-            owner_mod2: false,
-            sampler: GpuSampler::Linear,
-            gamma: false,
-        })
-        .collect();
-    GpuScene {
-        logical_extent: FRAME_EXTENT,
-        clear: Color::opaque(0, 0, 0),
-        gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-        gamma_mode: GpuGammaMode::Disabled,
-        textures: vec![GpuTextureResource::immutable_rgba(
-            texture,
-            2,
-            2,
-            Arc::from(vec![255_u8; 16].into_boxed_slice()),
-        )],
-        commands,
-    }
+    let (mut graphics, particles, gamma) = capture_fixture();
+    graphics.capture_global_definition_particles_for_benchmark(&particles, &gamma)
 }
 
 fn empty_scene() -> GpuScene {
-    GpuScene {
-        logical_extent: FRAME_EXTENT,
-        clear: Color::opaque(0, 0, 0),
-        gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-        gamma_mode: GpuGammaMode::Disabled,
-        textures: Vec::new(),
-        commands: Vec::new(),
-    }
+    let (mut graphics, _, gamma) = capture_fixture();
+    graphics.capture_global_definition_particles_for_benchmark(&[], &gamma)
 }
 
 fn benchmark_device() -> (tokio::runtime::Runtime, wgpu::Device, wgpu::Queue) {
@@ -176,10 +218,11 @@ fn bench_particle_render(c: &mut Criterion) {
         &scene,
         &presentation,
     );
+    assert_eq!(renderer.last_stats().draw_calls, 2);
 
     let mut group = c.benchmark_group("particle_render");
     group.throughput(Throughput::Elements(PARTICLE_QUADS as u64));
-    group.bench_function("16384_additive_quads", |b| {
+    group.bench_function("2000_fire_and_fire2", |b| {
         b.iter(|| {
             render_completed_frame(
                 &mut renderer,
@@ -191,7 +234,7 @@ fn bench_particle_render(c: &mut Criterion) {
             );
         });
     });
-    group.bench_function("16384_additive_quads_amortized", |b| {
+    group.bench_function("2000_fire_and_fire2_amortized", |b| {
         b.iter_custom(|iterations| {
             let start = Instant::now();
             for _ in 0..iterations {
@@ -248,6 +291,60 @@ fn bench_particle_render(c: &mut Criterion) {
             start.elapsed() / AMORTIZED_FRAMES
         });
     });
+
+    let (mut integrated_graphics, integrated_particles, integrated_gamma) = capture_fixture();
+    let mut pipeline_group = c.benchmark_group("particle_pipeline");
+    pipeline_group.throughput(Throughput::Elements(PARTICLE_QUADS as u64));
+    pipeline_group.bench_function("2000_fire_and_fire2_amortized", |b| {
+        b.iter_custom(|iterations| {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                for _ in 0..AMORTIZED_FRAMES {
+                    let scene = integrated_graphics
+                        .capture_global_definition_particles_for_benchmark(
+                            &integrated_particles,
+                            &integrated_gamma,
+                        );
+                    submit_frame(
+                        &mut renderer,
+                        &device,
+                        &queue,
+                        &target_view,
+                        &scene,
+                        &presentation,
+                    );
+                }
+                device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .expect("wait for amortized particle-pipeline submissions");
+            }
+            start.elapsed() / AMORTIZED_FRAMES
+        });
+    });
+    pipeline_group.bench_function("empty_amortized", |b| {
+        b.iter_custom(|iterations| {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                for _ in 0..AMORTIZED_FRAMES {
+                    let scene = integrated_graphics
+                        .capture_global_definition_particles_for_benchmark(&[], &integrated_gamma);
+                    submit_frame(
+                        &mut renderer,
+                        &device,
+                        &queue,
+                        &target_view,
+                        &scene,
+                        &presentation,
+                    );
+                }
+                device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .expect("wait for amortized empty-pipeline submissions");
+            }
+            start.elapsed() / AMORTIZED_FRAMES
+        });
+    });
+    pipeline_group.finish();
 }
 
 criterion_group! {

@@ -1,5 +1,20 @@
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static GPU_SPRITE_BATCH_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_gpu_sprite_batch_fallbacks() {
+    GPU_SPRITE_BATCH_FALLBACKS.with(|fallbacks| fallbacks.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn gpu_sprite_batch_fallbacks() -> usize {
+    GPU_SPRITE_BATCH_FALLBACKS.with(std::cell::Cell::get)
+}
+
 #[derive(Clone, Copy)]
 struct CapturedGpuSpriteChunk {
     position: [[f32; 3]; 4],
@@ -165,6 +180,102 @@ pub(crate) fn capture_gpu_sprite_with_resource(
 
     let tile_size = cpp_tex_size(image.width(), image.height()) as f32;
     let texture_indent = blit.renderer_config.texture_indent();
+    if fog_sampler.is_none()
+        && blit.fog_modulation.is_none()
+        && texture_indent == 0.0
+        && mask.is_none()
+    {
+        let sample_width = if inclusive_source_end {
+            (source.width - 1.0).max(0.0)
+        } else {
+            source.width
+        };
+        let sample_height = if inclusive_source_end {
+            (source.height - 1.0).max(0.0)
+        } else {
+            source.height
+        };
+        let local = [
+            (0.0, 0.0),
+            (source.width, 0.0),
+            (0.0, source.height),
+            (source.width, source.height),
+        ];
+        let mut positions = [[0.0; 3]; 4];
+        let mut uv = [[0.0; 2]; 4];
+        for (index, (local_x, local_y)) in local.into_iter().enumerate() {
+            let normalized_x = local_x / source.width;
+            let normalized_y = local_y / source.height;
+            let target_x = dest_x + normalized_x * dest_width;
+            let target_y = dest_y + normalized_y * dest_height;
+            let Some(position) = captured_sprite_position(transform, target_x, target_y) else {
+                return false;
+            };
+            positions[index] = position;
+            let sample_x = if flip_x {
+                source.x + (1.0 - normalized_x) * sample_width
+            } else {
+                source.x + normalized_x * sample_width
+            };
+            let sample_y = source.y + normalized_y * sample_height;
+            uv[index] = [
+                sample_x / image.width() as f32,
+                sample_y / image.height() as f32,
+            ];
+        }
+        if positions
+            .iter()
+            .any(|position| position[2].is_sign_positive())
+            && positions
+                .iter()
+                .any(|position| position[2].is_sign_negative())
+        {
+            return false;
+        }
+
+        let main_modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+        let (modulation, mod2) = captured_sprite_modulation(
+            main_modulation,
+            None,
+            blit.mode & C4GFXBLIT_MOD2 != 0,
+            blit.renderer_config,
+        );
+        let outer_modulation = if blit.modulation.is_some() {
+            GpuOuterModulation::Combine
+        } else {
+            GpuOuterModulation::Inherit
+        };
+        let sample_tile = (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size]);
+        let vertices = std::array::from_fn(|index| {
+            let vertex = GpuVertex::new(positions[index], uv[index], modulation[index])
+                .with_outer_modulation(outer_modulation)
+                .with_owner_outer_modulation(outer_modulation);
+            sample_tile.map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
+        });
+        let base_resource = retained_resource.unwrap_or_else(|| image.gpu_texture_resource());
+        let command = GpuCommand::Quad {
+            texture: base_resource.id,
+            owner_mask: None,
+            vertices,
+            clip: surface.clip(),
+            blend: if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+                GpuBlend::Additive
+            } else {
+                GpuBlend::Normal
+            },
+            base_mod2: mod2,
+            owner_mod2: false,
+            sampler,
+            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+        };
+        let _ = surface.add_gpu_texture(base_resource);
+        let _ = surface.push_gpu_command(command);
+        return true;
+    }
+    #[cfg(test)]
+    GPU_SPRITE_BATCH_FALLBACKS.with(|fallbacks| {
+        fallbacks.set(fallbacks.get().saturating_add(1));
+    });
     let chunk_geometry = if let Some(sampler) = fog_sampler.as_ref() {
         // Fog chunks use min(native tile size, 64), so every chunk is
         // already contained within exactly one C4TexRef tile.

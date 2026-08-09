@@ -910,6 +910,7 @@ dependencies = [
  "clonk-resources",
  "clonk-scaling",
  "clonk-script",
+ "criterion",
  "freetype-rs",
  "image",
  "libc",
