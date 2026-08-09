@@ -867,12 +867,13 @@
         assert_eq!(evidence.nonnegative_lag_peer_count, 2);
         assert_eq!(evidence.max_nonnegative_ping_ms, Some(7));
         assert_eq!(evidence.max_nonnegative_lag_ms, Some(12));
+        assert_eq!(evidence.host_message_route_lag_ms, Some(9));
         assert_eq!(evidence.max_packet_loss, 3);
         assert_eq!(evidence.control_presend, 4);
         assert_eq!(evidence.avg_control_send_time_us, 26_813);
         assert_eq!(
                 evidence.machine_line(),
-                "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id=1 preferred_message_route_peer_count=2 preferred_message_route_peer_ids=[0,2] tcp_preferred_message_routes=1 udp_preferred_message_routes=1 unknown_preferred_message_routes=0 nonnegative_ping_peer_count=1 nonnegative_lag_peer_count=2 max_nonnegative_ping_ms=7 max_nonnegative_lag_ms=12 max_packet_loss=3 control_presend=4 avg_control_send_time_us=26813"
+                "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id=1 preferred_message_route_peer_count=2 preferred_message_route_peer_ids=[0,2] tcp_preferred_message_routes=1 udp_preferred_message_routes=1 unknown_preferred_message_routes=0 nonnegative_ping_peer_count=1 nonnegative_lag_peer_count=2 max_nonnegative_ping_ms=7 max_nonnegative_lag_ms=12 host_message_route_lag_ms=9 max_packet_loss=3 control_presend=4 avg_control_send_time_us=26813"
             );
     }
 
@@ -985,6 +986,65 @@
     }
 
     #[test]
+    fn presentation_benchmark_readiness_waits_for_one_executed_simulation_frame() {
+        // Native queues the initial joins at GO and executes that control batch
+        // before advancing frame one (C4Network2Players.cpp:465-482;
+        // C4Game.cpp:796-801).
+        let mut readiness = PresentationBenchmarkRuntimeReadiness::default();
+
+        assert!(!readiness.ready(AppMode::Running));
+        readiness.observe(AppMode::Running, 0);
+        assert!(!readiness.ready(AppMode::Running));
+        readiness.observe(AppMode::Running, 1);
+        assert!(readiness.ready(AppMode::Running));
+        readiness.observe(AppMode::Running, 0);
+        assert!(readiness.ready(AppMode::Running));
+
+        assert!(!readiness.ready(AppMode::Loading));
+        assert!(!readiness.ready(AppMode::Running));
+
+        let base = Instant::now();
+        let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+        assert_eq!(
+            benchmark.poll(readiness.ready(AppMode::Running), base, 0),
+            None
+        );
+        assert_eq!(
+            benchmark.poll(
+                readiness.ready(AppMode::Running),
+                base + Duration::from_secs(10),
+                0,
+            ),
+            None
+        );
+
+        readiness.observe(AppMode::Running, 1);
+        let ready_at = base + Duration::from_secs(10);
+        assert_eq!(
+            benchmark.poll(readiness.ready(AppMode::Running), ready_at, 1),
+            None
+        );
+        assert_eq!(
+            benchmark.poll(
+                readiness.ready(AppMode::Running),
+                ready_at + PRESENTATION_BENCHMARK_WARMUP,
+                1,
+            ),
+            None
+        );
+        assert!(
+            benchmark
+                .poll(
+                    readiness.ready(AppMode::Running),
+                    ready_at + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3),
+                    116,
+                )
+                .is_some(),
+            "the window starts only after one frame and the complete warmup"
+        );
+    }
+
+    #[test]
     fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         let base = Instant::now();
         let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
@@ -1078,6 +1138,36 @@
     }
 
     #[test]
+    fn runtime_benchmark_does_not_reselect_a_window_after_runtime_stops() {
+        let base = Instant::now();
+        let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+
+        assert_eq!(benchmark.poll(true, base, 70), None);
+        assert_eq!(
+            benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
+            None
+        );
+        assert_eq!(
+            benchmark.poll(
+                false,
+                base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(1),
+                70,
+            ),
+            None
+        );
+        let report = benchmark
+            .poll(
+                false,
+                base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3),
+                70,
+            )
+            .expect("runtime loss remains inside the original measurement window");
+
+        assert_eq!(report.elapsed, Duration::from_secs(3));
+        assert_eq!(report.simulation_frames, 0);
+    }
+
+    #[test]
     fn input_latency_benchmark_starts_with_the_measurement_and_keeps_its_interval() {
         let base = Instant::now();
         let mut benchmark = InputLatencyBenchmark::new(Duration::from_millis(500));
@@ -1163,6 +1253,19 @@
         assert_eq!(report.p95, Duration::from_millis(101));
         assert_eq!(report.p99, Duration::from_millis(101));
         assert_eq!(report.max, Duration::from_millis(101));
+        assert_eq!(report.players.len(), 1);
+        assert_eq!(report.players[0].player, 2);
+        assert_eq!(report.players[0].submitted_inputs, 2);
+        assert_eq!(report.players[0].executed_inputs, 2);
+        assert_eq!(report.players[0].pending_inputs, 0);
+        assert_eq!(
+            report.players[0].latency_samples,
+            vec![Duration::from_millis(100), Duration::from_millis(101)]
+        );
+        assert_eq!(
+            report.players[0].machine_line(report.elapsed),
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT_PLAYER player=2 elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]"
+        );
         assert_eq!(
                 report.machine_line(),
                 "LC_APP_PRESENTATION_BENCHMARK_INPUT elapsed_seconds=5.000000 submitted_inputs=2 executed_inputs=2 pending_inputs=0 input_latency_sample_count=2 input_latency_p50_ms=100.000000 input_latency_p95_ms=101.000000 input_latency_p99_ms=101.000000 input_latency_max_ms=101.000000 input_latency_samples_ns=[100000000,101000000]"
@@ -1199,12 +1302,35 @@
     }
 
     #[test]
-    fn input_latency_benchmark_submits_two_unmatched_releases_to_lockstep() {
+    fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player() {
         // C4Player::InCom drops a release whose press bit is clear before it
         // dispatches DirectCom (src/C4Player.cpp:1541-1548). Two distinct
         // unmatched releases exercise lockstep without changing game state.
         let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
+        let second_owner = owner + 1;
+        let first_crew = app.snapshot.players[0].crew[0];
+        let mut second_crew = app
+            .snapshot
+            .object(first_crew)
+            .expect("sandbox crew object")
+            .clone();
+        second_crew.id = ObjectId::new(first_crew.as_u64() + 1);
+        second_crew.owner = second_owner;
+        let second_crew_id = second_crew.id;
+        app.snapshot.objects.push(second_crew);
+        let mut second_player = app.snapshot.players[0].clone();
+        second_player.id = second_owner;
+        second_player.crew = vec![second_crew_id];
+        app.snapshot.players.push(second_player);
+        app.local_controls.initialize(LocalControlInit {
+            owner: second_owner,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
         let (network, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(network);
@@ -1218,6 +1344,16 @@
             vec![
                 (owner, ControlEvent::Release(ControlButton::Left), tick),
                 (owner, ControlEvent::Release(ControlButton::Right), tick),
+                (
+                    second_owner,
+                    ControlEvent::Release(ControlButton::Left),
+                    tick,
+                ),
+                (
+                    second_owner,
+                    ControlEvent::Release(ControlButton::Right),
+                    tick,
+                ),
             ]
         );
         app.submit_due_input_latency_benchmark_pair(
@@ -1230,8 +1366,16 @@
             .as_ref()
             .map(|benchmark| benchmark.report(Duration::from_secs(1)))
             .expect("benchmark remains installed");
-        assert_eq!(report.submitted_inputs, 2);
-        assert_eq!(report.pending_inputs, 2);
+        assert_eq!(report.submitted_inputs, 4);
+        assert_eq!(report.pending_inputs, 4);
+        assert_eq!(
+            report
+                .players
+                .iter()
+                .map(|player| (player.player, player.submitted_inputs))
+                .collect::<Vec<_>>(),
+            vec![(owner, 2), (second_owner, 2)]
+        );
     }
 
     #[test]

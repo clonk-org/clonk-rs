@@ -3039,6 +3039,8 @@ pub(crate) struct InputLatencyBenchmark {
     pending: VecDeque<PendingInputLatencyBenchmark>,
     submitted_inputs: u64,
     latency_samples: Vec<Duration>,
+    submitted_by_player: BTreeMap<i32, u64>,
+    latency_samples_by_player: BTreeMap<i32, Vec<Duration>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3078,6 +3080,44 @@ pub(crate) struct InputLatencyBenchmarkReport {
     pub(crate) p99: Duration,
     pub(crate) max: Duration,
     pub(crate) latency_samples: Vec<Duration>,
+    pub(crate) players: Vec<InputLatencyBenchmarkPlayerReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputLatencyBenchmarkPlayerReport {
+    pub(crate) player: i32,
+    pub(crate) submitted_inputs: u64,
+    pub(crate) executed_inputs: u64,
+    pub(crate) pending_inputs: u64,
+    pub(crate) p50: Duration,
+    pub(crate) p95: Duration,
+    pub(crate) p99: Duration,
+    pub(crate) max: Duration,
+    pub(crate) latency_samples: Vec<Duration>,
+}
+
+impl InputLatencyBenchmarkPlayerReport {
+    pub(crate) fn machine_line(&self, elapsed: Duration) -> String {
+        let samples = self
+            .latency_samples
+            .iter()
+            .map(|sample| sample.as_nanos().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "LC_APP_PRESENTATION_BENCHMARK_INPUT_PLAYER player={} elapsed_seconds={:.6} submitted_inputs={} executed_inputs={} pending_inputs={} input_latency_sample_count={} input_latency_p50_ms={:.6} input_latency_p95_ms={:.6} input_latency_p99_ms={:.6} input_latency_max_ms={:.6} input_latency_samples_ns=[{samples}]",
+            self.player,
+            elapsed.as_secs_f64(),
+            self.submitted_inputs,
+            self.executed_inputs,
+            self.pending_inputs,
+            self.latency_samples.len(),
+            self.p50.as_secs_f64() * 1_000.0,
+            self.p95.as_secs_f64() * 1_000.0,
+            self.p99.as_secs_f64() * 1_000.0,
+            self.max.as_secs_f64() * 1_000.0,
+        )
+    }
 }
 
 impl InputLatencyBenchmarkReport {
@@ -3113,6 +3153,8 @@ impl InputLatencyBenchmark {
             pending: VecDeque::new(),
             submitted_inputs: 0,
             latency_samples: Vec::new(),
+            submitted_by_player: BTreeMap::new(),
+            latency_samples_by_player: BTreeMap::new(),
         }
     }
 
@@ -3125,6 +3167,8 @@ impl InputLatencyBenchmark {
         self.pending.clear();
         self.submitted_inputs = 0;
         self.latency_samples.clear();
+        self.submitted_by_player.clear();
+        self.latency_samples_by_player.clear();
     }
 
     pub(crate) fn pair_due(&mut self, now: Instant) -> bool {
@@ -3152,6 +3196,10 @@ impl InputLatencyBenchmark {
         submitted_at: Instant,
     ) {
         self.submitted_inputs = self.submitted_inputs.saturating_add(1);
+        self.submitted_by_player
+            .entry(control.player)
+            .and_modify(|submitted| *submitted = submitted.saturating_add(1))
+            .or_insert(1);
         self.pending.push_back(PendingInputLatencyBenchmark {
             tick,
             control: control.into(),
@@ -3174,13 +3222,44 @@ impl InputLatencyBenchmark {
         else {
             return false;
         };
-        self.latency_samples
-            .push(executed_at.saturating_duration_since(pending.submitted_at));
+        let latency = executed_at.saturating_duration_since(pending.submitted_at);
+        self.latency_samples.push(latency);
+        self.latency_samples_by_player
+            .entry(control.player)
+            .or_default()
+            .push(latency);
         true
     }
 
     pub(crate) fn report(&self, elapsed: Duration) -> InputLatencyBenchmarkReport {
         let (p50, p95, p99) = graphics_pass_percentiles(&self.latency_samples);
+        let players = self
+            .submitted_by_player
+            .iter()
+            .map(|(player, submitted_inputs)| {
+                let latency_samples = self
+                    .latency_samples_by_player
+                    .get(player)
+                    .cloned()
+                    .unwrap_or_default();
+                let (p50, p95, p99) = graphics_pass_percentiles(&latency_samples);
+                InputLatencyBenchmarkPlayerReport {
+                    player: *player,
+                    submitted_inputs: *submitted_inputs,
+                    executed_inputs: latency_samples.len() as u64,
+                    pending_inputs: self
+                        .pending
+                        .iter()
+                        .filter(|pending| pending.control.player == *player)
+                        .count() as u64,
+                    p50,
+                    p95,
+                    p99,
+                    max: latency_samples.iter().copied().max().unwrap_or_default(),
+                    latency_samples,
+                }
+            })
+            .collect();
         InputLatencyBenchmarkReport {
             elapsed,
             submitted_inputs: self.submitted_inputs,
@@ -3196,6 +3275,7 @@ impl InputLatencyBenchmark {
                 .max()
                 .unwrap_or_default(),
             latency_samples: self.latency_samples.clone(),
+            players,
         }
     }
 }
@@ -3325,6 +3405,32 @@ pub(crate) struct PresentationBenchmark {
     finished: bool,
 }
 
+/// The runtime benchmark begins after the first complete game execution, not
+/// when network GO merely changes the application mode to Running. Native
+/// queues initial player joins at GO, then executes controls before advancing
+/// the first game frame (C4Network2Players.cpp:465-482; C4Game.cpp:796-801).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PresentationBenchmarkRuntimeReadiness {
+    executed_frame: bool,
+}
+
+impl PresentationBenchmarkRuntimeReadiness {
+    pub(crate) fn ready(&mut self, mode: AppMode) -> bool {
+        if mode != AppMode::Running {
+            self.executed_frame = false;
+        }
+        mode == AppMode::Running && self.executed_frame
+    }
+
+    pub(crate) fn observe(&mut self, mode: AppMode, executed_frames: u32) {
+        if mode != AppMode::Running {
+            self.executed_frame = false;
+        } else if executed_frames > 0 {
+            self.executed_frame = true;
+        }
+    }
+}
+
 impl PresentationBenchmark {
     pub(crate) fn new(window: Duration) -> Self {
         Self {
@@ -3344,7 +3450,7 @@ impl PresentationBenchmark {
         if self.finished {
             return None;
         }
-        if !running {
+        if !running && self.measurement.started.is_none() {
             self.warmup_started = None;
             self.measurement = PresentationBenchmarkMeasurement::default();
             return None;
@@ -3537,6 +3643,7 @@ pub(crate) struct PresentationBenchmarkNetworkEvidence {
     pub(crate) nonnegative_lag_peer_count: usize,
     pub(crate) max_nonnegative_ping_ms: Option<i32>,
     pub(crate) max_nonnegative_lag_ms: Option<i32>,
+    pub(crate) host_message_route_lag_ms: Option<i32>,
     pub(crate) max_packet_loss: u32,
     pub(crate) control_presend: i32,
     pub(crate) avg_control_send_time_us: i64,
@@ -3551,7 +3658,7 @@ impl PresentationBenchmarkNetworkEvidence {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id={} preferred_message_route_peer_count={} preferred_message_route_peer_ids=[{peer_ids}] tcp_preferred_message_routes={} udp_preferred_message_routes={} unknown_preferred_message_routes={} nonnegative_ping_peer_count={} nonnegative_lag_peer_count={} max_nonnegative_ping_ms={} max_nonnegative_lag_ms={} max_packet_loss={} control_presend={} avg_control_send_time_us={}",
+            "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id={} preferred_message_route_peer_count={} preferred_message_route_peer_ids=[{peer_ids}] tcp_preferred_message_routes={} udp_preferred_message_routes={} unknown_preferred_message_routes={} nonnegative_ping_peer_count={} nonnegative_lag_peer_count={} max_nonnegative_ping_ms={} max_nonnegative_lag_ms={} host_message_route_lag_ms={} max_packet_loss={} control_presend={} avg_control_send_time_us={}",
             self.local_client_id,
             self.preferred_message_route_peer_ids.len(),
             self.tcp_preferred_message_routes,
@@ -3561,6 +3668,7 @@ impl PresentationBenchmarkNetworkEvidence {
             self.nonnegative_lag_peer_count,
             self.max_nonnegative_ping_ms.unwrap_or(-1),
             self.max_nonnegative_lag_ms.unwrap_or(-1),
+            self.host_message_route_lag_ms.unwrap_or(-1),
             self.max_packet_loss,
             self.control_presend,
             self.avg_control_send_time_us,
@@ -3592,6 +3700,7 @@ pub(crate) fn summarize_presentation_benchmark_network(
         nonnegative_lag_peer_count: 0,
         max_nonnegative_ping_ms: None,
         max_nonnegative_lag_ms: None,
+        host_message_route_lag_ms: None,
         max_packet_loss: 0,
         control_presend,
         avg_control_send_time_us,
@@ -3625,6 +3734,10 @@ pub(crate) fn summarize_presentation_benchmark_network(
                     .max_nonnegative_lag_ms
                     .map_or(connection.lag_ms, |current| current.max(connection.lag_ms)),
             );
+        }
+        if connection.client_id == 0 {
+            evidence.host_message_route_lag_ms =
+                (connection.lag_ms >= 0).then_some(connection.lag_ms);
         }
         evidence.max_packet_loss = evidence.max_packet_loss.max(connection.packet_loss);
     }
@@ -3750,6 +3863,9 @@ pub(crate) fn finish_presentation_benchmark(
     println!("{}", report.machine_line());
     if let Some(input_latency) = input_latency {
         println!("{}", input_latency.machine_line());
+        for player in &input_latency.players {
+            println!("{}", player.machine_line(input_latency.elapsed));
+        }
     }
     println!(
         "{}",
