@@ -1747,6 +1747,20 @@ impl HostDefinitionTables {
             definition_crew_names: Rc::new(definition_crew_names),
         }
     }
+
+    pub(crate) fn resolves_engine_global_script(
+        &self,
+        scenario_script: Option<&Arc<ScriptEngine>>,
+        name: &str,
+    ) -> bool {
+        resolve_engine_global_script_from_hosts(
+            scenario_script,
+            self.linked_script_hosts.as_ref(),
+            self.scripts.as_ref(),
+            name,
+        )
+        .is_some()
+    }
 }
 
 /// C4AulParse resolves `&` parameters through the engine-wide same-name chain

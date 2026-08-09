@@ -559,6 +559,8 @@ impl Engine {
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
     fn host_world_context_base(&self) -> HostWorldContext {
+        #[cfg(test)]
+        HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let definition_metadata = self.definition_metadata_table();
         let host_definition_tables = self.host_definition_tables();
         let solid_mask_metadata = self.solid_mask_metadata_table();

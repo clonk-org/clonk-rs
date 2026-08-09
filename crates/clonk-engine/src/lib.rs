@@ -218,6 +218,10 @@ pub enum MenuCommandKind {
 mod command_definition_snapshot_cache_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/fire_callback_resolver_regression.rs"]
+mod fire_callback_resolver_regression;
+
+#[cfg(test)]
 #[path = "lib_tests/signed_action_direction_regression.rs"]
 mod signed_action_direction_regression;
 
@@ -344,6 +348,7 @@ std::thread_local! {
     static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
 }
