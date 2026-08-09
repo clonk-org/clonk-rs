@@ -759,6 +759,7 @@ dependencies = [
  "clonk-frontend",
  "clonk-graphics",
  "clonk-gui",
+ "criterion",
  "pixels",
  "thiserror 2.0.19",
  "tokio",
