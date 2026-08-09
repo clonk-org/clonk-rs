@@ -285,6 +285,49 @@ fn definition_sprite_carries_the_raw_defcore_picture_rect() {
 }
 
 #[test]
+fn picture_only_magic_definition_keeps_a_zero_sized_world_face() {
+    // C4DefCore::Default leaves Shape at its zero rectangle, and C4Def::Load
+    // builds MainFace from that exact Shape even when Picture selects a full
+    // menu icon (src/C4Def.cpp:122-132,221-232,730-733).
+    let mut app = new_running_sandbox_app();
+    let mut spell = Definition::from_script("MAG0", "Picture-only spell", "#strict\n")
+        .expect("magic definition compiles");
+    spell.set_category(clonk_engine::CATEGORY_MAGIC);
+    spell.set_picture(Some(clonk_engine::DefinitionPicture {
+        x: 0,
+        y: 0,
+        width: 64,
+        height: 64,
+    }));
+    spell.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
+        width: 64,
+        height: 64,
+        pixels: Arc::from(vec![0xff; 64 * 64 * 4]),
+        color_mask: None,
+    }));
+    app.engine
+        .register_definition(spell)
+        .expect("register picture-only spell");
+
+    app.rebuild_definition_sprites();
+
+    let sprite = app
+        .graphics
+        .object_sprite(&sprite_map_key("MAG0", None))
+        .expect("spell sprite is installed");
+    assert_eq!(
+        sprite.picture,
+        Some(clonk_engine::DefinitionRect::new(0, 0, 64, 64)),
+        "the menu picture remains available",
+    );
+    assert_eq!(
+        sprite.shape,
+        Some(clonk_engine::DefinitionRect::default()),
+        "the picture must not become a large idle world face",
+    );
+}
+
+#[test]
 fn running_graphics_recreation_keeps_script_particle_catalog() {
     // FI5B has a deliberately transparent object facet. Its shipped
     // Flying callback presents the launched flame exclusively through
