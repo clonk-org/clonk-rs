@@ -2,7 +2,7 @@
 """Run the complete competitive Hazard network benchmark sequentially.
 
 Each map gets an isolated Harpoon-style host/client fleet.  Running one map at
-a time keeps the requested four-player topology and port plan unambiguous, and
+a time keeps the requested 24-player topology and port plan unambiguous, and
 lets a failed map retain its evidence without preventing the remaining maps
 from being measured.
 """
@@ -56,9 +56,8 @@ HAZARD_SCENARIO_MEASUREMENT_SECONDS = (
 _EXPECTED_HAZARD_DIRECTORY_NAMES = frozenset(
     scenario.relative_path.name for scenario in HAZARD_COMPETITIVE_SCENARIOS
 ) | {"Tutorial.c4s"}
-# One four-player fleet consumes offsets 0..17. Keep a full 64-port block so
-# diagnostic reruns with the generic runner's 24-player topology (0..57) also
-# remain disjoint while prior sockets leave TIME_WAIT.
+# One 24-player fleet consumes offsets 0..57. Keep a full 64-port block so
+# consecutive scenarios remain disjoint while prior sockets leave TIME_WAIT.
 SCENARIO_PORT_STRIDE = 64
 
 
@@ -117,6 +116,10 @@ def harpoon_command_for_scenario(
         str(artifact_dir),
         "--players",
         str(arguments.players),
+        "--clients",
+        str(arguments.clients),
+        "--control-mode",
+        "2",
         "--measurement-seconds",
         str(arguments.measurement_seconds),
         "--base-port",
@@ -247,7 +250,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=os.environ.get("LC_APP_BINARY", str(workspace / "target/release/clonk-app")),
     )
     parser.add_argument("--artifact-dir", default=str(default_artifact_dir(workspace)))
-    parser.add_argument("--players", type=int, default=4)
+    parser.add_argument("--players", type=int, default=24)
+    parser.add_argument("--clients", type=int, default=12)
     parser.add_argument(
         "--measurement-seconds",
         type=int,
