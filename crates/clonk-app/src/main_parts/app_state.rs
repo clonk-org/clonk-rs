@@ -3559,6 +3559,34 @@ pub(crate) fn finish_presentation_benchmark(
     }
 }
 
+pub(crate) fn finish_app_presentation_benchmark(
+    event_loop: &ActiveEventLoop,
+    exit_code: &AtomicI32,
+    app: &GameApp,
+    report: PresentationBenchmarkReport,
+    assert_native_tick: bool,
+    keep_running: bool,
+) {
+    let network_evidence = inspect_presentation_benchmark_network(app);
+    finish_presentation_benchmark(
+        event_loop,
+        exit_code,
+        report,
+        assert_native_tick,
+        app.engine.players().count(),
+        app.control_player_infos.nonremoved_player_count(),
+        app.control_clients
+            .activated_client_ids()
+            .into_iter()
+            .filter(|client_id| *client_id != 0)
+            .count(),
+        runtime_crew_object_count(&app.snapshot),
+        runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
+        network_evidence,
+        keep_running,
+    );
+}
+
 pub(crate) fn advance_graphics_deadline(
     deadline: Instant,
     now: Instant,
