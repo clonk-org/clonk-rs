@@ -3157,7 +3157,14 @@ impl GameApp {
 
             let default_key = sprite_map_key(definition_id, None);
             let graphics_scale = self.engine.definition_graphics_scale(definition_id);
-            let shape_facet = self.engine.definition_shape_rect(definition_id);
+            // A missing parsed DefCore shape is native's zero C4Shape, while
+            // `DefinitionSprite::shape == None` is reserved for bootstrap
+            // sprites whose only available geometry is their bitmap.
+            let shape_facet = Some(
+                self.engine
+                    .definition_shape_rect(definition_id)
+                    .unwrap_or_default(),
+            );
             let fire_top = self.engine.definition_fire_top(definition_id);
             let rotateable = self.engine.definition_rotateable(definition_id);
             let line = self.engine.definition_line(definition_id);
