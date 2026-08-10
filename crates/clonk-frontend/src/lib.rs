@@ -879,6 +879,90 @@ mod tests {
     }
 
     #[test]
+    fn half_pixel_sky_offset_keeps_repeated_tiles_contiguous() {
+        // C4Sky passes integer parallax offsets to BlitSurfaceTile2
+        // (src/C4Sky.cpp:215-217), which advances from one integer origin by
+        // exact tile extents (src/StdDDraw2.cpp:1005-1029). A fractional
+        // intermediate parallax phase must not expose the backing surface.
+        let tile = [
+            Color::opaque(47, 139, 211),
+            Color::opaque(211, 139, 47),
+            Color::opaque(139, 47, 211),
+            Color::opaque(47, 211, 139),
+        ];
+        let image = ImageData::new(
+            2,
+            2,
+            tile.iter()
+                .flat_map(|color| [color.r, color.g, color.b, color.a])
+                .collect(),
+        );
+        let mut graphics = test_graphics(5, 5, 5, "contiguous sky tiles");
+        graphics.surface_mut().fill(Color::opaque(1, 1, 1));
+        graphics.viewport_x = 1.0;
+        graphics.viewport_y = 1.0;
+        let settings = SkySettings {
+            parallax_x: 20,
+            parallax_y: 20,
+            ..SkySettings::default().with_surface(2, 2)
+        };
+
+        graphics.tile_sky_image_with_parallel_rows(&image, &settings, None, 1.0, None, false);
+
+        for y in 0..5 {
+            for x in 0..5 {
+                assert_eq!(
+                    graphics.surface().get_pixel(x, y),
+                    Some(tile[((y % 2) * 2 + x % 2) as usize]),
+                    "native integer phase covers ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sky_scroll_uses_raw_fixed_rounding_for_the_tile_phase() {
+        // C4Sky subtracts `fixtoi(x)` before tiling (src/C4Sky.cpp:215-217),
+        // and C4Fixed rounds the raw 16.16 word rather than its float
+        // projection (src/Fixed.h:82-94). In particular, -0.5 rounds to 0.
+        let left = Color::opaque(31, 97, 211);
+        let right = Color::opaque(211, 97, 31);
+        let image = ImageData::new(
+            2,
+            1,
+            [left, right]
+                .into_iter()
+                .flat_map(|color| [color.r, color.g, color.b, color.a])
+                .collect(),
+        );
+        let settings = SkySettings {
+            parallax_x: 20,
+            ..SkySettings::default().with_surface(2, 1)
+        };
+        let frame = SkyFrame {
+            settings: settings.clone(),
+            offset_x: -0.5,
+            offset_y: 0.0,
+            fixed: Some([-(1 << 15), 0, 0, 0]),
+        };
+        let mut graphics = test_graphics(3, 1, 1, "fixed sky phase");
+        graphics.viewport_x = 1.0;
+
+        graphics.tile_sky_image_with_parallel_rows(
+            &image,
+            &settings,
+            Some(&frame),
+            1.0,
+            None,
+            false,
+        );
+
+        assert_eq!(graphics.surface().get_pixel(0, 0), Some(left));
+        assert_eq!(graphics.surface().get_pixel(1, 0), Some(right));
+        assert_eq!(graphics.surface().get_pixel(2, 0), Some(left));
+    }
+
+    #[test]
     fn clr_mod_map_squared_reveal_and_generator_values_match_cpp() {
         let mut reveal = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).unwrap();
         reveal.reduce_modulation(64, 64, 64, 96);

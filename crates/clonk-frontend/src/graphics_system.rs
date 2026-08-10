@@ -3816,10 +3816,22 @@ impl GraphicsSystem {
         if width == 0 || height == 0 {
             return;
         }
-        let width_f = width as f32;
-        let height_f = height as f32;
-        let runtime_x = frame.map(|frame| frame.offset_x).unwrap_or(0.0);
-        let runtime_y = frame.map(|frame| frame.offset_y).unwrap_or(0.0);
+        let (runtime_x, runtime_y) = frame.map_or((0, 0), |frame| {
+            frame.fixed.map_or_else(
+                || {
+                    (
+                        fixtoi(clonk_engine::math::ftofix(frame.offset_x)),
+                        fixtoi(clonk_engine::math::ftofix(frame.offset_y)),
+                    )
+                },
+                |fixed| {
+                    (
+                        fixtoi(C4Fixed::from_raw(fixed[0])),
+                        fixtoi(C4Fixed::from_raw(fixed[1])),
+                    )
+                },
+            )
+        });
         let parallax_x = if settings.parallax_x == 0 {
             10
         } else {
@@ -3830,21 +3842,32 @@ impl GraphicsSystem {
         } else {
             settings.parallax_y
         };
-        let source_x = (self.viewport_x * 10.0 / parallax_x as f32) - runtime_x;
-        let source_y = (self.viewport_y * 10.0 / parallax_y as f32) - runtime_y;
-        let offset_x = Self::normalize_offset(source_x, width_f);
-        let offset_y = Self::normalize_offset(source_y, height_f);
+        let tile_width = i32::try_from(width).unwrap_or(i32::MAX);
+        let tile_height = i32::try_from(height).unwrap_or(i32::MAX);
+        let source_x = (self.viewport_x as i32)
+            .wrapping_mul(10)
+            .wrapping_div(parallax_x)
+            .wrapping_sub(runtime_x);
+        let source_y = (self.viewport_y as i32)
+            .wrapping_mul(10)
+            .wrapping_div(parallax_y)
+            .wrapping_sub(runtime_y);
+        let offset_x = source_x.rem_euclid(tile_width);
+        let offset_y = source_y.rem_euclid(tile_height);
         let modulation = settings.modulation;
+        let surface_width = i32::try_from(self.surface_width).unwrap_or(i32::MAX);
+        let surface_height = i32::try_from(self.surface_height).unwrap_or(i32::MAX);
+        let start_x = -offset_x;
 
         let mut positions = Vec::new();
         let mut y = -offset_y;
-        while y < self.surface_height as f32 {
-            let mut x = -offset_x;
-            while x < self.surface_width as f32 {
-                positions.push((x.round() as i32, y.round() as i32));
-                x += width_f;
+        while y < surface_height {
+            let mut x = start_x;
+            while x < surface_width {
+                positions.push((x, y));
+                x = x.saturating_add(tile_width);
             }
-            y += height_f;
+            y = y.saturating_add(tile_height);
         }
         self.draw_sky_tile_positions_with_parallel_rows(
             image,
@@ -4179,17 +4202,6 @@ impl GraphicsSystem {
             surface_height,
             parallel_rows,
         );
-    }
-
-    fn normalize_offset(offset: f32, dimension: f32) -> f32 {
-        if dimension <= 0.0 {
-            return 0.0;
-        }
-        let mut wrapped = offset % dimension;
-        if wrapped < 0.0 {
-            wrapped += dimension;
-        }
-        wrapped
     }
 
     fn lerp_color(a: Color, b: Color, t: f32) -> Color {
