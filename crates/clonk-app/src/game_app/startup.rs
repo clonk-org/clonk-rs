@@ -2057,11 +2057,11 @@ impl GameApp {
         receiver: Receiver<StartupNetworkResult>,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
-        connect_targets: Option<String>,
+        join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         self.install_startup_network_connection(
             StartupNetworkConnection::new(receiver, selected_scenario, purpose),
-            connect_targets,
+            join_target,
         )
     }
 
@@ -2071,19 +2071,19 @@ impl GameApp {
         attempt: StartupNetworkAttempt,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
-        connect_targets: Option<String>,
+        join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         self.install_startup_network_connection(
             StartupNetworkConnection::new(receiver, selected_scenario, purpose)
                 .with_attempt(attempt),
-            connect_targets,
+            join_target,
         )
     }
 
     fn install_startup_network_connection(
         &mut self,
         connection: StartupNetworkConnection,
-        connect_targets: Option<String>,
+        join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         let purpose = connection.purpose;
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
@@ -2092,13 +2092,12 @@ impl GameApp {
             dialog.cancel_interaction();
         }
         if purpose == StartupNetworkPurpose::Join {
-            let connect_targets = connect_targets
-                .filter(|targets| !targets.trim().is_empty())
-                .unwrap_or_else(|| "network game".to_string());
-            let message = format_resource_string(
-                self.runtime_resource_text("IDS_NET_CONNECTHOST", "Connecting to host on %s..."),
-                &[&connect_targets],
-            );
+            let target = join_target
+                .filter(|target| !target.is_blank())
+                .unwrap_or_else(|| StartupJoinTarget::Addresses("network game".to_string()));
+            let (resource_key, fallback, name) = target.message_parts();
+            let message =
+                format_resource_string(self.runtime_resource_text(resource_key, fallback), &[name]);
             let caption = self.runtime_resource_text("IDS_NET_JOINGAME", "Joining network game");
             self.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::new(

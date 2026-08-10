@@ -1027,6 +1027,7 @@ IDS_NET_CLIENT_UNREADY=Client %s nicht bereit.
 IDS_NET_COMMENTCHANGED=Neuer Netzwerkspiel-Kommentar gesetzt.
 IDS_NET_COMPUTERNAME=Computername:
 IDS_NET_COMPUTERNAME_DESC=Computername, der benutzt wird, um diesen Computer in Netzwerkspielen zu identifizieren.
+IDS_NET_CONNECTGAME=Verbinde mit %s...
 IDS_NET_CONNECTHOST=Verbinde mit Host auf %s...
 IDS_NET_CONNECTING=Verbinde mit %s (%s)
 IDS_NET_CONTROL=Steuerdaten

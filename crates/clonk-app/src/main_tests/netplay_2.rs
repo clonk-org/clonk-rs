@@ -1875,7 +1875,7 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
         receiver,
         StartupNetworkPurpose::Join,
         None,
-        Some(target.to_string()),
+        Some(StartupJoinTarget::Addresses(target.to_string())),
     )
     .expect("show raw-connect progress");
 
@@ -1921,6 +1921,71 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
 }
 
 #[test]
+fn a_reference_join_names_the_game_rather_than_its_transport_addresses() {
+    // C++ formats IDS_NET_CONNECTHOST from every endpoint it dials
+    // (oracle-src-pinned 7d43b47b src/C4Network2.cpp:410-419). A masterserver
+    // reference routinely advertises a dozen routes, and SetSourceAddress
+    // (src/C4Network2Reference.cpp:37-47) rewrites the host's null address onto
+    // one the reference already lists, so the modal fills with duplicated
+    // transport addresses. The player picked a game by name; name that
+    // (clonk-org/clonk-rs#204). The endpoints keep their C++ wording in the log.
+    let mut app = new_classic_menu_app(800, 600);
+
+    app.activate_network_reference_join(clonk_network::NetworkGameReference {
+        title: "Clonk Party".to_string(),
+        host_name: "archlinux".to_string(),
+        source_address: "127.0.0.1:1".parse().unwrap(),
+        ..Default::default()
+    })
+    .expect("a reference without a password joins immediately");
+
+    let progress = &app
+        .message_dialogs
+        .last()
+        .expect("the launched join raises its progress dialog")
+        .state;
+    assert_eq!(
+        progress.message(),
+        "Connecting to Clonk Party on archlinux..."
+    );
+    assert_eq!(progress.caption(), "Joining network game");
+}
+
+#[test]
+fn a_password_prompt_does_not_cost_the_join_the_name_of_its_game() {
+    // The reference is consumed when the prompt opens, so the game's name has
+    // to survive on the settings that the accepted password launches. Losing it
+    // here would silently drop a passworded join back to the address wall
+    // clonk-org/clonk-rs#204 is about.
+    let mut app = new_classic_menu_app(800, 600);
+
+    app.activate_network_reference_join(clonk_network::NetworkGameReference {
+        title: "Clonk Party".to_string(),
+        host_name: "archlinux".to_string(),
+        password_needed: true,
+        source_address: "127.0.0.1:1".parse().unwrap(),
+        ..Default::default()
+    })
+    .expect("a passworded reference prompts before joining");
+    assert!(app.game_option_input_dialog.is_some());
+
+    app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+        "hunter2".to_string(),
+    )])
+    .expect("an accepted password launches the join");
+
+    let progress = &app
+        .message_dialogs
+        .last()
+        .expect("the launched join raises its progress dialog")
+        .state;
+    assert_eq!(
+        progress.message(),
+        "Connecting to Clonk Party on archlinux..."
+    );
+}
+
+#[test]
 fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
@@ -1932,7 +1997,7 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
         receiver,
         StartupNetworkPurpose::Join,
         None,
-        Some(address.to_string()),
+        Some(StartupJoinTarget::Addresses(address.to_string())),
     )
     .expect("show abortable raw-connect progress");
     app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -1969,7 +2034,9 @@ fn cancel_button_aborts_inflight_join() {
         receiver,
         StartupNetworkPurpose::Join,
         None,
-        Some("198.51.100.40:11112".to_string()),
+        Some(StartupJoinTarget::Addresses(
+            "198.51.100.40:11112".to_string(),
+        )),
     )
     .expect("show clickable raw-connect progress");
     let cancel = app
@@ -2979,7 +3046,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
         receiver,
         StartupNetworkPurpose::Join,
         None,
-        Some("127.0.0.1:11112".to_string()),
+        Some(StartupJoinTarget::Addresses("127.0.0.1:11112".to_string())),
     )
     .expect("begin join transition");
     assert!(
