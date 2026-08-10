@@ -875,6 +875,24 @@ impl GameApp {
             }
     }
 
+    /// The name C4StartupNetListEntry gives an advertised game: its title over
+    /// the client hosting it (oracle-src-pinned 7d43b47b
+    /// src/C4StartupNetDlg.cpp:454).
+    pub(crate) fn startup_network_reference_title(
+        resources: &HashMap<String, String>,
+        reference: &clonk_network::NetworkGameReference,
+    ) -> String {
+        let host = if reference.host_name.is_empty() {
+            "unknown"
+        } else {
+            reference.host_name.as_str()
+        };
+        format_resource_string(
+            runtime_resource_text_from_table(resources, "IDS_NET_REFONCLIENT", "%s on %s"),
+            &[&reference.title, host],
+        )
+    }
+
     pub(crate) fn startup_network_reference_row_with_config(
         resources: &HashMap<String, String>,
         use_alternate_server: bool,
@@ -882,15 +900,7 @@ impl GameApp {
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
         use clonk_frontend::startup_netdlg::{NetDlgGameEntry, NetDlgRowIcon, NetDlgStatusIcon};
 
-        let host = if reference.host_name.is_empty() {
-            "unknown"
-        } else {
-            reference.host_name.as_str()
-        };
-        let title = format_resource_string(
-            runtime_resource_text_from_table(resources, "IDS_NET_REFONCLIENT", "%s on %s"),
-            &[&reference.title, host],
-        );
+        let title = Self::startup_network_reference_title(resources, reference);
         let goals = if reference.goals.is_empty() {
             runtime_resource_text_from_table(resources, "IDS_CTL_NOGOAL", "No game goal")
         } else {
