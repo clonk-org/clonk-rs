@@ -1,0 +1,443 @@
+name: Release prebuild
+
+on:
+  workflow_call:
+    inputs:
+      source-sha:
+        description: Exact merge-group commit to compile
+        required: true
+        type: string
+      tree-sha:
+        description: Exact merge-group Git tree
+        required: true
+        type: string
+      version:
+        description: Release version in the prepared workspace
+        required: true
+        type: string
+      pr-number:
+        description: Open release pull request number
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail closed before any source-controlled command is compiled. The release
+  # branch is automation-owned, but its identity is still re-read from GitHub
+  # instead of being trusted merely because the caller supplied it.
+  validate:
+    name: Validate release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate the remote release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+          TRUSTED_MERGE_GROUP: ${{ github.event_name == 'merge_group' }}
+        run: |
+          if [[ "$TRUSTED_MERGE_GROUP" != 'true' ]]; then
+            echo "release prebuild must be called from a merge group" >&2
+            exit 1
+          fi
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "invalid release pull request number: $PR_NUMBER" >&2
+            exit 1
+          fi
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid release source SHA: $SOURCE_SHA" >&2
+            exit 1
+          fi
+          if [[ "$SOURCE_SHA" != "$MERGE_SHA" ]]; then
+            echo "release prebuild source is not the active merge-group commit" >&2
+            exit 1
+          fi
+          if [[ ! "$TREE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid release tree SHA: $TREE_SHA" >&2
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid release version: $REQUESTED_VERSION" >&2
+            exit 1
+          fi
+
+          pull_request=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")
+          if ! jq -e \
+            --arg repository "$REPOSITORY" \
+            --arg version "$REQUESTED_VERSION" \
+            '
+              .state == "open"
+              and .base.ref == "main"
+              and .base.repo.full_name == $repository
+              and .head.ref == "release/next"
+              and .head.repo.full_name == $repository
+              and .title == ("chore: release " + $version)
+            ' <<<"$pull_request" >/dev/null
+          then
+            echo "pull request $PR_NUMBER is not the requested open same-repository release/next -> main change" >&2
+            exit 1
+          fi
+
+          source_tree=$(gh api "repos/${REPOSITORY}/git/commits/${SOURCE_SHA}" --jq .tree.sha)
+          if [[ "$source_tree" != "$TREE_SHA" ]]; then
+            echo "merge-group source does not have requested tree $TREE_SHA" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - name: Validate the checked-out release source
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+        run: |
+          if ! [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]; then
+            echo "checkout does not match requested release source $SOURCE_SHA" >&2
+            exit 1
+          fi
+          if ! [[ "$(git rev-parse HEAD^{tree})" == "$TREE_SHA" ]]; then
+            echo "checkout does not match requested release tree $TREE_SHA" >&2
+            exit 1
+          fi
+          actual_version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          section = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[)", text, re.M | re.S)
+          if section is None:
+              raise SystemExit("Cargo.toml has no [workspace.package] section")
+          version = re.search(r'^version = "([^"]+)"$', section.group(1), re.M)
+          if version is None:
+              raise SystemExit("[workspace.package] has no version")
+          print(version.group(1))
+          PY
+          )
+          if [[ "$actual_version" != "$REQUESTED_VERSION" ]]; then
+            echo "workspace version ${actual_version} does not match requested release ${REQUESTED_VERSION}" >&2
+            exit 1
+          fi
+
+  # Host tools are not shipped code, so use the existing non-LTO test profile.
+  # They build beside all four native runtimes instead of extending packaging.
+  tool:
+    name: Prebuild packaging tool / ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            artifact: release-prebuild-tool-linux
+            tool_path: target/debug/xtask-engine-tools
+            filename: xtask-engine-tools
+            target: host
+          - name: windows
+            runner: windows-latest
+            artifact: release-prebuild-tool-windows
+            tool_path: target/debug/xtask-engine-tools.exe
+            filename: xtask-engine-tools.exe
+            target: host
+          - name: macos
+            runner: macos-latest
+            artifact: release-prebuild-tool-macos
+            tool_path: target/debug/xtask-engine-tools
+            filename: xtask-engine-tools
+            target: host
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - name: Validate the checked-out tool source
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD^{tree})" == "$TREE_SHA" ]]
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Restore trusted-main Linux build cache
+        if: matrix.name == 'linux'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: full-parity
+          save-if: false
+
+      - name: Restore trusted-main Windows build cache
+        if: matrix.name == 'windows'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          save-if: false
+
+      - name: Restore trusted-main macOS build cache
+        if: matrix.name == 'macos'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: recording-host-oracles
+          save-if: false
+
+      - name: Install Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Build the packaging tool
+        run: cargo build --profile test --locked -p xtask --features engine-tools --bin xtask-engine-tools
+
+      - name: Stage the packaging tool and manifest
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          artifact_dir="target/release-prebuild/${{ matrix.artifact }}"
+          rm -rf -- "$artifact_dir"
+          mkdir -p "$artifact_dir/payload"
+          if [[ ! -s "${{ matrix.tool_path }}" ]]; then
+            echo "prebuilt packaging tool is missing or empty: ${{ matrix.tool_path }}" >&2
+            exit 1
+          fi
+          cp "${{ matrix.tool_path }}" "$artifact_dir/payload/${{ matrix.filename }}"
+          python3 scripts/release-prebuild-manifest.py write \
+            --root "$artifact_dir" \
+            --manifest "$artifact_dir/manifest.json" \
+            --head-sha "$SOURCE_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --version "$VERSION" \
+            --kind tool \
+            --target "${{ matrix.target }}" \
+            --file "payload/${{ matrix.filename }}"
+
+      - name: Hand off the packaging tool
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-prebuild/${{ matrix.artifact }}
+          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
+
+      # cache/save reports service failures as warnings. A lookup-only restore
+      # makes this producer row fail, so "re-run failed jobs" recreates it.
+      - name: Verify the packaging tool handoff
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-prebuild/${{ matrix.artifact }}
+          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
+          fail-on-cache-miss: true
+          lookup-only: true
+
+  # Native runtime rows preserve the release profile, targets, dependency
+  # caches and Windows ThinLTO/runtime validation used by release-build.yml.
+  runtime:
+    name: Prebuild runtime / ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            artifact: release-prebuild-runtime-linux
+            source_dir: target/release
+            suffix: ''
+            target: x86_64-unknown-linux-gnu
+          - name: windows
+            runner: windows-latest
+            artifact: release-prebuild-runtime-windows
+            source_dir: target/x86_64-pc-windows-msvc/release
+            suffix: .exe
+            target: x86_64-pc-windows-msvc
+          - name: macos-arm64
+            runner: macos-latest
+            artifact: release-prebuild-runtime-macos-arm64
+            source_dir: target/aarch64-apple-darwin/release
+            suffix: ''
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            runner: macos-latest
+            artifact: release-prebuild-runtime-macos-x86_64
+            source_dir: target/x86_64-apple-darwin/release
+            suffix: ''
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - name: Validate the checked-out runtime source
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD^{tree})" == "$TREE_SHA" ]]
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Restore trusted-main Linux runtime cache
+        if: matrix.name == 'linux'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: full-parity
+          save-if: false
+
+      - name: Restore trusted-main Windows runtime cache
+        if: matrix.name == 'windows'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          save-if: false
+
+      - name: Restore trusted-main macOS runtime cache
+        if: startsWith(matrix.name, 'macos-')
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: recording-host-oracles
+          save-if: false
+
+      - name: Install Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install the macOS runtime target
+        if: startsWith(matrix.name, 'macos-')
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Configure the shipped MSVC runtime
+        if: matrix.name == 'windows'
+        run: scripts/configure-msvc-runtime.sh
+
+      - name: Restore trusted-main ThinLTO cache
+        if: matrix.name == 'windows'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', 'third_party/**/*.rs') }}
+
+      - name: Restore shipped MSVC dependency cache
+        if: matrix.name == 'windows'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: shipped-msvc-runtime-v1
+          save-if: false
+
+      - name: Build the Linux runtime
+        if: matrix.name == 'linux'
+        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
+
+      - name: Build the Windows runtime
+        if: matrix.name == 'windows'
+        run: |
+          cargo fetch --locked
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
+
+      - name: Build the macOS arm64 runtime
+        if: matrix.name == 'macos-arm64'
+        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group --target aarch64-apple-darwin
+
+      - name: Build the macOS x86_64 runtime
+        if: matrix.name == 'macos-x86_64'
+        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group --target x86_64-apple-darwin
+
+      - name: Validate the shipped MSVC runtime
+        if: matrix.name == 'windows'
+        run: scripts/validate-msvc-runtime.sh
+
+      - name: Stage the runtime and manifest
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          artifact_dir="target/release-prebuild/${{ matrix.artifact }}"
+          rm -rf -- "$artifact_dir"
+          mkdir -p "$artifact_dir/payload"
+          for binary in c4group clonk-app clonk-game; do
+            source_path="${{ matrix.source_dir }}/${binary}${{ matrix.suffix }}"
+            if [[ ! -s "$source_path" ]]; then
+              echo "prebuilt runtime is missing or empty: $source_path" >&2
+              exit 1
+            fi
+            cp "$source_path" "$artifact_dir/payload/${binary}${{ matrix.suffix }}"
+          done
+          python3 scripts/release-prebuild-manifest.py write \
+            --root "$artifact_dir" \
+            --manifest "$artifact_dir/manifest.json" \
+            --head-sha "$SOURCE_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --version "$VERSION" \
+            --kind runtime \
+            --target "${{ matrix.target }}" \
+            --file "payload/c4group${{ matrix.suffix }}" \
+            --file "payload/clonk-app${{ matrix.suffix }}" \
+            --file "payload/clonk-game${{ matrix.suffix }}"
+
+      - name: Hand off the runtime
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-prebuild/${{ matrix.artifact }}
+          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
+
+      - name: Verify the runtime handoff
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release-prebuild/${{ matrix.artifact }}
+          key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
+          fail-on-cache-miss: true
+          lookup-only: true

@@ -11,6 +11,9 @@ EXACT_SHA_QUALIFICATION_WORKFLOW = (
 )
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.yml"
+RELEASE_PREBUILD_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "release-prebuild.yml"
+)
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 WINDOWS_INSTALLER = REPOSITORY / "scripts" / "windows-installer.nsi"
@@ -56,6 +59,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             EXACT_SHA_QUALIFICATION_WORKFLOW,
             RELEASE_WORKFLOW,
             RELEASE_BUILD_WORKFLOW,
+            RELEASE_PREBUILD_WORKFLOW,
         ):
             source = workflow.read_text(encoding="utf-8")
             blocks = [
@@ -105,7 +109,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn("run: scripts/configure-msvc-runtime.sh", landing)
         self.assertNotIn("run: scripts/validate-msvc-runtime.sh", landing)
 
-        for workflow in (MAIN_WORKFLOW, RELEASE_BUILD_WORKFLOW):
+        for workflow in (MAIN_WORKFLOW, RELEASE_PREBUILD_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 self.assertEqual(
                     workflow.read_text(encoding="utf-8").count(
@@ -172,7 +176,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_thinlto_cache_is_published_only_by_trusted_main(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        release_build = RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+        release_prebuild = RELEASE_PREBUILD_WORKFLOW.read_text(encoding="utf-8")
         restore = (
             "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
             " # v6.1.0"
@@ -186,14 +190,14 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn(save, landing)
         self.assertEqual(main.count(restore), 1)
         self.assertEqual(main.count(save), 1)
-        thinlto_start = release_build.index("Restore trusted-main ThinLTO cache")
-        thinlto_end = release_build.index("\n      - name:", thinlto_start)
-        thinlto_step = release_build[thinlto_start:thinlto_end]
+        thinlto_start = release_prebuild.index("Restore trusted-main ThinLTO cache")
+        thinlto_end = release_prebuild.index("\n      - name:", thinlto_start)
+        thinlto_step = release_prebuild[thinlto_start:thinlto_end]
         self.assertEqual(thinlto_step.count(restore), 1)
-        self.assertNotIn("Publish trusted ThinLTO cache", release_build)
+        self.assertNotIn("Publish trusted ThinLTO cache", release_prebuild)
         self.assertNotIn(
             "key: ${{ steps.thinlto-cache.outputs.cache-primary-key }}",
-            release_build,
+            release_prebuild,
         )
 
         trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
@@ -212,7 +216,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "'third_party/**/*.rs') }}"
         )
         self.assertNotIn("clonk-msvc-thinlto", landing)
-        for workflow in (main, release_build):
+        for workflow in (main, release_prebuild):
             with self.subTest(workflow=workflow):
                 self.assertIn(production_key, workflow)
                 self.assertNotIn("restore-keys:", workflow)
@@ -224,14 +228,20 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             with self.subTest(metadata=metadata):
                 self.assertNotIn(metadata, production_key)
 
-    def test_exact_msvc_runtime_build_is_post_merge_and_release_gated(self):
+    def test_exact_msvc_runtime_build_is_merge_group_release_gated(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        prebuild = RELEASE_PREBUILD_WORKFLOW.read_text(encoding="utf-8")
+        release_build = RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
         release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertNotIn("Build the Windows packaging tool", landing)
         self.assertNotIn("Build the runtime exactly as a release ships it", landing)
         self.assertNotIn("cargo build --release -p clonk-app", landing)
+        self.assertIn("run: scripts/configure-msvc-runtime.sh", prebuild)
+        self.assertIn("run: scripts/validate-msvc-runtime.sh", prebuild)
+        self.assertNotIn("cargo build --release", release_build)
+        self.assertIn("scripts/release-prebuild-manifest.py verify", release_build)
         self.assertIn(
             "cargo build --release --locked -p xtask --features engine-tools "
             "--bin xtask-engine-tools",
