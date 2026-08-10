@@ -4,6 +4,12 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-08-10
+
+### Performance
+
+- Halve release candidate build time (#245)
+
 ## [0.9.5] - 2026-08-10
 
 ### Bug fixes
