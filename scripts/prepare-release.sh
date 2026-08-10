@@ -55,7 +55,7 @@ fi
 if [[ $# -eq 1 ]]; then
     version=${1#v}
 else
-    version=$("$tool" --config "$repo_root/cliff.toml" --bumped-version 2>/dev/null)
+    version=$("$tool" --config "$repo_root/cliff.toml" --unreleased --bumped-version 2>/dev/null)
     version=${version#v}
 fi
 

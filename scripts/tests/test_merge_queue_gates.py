@@ -3,6 +3,7 @@
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from _repo import REPOSITORY
 WORKFLOWS = REPOSITORY / ".github" / "workflows"
 LANDING = WORKFLOWS / "landing.yml"
 MAIN_VALIDATION = WORKFLOWS / "rust.yml"
+EXACT_SHA_QUALIFICATION = WORKFLOWS / "exact-sha-qualification.yml"
 LEGACY_WINDOWS = WORKFLOWS / "windows.yml"
 QUEUE_JOBS = ("linux", "windows-smoke")
 
@@ -51,6 +53,63 @@ def step_script(workflow: Path, name: str) -> str:
 
 
 class MergeQueueGateTests(unittest.TestCase):
+    def test_release_merge_group_runs_existing_exact_sha_qualification(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        qualification = job_block(LANDING, "release-qualification")
+        gate = job_block(LANDING, "landing-gate")
+
+        self.assertTrue(EXACT_SHA_QUALIFICATION.exists())
+        reusable = EXACT_SHA_QUALIFICATION.read_text(encoding="utf-8")
+        self.assertIn("name: Rust code coverage", reusable)
+        self.assertIn(
+            "name: Recording-host material-order oracles (macOS)", reusable
+        )
+        self.assertEqual(
+            reusable.count("if: ${{ always() && inputs.upload-diagnostics }}"),
+            2,
+        )
+        self.assertIn("needs: release-context", qualification)
+        self.assertIn(
+            "needs.release-context.outputs.release == 'true'", qualification
+        )
+        self.assertIn(
+            "uses: ./.github/workflows/exact-sha-qualification.yml",
+            qualification,
+        )
+        self.assertIn("source-sha: ${{ github.sha }}", qualification)
+        self.assertIn("concurrency-suffix: ${{ github.sha }}", qualification)
+        self.assertIn("publish-recording-host-cache: false", qualification)
+        self.assertIn("upload-diagnostics: false", qualification)
+        self.assertIn(
+            "upload-diagnostics: true",
+            job_block(MAIN_VALIDATION, "exact-sha-qualification"),
+        )
+        self.assertRegex(gate, r"(?m)^      - release-qualification$")
+        self.assertIn("RELEASE_QUALIFICATION_RESULT", gate)
+
+    def test_release_merge_group_builds_exact_sha_artifacts_before_landing(self):
+        workflow = LANDING.read_text(encoding="utf-8")
+        context = job_block(LANDING, "release-context")
+        build = job_block(LANDING, "release-build")
+        gate = job_block(LANDING, "landing-gate")
+
+        self.assertIn("github.event.merge_group.head_commit.message", context)
+        self.assertIn("release: ${{ steps.release.outputs.release }}", context)
+        self.assertIn("version: ${{ steps.release.outputs.version }}", context)
+        self.assertIn("needs: release-context", build)
+        self.assertIn("needs.release-context.outputs.release == 'true'", build)
+        self.assertIn("uses: ./.github/workflows/release-build.yml", build)
+        self.assertIn("source-sha: ${{ github.sha }}", build)
+        self.assertIn(
+            "version: ${{ needs.release-context.outputs.version }}",
+            build,
+        )
+        for job in ("release-context", "release-build"):
+            self.assertRegex(gate, rf"(?m)^      - {job}$")
+        self.assertIn("RELEASE_CONTEXT_RESULT", gate)
+        self.assertIn("RELEASE_BUILD_RESULT", gate)
+        self.assertIn("IS_RELEASE", gate)
+
     def test_landing_owns_pr_and_merge_group_while_main_validation_owns_push(self):
         landing = trigger_block(LANDING)
         main = trigger_block(MAIN_VALIDATION)
@@ -98,13 +157,51 @@ class MergeQueueGateTests(unittest.TestCase):
             **os.environ,
             "EVENT_NAME": "merge_group",
             "TITLE_RESULT": "skipped",
+            "RELEASE_CONTEXT_RESULT": "success",
+            "RELEASE_BUILD_RESULT": "skipped",
+            "RELEASE_QUALIFICATION_RESULT": "skipped",
+            "IS_RELEASE": "false",
             "LINUX_RESULT": "success",
             "WINDOWS_SMOKE_RESULT": "success",
         }
 
         cases = (
-            ("pull request", {"EVENT_NAME": "pull_request", "TITLE_RESULT": "success", "LINUX_RESULT": "skipped", "WINDOWS_SMOKE_RESULT": "skipped"}, 0),
-            ("merge group", {}, 0),
+            (
+                "pull request",
+                {
+                    "EVENT_NAME": "pull_request",
+                    "TITLE_RESULT": "success",
+                    "RELEASE_CONTEXT_RESULT": "skipped",
+                    "IS_RELEASE": "",
+                    "LINUX_RESULT": "skipped",
+                    "WINDOWS_SMOKE_RESULT": "skipped",
+                },
+                0,
+            ),
+            ("ordinary merge group", {}, 0),
+            (
+                "release merge group",
+                {
+                    "RELEASE_BUILD_RESULT": "success",
+                    "RELEASE_QUALIFICATION_RESULT": "success",
+                    "IS_RELEASE": "true",
+                },
+                0,
+            ),
+            (
+                "release qualification failed",
+                {
+                    "RELEASE_BUILD_RESULT": "success",
+                    "RELEASE_QUALIFICATION_RESULT": "failure",
+                    "IS_RELEASE": "true",
+                },
+                1,
+            ),
+            (
+                "ordinary merge unexpectedly qualified",
+                {"RELEASE_QUALIFICATION_RESULT": "success"},
+                1,
+            ),
             ("failed child", {"LINUX_RESULT": "failure"}, 1),
             ("cancelled child", {"WINDOWS_SMOKE_RESULT": "cancelled"}, 1),
             ("skipped merge child", {"WINDOWS_SMOKE_RESULT": "skipped"}, 1),
@@ -118,6 +215,35 @@ class MergeQueueGateTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(completed.returncode, expected, completed.stderr)
+
+    def test_release_context_accepts_only_the_exact_merge_queue_subject(self):
+        script = step_script(LANDING, "Resolve the merge-group release")
+        cases = (
+            ("fix: ordinary candidate (#230)", 0, "release=false\n"),
+            (
+                "chore: release 0.9.4 (#231)\n\nSquashed commits follow.",
+                0,
+                "release=true\nversion=0.9.4\n",
+            ),
+            ("chore: release 0.9.4", 1, ""),
+            ("chore: release next (#231)", 1, ""),
+        )
+        for subject, expected_status, expected_output in cases:
+            with self.subTest(subject=subject), tempfile.TemporaryDirectory() as root:
+                output = Path(root) / "github-output"
+                completed = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                    env={
+                        **os.environ,
+                        "MERGE_SUBJECT": subject,
+                        "GITHUB_OUTPUT": str(output),
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, expected_status, completed.stderr)
+                actual = output.read_text(encoding="utf-8") if output.exists() else ""
+                self.assertEqual(actual, expected_output)
 
     def test_pull_request_title_is_an_unscoped_subject_only(self):
         script = step_script(LANDING, "Check the title is a Conventional Commit subject")

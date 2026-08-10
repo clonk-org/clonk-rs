@@ -5,7 +5,7 @@ import unittest
 
 from _repo import REPOSITORY
 
-WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
+WORKFLOW = REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
 ORACLE_REASON = (
     "recording-host material order; required macOS CI job"
 )

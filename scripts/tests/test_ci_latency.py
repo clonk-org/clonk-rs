@@ -10,6 +10,7 @@ from _repo import REPOSITORY
 WORKFLOWS = REPOSITORY / ".github" / "workflows"
 LANDING = WORKFLOWS / "landing.yml"
 MAIN = WORKFLOWS / "rust.yml"
+QUALIFICATION = WORKFLOWS / "exact-sha-qualification.yml"
 DEPENDENCY_GUARD = WORKFLOWS / "dependency-guard.yml"
 
 # One step, from its first key to the next step's. `actions/cache/restore` is
@@ -56,7 +57,11 @@ class CiLatencyTests(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assertIn(f"shared-key: {scope}", main)
 
-        linux_producer = main[main.index("  linux-landing-cache:") : main.index("  coverage:")]
+        linux_producer = main[
+            main.index("  linux-landing-cache:") : main.index(
+                "  exact-sha-qualification:"
+            )
+        ]
         self.assertIn("workspaces: . -> target", linux_producer)
         self.assertIn("shared-key: full-parity", linux_producer)
         self.assertNotIn("cache-on-failure:", linux_producer)
@@ -108,32 +113,45 @@ class CiLatencyTests(unittest.TestCase):
 
     def test_cache_producers_finish_while_obsolete_diagnostics_cancel(self):
         main = MAIN.read_text(encoding="utf-8")
+        qualification = QUALIFICATION.read_text(encoding="utf-8")
 
         self.assertNotRegex(main, r"(?m)^concurrency:\s*$")
-        linux_producer = main[main.index("  linux-landing-cache:") : main.index("  coverage:")]
-        coverage = main[main.index("  coverage:") : main.index("  recording-host-oracles:")]
-        recording_host = main[
-            main.index("  recording-host-oracles:") : main.index("  windows-release-tools:")
+        linux_producer = main[
+            main.index("  linux-landing-cache:") : main.index(
+                "  exact-sha-qualification:"
+            )
         ]
+        caller = main[
+            main.index("  exact-sha-qualification:") : main.index(
+                "  windows-release-tools:"
+            )
+        ]
+        coverage = qualification[
+            qualification.index("  coverage:") : qualification.index(
+                "  recording-host-oracles:"
+            )
+        ]
+        recording_host = qualification[qualification.index("  recording-host-oracles:") :]
         windows_producer = main[main.index("  windows-release-tools:") :]
 
         for producer in (linux_producer, windows_producer):
             self.assertIn("cancel-in-progress: false", producer)
         for diagnostic in (coverage, recording_host):
             self.assertIn("cancel-in-progress: true", diagnostic)
-        self.assertIn("needs: linux-landing-cache", coverage)
+        self.assertIn("needs: linux-landing-cache", caller)
         self.assertIn("save-if: false", coverage)
+        self.assertIn("publish-recording-host-cache: true", caller)
 
     def test_post_merge_work_leaves_the_next_landing_runner_budget(self):
         main = MAIN.read_text(encoding="utf-8")
         dependency_guard = DEPENDENCY_GUARD.read_text(encoding="utf-8")
 
-        recording_host = main[
-            main.index("  recording-host-oracles:") : main.index(
+        qualification = main[
+            main.index("  exact-sha-qualification:") : main.index(
                 "  windows-release-tools:"
             )
         ]
-        self.assertIn("needs: linux-landing-cache", recording_host)
+        self.assertIn("needs: linux-landing-cache", qualification)
 
         triggers = dependency_guard[
             dependency_guard.index("on:\n") : dependency_guard.index("permissions:\n")
@@ -153,6 +171,7 @@ class CiLatencyTests(unittest.TestCase):
     def test_merge_group_rows_preempt_only_rolling_post_merge_work(self):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
+        qualification = QUALIFICATION.read_text(encoding="utf-8")
 
         claims = {
             "linux-landing-cache-rolling": "app 2/12",
@@ -164,7 +183,7 @@ class CiLatencyTests(unittest.TestCase):
             with self.subTest(group=group):
                 self.assertEqual(landing.count(f"'{group}'"), 1)
                 self.assertIn(claimant, landing)
-                self.assertIn(group.removesuffix("rolling"), main)
+                self.assertIn(group.removesuffix("rolling"), main + qualification)
 
         self.assertIn(
             "format('landing-linux-{0}-{1}', github.run_id, matrix.name)",
@@ -399,20 +418,24 @@ class CiLatencyTests(unittest.TestCase):
     def test_slow_diagnostics_are_post_merge_and_release_sha_is_not_cancelled(self):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
+        qualification = QUALIFICATION.read_text(encoding="utf-8")
 
         self.assertNotIn("cargo llvm-cov", landing)
         self.assertNotIn("runs-on: macos-latest", landing)
-        self.assertIn("cargo llvm-cov", main)
-        self.assertIn("runs-on: macos-latest", main)
+        self.assertIn(
+            "uses: ./.github/workflows/exact-sha-qualification.yml", main
+        )
+        self.assertIn("cargo llvm-cov", qualification)
+        self.assertIn("runs-on: macos-latest", qualification)
         self.assertIn(
             "startsWith(github.event.head_commit.message, 'chore: release ')",
             main,
         )
         self.assertIn("&& github.sha ||", main)
-        self.assertIn("cancel-in-progress: true", main)
+        self.assertIn("cancel-in-progress: true", qualification)
 
     def test_post_merge_render_probe_consumes_a_fresh_deterministic_replay(self):
-        workflow = MAIN.read_text(encoding="utf-8")
+        workflow = QUALIFICATION.read_text(encoding="utf-8")
         replay = workflow.index("- name: Generate deterministic replay evidence")
         render = workflow.index("- name: Render the replay snapshot")
         coverage = workflow.index("- name: Collect instrumented workspace coverage")
@@ -426,7 +449,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("dev_feedback_render --ignored --exact", workflow[render:coverage])
 
     def test_post_merge_replay_writes_to_the_repository_artifact_root(self):
-        workflow = MAIN.read_text(encoding="utf-8")
+        workflow = QUALIFICATION.read_text(encoding="utf-8")
         replay = workflow.index("- name: Generate deterministic replay evidence")
         render = workflow.index("- name: Render the replay snapshot")
 
@@ -436,7 +459,7 @@ class CiLatencyTests(unittest.TestCase):
         )
 
     def test_post_merge_render_uses_repository_artifact_paths(self):
-        workflow = MAIN.read_text(encoding="utf-8")
+        workflow = QUALIFICATION.read_text(encoding="utf-8")
         render = workflow.index("- name: Render the replay snapshot")
         coverage = workflow.index("- name: Collect instrumented workspace coverage")
         render_step = workflow[render:coverage]

@@ -6,7 +6,11 @@ from _repo import REPOSITORY
 
 LANDING_WORKFLOW = REPOSITORY / ".github" / "workflows" / "landing.yml"
 MAIN_WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
+EXACT_SHA_QUALIFICATION_WORKFLOW = (
+    REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
+)
 RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
+RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.yml"
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
 
@@ -39,7 +43,13 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_checkouts_do_not_persist_credentials(self):
         marker = "uses: actions/checkout@"
 
-        for workflow in (LANDING_WORKFLOW, MAIN_WORKFLOW, RELEASE_WORKFLOW):
+        for workflow in (
+            LANDING_WORKFLOW,
+            MAIN_WORKFLOW,
+            EXACT_SHA_QUALIFICATION_WORKFLOW,
+            RELEASE_WORKFLOW,
+            RELEASE_BUILD_WORKFLOW,
+        ):
             source = workflow.read_text(encoding="utf-8")
             blocks = [
                 block.split("\n      - ", 1)[0]
@@ -88,7 +98,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn("run: scripts/configure-msvc-runtime.sh", landing)
         self.assertNotIn("run: scripts/validate-msvc-runtime.sh", landing)
 
-        for workflow in (MAIN_WORKFLOW, RELEASE_WORKFLOW):
+        for workflow in (MAIN_WORKFLOW, RELEASE_BUILD_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 self.assertEqual(
                     workflow.read_text(encoding="utf-8").count(
@@ -155,7 +165,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_thinlto_cache_is_published_only_by_trusted_main(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        release_build = RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
         restore = (
             "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
             " # v6.1.0"
@@ -169,8 +179,8 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn(save, landing)
         self.assertEqual(main.count(restore), 1)
         self.assertEqual(main.count(save), 1)
-        self.assertEqual(release.count(restore), 1)
-        self.assertNotIn(save, release)
+        self.assertEqual(release_build.count(restore), 1)
+        self.assertNotIn(save, release_build)
 
         trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
         for guard in (
@@ -188,7 +198,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "'scripts/configure-msvc-runtime.sh') }}"
         )
         self.assertNotIn("clonk-msvc-thinlto", landing)
-        for workflow in (main, release):
+        for workflow in (main, release_build):
             with self.subTest(workflow=workflow):
                 self.assertIn(production_key, workflow)
                 self.assertNotIn("restore-keys:", workflow)
@@ -196,6 +206,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_exact_msvc_runtime_build_is_post_merge_and_release_gated(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertNotIn("Build the Windows packaging tool", landing)
         self.assertNotIn("Build the runtime exactly as a release ships it", landing)
@@ -210,8 +221,22 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             "--locked --timings",
             step_script(MAIN_WORKFLOW, "Refresh the shipped MSVC runtime cache"),
         )
-        release_gate = step_script(RELEASE_WORKFLOW, "Require exact-SHA validation")
-        self.assertIn("for workflow in landing.yml rust.yml", release_gate)
+        for fragment in (
+            "if: needs.release-context.outputs.release == 'true'",
+            "uses: ./.github/workflows/release-build.yml",
+            "source-sha: ${{ github.sha }}",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, landing)
+
+        artifact_resolver = step_script(
+            RELEASE_WORKFLOW, "Resolve exact-SHA release artifacts"
+        )
+        self.assertIn("--workflow landing.yml", artifact_resolver)
+        self.assertNotIn("rust.yml", artifact_resolver)
+        self.assertIn(
+            "run-id: ${{ steps.artifacts.outputs.run-id }}", release
+        )
 
     def test_installer_smoke_compiles_the_release_icon_branch(self):
         script = step_script(
@@ -223,7 +248,9 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
     def test_windows_installer_toolchain_is_exactly_pinned(self):
         scripts = (
             step_script(LANDING_WORKFLOW, "Install NSIS"),
-            step_script(RELEASE_WORKFLOW, "Install the Windows installer toolchain"),
+            step_script(
+                RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
+            ),
         )
         for script in scripts:
             with self.subTest(script=script):
@@ -234,8 +261,29 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                 self.assertIn('"$nsis_dir/makensis.exe" /VERSION', script)
                 self.assertIn("expected NSIS v3.12", script)
 
+    def test_windows_installer_toolchain_retries_transient_download_failures(self):
+        scripts = (
+            step_script(LANDING_WORKFLOW, "Install NSIS"),
+            step_script(
+                RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
+            ),
+        )
+        for script in scripts:
+            with self.subTest(script=script):
+                self.assertIn("for attempt in 1 2 3; do", script)
+                self.assertIn(
+                    "if choco install nsis --version 3.12.0 --yes --no-progress; then",
+                    script,
+                )
+                self.assertIn('if [[ "$attempt" -eq 3 ]]; then', script)
+                self.assertIn('sleep "$((attempt * 10))"', script)
+                self.assertNotIn("--ignore-checksums", script)
+                self.assertNotIn("--allow-empty-checksums", script)
+
     def test_universal_release_verifies_every_shipped_binary(self):
-        script = step_script(RELEASE_WORKFLOW, "Check the macOS build is universal")
+        script = step_script(
+            RELEASE_BUILD_WORKFLOW, "Check the macOS build is universal"
+        )
 
         self.assertIn("for binary in clonk-app clonk-game c4group", script)
 

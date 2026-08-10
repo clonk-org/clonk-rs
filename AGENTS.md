@@ -210,11 +210,19 @@ separate commits on `main` — that is what was traded for verification — but
 is preserved in the body of the squashed commit, and the split is still how the
 pull request is reviewed.
 
+Release automation has two separate two-minute objectives:
+`release-prepare.yml` opens a release pull request within two minutes of
+dispatch, and `release.yml` publishes within two minutes after the qualified
+release commit lands on `main`. Time in the merge queue is outside both
+windows: a release merge group builds and qualifies the exact candidate SHA
+before it can land.
+
 | | Jobs | When |
 |---|---|---|
 | Per pull request | pull-request title admission (+ dependency guard on manifest changes) | every push to the branch, normally under 1 min |
-| In the queue | exhaustive compile-time Linux test shards, formatting/scripts, workspace lints, parity/snapshots/package tests, Windows smoke tests and the shipped MSVC runtime | 1 entry builds at a time; target at or below 5 min |
-| After landing | code coverage, macOS material-order oracles and Windows release tooling | exact landed SHA; blocks releases, not the next merge |
+| In the queue (ordinary) | exhaustive compile-time Linux test shards, formatting/scripts, workspace lints, parity/snapshots/package tests and Windows smoke tests | 1 entry builds at a time; target at or below 5 min |
+| In the queue (release) | ordinary gates plus exact-SHA platform packages, code coverage, macOS material-order oracles and shipped MSVC validation | the candidate cannot land until its artifacts and qualification pass |
+| After ordinary landing | code coverage, macOS material-order oracles and Windows release tooling | asynchronous diagnostics and cache warming; blocks neither the next merge nor a release |
 
 A green pull request has passed admission, not the landing gate. The fail-closed
 `Landing gate` is the sole required queue result and rejects any failed,
@@ -242,8 +250,10 @@ gh pr view <n> --repo clonk-org/clonk-rs --json state,mergeStateStatus,autoMerge
 gh run list --repo clonk-org/clonk-rs --branch "gh-readonly-queue/main/pr-<n>-<base-sha>"
 ```
 
-Poll on the timings in the table above — admission inside a minute, the queue
-around five. Do not spin on it faster than that.
+Poll on the timings in the table above — admission inside a minute and an
+ordinary queue entry around five. A release entry intentionally waits for its
+platform builds and exact-SHA qualification. Do not spin on it faster than
+that.
 
 - **`autoMergeRequest: null` means the entry is *in* the queue, not that it was
   evicted.** GitHub consumes the auto-merge request when it enqueues, so the null

@@ -1,5 +1,6 @@
 """Release validation guards, exercised from the workflow's real shell."""
 
+import json
 import os
 import re
 import shutil
@@ -9,6 +10,8 @@ import unittest
 from pathlib import Path
 
 from test_release_content_handoff import WORKFLOW, step_script
+
+BUILD_WORKFLOW = WORKFLOW.with_name("release-build.yml")
 
 
 def job_block(name):
@@ -21,6 +24,58 @@ def job_block(name):
 
 
 class ReleaseWorkflowTopologyTests(unittest.TestCase):
+    def test_publish_promotes_the_successful_exact_sha_landing_artifacts(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        publish = job_block("publish")
+
+        self.assertNotIn("\n  resolve:\n", workflow)
+        self.assertNotIn("\n  build:\n", workflow)
+        self.assertIn("Decide whether this commit releases", publish)
+        self.assertIn("Resolve exact-SHA release artifacts", publish)
+        self.assertNotIn("rust.yml", publish)
+        self.assertNotIn("needs:", publish)
+        self.assertIn("actions: read", publish)
+        for fragment in (
+            "github-token: ${{ github.token }}",
+            "repository: ${{ github.repository }}",
+            "run-id: ${{ steps.artifacts.outputs.run-id }}",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertEqual(publish.count(fragment), 3)
+
+    def test_release_artifact_build_is_a_reusable_workflow(self):
+        landing = WORKFLOW.with_name("landing.yml").read_text(encoding="utf-8")
+
+        self.assertTrue(BUILD_WORKFLOW.exists())
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", reusable)
+        self.assertIn("source-sha:", reusable)
+        self.assertIn("version:", reusable)
+        self.assertIn("uses: ./.github/workflows/release-build.yml", landing)
+        self.assertIn("source-sha: ${{ github.sha }}", landing)
+
+    def test_reusable_release_build_validates_the_requested_source_version(self):
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("name: Validate the release source", reusable)
+        self.assertIn("REQUESTED_VERSION: ${{ inputs.version }}", reusable)
+        self.assertIn('workspace version ${actual_version}', reusable)
+        self.assertIn('requested release ${REQUESTED_VERSION}', reusable)
+
+    def test_merge_group_release_build_is_rerunnable_without_ephemeral_caches(self):
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertNotIn("shared-key: release-${{", reusable)
+        for trusted_cache in (
+            "full-parity",
+            "windows-runtime-msvc",
+            "recording-host-oracles",
+        ):
+            with self.subTest(trusted_cache=trusted_cache):
+                self.assertIn(f"shared-key: {trusted_cache}", reusable)
+        self.assertEqual(reusable.count("compression-level: 0"), 3)
+        self.assertEqual(reusable.count("overwrite: true"), 3)
+
     def test_release_commits_have_a_sha_specific_concurrency_lane(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
@@ -31,33 +86,56 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         )
         self.assertIn("cancel-in-progress: false", workflow)
 
-    def test_resolver_blocks_builds_on_exact_sha_validation(self):
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        resolve = job_block("resolve")
-        build = job_block("build")
-
-        self.assertNotIn("\n  prepare:\n", workflow)
-        self.assertIn("actions: read", resolve)
-        self.assertIn("if: steps.resolve.outputs.release == 'true'", resolve)
-        self.assertIn("CI_SHA: ${{ steps.resolve.outputs.sha }}", resolve)
-        self.assertIn("landing.yml", resolve)
-        self.assertIn("rust.yml", resolve)
-        self.assertIn("needs: resolve", build)
-
-    def test_partial_publication_can_resume_without_persisted_git_credentials(self):
-        resolve = job_block("resolve")
+    def test_publish_uses_a_shallow_checkout_and_the_tag_api(self):
         publish = job_block("publish")
 
-        self.assertIn('"repos/${REPOSITORY}/releases/tags/v${version}"', resolve)
-        self.assertIn("--jq '.draft'", resolve)
-        self.assertIn("'(HTTP 404)'", resolve)
-        self.assertIn('if [[ "$release_state" == "false" ]]', resolve)
+        self.assertIn("fetch-depth: 1", publish)
+        self.assertIn('git/ref/tags/v${version}', publish)
+        self.assertNotIn('git rev-parse -q --verify "refs/tags/', publish)
+
+    def test_publication_fails_its_two_minute_slo_closed(self):
+        publish = job_block("publish")
+
+        self.assertIn("name: Enforce release publication SLO", publish)
+        self.assertIn("releases/tags/v${VERSION}", publish)
+        self.assertIn("commits/${SHA}/pulls", publish)
+        self.assertIn(".merge_commit_sha == $sha", publish)
+        self.assertIn(".merged_at", publish)
+        self.assertIn('if [[ "$elapsed" -gt 120 ]]', publish)
+        self.assertIn("CI_POLL_ATTEMPTS: '5'", publish)
+        self.assertIn("CI_POLL_SECONDS: '1'", publish)
+
+    def test_already_published_rerun_still_enforces_publication_slo(self):
+        resolve = step_script("Decide whether this commit releases")
+        published_noop = resolve.rindex('echo "release=false" >> "$GITHUB_OUTPUT"')
+
+        self.assertLess(
+            resolve.index('echo "version=$version" >> "$GITHUB_OUTPUT"'),
+            published_noop,
+        )
+        self.assertLess(
+            resolve.index('echo "sha=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"'),
+            published_noop,
+        )
+        self.assertIn(
+            "if: steps.resolve.outputs.version != ''",
+            job_block("publish"),
+        )
+
+    def test_partial_publication_can_resume_without_persisted_git_credentials(self):
+        publish = job_block("publish")
+
+        self.assertIn('"repos/${REPOSITORY}/releases/tags/v${version}"', publish)
+        self.assertIn("--jq '.draft'", publish)
+        self.assertIn("'(HTTP 404)'", publish)
+        self.assertIn('if [[ "$release_state" == "false" ]]', publish)
         self.assertIn("persist-credentials: false", publish)
         self.assertIn('gh release create "v${VERSION}" --draft', publish)
         self.assertIn('gh release edit "v${VERSION}" --draft=false --latest', publish)
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
+@unittest.skipUnless(shutil.which("jq"), "needs jq, as the ubuntu runner has")
 class ReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -70,15 +148,65 @@ class ReleaseWorkflowTests(unittest.TestCase):
         path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
         path.chmod(0o755)
 
-    def run_gate(self, **extra):
+    def run_artifact_resolver(self, **extra):
+        output = self.root / "github-output"
         environment = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "GH_TOKEN": "stub",
             "CI_SHA": "0123456789abcdef",
+            "REPOSITORY": "clonk-org/clonk-rs",
             "CI_POLL_ATTEMPTS": "3",
             "CI_POLL_SECONDS": "0",
+            "GITHUB_OUTPUT": str(output),
             **extra,
+        }
+        completed = subprocess.run(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-eo",
+                "pipefail",
+                "-c",
+                step_script("Resolve exact-SHA release artifacts"),
+            ],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        return completed, output.read_text(encoding="utf-8") if output.exists() else ""
+
+    def run_publication_slo(self, elapsed_seconds):
+        self._stub(
+            'if [[ "$*" == "api repos/${REPOSITORY}/commits/${SHA}/pulls" ]]; then\n'
+            '  printf \'[{"merge_commit_sha":"%s","merged_at":"%s"}]\\n\' "$SHA" "$LANDED_AT"\n'
+            'elif [[ "$*" == "api repos/${REPOSITORY}/releases/tags/v${VERSION} --jq .published_at" ]]; then\n'
+            '  printf \'%s\\n\' "$PUBLISHED_AT"\n'
+            "else exit 1; fi\n"
+        )
+        date = self.bin / "date"
+        date.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "$*" == "-u -d ${LANDED_AT} +%s" ]]; then\n'
+            "  echo 0\n"
+            'elif [[ "$*" == "-u -d ${PUBLISHED_AT} +%s" ]]; then\n'
+            '  echo "$ELAPSED_SECONDS"\n'
+            "else exit 1; fi\n",
+            encoding="utf-8",
+        )
+        date.chmod(0o755)
+        environment = {
+            **os.environ,
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "ELAPSED_SECONDS": str(elapsed_seconds),
+            "GH_TOKEN": "stub",
+            "LANDED_AT": "2026-08-09T10:30:55Z",
+            "PUBLISHED_AT": "2026-08-09T10:32:55Z",
+            "REPOSITORY": "clonk-org/clonk-rs",
+            "SHA": "0123456789abcdef",
+            "VERSION": "0.9.4",
         }
         return subprocess.run(
             [
@@ -88,7 +216,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "-eo",
                 "pipefail",
                 "-c",
-                step_script("Require exact-SHA validation"),
+                step_script("Enforce release publication SLO"),
             ],
             cwd=self.root,
             env=environment,
@@ -96,62 +224,98 @@ class ReleaseWorkflowTests(unittest.TestCase):
             text=True,
         )
 
-    def test_gate_accepts_only_the_two_exact_event_verdicts(self):
-        self._stub(
-            '[[ " $* " == *" --commit $CI_SHA "* ]] || { echo completed:failure; exit 0; }\n'
-            'if [[ " $* " == *" --workflow landing.yml "* ]]; then\n'
-            '  [[ " $* " == *" --event merge_group "* ]] || { echo completed:failure; exit 0; }\n'
-            '  [[ " $* " != *" --branch "* ]] || { echo completed:failure; exit 0; }\n'
-            'elif [[ " $* " == *" --workflow rust.yml "* ]]; then\n'
-            '  [[ " $* " == *" --event push "* ]] || { echo completed:failure; exit 0; }\n'
-            '  [[ " $* " == *" --branch main "* ]] || { echo completed:failure; exit 0; }\n'
-            'else\n  echo completed:failure; exit 0\nfi\n'
-            "echo completed:success\n"
+    @staticmethod
+    def artifact_inventory(*, omit=None, extra=None, expired=None):
+        names = [
+            "desktop-linux",
+            "desktop-windows",
+            "desktop-macos",
+            "components-desktop-linux",
+            "components-desktop-windows",
+            "components-desktop-macos",
+            "release-tool",
+        ]
+        return json.dumps(
+            {
+                "artifacts": [
+                    {"name": name, "expired": name == expired}
+                    for name in names
+                    if name != omit
+                ]
+                + ([{"name": extra, "expired": False}] if extra else [])
+            }
         )
-        completed = self.run_gate()
-        self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_gate_waits_for_running_checks_without_hiding_them(self):
+    def test_resolver_accepts_only_an_exact_successful_landing_inventory(self):
         self._stub(
-            '[[ " $* " != *" --status completed "* ]] || exit 9\n'
-            'counter=.calls\n'
-            'calls=$(cat "$counter" 2>/dev/null || echo 0)\n'
-            'calls=$((calls + 1))\n'
-            'echo "$calls" > "$counter"\n'
-            'if (( calls <= 2 )); then echo in_progress:none; else echo completed:success; fi\n'
+            'echo "$*" >> "$GH_LOG"\n'
+            'if [[ "$1 $2" == "run list" ]]; then\n'
+            '  printf "91\\t%s\\tcompleted\\tsuccess\\n" "$CI_SHA"\n'
+            'elif [[ "$1" == "api" ]]; then\n'
+            '  printf "%s\\n" "$ARTIFACTS"\n'
+            "else exit 1; fi\n"
         )
-        completed = self.run_gate()
+        log = self.root / "gh.log"
+        completed, output = self.run_artifact_resolver(
+            GH_LOG=str(log), ARTIFACTS=self.artifact_inventory()
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("in_progress:none", completed.stdout)
+        self.assertEqual(output, "run-id=91\n")
+        commands = log.read_text(encoding="utf-8")
+        self.assertIn("--workflow landing.yml", commands)
+        self.assertIn("--event merge_group", commands)
+        self.assertIn("--commit 0123456789abcdef", commands)
+        self.assertNotIn("--branch", commands)
 
-    def test_gate_waits_when_gh_uses_an_empty_running_conclusion(self):
+    def test_resolver_fails_closed_on_incomplete_or_unexpected_inventory(self):
         self._stub(
-            'counter=.calls\n'
-            'calls=$(cat "$counter" 2>/dev/null || echo 0)\n'
-            'calls=$((calls + 1))\n'
-            'echo "$calls" > "$counter"\n'
-            'if (( calls <= 2 )); then echo in_progress:; else echo completed:success; fi\n'
+            'if [[ "$1 $2" == "run list" ]]; then\n'
+            '  printf "91\\t%s\\tcompleted\\tsuccess\\n" "$CI_SHA"\n'
+            'elif [[ "$1" == "api" ]]; then printf "%s\\n" "$ARTIFACTS";\n'
+            "else exit 1; fi\n"
         )
-        completed = self.run_gate()
+        cases = {
+            "missing": self.artifact_inventory(omit="release-tool"),
+            "expired": self.artifact_inventory(expired="desktop-linux"),
+            "unexpected": self.artifact_inventory(extra="unreviewed-payload"),
+        }
+        for name, inventory in cases.items():
+            with self.subTest(name=name):
+                completed, output = self.run_artifact_resolver(
+                    ARTIFACTS=inventory, CI_POLL_ATTEMPTS="1"
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertIn("timed out", completed.stderr)
+
+    def test_resolver_retries_artifact_api_visibility(self):
+        self._stub(
+            'if [[ "$1 $2" == "run list" ]]; then\n'
+            '  printf "91\\t%s\\tcompleted\\tsuccess\\n" "$CI_SHA"\n'
+            'elif [[ "$1" == "api" ]]; then\n'
+            '  calls=$(cat .api-calls 2>/dev/null || echo 0); calls=$((calls + 1)); echo "$calls" > .api-calls\n'
+            '  (( calls > 1 )) || exit 1\n'
+            '  printf "%s\\n" "$ARTIFACTS"\n'
+            "else exit 1; fi\n"
+        )
+        completed, output = self.run_artifact_resolver(
+            ARTIFACTS=self.artifact_inventory()
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("in_progress:none", completed.stdout)
-        self.assertEqual((self.root / ".calls").read_text(encoding="utf-8").strip(), "4")
+        self.assertEqual(output, "run-id=91\n")
+        self.assertEqual((self.root / ".api-calls").read_text().strip(), "2")
 
-    def test_gate_rejects_a_terminal_failure_immediately(self):
-        self._stub(
-            'if [[ " $* " == *" --workflow landing.yml "* ]]; then\n'
-            "  echo completed:failure\n"
-            "else\n  echo completed:success\nfi\n"
-        )
-        completed = self.run_gate()
+    def test_publication_slo_accepts_exactly_120_seconds(self):
+        completed = self.run_publication_slo(120)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("release published 120s after its commit landed", completed.stdout)
+
+    def test_publication_slo_rejects_121_seconds(self):
+        completed = self.run_publication_slo(121)
+
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("completed:failure", completed.stderr)
-
-    def test_gate_times_out_when_a_verdict_never_appears(self):
-        self._stub("echo missing\n")
-        completed = self.run_gate(CI_POLL_ATTEMPTS="2")
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("timed out", completed.stderr)
+        self.assertIn("release publication exceeded its 120s SLO", completed.stderr)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import unittest
 
 from _repo import REPOSITORY
 
-WORKFLOW = REPOSITORY / ".github" / "workflows" / "rust.yml"
+WORKFLOW = REPOSITORY / ".github" / "workflows" / "exact-sha-qualification.yml"
 
 
 def job_block(name):
@@ -71,7 +71,7 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertRegex(
             coverage,
             r"(?s)- name: Upload Rust coverage reports\s+"
-            r"if: always\(\)\s+"
+            r"if: \$\{\{ always\(\) && inputs\.upload-diagnostics \}\}\s+"
             r"uses: actions/upload-artifact@"
             r"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1\s+"
             r"with:\s+"
