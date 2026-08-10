@@ -134,7 +134,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>  Describe the update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package [--skip-build] [--no-archive] [--components=none|engine|all]\n                                      Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask update-manifest generate --version <X.Y.Z> --released-at <RFC3339> --components <dir> --out-dir <dir> --content-commit <sha> --content-sha256 <hex> --content-size <bytes>  Describe the update components for in-app updating.\n  cargo xtask chaos run|record|verify Potato-on-a-bad-link regression harness (report-only).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
@@ -1434,10 +1434,19 @@ fn load_recording(path: &Path) -> Result<Recording> {
 /// Command-line options for `cargo xtask package`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PackageOptions {
+    /// Whether packaging compiles the shipped binaries or consumes ones a
+    /// caller already built in the target directory.
+    runtime_input: RuntimeInput,
     /// Whether to compress the staged layout into a release archive.
     archive: bool,
     /// Which update components to emit alongside it.
     components: ComponentSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeInput {
+    Build,
+    Prebuilt,
 }
 
 /// Which per-component update archives a packaging run produces.
@@ -1469,11 +1478,13 @@ impl ComponentSelection {
 impl PackageOptions {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self> {
         let mut options = Self {
+            runtime_input: RuntimeInput::Build,
             archive: true,
             components: ComponentSelection::None,
         };
         for argument in arguments {
             match argument.as_str() {
+                "--skip-build" => options.runtime_input = RuntimeInput::Prebuilt,
                 // The Windows installer consumes the staged directory itself,
                 // so the archive step would only produce a file to discard.
                 "--no-archive" => options.archive = false,
@@ -1518,9 +1529,13 @@ fn package_output(target_triple: &str, archive: bool) -> PackageOutput {
 
 fn package(options: PackageOptions) -> Result<()> {
     let paths = WorkspacePaths::detect()?;
-    build_runtime_binaries(&paths)?;
-    audit_release_dependencies(&paths)?;
-    let package_dir = assemble_package_layout(&paths)?;
+    package_with_paths(&paths, options)
+}
+
+fn package_with_paths(paths: &WorkspacePaths, options: PackageOptions) -> Result<()> {
+    prepare_runtime_binaries(paths, options.runtime_input)?;
+    audit_release_dependencies(paths)?;
+    let package_dir = assemble_package_layout(paths)?;
     // Runs on the real tree, not a fixture: an entry that belongs to no update
     // component would ship in the installer but never reach a client updating
     // in place, and nothing else would notice.
@@ -1537,7 +1552,7 @@ fn package(options: PackageOptions) -> Result<()> {
             .into_iter()
             .filter(|component| component.id().is_platform_independent())
         {
-            let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
+            let emitted = emit_update_component(component, &package_dir, &components_dir, paths)?;
             tracing::info!(
                 path = %emitted.path.display(),
                 sha256 = %emitted.sha256,
@@ -1549,7 +1564,7 @@ fn package(options: PackageOptions) -> Result<()> {
     // The bundle is the macOS staged layout, so it is assembled even when no
     // disk image is requested.
     let staged = if paths.target_triple.contains("apple-darwin") {
-        assemble_macos_app_bundle(&paths, &package_dir)?
+        assemble_macos_app_bundle(paths, &package_dir)?
     } else {
         package_dir
     };
@@ -1561,7 +1576,7 @@ fn package(options: PackageOptions) -> Result<()> {
             components::BuiltComponent::Engine,
             &staged,
             &components_dir,
-            &paths,
+            paths,
         )?;
         tracing::info!(
             path = %emitted.path.display(),
@@ -1584,12 +1599,36 @@ fn package(options: PackageOptions) -> Result<()> {
             tracing::info!(path = %staged.display(), "staged Rust port without an archive");
         }
         PackageOutput::DiskImage => {
-            let image = create_dmg(&paths, &staged)?;
+            let image = create_dmg(paths, &staged)?;
             tracing::info!(path = %image.display(), "packaged Rust port");
         }
         PackageOutput::Archive => {
-            let archive = create_archive(&paths, &staged)?;
+            let archive = create_archive(paths, &staged)?;
             tracing::info!(path = %archive.display(), "packaged Rust port");
+        }
+    }
+    Ok(())
+}
+
+fn prepare_runtime_binaries(paths: &WorkspacePaths, input: RuntimeInput) -> Result<()> {
+    match input {
+        RuntimeInput::Build => build_runtime_binaries(paths),
+        RuntimeInput::Prebuilt if paths.target_triple == MACOS_UNIVERSAL_TRIPLE => {
+            fuse_universal_macos_binaries(paths)
+        }
+        RuntimeInput::Prebuilt => verify_prebuilt_runtime_binaries(paths),
+    }
+}
+
+fn verify_prebuilt_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
+    for binary in RUNTIME_BINARIES {
+        let executable = executable_name(binary.executable, &paths.target_triple);
+        let path = paths.release_dir.join(&executable);
+        if !path.is_file() {
+            bail!(
+                "expected prebuilt {executable} binary at {}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -1654,6 +1693,10 @@ fn build_universal_macos_binaries(paths: &WorkspacePaths) -> Result<()> {
     for arch in MACOS_UNIVERSAL_ARCHES {
         cargo_build_runtime(paths, Some(arch))?;
     }
+    fuse_universal_macos_binaries(paths)
+}
+
+fn fuse_universal_macos_binaries(paths: &WorkspacePaths) -> Result<()> {
     fs::create_dir_all(&paths.release_dir)
         .with_context(|| format!("failed to create {}", paths.release_dir.display()))?;
     for binary in RUNTIME_BINARIES {
@@ -2843,6 +2886,7 @@ mod tests {
         assert_eq!(
             PackageOptions::parse(Vec::new().into_iter()).expect("no arguments parses"),
             PackageOptions {
+                runtime_input: RuntimeInput::Build,
                 archive: true,
                 components: ComponentSelection::None
             }
@@ -2857,10 +2901,98 @@ mod tests {
             PackageOptions::parse(["--no-archive".to_string()].into_iter())
                 .expect("--no-archive parses"),
             PackageOptions {
+                runtime_input: RuntimeInput::Build,
                 archive: false,
                 components: ComponentSelection::None
             }
         );
+    }
+
+    #[test]
+    fn package_options_can_reuse_prebuilt_runtime_binaries() {
+        assert_eq!(
+            PackageOptions::parse(["--skip-build".to_string()].into_iter())
+                .expect("--skip-build parses")
+                .runtime_input,
+            RuntimeInput::Prebuilt
+        );
+    }
+
+    #[test]
+    fn prebuilt_runtime_input_skips_cargo_for_a_complete_native_build() {
+        // This fixture is not a Cargo workspace. Reaching for `cargo build`
+        // would therefore fail instead of accepting the binaries already in
+        // its release directory.
+        let (_temp, paths) = package_fixture();
+
+        prepare_runtime_binaries(&paths, RuntimeInput::Prebuilt)
+            .expect("complete prebuilt runtime is ready for packaging");
+    }
+
+    #[test]
+    fn prebuilt_runtime_input_rejects_each_missing_native_binary() {
+        for missing in RUNTIME_BINARIES {
+            let (_temp, paths) = package_fixture();
+            let executable = executable_name(missing.executable, &paths.target_triple);
+            fs::remove_file(paths.release_dir.join(&executable)).expect("remove fixture binary");
+
+            let error = prepare_runtime_binaries(&paths, RuntimeInput::Prebuilt)
+                .expect_err("an incomplete prebuilt runtime must be rejected");
+            assert!(
+                error.to_string().contains(&executable),
+                "error names missing {executable}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn prebuilt_universal_runtime_requires_architecture_slices_before_fusing() {
+        let (_temp, mut paths) = package_fixture();
+        paths.target_triple = MACOS_UNIVERSAL_TRIPLE.to_string();
+        paths.release_dir = paths
+            .target_dir
+            .join(MACOS_UNIVERSAL_TRIPLE)
+            .join("release");
+        let missing_slice = paths
+            .target_dir
+            .join(MACOS_UNIVERSAL_ARCHES[0])
+            .join("release")
+            .join(RUNTIME_BINARIES[0].executable);
+
+        let error = prepare_runtime_binaries(&paths, RuntimeInput::Prebuilt)
+            .expect_err("universal packaging needs both prebuilt architectures");
+        assert!(
+            error
+                .to_string()
+                .contains(&missing_slice.display().to_string()),
+            "error names the missing architecture slice: {error}"
+        );
+    }
+
+    #[test]
+    fn prebuilt_runtime_input_still_stages_the_complete_package() {
+        let (_temp, paths) = package_fixture();
+        let options = PackageOptions {
+            runtime_input: RuntimeInput::Prebuilt,
+            archive: false,
+            components: ComponentSelection::None,
+        };
+
+        package_with_paths(&paths, options).expect("stage the prebuilt package");
+
+        let staged = paths.target_dir.join("dist/clonk-rust");
+        for binary in RUNTIME_BINARIES {
+            assert!(
+                staged
+                    .join("bin")
+                    .join(executable_name(binary.executable, &paths.target_triple))
+                    .is_file(),
+                "{} reached the staged package",
+                binary.executable
+            );
+        }
+        assert!(staged.join("planet/System.c4g/C4.c").is_file());
+        assert!(staged.join("content/Objects.c4d/DefCore.txt").is_file());
     }
 
     #[test]

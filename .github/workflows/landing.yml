@@ -364,6 +364,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read
     needs:
       - pull-request-title
       - release-context
@@ -430,3 +432,61 @@ jobs:
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
           fi
           exit "$failed"
+
+      # The v0.9.4 release candidate took 1,797 seconds on its critical Windows
+      # lane (Landing run 31343777447). This outer job measures the complete
+      # reusable build action without adding its own runtime to that span.
+      - name: Enforce release build latency
+        if: github.event_name == 'merge_group' && needs.release-context.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_RELEASE_BUILD_SECONDS: '898'
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          response=$(gh api \
+            "repos/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100")
+          elapsed=$(jq -er '
+            def expected: [
+              "Build release candidate / Build packaging tool / linux",
+              "Build release candidate / Build packaging tool / macos",
+              "Build release candidate / Build packaging tool / windows",
+              "Build release candidate / Build runtime / linux",
+              "Build release candidate / Build runtime / macos-arm64",
+              "Build release candidate / Build runtime / macos-x86_64",
+              "Build release candidate / Build runtime / windows",
+              "Build release candidate / Package linux",
+              "Build release candidate / Package macos",
+              "Build release candidate / Package windows"
+            ] | sort;
+            if (.jobs | type) != "array"
+              or (.total_count | type) != "number"
+              or .total_count != (.jobs | length)
+            then error("incomplete workflow job inventory")
+            else .jobs end
+            | map(select(.name | startswith("Build release candidate / "))) as $jobs
+            | ($jobs | map(.name) | sort) as $names
+            | if $names != expected
+              then error("unexpected release-build job inventory: \($names | join(", "))")
+              else $jobs end
+            | if all(.[];
+                .status == "completed"
+                and .conclusion == "success"
+                and (.started_at | type) == "string"
+                and (.completed_at | type) == "string")
+              then .
+              else error("release-build job is incomplete or unsuccessful") end
+            | ((map(.completed_at | fromdateiso8601) | max)
+              - (map(.started_at | fromdateiso8601) | min))
+            | if . < 0 or . != floor
+              then error("invalid release-build elapsed time")
+              else . end
+          ' <<< "$response")
+          if [[ ! "$elapsed" =~ ^[0-9]+$ ]]; then
+            echo "invalid release build elapsed time: $elapsed" >&2
+            exit 1
+          fi
+          if [[ "$elapsed" -gt "$MAX_RELEASE_BUILD_SECONDS" ]]; then
+            echo "release build took ${elapsed}s, exceeding ${MAX_RELEASE_BUILD_SECONDS}s" >&2
+            exit 1
+          fi
+          echo "release build completed in ${elapsed}s (limit ${MAX_RELEASE_BUILD_SECONDS}s)"

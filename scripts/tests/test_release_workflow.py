@@ -7,11 +7,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from test_release_content_handoff import WORKFLOW, step_script
 
 BUILD_WORKFLOW = WORKFLOW.with_name("release-build.yml")
+LANDING_WORKFLOW = WORKFLOW.with_name("landing.yml")
 
 
 def job_block(name):
@@ -21,6 +23,38 @@ def job_block(name):
     following = re.compile(r"^  [A-Za-z0-9_-]+:$", re.MULTILINE)
     match = following.search(source, start + 1)
     return source[start : match.start()] if match else source[start:]
+
+
+def build_job_block(name, workflow=BUILD_WORKFLOW):
+    source = workflow.read_text(encoding="utf-8")
+    marker = f"\n  {name}:\n"
+    start = source.index(marker) + 1
+    following = re.compile(r"^  [A-Za-z0-9_-]+:$", re.MULTILINE)
+    match = following.search(source, start + 1)
+    return source[start : match.start()] if match else source[start:]
+
+
+def build_step_script(name, workflow=BUILD_WORKFLOW):
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index(f"      - name: {name}")
+    except ValueError:
+        raise AssertionError(
+            f"{workflow.name} has no step named {name!r}"
+        ) from None
+
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("      - "):
+            break
+        if line == "        run: |":
+            body = []
+            for candidate in lines[index + 1 :]:
+                if candidate.strip() and not candidate.startswith(" " * 10):
+                    break
+                body.append(candidate[10:])
+            return "\n".join(body)
+    raise AssertionError(f"step {name!r} has no `run: |` block")
 
 
 class ReleaseWorkflowTopologyTests(unittest.TestCase):
@@ -75,6 +109,72 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
                 self.assertIn(f"shared-key: {trusted_cache}", reusable)
         self.assertEqual(reusable.count("compression-level: 0"), 3)
         self.assertEqual(reusable.count("overwrite: true"), 3)
+
+    def test_release_build_parallelizes_tools_runtimes_and_macos_architectures(self):
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("\n  tool:\n", reusable)
+        self.assertIn("\n  runtime:\n", reusable)
+        self.assertIn("\n  package:\n", reusable)
+        package = build_job_block("package")
+        self.assertIn("needs: [tool, runtime]", package)
+        self.assertIn("name: macos-arm64", reusable)
+        self.assertIn("name: macos-x86_64", reusable)
+        self.assertIn("--target aarch64-apple-darwin", reusable)
+        self.assertIn("--target x86_64-apple-darwin", reusable)
+        self.assertIn("--skip-build", package)
+
+    def test_release_build_handoffs_are_exact_run_scoped_caches(self):
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("\n  package:\n", reusable)
+        package = build_job_block("package")
+
+        self.assertIn(
+            "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            reusable,
+        )
+        self.assertIn(
+            "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            package,
+        )
+        for fragment in (
+            "${{ inputs.source-sha }}",
+            "${{ github.run_id }}",
+            "fail-on-cache-miss: true",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, reusable)
+        self.assertNotIn("restore-keys:", reusable)
+        self.assertNotIn("github.run_attempt", reusable)
+
+        # Only final distributables are Actions artifacts. Compile handoffs use
+        # run-scoped caches so release.yml still verifies exactly seven names.
+        self.assertEqual(reusable.count("actions/upload-artifact@"), 3)
+
+    def test_release_packaging_tool_uses_the_non_lto_test_profile(self):
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("\n  tool:\n", reusable)
+        tool = build_job_block("tool")
+
+        self.assertIn(
+            "cargo build --profile test --locked -p xtask --features engine-tools ",
+            tool,
+        )
+        self.assertIn("--bin xtask-engine-tools", tool)
+        self.assertNotIn("cargo build --release", tool)
+        self.assertIn("target/debug/xtask-engine-tools", tool)
+        self.assertNotIn("target/test/xtask-engine-tools", reusable)
+
+    def test_release_build_enforces_half_of_the_measured_baseline(self):
+        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertNotIn("\n  latency:\n", reusable)
+        gate = build_job_block("landing-gate", LANDING_WORKFLOW)
+        self.assertIn("actions: read", gate)
+        self.assertIn("MAX_RELEASE_BUILD_SECONDS: '898'", gate)
+        self.assertIn("actions/runs/${GITHUB_RUN_ID}/jobs", gate)
+        self.assertIn('if [[ "$elapsed" -gt "$MAX_RELEASE_BUILD_SECONDS" ]]', gate)
 
     def test_release_commits_have_a_sha_specific_concurrency_lane(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -224,6 +324,79 @@ class ReleaseWorkflowTests(unittest.TestCase):
             text=True,
         )
 
+    def run_release_build_latency(self, elapsed_seconds, *, omit=None):
+        started = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        completed = started + timedelta(seconds=elapsed_seconds)
+        jobs = []
+        matrix = {
+            "Build packaging tool": ("linux", "windows", "macos"),
+            "Build runtime": ("linux", "windows", "macos-arm64", "macos-x86_64"),
+            "Package": ("linux", "windows", "macos"),
+        }
+        for phase, names in matrix.items():
+            for name in names:
+                separator = " " if phase == "Package" else " / "
+                full_name = f"Build release candidate / {phase}{separator}{name}"
+                if full_name == omit:
+                    continue
+                jobs.append(
+                    {
+                        "name": full_name,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "started_at": started.isoformat().replace("+00:00", "Z"),
+                        "completed_at": completed.isoformat().replace("+00:00", "Z"),
+                    }
+                )
+        jobs.extend(
+            [
+                {
+                    "name": "Landing gate",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "started_at": completed.isoformat().replace("+00:00", "Z"),
+                    "completed_at": None,
+                },
+                {
+                    "name": "Qualify release candidate / Rust code coverage",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-08-09T00:00:00Z",
+                    "completed_at": "2026-08-11T00:00:00Z",
+                },
+            ]
+        )
+        inventory = self.root / "jobs.json"
+        inventory.write_text(
+            json.dumps({"total_count": len(jobs), "jobs": jobs}),
+            encoding="utf-8",
+        )
+        self._stub('cat "$JOBS"\n')
+        environment = {
+            **os.environ,
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "GH_TOKEN": "stub",
+            "GITHUB_RUN_ID": "31343777447",
+            "JOBS": str(inventory),
+            "MAX_RELEASE_BUILD_SECONDS": "898",
+            "REPOSITORY": "clonk-org/clonk-rs",
+        }
+        return subprocess.run(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-eo",
+                "pipefail",
+                "-c",
+                build_step_script("Enforce release build latency", LANDING_WORKFLOW),
+            ],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
     @staticmethod
     def artifact_inventory(*, omit=None, extra=None, expired=None):
         names = [
@@ -316,6 +489,27 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("release publication exceeded its 120s SLO", completed.stderr)
+
+    def test_release_build_latency_accepts_exactly_half_the_baseline(self):
+        completed = self.run_release_build_latency(898)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("release build completed in 898s", completed.stdout)
+
+    def test_release_build_latency_rejects_one_second_over_target(self):
+        completed = self.run_release_build_latency(899)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("release build took 899s", completed.stderr)
+
+    def test_release_build_latency_rejects_a_partial_matrix(self):
+        completed = self.run_release_build_latency(
+            500,
+            omit="Build release candidate / Build runtime / macos-x86_64",
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unexpected release-build job inventory", completed.stderr)
 
 
 if __name__ == "__main__":

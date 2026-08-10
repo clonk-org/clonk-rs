@@ -13,6 +13,7 @@ RELEASE_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 RELEASE_BUILD_WORKFLOW = REPOSITORY / ".github" / "workflows" / "release-build.yml"
 MSVC_RUNTIME_CONFIG = REPOSITORY / "scripts" / "configure-msvc-runtime.sh"
 MSVC_RUNTIME_VALIDATION = REPOSITORY / "scripts" / "validate-msvc-runtime.sh"
+WINDOWS_INSTALLER = REPOSITORY / "scripts" / "windows-installer.nsi"
 
 
 def step_script(workflow, name):
@@ -40,6 +41,12 @@ def step_script(workflow, name):
 
 
 class WorkflowRuntimeInventoryTests(unittest.TestCase):
+    def test_windows_installer_uses_fast_solid_compression(self):
+        installer = WINDOWS_INSTALLER.read_text(encoding="utf-8")
+
+        self.assertIn("SetCompressor /SOLID zlib", installer)
+        self.assertNotIn("SetCompressor /SOLID lzma", installer)
+
     def test_checkouts_do_not_persist_credentials(self):
         marker = "uses: actions/checkout@"
 
@@ -179,8 +186,15 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn(save, landing)
         self.assertEqual(main.count(restore), 1)
         self.assertEqual(main.count(save), 1)
-        self.assertEqual(release_build.count(restore), 1)
-        self.assertNotIn(save, release_build)
+        thinlto_start = release_build.index("Restore trusted-main ThinLTO cache")
+        thinlto_end = release_build.index("\n      - name:", thinlto_start)
+        thinlto_step = release_build[thinlto_start:thinlto_end]
+        self.assertEqual(thinlto_step.count(restore), 1)
+        self.assertNotIn("Publish trusted ThinLTO cache", release_build)
+        self.assertNotIn(
+            "key: ${{ steps.thinlto-cache.outputs.cache-primary-key }}",
+            release_build,
+        )
 
         trusted_save = main[main.index("Publish trusted ThinLTO cache") :]
         for guard in (
@@ -192,16 +206,23 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             self.assertIn(guard, trusted_save)
 
         production_key = (
-            "clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ "
-            "hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', "
-            "'Cargo.lock', 'crates/**/Cargo.toml', "
-            "'scripts/configure-msvc-runtime.sh') }}"
+            "clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ "
+            "hashFiles('rust-toolchain.toml', '.cargo/config.toml', "
+            "'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', "
+            "'third_party/**/*.rs') }}"
         )
         self.assertNotIn("clonk-msvc-thinlto", landing)
         for workflow in (main, release_build):
             with self.subTest(workflow=workflow):
                 self.assertIn(production_key, workflow)
                 self.assertNotIn("restore-keys:", workflow)
+
+        # A release commit changes the workspace package version in both files.
+        # LLVM's cache validates its own bitcode keys, while including either
+        # metadata file here would force every release to start empty.
+        for metadata in ("Cargo.toml", "Cargo.lock", "crates/**/Cargo.toml"):
+            with self.subTest(metadata=metadata):
+                self.assertNotIn(metadata, production_key)
 
     def test_exact_msvc_runtime_build_is_post_merge_and_release_gated(self):
         landing = LANDING_WORKFLOW.read_text(encoding="utf-8")

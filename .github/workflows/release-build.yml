@@ -20,13 +20,234 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
+  # The host packaging tools do not contain shipped code. Build them with the
+  # non-LTO test profile, in parallel with the release runtimes they package.
+  tool:
+    name: Build packaging tool / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    # The Windows pass is the long pole: a native release build, a 299 MB
-    # submodule checkout and solid-LZMA compression of the whole payload, all
-    # on the slowest runner class.
-    timeout-minutes: 120
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            tool_path: target/debug/xtask-engine-tools
+          - name: windows
+            runner: windows-latest
+            tool_path: target/debug/xtask-engine-tools.exe
+          - name: macos
+            runner: macos-latest
+            tool_path: target/debug/xtask-engine-tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      # A merge-group ref cannot publish a reusable build cache. Restore only
+      # from the trusted-main producers that own each platform's build graph.
+      - name: Restore trusted-main Linux build cache
+        if: matrix.name == 'linux'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: full-parity
+          save-if: false
+
+      - name: Restore trusted-main Windows build cache
+        if: matrix.name == 'windows'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          save-if: false
+
+      - name: Restore trusted-main macOS build cache
+        if: matrix.name == 'macos'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: recording-host-oracles
+          save-if: false
+
+      - name: Install Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      # Running `cargo run` with CARGO_BUILD_TARGET set would build the tool
+      # for a shipped target and then try to execute it on the host.
+      - name: Build the packaging tool
+        run: cargo build --profile test --locked -p xtask --features engine-tools --bin xtask-engine-tools
+
+      # These caches are immutable, exact inputs to this workflow run. Omitting
+      # the attempt lets "re-run failed jobs" reuse successful producer jobs;
+      # the run ID still prevents any other candidate from restoring them.
+      - name: Hand off the packaging tool
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.tool_path }}
+          key: release-tool-${{ inputs.source-sha }}-${{ github.run_id }}-${{ matrix.name }}
+
+  # Four independent compile lanes keep each shipped target byte-for-byte
+  # native while removing tool builds and the other macOS architecture from
+  # its critical path.
+  runtime:
+    name: Build runtime / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            runtime_path: |
+              target/release/clonk-app
+              target/release/clonk-game
+              target/release/c4group
+          - name: windows
+            runner: windows-latest
+            runtime_path: |
+              target/x86_64-pc-windows-msvc/release/clonk-app.exe
+              target/x86_64-pc-windows-msvc/release/clonk-game.exe
+              target/x86_64-pc-windows-msvc/release/c4group.exe
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            runtime_path: |
+              target/aarch64-apple-darwin/release/clonk-app
+              target/aarch64-apple-darwin/release/clonk-game
+              target/aarch64-apple-darwin/release/c4group
+          - name: macos-x86_64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            runtime_path: |
+              target/x86_64-apple-darwin/release/clonk-app
+              target/x86_64-apple-darwin/release/clonk-game
+              target/x86_64-apple-darwin/release/c4group
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+
+      - name: Restore trusted-main Linux runtime cache
+        if: matrix.name == 'linux'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: full-parity
+          save-if: false
+
+      - name: Restore trusted-main Windows runtime cache
+        if: matrix.name == 'windows'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-runtime-msvc
+          save-if: false
+
+      - name: Restore trusted-main macOS runtime cache
+        if: startsWith(matrix.name, 'macos-')
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: recording-host-oracles
+          save-if: false
+
+      - name: Install Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install the macOS runtime target
+        if: startsWith(matrix.name, 'macos-')
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Configure the shipped MSVC runtime
+        if: matrix.name == 'windows'
+        run: scripts/configure-msvc-runtime.sh
+
+      - name: Restore trusted-main ThinLTO cache
+        if: matrix.name == 'windows'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clonk-msvc-thinlto
+          # Release preparation changes Cargo package versions without changing
+          # bitcode. LLD independently hashes every input before reusing it.
+          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', 'third_party/**/*.rs') }}
+
+      - name: Restore shipped MSVC dependency cache
+        if: matrix.name == 'windows'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: shipped-msvc-runtime-v1
+          save-if: false
+
+      - name: Build the Linux runtime
+        if: matrix.name == 'linux'
+        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
+
+      - name: Build the Windows runtime
+        if: matrix.name == 'windows'
+        run: |
+          # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
+          # is absent from its published crate. Point it at the vendored copy.
+          cargo fetch --locked
+          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
+          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
+            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
+            exit 1
+          fi
+          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
+
+      - name: Build the macOS arm64 runtime
+        if: matrix.name == 'macos-arm64'
+        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group --target aarch64-apple-darwin
+
+      - name: Build the macOS x86_64 runtime
+        if: matrix.name == 'macos-x86_64'
+        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group --target x86_64-apple-darwin
+
+      # The audit runs on the runner that produced the binaries, while its LLD
+      # cache and Visual Studio inspection tools are still present.
+      - name: Validate the shipped MSVC runtime
+        if: matrix.name == 'windows'
+        run: scripts/validate-msvc-runtime.sh
+
+      - name: Hand off the validated runtime
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.runtime_path }}
+          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-${{ matrix.name }}
+
+  # Packaging waits for every compile lane so no partial platform set can be
+  # published. The only cross-job inputs are immutable caches named for this
+  # exact workflow run; a miss fails closed.
+  package:
+    name: Package ${{ matrix.name }}
+    needs: [tool, runtime]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     permissions:
       contents: read
     defaults:
@@ -39,25 +260,23 @@ jobs:
           - name: linux
             runner: ubuntu-latest
             artifact: desktop-linux
-          # Windows used to be cross-compiled from the ubuntu pass with mingw,
-          # because this repository was private and Windows runners billed at
-          # 2x. It is public now, so they are free — and building natively
-          # means the toolchain that the landing gate tests is finally the
-          # toolchain that ships.
+            tool_path: target/debug/xtask-engine-tools
           - name: windows
             runner: windows-latest
             artifact: desktop-windows
+            tool_path: target/debug/xtask-engine-tools.exe
           - name: macos
             runner: macos-latest
             artifact: desktop-macos
+            tool_path: target/debug/xtask-engine-tools
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The resolved commit, not a tag: no tag exists yet. Nothing is
-          # tagged until these builds have produced real artifacts.
+          # The resolved commit, not a tag: no tag exists until these exact
+          # builds have produced and qualified real artifacts.
           ref: ${{ inputs.source-sha }}
-          # Packaging copies the tracked game data, so the submodule is required.
-          # This works only while clonk-rs-content is public.
+          # Packaging copies the tracked game data. This works only while the
+          # clonk-rs-content submodule remains public.
           submodules: recursive
           persist-credentials: false
 
@@ -85,32 +304,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
-      # A merge-group ref cannot publish a reusable cache. Restore only from
-      # the trusted-main producers that already own each platform's build
-      # graph, so moving the release build before merge does not make it cold.
-      - name: Restore trusted-main Linux build cache
-        if: matrix.runner == 'ubuntu-latest'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: full-parity
-          save-if: false
-
-      - name: Restore trusted-main Windows build cache
-        if: matrix.runner == 'windows-latest'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: windows-runtime-msvc
-          save-if: false
-
-      - name: Restore trusted-main macOS build cache
-        if: matrix.runner == 'macos-latest'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: recording-host-oracles
-          save-if: false
-
-      - name: Install Linux build dependencies
-        if: matrix.runner == 'ubuntu-latest'
+      - name: Install Linux packaging dependencies
+        if: matrix.name == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -118,12 +313,10 @@ jobs:
             libudev-dev \
             pkg-config
 
-      # `makensis` is not on the Windows image. Chocolatey's `nsis` package
-      # runs the upstream installer rather than shimming a binary, so its
-      # directory goes on PATH by hand — which only affects *later* steps,
-      # hence the existence check here rather than a version probe.
+      # `makensis` is not on the Windows image. Chocolatey's package runs the
+      # upstream installer rather than shimming a binary, so add it to PATH.
       - name: Install the Windows installer toolchain
-        if: matrix.runner == 'windows-latest'
+        if: matrix.name == 'windows'
         run: |
           for attempt in 1 2 3; do
             if choco install nsis --version 3.12.0 --yes --no-progress; then
@@ -148,73 +341,77 @@ jobs:
           fi
           echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
 
-      # The macOS pass ships one universal `.app`, so it builds both
-      # architectures and `lipo`s them together. The runner is arm64, so only
-      # the Intel half needs installing.
-      - name: Install macOS cross target
-        if: matrix.runner == 'macos-latest'
-        run: rustup target add x86_64-apple-darwin
-
-      # Built natively first and then invoked directly. Running
-      # `cargo run -p xtask` with CARGO_BUILD_TARGET set would build the tool
-      # *for the target* and fail to execute it.
-      - name: Build the packaging tool
-        run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
-
-      - name: Configure the shipped MSVC runtime
-        if: matrix.runner == 'windows-latest'
-        run: scripts/configure-msvc-runtime.sh
-
-      - name: Restore trusted-main ThinLTO cache
-        if: matrix.runner == 'windows-latest'
+      - name: Restore the packaging tool
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
+          path: ${{ matrix.tool_path }}
+          key: release-tool-${{ inputs.source-sha }}-${{ github.run_id }}-${{ matrix.name }}
+          fail-on-cache-miss: true
 
-      - name: Restore shipped MSVC dependency cache
-        if: matrix.runner == 'windows-latest'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Restore the Linux runtime
+        if: matrix.name == 'linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          shared-key: shipped-msvc-runtime-v1
-          save-if: false
+          path: |
+            target/release/clonk-app
+            target/release/clonk-game
+            target/release/c4group
+          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-linux
+          fail-on-cache-miss: true
+
+      - name: Restore the Windows runtime
+        if: matrix.name == 'windows'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/x86_64-pc-windows-msvc/release/clonk-app.exe
+            target/x86_64-pc-windows-msvc/release/clonk-game.exe
+            target/x86_64-pc-windows-msvc/release/c4group.exe
+          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-windows
+          fail-on-cache-miss: true
+
+      - name: Restore the macOS arm64 runtime
+        if: matrix.name == 'macos'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/aarch64-apple-darwin/release/clonk-app
+            target/aarch64-apple-darwin/release/clonk-game
+            target/aarch64-apple-darwin/release/c4group
+          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-macos-arm64
+          fail-on-cache-miss: true
+
+      - name: Restore the macOS x86_64 runtime
+        if: matrix.name == 'macos'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/x86_64-apple-darwin/release/clonk-app
+            target/x86_64-apple-darwin/release/clonk-game
+            target/x86_64-apple-darwin/release/c4group
+          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-macos-x86_64
+          fail-on-cache-miss: true
 
       # The only pass that emits `planet`. Its archive is prefix-free and
-      # therefore byte-identical on every triple, so emitting it from every pass
-      # would spend the time to produce exact duplicates. `content` is not
-      # emitted by any pass — clonk-org/clonk-rs-content publishes it.
+      # therefore byte-identical on every triple. `content` is published by
+      # clonk-org/clonk-rs-content and is deliberately not duplicated here.
       - name: Package Linux
-        if: matrix.runner == 'ubuntu-latest'
-        run: ./target/release/xtask-engine-tools package --components=all
+        if: matrix.name == 'linux'
+        run: ./target/debug/xtask-engine-tools package --skip-build --components=all
 
       - name: Package Windows installer
-        if: matrix.runner == 'windows-latest'
+        if: matrix.name == 'windows'
         env:
+          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
           VERSION: ${{ inputs.version }}
         run: |
-          # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
-          # does not exist in its published crate, so its bundled libpng only
-          # finds zlib.h where the host happens to ship one. No Windows
-          # toolchain does. Resolved dynamically rather than pinned to a
-          # libz-sys version.
-          cargo fetch --locked
-          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
-          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
-            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
-            exit 1
-          fi
-          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
-          ./target/release/xtask-engine-tools.exe package --no-archive --components=engine
+          ./target/debug/xtask-engine-tools.exe package --skip-build --no-archive --components=engine
 
           # Native paths for a native tool: under Git Bash `$PWD` is a POSIX
-          # path makensis cannot resolve, and leaving it to MSYS's implicit
-          # argument rewriting would make the build depend on its heuristics.
-          # The switches keep their `-` prefix for the same reason — `/NOCD`
-          # would be rewritten as a path.
+          # path makensis cannot resolve, and implicit MSYS rewriting would
+          # make the build depend on heuristics.
           payload=$(cygpath -w "$PWD/target/dist/clonk-rust")
           outfile=$(cygpath -w "$PWD/target/dist/clonk-rust-$VERSION-x86_64-windows-setup.exe")
-          # `package` writes this beside the payload; the installer and
-          # uninstaller are separate executables and need their own copy.
           icon=$(cygpath -w "$PWD/target/dist/clonk-rust-installer.ico")
           makensis -NOCD \
             -DVERSION="$VERSION" \
@@ -223,35 +420,18 @@ jobs:
             -DICON="$icon" \
             scripts/windows-installer.nsi
 
-      - name: Validate the shipped MSVC runtime
-        if: matrix.runner == 'windows-latest'
-        run: scripts/validate-msvc-runtime.sh
-
-      # One pass, not one per architecture: the two builds differ only in ~20 MB
-      # of executables, so a second disk image was ~340 MB of identical game
-      # data. `package` builds both arches and fuses them itself, so this emits
-      # one `.dmg` and one `engine` component for both macOS triples.
+      # The prebuilt architecture slices are fused once, then the universal
+      # bundle is signed and used for both the component and disk image.
       - name: Package macOS
-        if: matrix.runner == 'macos-latest'
+        if: matrix.name == 'macos'
         env:
-          # Named rather than inferred. On a toolchain missing an architecture
-          # `package` falls back to a single-architecture build — right for a
-          # contributor running the README's command, wrong for a release — and
-          # an explicitly named target is never downgraded. So a runner whose
-          # `rustup target add` silently failed stops here, instead of
-          # publishing a thin `.app` under a name promising both. Every cargo
-          # invocation this triggers passes `--target` itself, which overrides
-          # this variable; nothing builds *for* the pseudo-triple.
           CARGO_BUILD_TARGET: universal-apple-darwin
-        run: ./target/release/xtask-engine-tools package --components=engine
+        run: ./target/debug/xtask-engine-tools package --skip-build --components=engine
 
-      # `lipo` invalidates the signature of the slices it fuses, so the bundle
-      # is signed afterwards, on the universal binaries. `package` already fails
-      # if `codesign --verify --deep --strict` does; this is the other half —
-      # that the thing it signed is actually fat. A single-arch regression is
-      # invisible on an arm64 runner, and would ship a build no Intel Mac runs.
+      # `lipo` invalidates each slice's linker signature, so package signs the
+      # fused binaries. This separately proves every shipped binary is fat.
       - name: Check the macOS build is universal
-        if: matrix.runner == 'macos-latest'
+        if: matrix.name == 'macos'
         run: |
           shopt -s nullglob
           engines=(target/dist/components/update-engine-*-universal-apple-darwin.zip)
@@ -293,10 +473,8 @@ jobs:
             echo "ok $(basename "$asset") $size bytes"
           done
 
-      # A gate of its own, because the 100 MB floor above is a statement about
-      # whole-payload archives and would reject every update component.
-      # These floors are per kind and deliberately far below the real sizes:
-      # they catch an empty container, not a few megabytes of drift.
+      # Update archives are smaller, so each kind has its own deliberately low
+      # empty-container floor. Unknown kinds fail closed.
       - name: Check the update components look real
         run: |
           shopt -s nullglob
@@ -309,16 +487,8 @@ jobs:
             name=$(basename "$component")
             case "$name" in
               update-planet-*) floor=10000000 ;;
-              # The macOS engine carries two architectures, so its floor is
-              # twice the others'. Still only an empty-container check — that
-              # both slices are really present is what `lipo -info` proves, in
-              # the step above.
               update-engine-*-universal-*) floor=10000000 ;;
               update-engine-*) floor=5000000 ;;
-              # `content-*` is deliberately not here: that archive is built and
-              # published by clonk-org/clonk-rs-content, and a second builder of
-              # content-addressed bytes is exactly what must not exist. The
-              # manifest generator refuses one too.
               *) echo "$name matches no known update component" >&2; exit 1 ;;
             esac
             size=$(wc -c < "$component")
@@ -341,11 +511,8 @@ jobs:
           compression-level: 0
           overwrite: true
 
-      # Its own artifact rather than another line in the glob above:
-      # upload-artifact roots the archive at the least common ancestor of the
-      # files it matched, so adding `target/dist/components/*.zip` there would
-      # move every existing asset into a subdirectory and silently change what
-      # `merge-multiple` produces in `publish`.
+      # Keep update components separate so upload-artifact's least-common-
+      # ancestor rule cannot silently add a directory to the desktop assets.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: components-${{ matrix.artifact }}
@@ -355,13 +522,13 @@ jobs:
           compression-level: 0
           overwrite: true
 
-      # `publish` generates the manifest with this binary instead of compiling
-      # xtask a third time. It runs on ubuntu, which is where this was built.
+      # publish generates the manifest with this exact Linux host tool instead
+      # of compiling xtask again. The other two matrix legs skip this step.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.runner == 'ubuntu-latest'
+        if: matrix.name == 'linux'
         with:
           name: release-tool
-          path: target/release/xtask-engine-tools
+          path: target/debug/xtask-engine-tools
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
