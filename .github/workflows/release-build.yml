@@ -4,7 +4,11 @@ on:
   workflow_call:
     inputs:
       source-sha:
-        description: The exact commit to package
+        description: The exact merge-group commit to package
+        required: true
+        type: string
+      tree-sha:
+        description: The exact merge-group tree compiled by the sibling prebuild
         required: true
         type: string
       version:
@@ -20,232 +24,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The host packaging tools do not contain shipped code. Build them with the
-  # non-LTO test profile, in parallel with the release runtimes they package.
-  tool:
-    name: Build packaging tool / ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            tool_path: target/debug/xtask-engine-tools
-          - name: windows
-            runner: windows-latest
-            tool_path: target/debug/xtask-engine-tools.exe
-          - name: macos
-            runner: macos-latest
-            tool_path: target/debug/xtask-engine-tools
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.source-sha }}
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-
-      # A merge-group ref cannot publish a reusable build cache. Restore only
-      # from the trusted-main producers that own each platform's build graph.
-      - name: Restore trusted-main Linux build cache
-        if: matrix.name == 'linux'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: full-parity
-          save-if: false
-
-      - name: Restore trusted-main Windows build cache
-        if: matrix.name == 'windows'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: windows-runtime-msvc
-          save-if: false
-
-      - name: Restore trusted-main macOS build cache
-        if: matrix.name == 'macos'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: recording-host-oracles
-          save-if: false
-
-      - name: Install Linux build dependencies
-        if: matrix.name == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libudev-dev \
-            pkg-config
-
-      # Running `cargo run` with CARGO_BUILD_TARGET set would build the tool
-      # for a shipped target and then try to execute it on the host.
-      - name: Build the packaging tool
-        run: cargo build --profile test --locked -p xtask --features engine-tools --bin xtask-engine-tools
-
-      # These caches are immutable, exact inputs to this workflow run. Omitting
-      # the attempt lets "re-run failed jobs" reuse successful producer jobs;
-      # the run ID still prevents any other candidate from restoring them.
-      - name: Hand off the packaging tool
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ matrix.tool_path }}
-          key: release-tool-${{ inputs.source-sha }}-${{ github.run_id }}-${{ matrix.name }}
-
-  # Four independent compile lanes keep each shipped target byte-for-byte
-  # native while removing tool builds and the other macOS architecture from
-  # its critical path.
-  runtime:
-    name: Build runtime / ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            runner: ubuntu-latest
-            runtime_path: |
-              target/release/clonk-app
-              target/release/clonk-game
-              target/release/c4group
-          - name: windows
-            runner: windows-latest
-            runtime_path: |
-              target/x86_64-pc-windows-msvc/release/clonk-app.exe
-              target/x86_64-pc-windows-msvc/release/clonk-game.exe
-              target/x86_64-pc-windows-msvc/release/c4group.exe
-          - name: macos-arm64
-            runner: macos-latest
-            target: aarch64-apple-darwin
-            runtime_path: |
-              target/aarch64-apple-darwin/release/clonk-app
-              target/aarch64-apple-darwin/release/clonk-game
-              target/aarch64-apple-darwin/release/c4group
-          - name: macos-x86_64
-            runner: macos-latest
-            target: x86_64-apple-darwin
-            runtime_path: |
-              target/x86_64-apple-darwin/release/clonk-app
-              target/x86_64-apple-darwin/release/clonk-game
-              target/x86_64-apple-darwin/release/c4group
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.source-sha }}
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-
-      - name: Restore trusted-main Linux runtime cache
-        if: matrix.name == 'linux'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: full-parity
-          save-if: false
-
-      - name: Restore trusted-main Windows runtime cache
-        if: matrix.name == 'windows'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: windows-runtime-msvc
-          save-if: false
-
-      - name: Restore trusted-main macOS runtime cache
-        if: startsWith(matrix.name, 'macos-')
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: recording-host-oracles
-          save-if: false
-
-      - name: Install Linux build dependencies
-        if: matrix.name == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libasound2-dev \
-            libudev-dev \
-            pkg-config
-
-      - name: Install the macOS runtime target
-        if: startsWith(matrix.name, 'macos-')
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Configure the shipped MSVC runtime
-        if: matrix.name == 'windows'
-        run: scripts/configure-msvc-runtime.sh
-
-      - name: Restore trusted-main ThinLTO cache
-        if: matrix.name == 'windows'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/clonk-msvc-thinlto
-          # Release preparation changes Cargo package versions without changing
-          # bitcode. LLD independently hashes every input before reusing it.
-          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', 'third_party/**/*.rs') }}
-
-      - name: Restore shipped MSVC dependency cache
-        if: matrix.name == 'windows'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: shipped-msvc-runtime-v1
-          save-if: false
-
-      - name: Build the Linux runtime
-        if: matrix.name == 'linux'
-        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
-
-      - name: Build the Windows runtime
-        if: matrix.name == 'windows'
-        run: |
-          # freetype-sys hardcodes a relative `libz-sys/src/zlib` include that
-          # is absent from its published crate. Point it at the vendored copy.
-          cargo fetch --locked
-          zlib_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'libz-sys-*' | head -1)/src/zlib
-          if [[ ! -f "$zlib_dir/zlib.h" ]]; then
-            echo "could not locate the vendored zlib headers under $zlib_dir" >&2
-            exit 1
-          fi
-          export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
-          cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group
-
-      - name: Build the macOS arm64 runtime
-        if: matrix.name == 'macos-arm64'
-        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group --target aarch64-apple-darwin
-
-      - name: Build the macOS x86_64 runtime
-        if: matrix.name == 'macos-x86_64'
-        run: cargo build --release --locked -p clonk-app -p clonk-game -p clonk-c4group --target x86_64-apple-darwin
-
-      # The audit runs on the runner that produced the binaries, while its LLD
-      # cache and Visual Studio inspection tools are still present.
-      - name: Validate the shipped MSVC runtime
-        if: matrix.name == 'windows'
-        run: scripts/validate-msvc-runtime.sh
-
-      - name: Hand off the validated runtime
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ matrix.runtime_path }}
-          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-${{ matrix.name }}
-
-  # Packaging waits for every compile lane so no partial platform set can be
-  # published. The only cross-job inputs are immutable caches named for this
-  # exact workflow run; a miss fails closed.
+  # The sibling exact-SHA prebuild owns compilation. This action only restores,
+  # verifies and packages the immutable same-run inputs.
   package:
     name: Package ${{ matrix.name }}
-    needs: [tool, runtime]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -260,14 +42,31 @@ jobs:
           - name: linux
             runner: ubuntu-latest
             artifact: desktop-linux
+            runtime_artifact: release-prebuild-runtime-linux
+            runtime_target: x86_64-unknown-linux-gnu
+            runtime_suffix: ''
+            tool_artifact: release-prebuild-tool-linux
+            tool_filename: xtask-engine-tools
             tool_path: target/debug/xtask-engine-tools
           - name: windows
             runner: windows-latest
             artifact: desktop-windows
+            runtime_artifact: release-prebuild-runtime-windows
+            runtime_target: x86_64-pc-windows-msvc
+            runtime_suffix: .exe
+            tool_artifact: release-prebuild-tool-windows
+            tool_filename: xtask-engine-tools.exe
             tool_path: target/debug/xtask-engine-tools.exe
           - name: macos
             runner: macos-latest
             artifact: desktop-macos
+            runtime_artifact: release-prebuild-runtime-macos-arm64
+            runtime_target: aarch64-apple-darwin
+            runtime_suffix: ''
+            runtime_artifact_2: release-prebuild-runtime-macos-x86_64
+            runtime_target_2: x86_64-apple-darwin
+            tool_artifact: release-prebuild-tool-macos
+            tool_filename: xtask-engine-tools
             tool_path: target/debug/xtask-engine-tools
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -282,8 +81,25 @@ jobs:
 
       - name: Validate the release source
         env:
+          MERGE_SHA: ${{ github.sha }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
         run: |
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || ! "$TREE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release source identity is malformed" >&2
+            exit 1
+          fi
+          if [[ "$SOURCE_SHA" != "$MERGE_SHA" ]]; then
+            echo "release package source is not the active merge-group commit" >&2
+            exit 1
+          fi
+          actual_sha=$(git rev-parse HEAD)
+          actual_tree=$(git rev-parse 'HEAD^{tree}')
+          if [[ "$actual_sha" != "$SOURCE_SHA" || "$actual_tree" != "$TREE_SHA" ]]; then
+            echo "checked-out merge candidate does not match the prebuilt release tree" >&2
+            exit 1
+          fi
           if [[ ! "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "requested release version is invalid: ${REQUESTED_VERSION}" >&2
             exit 1
@@ -344,53 +160,97 @@ jobs:
       - name: Restore the packaging tool
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ matrix.tool_path }}
-          key: release-tool-${{ inputs.source-sha }}-${{ github.run_id }}-${{ matrix.name }}
+          path: target/release-prebuild/${{ matrix.tool_artifact }}
+          key: release-prebuild-${{ matrix.tool_artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
           fail-on-cache-miss: true
 
-      - name: Restore the Linux runtime
-        if: matrix.name == 'linux'
+      - name: Restore the runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            target/release/clonk-app
-            target/release/clonk-game
-            target/release/c4group
-          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-linux
-          fail-on-cache-miss: true
-
-      - name: Restore the Windows runtime
-        if: matrix.name == 'windows'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/x86_64-pc-windows-msvc/release/clonk-app.exe
-            target/x86_64-pc-windows-msvc/release/clonk-game.exe
-            target/x86_64-pc-windows-msvc/release/c4group.exe
-          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-windows
-          fail-on-cache-miss: true
-
-      - name: Restore the macOS arm64 runtime
-        if: matrix.name == 'macos'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/aarch64-apple-darwin/release/clonk-app
-            target/aarch64-apple-darwin/release/clonk-game
-            target/aarch64-apple-darwin/release/c4group
-          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-macos-arm64
+          path: target/release-prebuild/${{ matrix.runtime_artifact }}
+          key: release-prebuild-${{ matrix.runtime_artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
           fail-on-cache-miss: true
 
       - name: Restore the macOS x86_64 runtime
         if: matrix.name == 'macos'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            target/x86_64-apple-darwin/release/clonk-app
-            target/x86_64-apple-darwin/release/clonk-game
-            target/x86_64-apple-darwin/release/c4group
-          key: release-runtime-${{ inputs.source-sha }}-${{ github.run_id }}-macos-x86_64
+          path: target/release-prebuild/${{ matrix.runtime_artifact_2 }}
+          key: release-prebuild-${{ matrix.runtime_artifact_2 }}-${{ inputs.source-sha }}-${{ github.run_id }}
           fail-on-cache-miss: true
+
+      - name: Verify and install the prebuilt inputs
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          TREE_SHA: ${{ inputs.tree-sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          tool_root="target/release-prebuild/${{ matrix.tool_artifact }}"
+          runtime_root="target/release-prebuild/${{ matrix.runtime_artifact }}"
+          python3 scripts/release-prebuild-manifest.py verify \
+            --root "$tool_root" \
+            --manifest "$tool_root/manifest.json" \
+            --head-sha "$SOURCE_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --version "$VERSION" \
+            --kind tool \
+            --target host \
+            --file "payload/${{ matrix.tool_filename }}"
+          python3 scripts/release-prebuild-manifest.py verify \
+            --root "$runtime_root" \
+            --manifest "$runtime_root/manifest.json" \
+            --head-sha "$SOURCE_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --version "$VERSION" \
+            --kind runtime \
+            --target "${{ matrix.runtime_target }}" \
+            --file "payload/c4group${{ matrix.runtime_suffix }}" \
+            --file "payload/clonk-app${{ matrix.runtime_suffix }}" \
+            --file "payload/clonk-game${{ matrix.runtime_suffix }}"
+
+          case "${{ matrix.name }}" in
+            linux)
+              mkdir -p target/debug target/release
+              cp "$tool_root/payload/xtask-engine-tools" target/debug/
+              cp "$runtime_root"/payload/{c4group,clonk-app,clonk-game} target/release/
+              chmod +x target/debug/xtask-engine-tools target/release/{c4group,clonk-app,clonk-game}
+              ;;
+            windows)
+              mkdir -p target/debug target/x86_64-pc-windows-msvc/release
+              cp "$tool_root/payload/xtask-engine-tools.exe" target/debug/
+              cp "$runtime_root"/payload/{c4group,clonk-app,clonk-game}.exe \
+                target/x86_64-pc-windows-msvc/release/
+              ;;
+            macos)
+              runtime_root_2="target/release-prebuild/${{ matrix.runtime_artifact_2 }}"
+              python3 scripts/release-prebuild-manifest.py verify \
+                --root "$runtime_root_2" \
+                --manifest "$runtime_root_2/manifest.json" \
+                --head-sha "$SOURCE_SHA" \
+                --tree-sha "$TREE_SHA" \
+                --version "$VERSION" \
+                --kind runtime \
+                --target "${{ matrix.runtime_target_2 }}" \
+                --file payload/c4group \
+                --file payload/clonk-app \
+                --file payload/clonk-game
+              mkdir -p target/debug \
+                target/aarch64-apple-darwin/release \
+                target/x86_64-apple-darwin/release
+              cp "$tool_root/payload/xtask-engine-tools" target/debug/
+              cp "$runtime_root"/payload/{c4group,clonk-app,clonk-game} \
+                target/aarch64-apple-darwin/release/
+              cp "$runtime_root_2"/payload/{c4group,clonk-app,clonk-game} \
+                target/x86_64-apple-darwin/release/
+              chmod +x target/debug/xtask-engine-tools \
+                target/aarch64-apple-darwin/release/{c4group,clonk-app,clonk-game} \
+                target/x86_64-apple-darwin/release/{c4group,clonk-app,clonk-game}
+              ;;
+            *)
+              echo "unsupported release platform: ${{ matrix.name }}" >&2
+              exit 1
+              ;;
+          esac
 
       # The only pass that emits `planet`. Its archive is prefix-free and
       # therefore byte-identical on every triple. `content` is published by

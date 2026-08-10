@@ -55,8 +55,11 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
+      pr-number: ${{ steps.release.outputs.pr-number }}
       release: ${{ steps.release.outputs.release }}
+      tree-sha: ${{ steps.release.outputs.tree-sha }}
       version: ${{ steps.release.outputs.version }}
     defaults:
       run:
@@ -65,9 +68,12 @@ jobs:
       - name: Resolve the merge-group release
         id: release
         env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.sha }}
           # The push-only `head_commit` field is absent here. The merge-group
           # payload carries the exact candidate commit and its squash subject.
           MERGE_SUBJECT: ${{ github.event.merge_group.head_commit.message }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           subject=${MERGE_SUBJECT%%$'\n'*}
           if [[ "$subject" != "chore: release "* ]]; then
@@ -75,23 +81,62 @@ jobs:
             exit 0
           fi
 
-          pattern='^chore: release ([0-9]+\.[0-9]+\.[0-9]+) \(#[0-9]+\)$'
+          pattern='^chore: release ([0-9]+\.[0-9]+\.[0-9]+) \(#([0-9]+)\)$'
           if [[ ! "$subject" =~ $pattern ]]; then
             echo "malformed release subject: $subject" >&2
             exit 1
           fi
+          version=${BASH_REMATCH[1]}
+          pr_number=${BASH_REMATCH[2]}
+
+          pr=$(gh api "repos/${REPOSITORY}/pulls/${pr_number}")
+          title=$(jq -r '.title' <<<"$pr")
+          state=$(jq -r '.state' <<<"$pr")
+          head_ref=$(jq -r '.head.ref' <<<"$pr")
+          head_repo=$(jq -r '.head.repo.full_name // ""' <<<"$pr")
+          base_ref=$(jq -r '.base.ref' <<<"$pr")
+          if [[ "$title" != "chore: release ${version}" || "$state" != "open" \
+            || "$head_ref" != "release/next" || "$head_repo" != "$REPOSITORY" \
+            || "$base_ref" != "main" ]]; then
+            echo "merge-group release pull request identity is invalid" >&2
+            exit 1
+          fi
+
+          merge_tree=$(gh api "repos/${REPOSITORY}/git/commits/${MERGE_SHA}" --jq '.tree.sha')
+          if [[ ! "$merge_tree" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "merge-group release tree is invalid" >&2
+            exit 1
+          fi
+
           echo "release=true" >> "$GITHUB_OUTPUT"
-          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "pr-number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "tree-sha=$merge_tree" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  release-prebuild:
+    name: Prebuild release candidate
+    needs: release-context
+    if: needs.release-context.outputs.release == 'true'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/release-prebuild.yml
+    with:
+      source-sha: ${{ github.sha }}
+      tree-sha: ${{ needs.release-context.outputs.tree-sha }}
+      version: ${{ needs.release-context.outputs.version }}
+      pr-number: ${{ needs.release-context.outputs.pr-number }}
 
   release-build:
     name: Build release candidate
-    needs: release-context
+    needs: [release-context, release-prebuild]
     if: needs.release-context.outputs.release == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/release-build.yml
     with:
       source-sha: ${{ github.sha }}
+      tree-sha: ${{ needs.release-context.outputs.tree-sha }}
       version: ${{ needs.release-context.outputs.version }}
 
   release-qualification:
@@ -369,6 +414,7 @@ jobs:
     needs:
       - pull-request-title
       - release-context
+      - release-prebuild
       - release-build
       - release-qualification
       - linux
@@ -382,6 +428,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           TITLE_RESULT: ${{ needs.pull-request-title.result }}
           RELEASE_CONTEXT_RESULT: ${{ needs.release-context.result }}
+          RELEASE_PREBUILD_RESULT: ${{ needs.release-prebuild.result }}
           RELEASE_BUILD_RESULT: ${{ needs.release-build.result }}
           RELEASE_QUALIFICATION_RESULT: ${{ needs.release-qualification.result }}
           IS_RELEASE: ${{ needs.release-context.outputs.release }}
@@ -400,6 +447,7 @@ jobs:
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             require_result title "$TITLE_RESULT" success
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
+            require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
             require_result release-build "$RELEASE_BUILD_RESULT" skipped
             require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
             require_result linux "$LINUX_RESULT" skipped
@@ -409,10 +457,12 @@ jobs:
             require_result release-context "$RELEASE_CONTEXT_RESULT" success
             case "$IS_RELEASE" in
               true)
+                require_result release-prebuild "$RELEASE_PREBUILD_RESULT" success
                 require_result release-build "$RELEASE_BUILD_RESULT" success
                 require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" success
                 ;;
               false)
+                require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
                 require_result release-build "$RELEASE_BUILD_RESULT" skipped
                 require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
                 ;;
@@ -426,6 +476,7 @@ jobs:
           else
             require_result title "$TITLE_RESULT" skipped
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
+            require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
             require_result release-build "$RELEASE_BUILD_RESULT" skipped
             require_result release-qualification "$RELEASE_QUALIFICATION_RESULT" skipped
             require_result linux "$LINUX_RESULT" success
@@ -447,13 +498,6 @@ jobs:
             "repos/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100")
           elapsed=$(jq -er '
             def expected: [
-              "Build release candidate / Build packaging tool / linux",
-              "Build release candidate / Build packaging tool / macos",
-              "Build release candidate / Build packaging tool / windows",
-              "Build release candidate / Build runtime / linux",
-              "Build release candidate / Build runtime / macos-arm64",
-              "Build release candidate / Build runtime / macos-x86_64",
-              "Build release candidate / Build runtime / windows",
               "Build release candidate / Package linux",
               "Build release candidate / Package macos",
               "Build release candidate / Package windows"

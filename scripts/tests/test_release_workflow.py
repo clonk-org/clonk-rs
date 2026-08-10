@@ -14,6 +14,7 @@ from test_release_content_handoff import WORKFLOW, step_script
 
 BUILD_WORKFLOW = WORKFLOW.with_name("release-build.yml")
 LANDING_WORKFLOW = WORKFLOW.with_name("landing.yml")
+PREBUILD_WORKFLOW = WORKFLOW.with_name("release-prebuild.yml")
 
 
 def job_block(name):
@@ -84,8 +85,10 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("workflow_call:", reusable)
         self.assertIn("source-sha:", reusable)
+        self.assertIn("tree-sha:", reusable)
         self.assertIn("version:", reusable)
         self.assertIn("uses: ./.github/workflows/release-build.yml", landing)
+        self.assertIn("uses: ./.github/workflows/release-prebuild.yml", landing)
         self.assertIn("source-sha: ${{ github.sha }}", landing)
 
     def test_reusable_release_build_validates_the_requested_source_version(self):
@@ -93,45 +96,54 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
 
         self.assertIn("name: Validate the release source", reusable)
         self.assertIn("REQUESTED_VERSION: ${{ inputs.version }}", reusable)
+        self.assertIn('[[ "$SOURCE_SHA" != "$MERGE_SHA" ]]', reusable)
         self.assertIn('workspace version ${actual_version}', reusable)
         self.assertIn('requested release ${REQUESTED_VERSION}', reusable)
 
-    def test_merge_group_release_build_is_rerunnable_without_ephemeral_caches(self):
+    def test_merge_group_release_build_uses_exact_rerunnable_handoff_caches(self):
         reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        prebuild = PREBUILD_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertNotIn("shared-key: release-${{", reusable)
+        self.assertNotIn("shared-key: release-${{", prebuild)
         for trusted_cache in (
             "full-parity",
             "windows-runtime-msvc",
             "recording-host-oracles",
         ):
             with self.subTest(trusted_cache=trusted_cache):
-                self.assertIn(f"shared-key: {trusted_cache}", reusable)
+                self.assertIn(f"shared-key: {trusted_cache}", prebuild)
+        self.assertIn("actions/cache/save@", prebuild)
+        self.assertIn("actions/cache/restore@", reusable)
+        self.assertIn("fail-on-cache-miss: true", reusable)
         self.assertEqual(reusable.count("compression-level: 0"), 3)
         self.assertEqual(reusable.count("overwrite: true"), 3)
 
     def test_release_build_parallelizes_tools_runtimes_and_macos_architectures(self):
         reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        prebuild = PREBUILD_WORKFLOW.read_text(encoding="utf-8")
+        landing = LANDING_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn("\n  tool:\n", reusable)
-        self.assertIn("\n  runtime:\n", reusable)
+        self.assertIn("\n  tool:\n", prebuild)
+        self.assertIn("\n  runtime:\n", prebuild)
         self.assertIn("\n  package:\n", reusable)
         package = build_job_block("package")
-        self.assertIn("needs: [tool, runtime]", package)
-        self.assertIn("name: macos-arm64", reusable)
-        self.assertIn("name: macos-x86_64", reusable)
-        self.assertIn("--target aarch64-apple-darwin", reusable)
-        self.assertIn("--target x86_64-apple-darwin", reusable)
+        self.assertNotIn("needs: [tool, runtime]", package)
+        self.assertIn("needs: [release-context, release-prebuild]", landing)
+        self.assertIn("name: macos-arm64", prebuild)
+        self.assertIn("name: macos-x86_64", prebuild)
+        self.assertIn("--target aarch64-apple-darwin", prebuild)
+        self.assertIn("--target x86_64-apple-darwin", prebuild)
         self.assertIn("--skip-build", package)
 
     def test_release_build_handoffs_are_exact_run_scoped_caches(self):
         reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        prebuild = PREBUILD_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("\n  package:\n", reusable)
         package = build_job_block("package")
 
         self.assertIn(
             "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-            reusable,
+            prebuild,
         )
         self.assertIn(
             "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
@@ -143,8 +155,8 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
             "fail-on-cache-miss: true",
         ):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, reusable)
-        self.assertNotIn("restore-keys:", reusable)
+                self.assertIn(fragment, prebuild + reusable)
+        self.assertNotIn("restore-keys:", prebuild + reusable)
         self.assertNotIn("github.run_attempt", reusable)
 
         # Only final distributables are Actions artifacts. Compile handoffs use
@@ -152,9 +164,9 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         self.assertEqual(reusable.count("actions/upload-artifact@"), 3)
 
     def test_release_packaging_tool_uses_the_non_lto_test_profile(self):
-        reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("\n  tool:\n", reusable)
-        tool = build_job_block("tool")
+        prebuild = PREBUILD_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("\n  tool:\n", prebuild)
+        tool = build_job_block("tool", PREBUILD_WORKFLOW)
 
         self.assertIn(
             "cargo build --profile test --locked -p xtask --features engine-tools ",
@@ -163,7 +175,7 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         self.assertIn("--bin xtask-engine-tools", tool)
         self.assertNotIn("cargo build --release", tool)
         self.assertIn("target/debug/xtask-engine-tools", tool)
-        self.assertNotIn("target/test/xtask-engine-tools", reusable)
+        self.assertNotIn("target/test/xtask-engine-tools", prebuild)
 
     def test_release_build_enforces_half_of_the_measured_baseline(self):
         reusable = BUILD_WORKFLOW.read_text(encoding="utf-8")
@@ -328,11 +340,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         started = datetime(2026, 8, 10, tzinfo=timezone.utc)
         completed = started + timedelta(seconds=elapsed_seconds)
         jobs = []
-        matrix = {
-            "Build packaging tool": ("linux", "windows", "macos"),
-            "Build runtime": ("linux", "windows", "macos-arm64", "macos-x86_64"),
-            "Package": ("linux", "windows", "macos"),
-        }
+        matrix = {"Package": ("linux", "windows", "macos")}
         for phase, names in matrix.items():
             for name in names:
                 separator = " " if phase == "Package" else " / "
@@ -505,7 +513,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_build_latency_rejects_a_partial_matrix(self):
         completed = self.run_release_build_latency(
             500,
-            omit="Build release candidate / Build runtime / macos-x86_64",
+            omit="Build release candidate / Package macos",
         )
 
         self.assertNotEqual(completed.returncode, 0)
