@@ -35,6 +35,8 @@ enum MoveToPhysicalContinuation {
     FlightControl {
         target: Vector2,
         from_walk: bool,
+        #[serde(default, skip_serializing_if = "crate::is_false")]
+        intermediate_waypoint: bool,
     },
 }
 
@@ -42,6 +44,8 @@ enum MoveToPhysicalContinuation {
 struct MoveToFlightContinuation {
     target: Vector2,
     jump_after_takeoff: bool,
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    intermediate_waypoint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -550,6 +554,7 @@ impl MoveToState {
             self.physical_continuation = Some(MoveToPhysicalContinuation::FlightControl {
                 target,
                 from_walk: ctx.object.action_procedure == ActionProcedure::Walk,
+                intermediate_waypoint: next_is_move_to,
             });
             let update =
                 steer.map(|direction| ObjectUpdate::new().with_command_direction(direction));
@@ -564,6 +569,7 @@ impl MoveToState {
             self.flight_continuation = Some(MoveToFlightContinuation {
                 target,
                 jump_after_takeoff: from_walk,
+                intermediate_waypoint: next_is_move_to,
             });
             let update =
                 steer.map(|direction| ObjectUpdate::new().with_command_direction(direction));
@@ -575,7 +581,16 @@ impl MoveToState {
             ]);
         }
 
-        let jump_operations = from_walk.then(|| self.jump_control(ctx, target)).flatten();
+        let jump_operations = from_walk
+            .then(|| {
+                self.jump_control(
+                    ctx,
+                    target,
+                    next_is_move_to,
+                    ctx.object.physical.can_scale != 0,
+                )
+            })
+            .flatten();
         if jump_operations.is_some() {
             let mut update = ObjectUpdate::new();
             if let Some(direction) = steer {
@@ -660,11 +675,16 @@ impl MoveToState {
                     ObjectUpdate::new().with_command_direction(direction),
                 ))
             }
-            MoveToPhysicalContinuation::FlightControl { target, from_walk } => {
+            MoveToPhysicalContinuation::FlightControl {
+                target,
+                from_walk,
+                intermediate_waypoint,
+            } => {
                 if self.flight_control_takes_off(ctx, target, physical) {
                     self.flight_continuation = Some(MoveToFlightContinuation {
                         target,
                         jump_after_takeoff: from_walk,
+                        intermediate_waypoint,
                     });
                     return CommandStepResult::running(None).with_events(vec![
                         CommandEvent::MoveToFlightControlTakeoff {
@@ -673,7 +693,17 @@ impl MoveToState {
                         },
                     ]);
                 }
-                let jump_operations = from_walk.then(|| self.jump_control(ctx, target)).flatten();
+                let jump_operations = from_walk
+                    .then(|| {
+                        self.jump_control(
+                            ctx,
+                            target,
+                            intermediate_waypoint
+                                && ctx.object.action_procedure == ActionProcedure::Walk,
+                            physical.can_scale != 0,
+                        )
+                    })
+                    .flatten();
                 CommandStepResult::running(None)
                     .with_operations(jump_operations.unwrap_or_default())
             }
@@ -689,7 +719,15 @@ impl MoveToState {
         };
         let operations = continuation
             .jump_after_takeoff
-            .then(|| self.jump_control(ctx, continuation.target))
+            .then(|| {
+                self.jump_control(
+                    ctx,
+                    continuation.target,
+                    continuation.intermediate_waypoint
+                        && ctx.object.action_procedure == ActionProcedure::Walk,
+                    !ctx.object.physical_deferred && ctx.object.physical.can_scale != 0,
+                )
+            })
             .flatten()
             .unwrap_or_default();
         CommandStepResult::running(None).with_operations(operations)
@@ -771,6 +809,8 @@ impl MoveToState {
         &self,
         ctx: &CommandRuntimeContext<'_>,
         target: Vector2,
+        intermediate_waypoint: bool,
+        can_scale: bool,
     ) -> Option<Vec<CommandOperation>> {
         if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 && ctx.object.pathfinder == 0 {
             return None;
@@ -807,20 +847,53 @@ impl MoveToState {
             }
         }
 
+        // clonk-org/clonk-rs#209: a point-clear pathfinder route can emit an
+        // aligned shaft waypoint above the 40px native jump limit. For an
+        // intermediate MoveTo and a scaler, plan one native-height climb
+        // toward the final point. The existing side-run and jump then reach a
+        // wall where ordinary contact can enter SCALE. Pinned C++ leaves this
+        // case inert (C4Command.cpp:219-220,1874-1893).
+        let live_target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
+            ctx.object.shape.width / 5
+        } else if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
+        } else {
+            self.tolerance
+        };
+        let staged_climb = intermediate_waypoint
+            && can_scale
+            && inside(cx - tx, -live_target_range, live_target_range)
+            && cy - ty > 40;
+        let climb_ty = if staged_climb { cy - 40 } else { ty };
+        let mut climb_angle = if staged_climb {
+            c4_angle(cx, cy, tx, climb_ty)
+        } else {
+            angle
+        };
+        while climb_angle > 180 {
+            climb_angle -= 360;
+        }
+
         // High-angle side move + jump (:1874-1893).
         if inside(
-            angle - JUMP_HIGH_ANGLE,
+            climb_angle - JUMP_HIGH_ANGLE,
             -3 * JUMP_ANGLE_RANGE,
             3 * JUMP_ANGLE_RANGE,
-        ) && inside(cy - ty, 10, 40)
+        ) && inside(cy - climb_ty, 10, 40)
         {
-            let side = solid_on_which_side(landscape, tx, ty);
-            let dist = 5 * (cy - ty).abs() / 6;
+            let side = solid_on_which_side(landscape, tx, climb_ty);
+            let dist = 5 * (cy - climb_ty).abs() / 6;
             let mut side_x = cx - dist * side;
             let mut side_y = cy;
             adjust_move_to_target(landscape, &mut side_x, &mut side_y, false, 0);
-            if inside(side_y - cy, -20, 20)
-                && landscape.path_is_clear(Vector2::new(side_x, side_y), Vector2::new(tx, ty))
+            if (!staged_climb || side != 0)
+                && inside(side_y - cy, -20, 20)
+                && if staged_climb {
+                    command_path_free(landscape, side_x, side_y, tx, climb_ty)
+                } else {
+                    landscape
+                        .path_is_clear(Vector2::new(side_x, side_y), Vector2::new(tx, climb_ty))
+                }
             {
                 return Some(vec![
                     jump_request(),

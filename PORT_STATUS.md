@@ -613,14 +613,14 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   next to the existing `dig_free_runs_before_movers_own_baked_mask_is_removed`
   (`crates/clonk-engine-unit-tests/tests/unit/parts/solidmask_shape.rs`).
 
-- Closed 2026-08-09: **Automatic construction can pace forever around a
-  point-clear but unclimbable waypoint — inherited oracle behavior.** Reported
-  as clonk-org/clonk-rs#209 in Frontier. A deterministic Build -> Acquire -> Get
-  -> MoveTo probe with the shipped CLNK/CST1/ROCK definitions collected its
-  rock, then reproduced the same waypoint loop while returning to the
-  construction site. A source-level audit of the pinned C++ control flow,
-  rather than a live end-to-end C++ run, predicts the same loop when either leg
-  contains such a waypoint.
+- Closed 2026-08-10: **Automatic construction traverses a climbable U-route
+  whose vertical waypoint WALK could not execute.** Reported as
+  clonk-org/clonk-rs#209 in Frontier.
+  A deterministic Build -> Acquire -> Get -> MoveTo probe with the shipped
+  CLNK/CST1/ROCK definitions collected its rock, then reproduced the waypoint
+  loop while returning to the construction site. A source-level audit of the
+  pinned C++ control flow, rather than a live end-to-end C++ run, predicts the
+  same loop when either leg contains such a waypoint.
   A missing component makes Build queue Acquire (`src/C4Object.cpp:1682-1747`);
   Acquire scans `OCF_Available` objects without a reachability test
   (`src/C4Command.cpp:2082-2136`) and the nearest-object scan uses straight-line
@@ -628,19 +628,31 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   25-tick MoveTo at `Target->x + Random(15) - 7`
   (`src/C4Command.cpp:1251-1291`). C4PathFinder tests point-clear pixels rather
   than actor traversal and emits those clear-ray waypoints
-  (`src/C4PathFinder.cpp:294-343,383-400`; callback in
-  `src/C4Game.cpp:2288-2292`), so it can accept a vertical shaft waypoint that
-  a walking Clonk cannot execute. DFA_WALK assigns only Left/Right
+  (`src/C4PathFinder.cpp:294-343,383-400,545-550`; callback in
+  `src/C4Game.cpp:2288-2292,2671`), so it can accept a vertical shaft waypoint
+  that a walking Clonk cannot execute. DFA_WALK assigns only Left/Right
   (`src/C4Command.cpp:319-327`), and the overhead JumpControl arm accepts only a
   10-to-40-pixel gap (`src/C4Command.cpp:1874-1893`). The child waypoint then
-  expires as *success* (`src/C4Command.cpp:1544-1555`), leaving Get/Acquire free
-  to select and route to the same object again. Adding reachability filtering,
-  vertical WALK steering, stuck failure or different timeout semantics would
-  change command and `Random()` order and desynchronize from the oracle.
-  Characterized at the relevant focused seams by
+  expires as *success* (`src/C4Command.cpp:1544-1555`). On the outbound leg Get
+  can repeat its pursuit; on the reproduced return leg the retained parent
+  MoveTo regenerates the same path. The port now makes the
+  intermediate MoveTo actor-traversable instead: a scalable pathfinder aligned
+  under a waypoint above native jump height plans one 40-pixel climb step,
+  takes the ordinary side run and jump toward its wall, enters SCALE through
+  ordinary contact, and climbs. Acquire/Get selection and intervals are
+  unchanged, and the extension itself draws no command-AI `Random()`. The exact
+  scope and lockstep blast radius are recorded
+  under "Deliberate divergences from the oracle" below. The inherited
+  no-wall/single-command behavior remains
+  characterized by
   `move_to_unclimbable_vertical_waypoint_expires_successfully_like_cpp`,
   `acquire_uses_squared_distance_and_cpp_master_list_order_for_ties` and
-  `get_interval_expires_successfully_after_exact_execution_count`.
+  `get_interval_expires_successfully_after_exact_execution_count`. The new
+  traversal is pinned at its command seam by
+  `move_to_far_vertical_waypoint_stages_max_height_wall_jump` and end to end by
+  `automatic_construction_returns_collected_material_through_a_climbable_u_route`,
+  which uses shipped Frontier/CLNK/CST1/ROCK logic and resumes construction
+  after returning from the lower tunnel.
 
 - Closed 2026-07-30: **Every preplaced object whose saved `DrawTransform`
   carried the FlipDir mirror rendered exactly backwards.** Reported as the
@@ -2875,6 +2887,53 @@ an ordered-map model gap.
   instance goes, ever makes the launcher present through two of them.
 
 ## Deliberate divergences from the oracle
+
+- **Tall intermediate MoveTo waypoints stage one native-height wall jump**
+  (`MoveToState::jump_control`,
+  `crates/clonk-engine/src/command/machine.rs`; no setting). Approved
+  2026-08-10, fixes clonk-org/clonk-rs#209. Pinned C++ sets `fWaypoint` when the
+  immediately following command is another MoveTo
+  (`src/C4Command.cpp:219-220`), but DFA_WALK still assigns only Left or Right
+  from horizontal error (`:319-327`). A point-clear vertical waypoint more than
+  40 pixels overhead therefore receives neither steering nor a high-angle jump
+  and can expire into the same route forever.
+
+  Rust deliberately extends only that high-angle planner. While a CrewMember
+  or nonzero-Pathfinder actor is WALKing an intermediate MoveTo, has resolved
+  nonzero `CanScale`, is horizontally within the live WALK target range (crew
+  `Shape.Wdt / 5`, otherwise MoveToRange/tolerance), and the waypoint is more
+  than 40 pixels overhead, it plans against the synthetic point
+  `(target_x, current_y - 40)`. A nonzero `SolidOnWhichSide` result, an adjusted
+  side-run point within 20 pixels vertically, and a legacy-`PathFree` clear
+  segment from the run-up to the synthetic point queue the ordinary
+  original-target Jump plus adjusted side MoveTo; push-front order executes the
+  run-up first. `SolidOnWhichSide` scans offsets 1 through 9 and chooses left
+  first on a tie (`src/C4Command.cpp:147-156`). The jump reaches the wall,
+  ordinary WALK contact enters SCALE
+  (`src/C4Object.cpp:4440-4457,4499-4515`), and SCALE climbs
+  (`:4823-4840`). The native 10-through-40-pixel high-angle arm and the
+  diagonal/low-contact arms are unchanged.
+
+  **Blast radius.** Every qualifying consecutive-MoveTo chain is affected,
+  including pathfinder chains created for commands other than Build and a
+  script that manually stacks MoveTo commands. A single/final MoveTo, a
+  non-scaler, a synthetic point without adjacent terrain, and a blocked
+  synthetic segment retain the port's prior behavior. A false-positive or
+  discontinuous wall can add another bounded run-up/Jump attempt each time the
+  parent waypoint executes: its interval counter is unchanged, but wall-clock
+  stack timing grows because the two children execute first. Temporary
+  obstruction is retried deterministically on a later parent execution. The
+  extension itself draws no `Random()`. A transient serde-defaulted waypoint
+  bit preserves the same-Execute decision across physical/Flight callbacks and
+  typed snapshots; it adds no long-lived script-visible route state or classic
+  save-format extension. Staged Jump/MoveTo nodes already serialize as ordinary
+  commands. Same-version peers remain deterministic, while the first added
+  command changes later movement/callback and possible RNG interleaving, so
+  mixed pinned-C++/old-Rust play desynchronizes when it fires. Pinned by
+  `move_to_far_vertical_waypoint_stages_max_height_wall_jump`, the unchanged
+  `move_to_unclimbable_vertical_waypoint_expires_successfully_like_cpp`, and the
+  shipped-content
+  `automatic_construction_returns_collected_material_through_a_climbable_u_route`.
 
 - **The product starts games at `SetGameSpeed(38)` cadence**
   (`DEFAULT_GAME_TICK_DELAY_MS`, `crates/clonk-engine/src/lib.rs`; C++

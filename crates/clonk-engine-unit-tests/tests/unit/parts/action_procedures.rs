@@ -3536,6 +3536,198 @@ protected func ControlCommand() { own_control_calls++; return 1; }
     }
 
     #[test]
+    fn automatic_construction_returns_collected_material_through_a_climbable_u_route() {
+        struct FrontierDefinitionResolver {
+            roots: Vec<std::path::PathBuf>,
+        }
+
+        impl clonk_engine::scenario::LegacyDefinitionResolver for FrontierDefinitionResolver {
+            fn resolve_definition_groups(
+                &self,
+                _scenario: &clonk_resources::Group,
+                identifier: &str,
+            ) -> Result<Vec<clonk_resources::Group>, ScenarioError> {
+                let relative = identifier.replace('\\', "/");
+                self.roots
+                    .iter()
+                    .map(|root| root.join(&relative))
+                    .find(|candidate| candidate.exists())
+                    .map(clonk_resources::Group::open)
+                    .transpose()
+                    .map_err(ScenarioError::Resources)?
+                    .map(|group| vec![group])
+                    .ok_or(ScenarioError::LegacyDefinitionNotFound { path: relative })
+            }
+        }
+
+        // Frontier exposes the point-path/traversal mismatch behind automatic
+        // construction with unmodified CLNK, CST1 and ROCK definitions. The
+        // pathfinder callback accepts point-clear rays
+        // (C4Game.cpp:2288-2292,2671; C4PathFinder.cpp:545-550), but a WALK
+        // command only steers horizontally and its high-angle jump is limited
+        // to 40 pixels (C4Command.cpp:319-327,1874-1893). This
+        // deliberately corrected route must therefore prove actor traversal,
+        // not merely time out or postpone the same reachable material trip.
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let content = repository.join("content");
+        let scenario_path = content.join("Missions.c4f/Frontier.c4s");
+        let scenario = Scenario::load_from_path_with_seed(
+            &scenario_path,
+            &FrontierDefinitionResolver {
+                roots: vec![repository.clone(), content.clone()],
+            },
+            0,
+        )
+        .expect("load shipped Frontier scenario");
+        let material_library = clonk_resources::MaterialLibrary::from_group(
+            &clonk_resources::Group::open(content.join("Material.c4g"))
+                .expect("open shipped material library"),
+        )
+        .expect("load shipped material library");
+        let system_scripts = clonk_engine::scenario::load_system_scripts(
+            &clonk_resources::Group::open(repository.join("planet/System.c4g"))
+                .expect("open shipped system scripts"),
+        )
+        .expect("load shipped system scripts");
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&material_library);
+        engine.install_global_scripts(&system_scripts);
+        scenario.apply(&mut engine).expect("apply Frontier scenario");
+        let owner = engine
+            .join_player(JoinPlayerConfig {
+                name: "Route probe".to_string(),
+                player_info_id: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("join route-probe player")
+            .number();
+        let clonk = engine.crew_cursor(owner).expect("Frontier supplies CLNK crew");
+
+        let width = 320usize;
+        let height = 220usize;
+        let mut pixels = vec![0u8; width * height];
+        for y in 100..height {
+            for x in 0..width {
+                let shaft = (40..=80).contains(&x) && y <= 175;
+                let lower_tunnel = (40..=250).contains(&x) && (145..=175).contains(&y);
+                if !shaft && !lower_tunnel {
+                    pixels[y * width + x] = 1;
+                }
+            }
+        }
+        let grid = clonk_engine::landscape::PixelGrid::new(
+            width as u32,
+            height as u32,
+            pixels,
+            vec![0, 80],
+            vec![None, Some("Earth".to_string())],
+            vec![None; 2],
+        );
+        let mut landscape =
+            Landscape::new(width as u32, vec![100; width]).expect("create U-route landscape");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        engine
+            .apply_object_update(
+                clonk,
+                ObjectUpdate::new().with_position(Vector2::new(220, 90)),
+            )
+            .expect("place CLNK above the U route");
+        let initial_construction = 90_000;
+        let site = engine
+            .spawn_object(
+                SpawnConfig::new("CST1")
+                    .with_position(Vector2::new(220, 80))
+                    .with_construction(initial_construction)
+                    .with_owner(owner),
+            )
+            .expect("spawn shipped construction site");
+        let material = engine
+            .spawn_object(
+                SpawnConfig::new("ROCK").with_position(Vector2::new(180, 170)),
+            )
+            .expect("spawn shipped construction material");
+        engine
+            .spawn_object(SpawnConfig::new("WOOD").with_container(clonk))
+            .expect("supply the other missing construction material");
+        engine
+            .execute_player_command(
+                owner,
+                CommandId::Build as i32,
+                0,
+                0,
+                site.as_u64() as i32,
+                0,
+                0,
+                1,
+            )
+            .expect("order automatic construction");
+
+        let mut collected_frame = None;
+        let mut completed = None;
+        let mut last_clonk = None;
+        for route_frame in 0..800 {
+            let snapshot = engine.tick().expect("advance deterministic U route");
+            let clonk_state = snapshot.object(clonk).expect("CLNK survives U route");
+            if collected_frame.is_none()
+                && snapshot
+                    .object(material)
+                    .is_some_and(|rock| rock.container == Some(clonk))
+            {
+                collected_frame = Some(route_frame);
+            }
+            if snapshot
+                .object(site)
+                .is_some_and(|site| site.construction > initial_construction)
+            {
+                completed = Some((
+                    route_frame,
+                    clonk_state.clone(),
+                    snapshot.object(material).is_some(),
+                ));
+                break;
+            }
+            last_clonk = Some(clonk_state.clone());
+        }
+
+        let collected_frame = collected_frame.expect("progressing outbound route collects ROCK");
+        assert!(
+            collected_frame <= 350,
+            "outbound ROCK collection must remain bounded, got frame {collected_frame}"
+        );
+        let (completed_frame, clonk_state, material_survived) = completed.unwrap_or_else(|| {
+            let clonk_state = last_clonk.expect("route produced a CLNK snapshot");
+            panic!(
+                "carried ROCK never returned to CST1; CLNK ended at {:?} with {:?}",
+                clonk_state.position,
+                clonk_state.command_stack.command_names()
+            )
+        });
+        assert!(completed_frame <= 700, "construction resumed too late");
+        assert!(!material_survived, "the collected ROCK must be consumed");
+        assert!(
+            clonk_state.position.x >= 180 && clonk_state.position.y < 120,
+            "construction must resume at the upper site, got {:?}",
+            clonk_state.position
+        );
+    }
+
+    #[test]
     fn failed_build_command_does_not_duplicate_live_needed_material_message(
     ) -> Result<(), EngineError> {
         // C4Object::Build first creates the target message. If its retained
