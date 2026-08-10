@@ -4652,7 +4652,7 @@ impl Engine {
             .landscape
             .as_ref()
             .map(|landscape| {
-                let solid_masks = self.solid_masks_for_movement(&self.active_solid_mask_indices());
+                let solid_masks = self.live_movement_solid_masks();
                 shape_contact_check(
                     &self.objects[idx].state.vertices,
                     position,

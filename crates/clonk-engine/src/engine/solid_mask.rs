@@ -958,6 +958,22 @@ impl Engine {
         result
     }
 
+    /// The rect overlay a live movement step checks against: the candidate
+    /// scan feeding [`Self::solid_masks_for_movement`]. Movement derived this
+    /// pair inline in three places; naming it keeps the candidate set and its
+    /// only consumer together.
+    pub(crate) fn live_movement_solid_masks(&self) -> Vec<SolidMaskRect> {
+        // Ask the grid question before deriving candidates, not after:
+        // solid_masks_for_movement answers an empty overlay for a grid world
+        // (:966-969) whatever the scan finds, and that scan walks every object
+        // against the definition table. Reading the same predicate in the same
+        // `&self` borrow keeps the result identical.
+        if self.solid_mask_grid_mode() {
+            return Vec::new();
+        }
+        self.solid_masks_for_movement(&self.active_solid_mask_indices())
+    }
+
     pub(crate) fn solid_masks_for_movement(
         &self,
         candidate_indices: &[usize],
@@ -2794,6 +2810,89 @@ mod tests {
         assert!(engine.ocf_solid_mask_overlay().is_empty());
         assert_eq!(SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(Cell::get), 0);
         assert_eq!(SOLID_MASK_DEFINITION_LOOKUPS.with(Cell::get), 0);
+    }
+
+    /// A grid world whose texmap carries a `Vehicle` default entry, which is
+    /// what `Landscape::grid_vehicle_byte` reads to decide that masks are
+    /// baked into the pixel plane.
+    fn grid_world_engine() -> Engine {
+        let mut engine = Engine::new();
+        let mut texmap = crate::landscape::RuntimeTexMapState::default();
+        texmap.set_default_material_entry("Vehicle", 2);
+        let mut landscape =
+            crate::landscape::Landscape::new(8, vec![8; 8]).expect("landscape builds");
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
+        engine.set_landscape(landscape);
+        engine
+    }
+
+    #[test]
+    fn grid_world_movement_skips_the_solid_mask_candidate_scan() {
+        // A grid world bakes masks into the plane via put_solid_mask, so
+        // solid_masks_for_movement returns an empty overlay whatever the
+        // candidate scan found (:966-969) — and every real scenario is a grid
+        // world. Deriving the candidates first walked every object against the
+        // definition table to build a value its only consumer discards: on
+        // Gold Rush that dead scan was ~23% of every simulation frame.
+        let mut engine = grid_world_engine();
+        assert!(
+            engine.solid_mask_grid_mode(),
+            "the fixture must be a grid world or this test pins nothing"
+        );
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine
+            .register_definition(masked)
+            .expect("masked definition registers");
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
+        for _ in 0..8 {
+            engine
+                .spawn_object(SpawnConfig::new("Plain"))
+                .expect("plain object spawns");
+        }
+
+        SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(|count| count.set(0));
+        SOLID_MASK_DEFINITION_LOOKUPS.with(|count| count.set(0));
+        assert!(
+            engine.live_movement_solid_masks().is_empty(),
+            "a grid world applies masks through the plane, not the rect overlay"
+        );
+        assert_eq!(
+            SOLID_MASK_DEFINITION_LOOKUPS.with(Cell::get),
+            0,
+            "the discarded candidate scan must not run at all"
+        );
+        assert_eq!(SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn rect_world_movement_still_collects_the_solid_mask_overlay() {
+        // The overlay model is the fixture path, and it must keep seeing
+        // masks: the grid short-circuit may not swallow a world that has no
+        // baked plane to fall back on.
+        let mut engine = Engine::new();
+        assert!(!engine.solid_mask_grid_mode(), "no landscape, no grid");
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine
+            .register_definition(masked)
+            .expect("masked definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
+
+        assert_eq!(
+            engine.live_movement_solid_masks().len(),
+            1,
+            "the rect overlay still reports the masked object"
+        );
     }
 
     #[test]

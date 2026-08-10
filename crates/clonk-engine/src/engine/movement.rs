@@ -27,7 +27,7 @@ impl Engine {
     }
 
     fn refresh_live_movement_solid_masks(&self, solid_masks: &mut Vec<SolidMaskRect>) {
-        *solid_masks = self.solid_masks_for_movement(&self.active_solid_mask_indices());
+        *solid_masks = self.live_movement_solid_masks();
     }
 
     fn apply_live_movement_side_bounds(
@@ -897,8 +897,7 @@ impl Engine {
         let old_movement_velocity = self.objects[idx].fixed_velocity;
         let old_movement_hit_flags = self.objects[idx].state.ocf;
         let object_id = self.objects[idx].id;
-        let live_solid_mask_indices = self.active_solid_mask_indices();
-        let mut solid_masks = self.solid_masks_for_movement(&live_solid_mask_indices);
+        let mut solid_masks = self.live_movement_solid_masks();
         let mut mask_attachments = None;
         let mut movement_outcome = self.advance_live_position_per_pixel(
             object_id,
