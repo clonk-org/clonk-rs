@@ -776,6 +776,11 @@ impl GameApp {
                 let _ = self.apply_pending_viewport_presentation_requests();
                 let local_viewport_owners_before_tick = self.execute_local_team_selections()?;
                 self.record_network_stats_control_frame();
+                let player_infos_before_tick = self
+                    .engine
+                    .players()
+                    .map(|player| (player.id(), player.player_info_id()))
+                    .collect::<Vec<_>>();
                 let tick_result = self.engine.tick();
                 // PauseGame is a process-local console request emitted from
                 // scripts during this tick. Native applies it immediately,
@@ -785,6 +790,22 @@ impl GameApp {
                 let target_result = self.apply_engine_network_target_fps_requests();
                 self.snapshot = tick_result?;
                 target_result?;
+                let retired_player_info = player_infos_before_tick
+                    .into_iter()
+                    .find(|(player, _)| self.engine.player(*player).is_none())
+                    .map(|(_, player_info)| player_info);
+                if let Some(player_info) =
+                    retired_player_info.filter(|player_info| *player_info != 0)
+                {
+                    let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+                    if self
+                        .control_player_infos
+                        .mark_removed(player_info, false, game_part_frame)
+                    {
+                        self.prune_host_local_alternate_colors();
+                        self.publish_current_host_player_infos();
+                    }
+                }
                 self.record_network_stats_frame();
                 self.reconcile_message_board_input_dialog()?;
                 let retired_viewport_owner = local_viewport_owners_before_tick
