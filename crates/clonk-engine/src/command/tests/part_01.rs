@@ -1787,6 +1787,361 @@
     }
 
     #[test]
+    fn move_to_far_vertical_waypoint_stages_max_height_wall_jump() {
+        // Pinned C++ leaves this point-clear 67px vertical waypoint inert:
+        // DFA_WALK assigns only Left/Right and JumpControl accepts at most a
+        // 40px overhead gap (C4Command.cpp:189-208,228-255,319-327,1874-1893).
+        // Deliberately diverge for an intermediate pathfinder waypoint by
+        // staging one native-height wall jump toward the final destination.
+        let width = 320usize;
+        let height = 220usize;
+        let mut bytes = vec![0; width * height];
+        for y in 100..height {
+            for x in 0..width {
+                let shaft = (40..=80).contains(&x) && y <= 175;
+                let tunnel = (40..=250).contains(&x) && (145..=175).contains(&y);
+                if !shaft && !tunnel {
+                    bytes[y * width + x] = 1;
+                }
+            }
+        }
+        let mut landscape =
+            crate::Landscape::with_default_material(width as u32, vec![100; width], None)
+                .expect("U-route landscape");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            width as u32,
+            height as u32,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+
+        let mut walker = walking_jumper(Vector2::new(80, 166));
+        walker.physical.can_scale = 1;
+        let objects = CommandObjectSnapshots::default();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(160))
+                    .with_ty(Some(90))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+
+        let result = stack.step(&ctx).expect("vertical waypoint executes");
+
+        assert_eq!(result.status, CommandStatus::Running);
+        let snapshot = stack.snapshot();
+        let requests = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| command.request.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 4, "jump staging adds exactly two commands");
+        assert_eq!(requests[0].id, CommandId::MoveTo);
+        assert_eq!((requests[0].tx, requests[0].ty), (Some(47), Some(175)));
+        assert_eq!(requests[0].update_interval, 50);
+        assert_eq!(requests[1].id, CommandId::Jump);
+        assert_eq!((requests[1].tx, requests[1].ty), (Some(80), Some(99)));
+
+        // The same wall and destination on a final/direct MoveTo stay under
+        // the native policy; only an intermediate waypoint may be split.
+        let mut direct = CommandStack::new();
+        direct
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true),
+            )
+            .expect("direct MoveTo queues");
+        direct.step(&ctx).expect("direct MoveTo executes");
+        assert_eq!(direct.snapshot().commands.len(), 1);
+
+        // A qualifying chained scaler still needs a wall beside the staged
+        // 40px point; point-clear sky alone must not invent a jump.
+        let no_wall = crate::Landscape::flat(200, 180);
+        let no_wall_ctx = jump_ctx(&walker, &objects, &players, &definitions, &no_wall);
+        let mut no_wall_stack = CommandStack::new();
+        no_wall_stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(160))
+                    .with_ty(Some(90))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        no_wall_stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+        no_wall_stack
+            .step(&no_wall_ctx)
+            .expect("wall-less waypoint executes");
+        assert_eq!(no_wall_stack.snapshot().commands.len(), 2);
+
+        // An actor that cannot enter SCALE must not be sent into the wall.
+        let mut non_scaler = walker.clone();
+        non_scaler.physical.can_scale = 0;
+        let non_scaler_ctx = jump_ctx(
+            &non_scaler,
+            &objects,
+            &players,
+            &definitions,
+            &landscape,
+        );
+        let mut non_scaler_stack = CommandStack::new();
+        non_scaler_stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(160))
+                    .with_ty(Some(90))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        non_scaler_stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+        non_scaler_stack
+            .step(&non_scaler_ctx)
+            .expect("non-scaler waypoint executes");
+        assert_eq!(non_scaler_stack.snapshot().commands.len(), 2);
+
+        // Shape.Wdt/5 gives this crew a three-pixel WALK target range. Four
+        // pixels of horizontal error already has native Left steering, so it
+        // must not also stage the vertical recovery.
+        let mut sparse_wall = crate::Landscape::flat(200, 180);
+        let mut sparse_pixels = vec![0; 200 * 200];
+        sparse_pixels[126 * 200 + 81] = 1;
+        sparse_wall.set_world_height(200);
+        sparse_wall.set_pixel_grid(crate::landscape::PixelGrid::new(
+            200,
+            200,
+            sparse_pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        assert!(command_path_free(&sparse_wall, 84, 166, 80, 99));
+        assert_eq!(solid_on_which_side(&sparse_wall, 80, 126), 1);
+        let offset_scaler = CommandObjectSnapshot {
+            position: Vector2::new(84, 166),
+            ..walker.clone()
+        };
+        let offset_ctx = jump_ctx(
+            &offset_scaler,
+            &objects,
+            &players,
+            &definitions,
+            &sparse_wall,
+        );
+        let mut offset_stack = CommandStack::new();
+        offset_stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(160))
+                    .with_ty(Some(90))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        offset_stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+        let offset_result = offset_stack
+            .step(&offset_ctx)
+            .expect("offset waypoint executes");
+        assert_eq!(
+            offset_result
+                .update
+                .and_then(|update| update.command_direction),
+            Some(CommandDirection::Left)
+        );
+        assert_eq!(offset_stack.snapshot().commands.len(), 2);
+
+        // A wide MoveToRange can consider a large x error horizontally in
+        // range. The synthetic 40px leg must still satisfy the native
+        // high-angle sector rather than borrowing the final far target's
+        // steeper angle.
+        let mut wide_range_scaler = pathfinder_jumper(Vector2::new(104, 166));
+        wide_range_scaler.move_to_range = 24;
+        wide_range_scaler.physical.can_scale = 1;
+        assert!(command_path_free(&sparse_wall, 104, 166, 80, 99));
+        let normalize_angle = |mut angle| {
+            while angle > 180 {
+                angle -= 360;
+            }
+            angle
+        };
+        let original_angle = normalize_angle(c4_angle(104, 166, 80, 99));
+        let staged_angle = normalize_angle(c4_angle(104, 166, 80, 126));
+        assert!(inside(
+            original_angle - JUMP_HIGH_ANGLE,
+            -3 * JUMP_ANGLE_RANGE,
+            3 * JUMP_ANGLE_RANGE,
+        ));
+        assert!(!inside(
+            staged_angle - JUMP_HIGH_ANGLE,
+            -3 * JUMP_ANGLE_RANGE,
+            3 * JUMP_ANGLE_RANGE,
+        ));
+        let wide_range_ctx = jump_ctx(
+            &wide_range_scaler,
+            &objects,
+            &players,
+            &definitions,
+            &sparse_wall,
+        );
+        let mut wide_range_stack = CommandStack::new();
+        wide_range_stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(160))
+                    .with_ty(Some(90))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        wide_range_stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+        wide_range_stack
+            .step(&wide_range_ctx)
+            .expect("wide-range waypoint executes");
+        assert_eq!(wide_range_stack.snapshot().commands.len(), 2);
+
+        // FairCrew physical resolution resumes the same native Execute. The
+        // intermediate-waypoint decision must survive that callback boundary
+        // (C4Command.cpp:219-220,1816-1893).
+        let mut deferred_scaler = walker.clone();
+        deferred_scaler.physical.can_scale = 0;
+        deferred_scaler.physical_deferred = true;
+        let deferred_ctx = jump_ctx(
+            &deferred_scaler,
+            &objects,
+            &players,
+            &definitions,
+            &landscape,
+        );
+        let mut deferred_stack = CommandStack::new();
+        deferred_stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(160))
+                    .with_ty(Some(90))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        deferred_stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+        let deferred = deferred_stack
+            .execute_front(&deferred_ctx)
+            .expect("physical read stages");
+        let command_instance_id = match deferred.events.as_slice() {
+            [CommandEvent::ResolveCommandPhysical {
+                command_instance_id,
+                ..
+            }] => *command_instance_id,
+            other => panic!("unexpected deferred events: {other:?}"),
+        };
+        assert_ne!(command_instance_id, 0);
+        let encoded = serde_json::to_value(deferred_stack.snapshot())
+            .expect("deferred waypoint snapshot serializes");
+        let decoded: CommandStackSnapshot =
+            serde_json::from_value(encoded).expect("deferred waypoint snapshot deserializes");
+        let mut restored_deferred_stack = CommandStack::new();
+        restored_deferred_stack.restore_from_snapshot(&decoded);
+        let mut resolved = PhysicalInfo::default();
+        resolved.can_scale = 1;
+        restored_deferred_stack
+            .execute_pending_physical(
+                &deferred_ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                0,
+                resolved,
+            )
+            .expect("deferred waypoint resumes");
+        assert_eq!(restored_deferred_stack.snapshot().commands.len(), 4);
+
+        // A callback that changes the actor out of WALK keeps native
+        // JumpControl's retained tail but must suppress this WALK-specific
+        // extension.
+        let callback_scaler = CommandObjectSnapshot {
+            action_procedure: ActionProcedure::Scale,
+            physical_deferred: false,
+            ..deferred_scaler
+        };
+        let callback_ctx = jump_ctx(
+            &callback_scaler,
+            &objects,
+            &players,
+            &definitions,
+            &landscape,
+        );
+        let mut callback_stack = CommandStack::new();
+        callback_stack.restore_from_snapshot(&decoded);
+        callback_stack
+            .execute_pending_physical(
+                &callback_ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                0,
+                resolved,
+            )
+            .expect("callback-mutated waypoint resumes");
+        assert_eq!(callback_stack.snapshot().commands.len(), 2);
+    }
+
+    #[test]
     fn move_to_unclimbable_vertical_waypoint_expires_successfully_like_cpp() {
         // A point-clear vertical waypoint is accepted, but DFA_WALK assigns
         // only Left/Right and JumpControl's overhead arm requires a 10..=40
