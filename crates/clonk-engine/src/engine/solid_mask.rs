@@ -958,6 +958,14 @@ impl Engine {
         result
     }
 
+    /// The rect overlay a live movement step checks against: the candidate
+    /// scan feeding [`Self::solid_masks_for_movement`]. Movement derived this
+    /// pair inline in three places; naming it keeps the candidate set and its
+    /// only consumer together.
+    pub(crate) fn live_movement_solid_masks(&self) -> Vec<SolidMaskRect> {
+        self.solid_masks_for_movement(&self.active_solid_mask_indices())
+    }
+
     pub(crate) fn solid_masks_for_movement(
         &self,
         candidate_indices: &[usize],
