@@ -1518,9 +1518,13 @@ fn package_output(target_triple: &str, archive: bool) -> PackageOutput {
 
 fn package(options: PackageOptions) -> Result<()> {
     let paths = WorkspacePaths::detect()?;
-    build_runtime_binaries(&paths)?;
-    audit_release_dependencies(&paths)?;
-    let package_dir = assemble_package_layout(&paths)?;
+    package_with_paths(&paths, options)
+}
+
+fn package_with_paths(paths: &WorkspacePaths, options: PackageOptions) -> Result<()> {
+    build_runtime_binaries(paths)?;
+    audit_release_dependencies(paths)?;
+    let package_dir = assemble_package_layout(paths)?;
     // Runs on the real tree, not a fixture: an entry that belongs to no update
     // component would ship in the installer but never reach a client updating
     // in place, and nothing else would notice.
@@ -1537,7 +1541,7 @@ fn package(options: PackageOptions) -> Result<()> {
             .into_iter()
             .filter(|component| component.id().is_platform_independent())
         {
-            let emitted = emit_update_component(component, &package_dir, &components_dir, &paths)?;
+            let emitted = emit_update_component(component, &package_dir, &components_dir, paths)?;
             tracing::info!(
                 path = %emitted.path.display(),
                 sha256 = %emitted.sha256,
@@ -1549,7 +1553,7 @@ fn package(options: PackageOptions) -> Result<()> {
     // The bundle is the macOS staged layout, so it is assembled even when no
     // disk image is requested.
     let staged = if paths.target_triple.contains("apple-darwin") {
-        assemble_macos_app_bundle(&paths, &package_dir)?
+        assemble_macos_app_bundle(paths, &package_dir)?
     } else {
         package_dir
     };
@@ -1561,7 +1565,7 @@ fn package(options: PackageOptions) -> Result<()> {
             components::BuiltComponent::Engine,
             &staged,
             &components_dir,
-            &paths,
+            paths,
         )?;
         tracing::info!(
             path = %emitted.path.display(),
@@ -1584,11 +1588,11 @@ fn package(options: PackageOptions) -> Result<()> {
             tracing::info!(path = %staged.display(), "staged Rust port without an archive");
         }
         PackageOutput::DiskImage => {
-            let image = create_dmg(&paths, &staged)?;
+            let image = create_dmg(paths, &staged)?;
             tracing::info!(path = %image.display(), "packaged Rust port");
         }
         PackageOutput::Archive => {
-            let archive = create_archive(&paths, &staged)?;
+            let archive = create_archive(paths, &staged)?;
             tracing::info!(path = %archive.display(), "packaged Rust port");
         }
     }
