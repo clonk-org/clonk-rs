@@ -124,7 +124,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/clonk-msvc-thinlto
-          key: clonk-msvc-thinlto-v1-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'scripts/configure-msvc-runtime.sh') }}
+          # Release preparation changes Cargo package versions without changing
+          # bitcode. Key the trusted cache by compiler/config/source instead;
+          # LLD independently hashes every input before reusing an entry.
+          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', 'third_party/**/*.rs') }}
 
       # The earlier cache serves smoke tests and the native packaging tool.
       # Re-enter it after setting target flags so this producer has the same

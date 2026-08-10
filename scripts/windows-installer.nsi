@@ -38,9 +38,11 @@ RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\Programs\Clonk Rust"
 InstallDirRegKey HKCU "Software\Clonk Rust" "InstallDir"
 
-; The payload is ~326 MB of engine and game data; solid LZMA is worth the
-; compression time here.
-SetCompressor /SOLID lzma
+; Most of the ~326 MB payload is already-compressed game data. Solid LZMA took
+; more than three minutes to save only about 19% in the measured release job;
+; solid zlib keeps one compact installer without putting compression on the
+; merge queue's critical path.
+SetCompressor /SOLID zlib
 
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "Clonk Rust"
