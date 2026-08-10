@@ -4,6 +4,22 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-08-10
+
+### Bug fixes
+
+- Preserve zero-sized spell world faces (#232)
+
+### Performance
+
+- Publish qualified releases within two minutes (#233)
+- Keep 24-player Hazard games responsive (#229)
+- Keep Hazard play responsive at four players (#228)
+
+### Testing
+
+- Cover Dragon Rock network hostility restoration (#230)
+
 ## [0.9.3] - 2026-08-09
 
 ### Bug fixes
