@@ -613,6 +613,35 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   next to the existing `dig_free_runs_before_movers_own_baked_mask_is_removed`
   (`crates/clonk-engine-unit-tests/tests/unit/parts/solidmask_shape.rs`).
 
+- Closed 2026-08-09: **Automatic construction can pace forever around a
+  point-clear but unclimbable waypoint — inherited oracle behavior.** Reported
+  as clonk-org/clonk-rs#209 in Frontier. A deterministic Build -> Acquire -> Get
+  -> MoveTo probe with the shipped CLNK/CST1/ROCK definitions collected its
+  rock, then reproduced the same waypoint loop while returning to the
+  construction site. A source-level audit of the pinned C++ control flow,
+  rather than a live end-to-end C++ run, predicts the same loop when either leg
+  contains such a waypoint.
+  A missing component makes Build queue Acquire (`src/C4Object.cpp:1682-1747`);
+  Acquire scans `OCF_Available` objects without a reachability test
+  (`src/C4Command.cpp:2082-2136`) and the nearest-object scan uses straight-line
+  squared distance (`src/C4Game.cpp:1334-1423`); Get repeatedly queues a
+  25-tick MoveTo at `Target->x + Random(15) - 7`
+  (`src/C4Command.cpp:1251-1291`). C4PathFinder tests point-clear pixels rather
+  than actor traversal and emits those clear-ray waypoints
+  (`src/C4PathFinder.cpp:294-343,383-400`; callback in
+  `src/C4Game.cpp:2288-2292`), so it can accept a vertical shaft waypoint that
+  a walking Clonk cannot execute. DFA_WALK assigns only Left/Right
+  (`src/C4Command.cpp:319-327`), and the overhead JumpControl arm accepts only a
+  10-to-40-pixel gap (`src/C4Command.cpp:1874-1893`). The child waypoint then
+  expires as *success* (`src/C4Command.cpp:1544-1555`), leaving Get/Acquire free
+  to select and route to the same object again. Adding reachability filtering,
+  vertical WALK steering, stuck failure or different timeout semantics would
+  change command and `Random()` order and desynchronize from the oracle.
+  Characterized at the relevant focused seams by
+  `move_to_unclimbable_vertical_waypoint_expires_successfully_like_cpp`,
+  `acquire_uses_squared_distance_and_cpp_master_list_order_for_ties` and
+  `get_interval_expires_successfully_after_exact_execution_count`.
+
 - Closed 2026-07-30: **Every preplaced object whose saved `DrawTransform`
   carried the FlipDir mirror rendered exactly backwards.** Reported as the
   Dragon Rock intro dragon facing right while it flew left. `C4Object::

@@ -1787,6 +1787,67 @@
     }
 
     #[test]
+    fn move_to_unclimbable_vertical_waypoint_expires_successfully_like_cpp() {
+        // A point-clear vertical waypoint is accepted, but DFA_WALK assigns
+        // only Left/Right and JumpControl's overhead arm requires a 10..=40
+        // pixel gap. The 25th Execute therefore expires this silent child as
+        // success without charging its base command a failure
+        // (C4Command.cpp:189-208,228-255,319-327,1544-1555,1851-1910).
+        let mut walker = walking_jumper(Vector2::new(80, 166));
+        walker.command_direction = CommandDirection::Up;
+        let objects = CommandObjectSnapshots::default();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let landscape = crate::Landscape::flat(200, 180);
+        assert!(command_path_free(&landscape, 80, 166, 80, 99));
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Wait)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("base command queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(80))
+                    .with_ty(Some(99))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+
+        for frame in 1..25 {
+            let ctx = CommandRuntimeContext {
+                landscape: Some(&landscape),
+                ..command_ctx_at_frame(&walker, &objects, &players, &definitions, frame)
+            };
+            let result = stack.step(&ctx).expect("MoveTo executes");
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.update.is_none(), "WALK does not steer vertically");
+            assert!(
+                result.operations.is_empty(),
+                "the vertical gap triggers no jump arm"
+            );
+        }
+
+        let expiry_ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            ..command_ctx_at_frame(&walker, &objects, &players, &definitions, 25)
+        };
+        assert_eq!(
+            stack.step(&expiry_ctx).expect("waypoint expires").status,
+            CommandStatus::Completed
+        );
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].failures, 0);
+    }
+
+    #[test]
     fn follow_completes_for_unselected_crew() {
         let follower_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
@@ -2406,4 +2467,3 @@
         assert_eq!(result2.status, CommandStatus::Completed);
         assert!(stack.is_empty());
     }
-
