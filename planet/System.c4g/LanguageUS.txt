@@ -1028,6 +1028,7 @@ IDS_NET_CLIENT_UNREADY=Client %s not ready.
 IDS_NET_COMMENTCHANGED=Network game comment adjusted.
 IDS_NET_COMPUTERNAME=Computer name:
 IDS_NET_COMPUTERNAME_DESC=Name used to identify this computer in network games.
+IDS_NET_CONNECTGAME=Connecting to %s...
 IDS_NET_CONNECTHOST=Connecting to host on %s...
 IDS_NET_CONNECTING=Connecting to %s at %s
 IDS_NET_CONTROL=Control

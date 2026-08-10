@@ -875,6 +875,24 @@ impl GameApp {
             }
     }
 
+    /// The name C4StartupNetListEntry gives an advertised game: its title over
+    /// the client hosting it (oracle-src-pinned 7d43b47b
+    /// src/C4StartupNetDlg.cpp:454).
+    pub(crate) fn startup_network_reference_title(
+        resources: &HashMap<String, String>,
+        reference: &clonk_network::NetworkGameReference,
+    ) -> String {
+        let host = if reference.host_name.is_empty() {
+            "unknown"
+        } else {
+            reference.host_name.as_str()
+        };
+        format_resource_string(
+            runtime_resource_text_from_table(resources, "IDS_NET_REFONCLIENT", "%s on %s"),
+            &[&reference.title, host],
+        )
+    }
+
     pub(crate) fn startup_network_reference_row_with_config(
         resources: &HashMap<String, String>,
         use_alternate_server: bool,
@@ -882,15 +900,7 @@ impl GameApp {
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
         use clonk_frontend::startup_netdlg::{NetDlgGameEntry, NetDlgRowIcon, NetDlgStatusIcon};
 
-        let host = if reference.host_name.is_empty() {
-            "unknown"
-        } else {
-            reference.host_name.as_str()
-        };
-        let title = format_resource_string(
-            runtime_resource_text_from_table(resources, "IDS_NET_REFONCLIENT", "%s on %s"),
-            &[&reference.title, host],
-        );
+        let title = Self::startup_network_reference_title(resources, reference);
         let goals = if reference.goals.is_empty() {
             runtime_resource_text_from_table(resources, "IDS_CTL_NOGOAL", "No game goal")
         } else {
@@ -2047,11 +2057,11 @@ impl GameApp {
         receiver: Receiver<StartupNetworkResult>,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
-        connect_targets: Option<String>,
+        join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         self.install_startup_network_connection(
             StartupNetworkConnection::new(receiver, selected_scenario, purpose),
-            connect_targets,
+            join_target,
         )
     }
 
@@ -2061,19 +2071,19 @@ impl GameApp {
         attempt: StartupNetworkAttempt,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
-        connect_targets: Option<String>,
+        join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         self.install_startup_network_connection(
             StartupNetworkConnection::new(receiver, selected_scenario, purpose)
                 .with_attempt(attempt),
-            connect_targets,
+            join_target,
         )
     }
 
     fn install_startup_network_connection(
         &mut self,
         connection: StartupNetworkConnection,
-        connect_targets: Option<String>,
+        join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         let purpose = connection.purpose;
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
@@ -2082,13 +2092,12 @@ impl GameApp {
             dialog.cancel_interaction();
         }
         if purpose == StartupNetworkPurpose::Join {
-            let connect_targets = connect_targets
-                .filter(|targets| !targets.trim().is_empty())
-                .unwrap_or_else(|| "network game".to_string());
-            let message = format_resource_string(
-                self.runtime_resource_text("IDS_NET_CONNECTHOST", "Connecting to host on %s..."),
-                &[&connect_targets],
-            );
+            let target = join_target
+                .filter(|target| !target.is_blank())
+                .unwrap_or_else(|| StartupJoinTarget::Addresses("network game".to_string()));
+            let (resource_key, fallback, name) = target.message_parts();
+            let message =
+                format_resource_string(self.runtime_resource_text(resource_key, fallback), &[name]);
             let caption = self.runtime_resource_text("IDS_NET_JOINGAME", "Joining network game");
             self.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::new(

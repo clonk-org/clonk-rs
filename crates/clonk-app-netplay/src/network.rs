@@ -170,6 +170,11 @@ pub struct ClientSettings {
     /// League HTTP host retained from accepted JoinData for later local-player
     /// authentication dialogs after the join envelope is released.
     pub league_server_name: String,
+    /// Advertised game this client chose, named as its netdlg row names it.
+    /// Empty for a direct address join, which has no reference to name. It
+    /// rides with the settings so a password retry or a host-restart rejoin
+    /// still knows what the player picked.
+    pub game_name: String,
     pub mesh_tcp_bind_address: Option<SocketAddr>,
     pub mesh_udp_bind_address: Option<SocketAddr>,
     pub netpuncher_address: Option<String>,
@@ -205,6 +210,7 @@ impl ClientSettings {
             league_transport: clonk_network::LeagueHttpTransportConfig::default(),
             league_auth: clonk_network::LeagueAuthRequestHead::default(),
             league_server_name: String::new(),
+            game_name: String::new(),
             mesh_tcp_bind_address: Some(wildcard),
             mesh_udp_bind_address: Some(wildcard),
             netpuncher_address: None,
@@ -219,6 +225,11 @@ impl ClientSettings {
         addresses: impl IntoIterator<Item = NetworkAddress>,
     ) -> Self {
         self.server_addresses = addresses.into_iter().collect();
+        self
+    }
+
+    pub fn with_game_name(mut self, game_name: impl Into<String>) -> Self {
+        self.game_name = game_name.into();
         self
     }
 

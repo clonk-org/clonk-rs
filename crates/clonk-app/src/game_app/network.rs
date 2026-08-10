@@ -37,6 +37,7 @@ impl GameApp {
             .map(|selection| selection.group_maker().clone());
         let classic = self.classic_command_line.clone();
         let reference_config = load_reference_query_settings(app_paths.as_ref());
+        let resources = self.startup_tooltip_resources.clone();
         let connect_target = address.clone();
         let spawn = thread::Builder::new()
             .name("lc-classic-direct-join".to_string())
@@ -62,7 +63,9 @@ impl GameApp {
                         ))
                     })?;
                     Ok(ClassicDirectReferenceQueryResult {
-                        settings,
+                        settings: settings.with_game_name(Self::startup_network_reference_title(
+                            &resources, &reference,
+                        )),
                         password_needed: reference.password_needed,
                     })
                 })();
@@ -5064,7 +5067,7 @@ impl GameApp {
                     attempt,
                     StartupNetworkPurpose::Join,
                     None,
-                    Some(connect_target),
+                    Some(StartupJoinTarget::Addresses(connect_target)),
                 )?;
             }
             Err(error) => {
@@ -5108,7 +5111,11 @@ impl GameApp {
         let settings = settings
             .with_compatibility_build(reference.build)
             .with_join_route_plan(route_plan)
-            .with_netpuncher(netpuncher_address, netpuncher_game_ids);
+            .with_netpuncher(netpuncher_address, netpuncher_game_ids)
+            .with_game_name(Self::startup_network_reference_title(
+                &self.startup_tooltip_resources,
+                &reference,
+            ));
         self.pending_network_join = Some(settings);
         if reference.password_needed {
             self.open_network_join_password_dialog()?;
@@ -5135,7 +5142,19 @@ impl GameApp {
             self.status_text = "Network join settings are unavailable".to_string();
             return Ok(());
         };
+        // C++ puts this list in the modal as well as the log; the modal names
+        // the chosen game instead, so the endpoints survive only here.
         let connect_targets = startup_network_connect_targets(&settings);
+        tracing::info!(
+            addresses = %connect_targets,
+            game = %settings.game_name,
+            "connecting to network host"
+        );
+        let join_target = if settings.game_name.trim().is_empty() {
+            StartupJoinTarget::Addresses(connect_targets)
+        } else {
+            StartupJoinTarget::Game(settings.game_name.clone())
+        };
         let local_owner = self.local_owner;
         let spawn = spawn_startup_network_attempt("lc-startup-network", move |cancellation| {
             let mode = NetworkMode::Client(settings.clone());
@@ -5149,7 +5168,7 @@ impl GameApp {
                     attempt,
                     StartupNetworkPurpose::Join,
                     None,
-                    Some(connect_targets),
+                    Some(join_target),
                 ) {
                     self.pending_network_join = None;
                     return Err(error);

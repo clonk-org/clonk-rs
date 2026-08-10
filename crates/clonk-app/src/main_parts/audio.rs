@@ -5262,6 +5262,44 @@ pub(crate) enum StartupNetworkPurpose {
     StagedHost,
 }
 
+/// What the join progress modal names as its destination.
+///
+/// C++ only ever names transport endpoints: `C4Network2::Join` formats
+/// `IDS_NET_CONNECTHOST` from every address it dialled (oracle-src-pinned
+/// 7d43b47b src/C4Network2.cpp:410-419). A masterserver reference routinely
+/// advertises a dozen of them -- `SetSourceAddress` rewrites the host's null
+/// address onto one the reference already lists, so several are duplicates --
+/// and the modal fills with them (clonk-org/clonk-rs#204). A player who picked
+/// a game from the list is told which game; the endpoints go to the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StartupJoinTarget {
+    /// An advertised game, named as its netdlg row names it.
+    Game(String),
+    /// Transport endpoints, in C++'s wording. Also what a direct address join
+    /// shows, because an address is exactly what that player typed.
+    Addresses(String),
+}
+
+impl StartupJoinTarget {
+    /// The resource string that reads naturally for this kind of destination,
+    /// its built-in fallback, and the name substituted into it.
+    pub(crate) fn message_parts(&self) -> (&'static str, &'static str, &str) {
+        match self {
+            Self::Game(name) => ("IDS_NET_CONNECTGAME", "Connecting to %s...", name.as_str()),
+            Self::Addresses(addresses) => (
+                "IDS_NET_CONNECTHOST",
+                "Connecting to host on %s...",
+                addresses.as_str(),
+            ),
+        }
+    }
+
+    pub(crate) fn is_blank(&self) -> bool {
+        let (_, _, name) = self.message_parts();
+        name.trim().is_empty()
+    }
+}
+
 pub(crate) const STARTUP_RESTART_LOG_CAPACITY: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
