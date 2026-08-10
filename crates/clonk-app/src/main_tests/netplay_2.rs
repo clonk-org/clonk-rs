@@ -6602,6 +6602,116 @@ fn offline_runtime_join_player_local_no_network() {
 }
 
 #[test]
+fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejoin() {
+    // C4PlayerList::Retire routes through Remove, which marks the linked
+    // C4PlayerInfo removed before deleting the live player; that makes the
+    // profile available to ActivateNewPlayer again (src/C4PlayerList.cpp:219-267,
+    // 398-409; src/C4MainMenu.cpp:59-121).
+    let player_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../clonk-engine/tests/fixtures/embedded_player.c4p"
+    ));
+    let player_file = PlayerFile::load_from_path(player_path).expect("load player fixture");
+    let mut app = new_synthetic_running_sandbox_app();
+    app.startup_player_files.push(StartupPlayerFile {
+        path: player_path.to_path_buf(),
+        file_name: player_path
+            .file_name()
+            .expect("fixture has a basename")
+            .to_string_lossy()
+            .into_owned(),
+        player_file: player_file.clone(),
+        render_model: clonk_frontend::startup_plrsel::PlrSelPlayer {
+            name: player_file.name.clone(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: player_file.normalized_preferred_color(),
+            score: player_file.score,
+            rounds: player_file.rounds,
+            rounds_won: player_file.rounds_won,
+            rounds_lost: player_file.rounds_lost,
+            total_playing_time: player_file.total_playing_time,
+            comment: String::new(),
+        },
+    });
+    let before_info_ids = app.control_player_infos.client_info_ids(0);
+
+    app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+        player_path.to_string_lossy().into_owned(),
+    ))
+    .expect("join the runtime player");
+
+    let retired_info_id = app
+        .control_player_infos
+        .client_info_ids(0)
+        .into_iter()
+        .find(|info_id| !before_info_ids.contains(info_id))
+        .expect("runtime player info was added");
+    let retired_owner = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == retired_info_id)
+        .map(clonk_engine::Player::id)
+        .expect("runtime player joined");
+    let original_control = app
+        .local_controls
+        .assignment(retired_owner)
+        .expect("runtime player has local controls");
+
+    assert!(app
+        .engine
+        .execute_eliminate_player_control(&clonk_engine::EliminatePlayerControlData {
+            player: retired_owner,
+            by_client: 0,
+        })
+        .expect("execute host elimination"));
+    for _ in 0..60 {
+        app.update().expect("advance retirement delay");
+    }
+
+    assert!(app.engine.player(retired_owner).is_none());
+    let retired_info = app
+        .control_player_infos
+        .get(retired_info_id)
+        .expect("retired player info remains as history");
+    assert_ne!(
+        retired_info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+        0,
+        "automatic retirement must release the profile from FileInUse"
+    );
+    assert!(app
+        .available_runtime_player_files()
+        .iter()
+        .any(|entry| { entry.file == player_path.to_string_lossy() }));
+    let info_ids_before_rejoin = app.control_player_infos.client_info_ids(0);
+
+    app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+        player_path.to_string_lossy().into_owned(),
+    ))
+    .expect("rejoin the retired profile");
+
+    let rejoined_info_id = app
+        .control_player_infos
+        .client_info_ids(0)
+        .into_iter()
+        .find(|info_id| !info_ids_before_rejoin.contains(info_id))
+        .expect("rejoined player info was added");
+    let rejoined_owner = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == rejoined_info_id)
+        .map(clonk_engine::Player::id)
+        .expect("retired profile rejoins as a new player");
+    let rejoined_control = app
+        .local_controls
+        .assignment(rejoined_owner)
+        .expect("rejoined player has local controls");
+    assert_eq!(rejoined_control.set, original_control.set);
+    assert_eq!(rejoined_control.mouse, original_control.mouse);
+}
+
+#[test]
 fn active_network_client_runtime_join_publishes_before_add_request() {
     // JoinPlayer:<file> calls JoinLocalPlayer(file, true). LoadFromLocalFile
     // publishes the NRT_Player resource before the client sends the
