@@ -694,6 +694,8 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
         submissions: 1_200,
         refreshed_frames: 1_200,
         simulation_frames: 714,
+        runtime_stippels_at_start: 0,
+        runtime_stippels_at_end: 0,
         automatic_graphics_skips: 0,
         graphics_average: INGAME_FRAME_INTERVAL,
         graphics_max: Duration::from_millis(32),
@@ -703,6 +705,18 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
         graphics_samples: Vec::new(),
     };
     assert_eq!(validate_native_tick_presentation_budget(&passing), Ok(()));
+
+    let mut missing_submission = passing.clone();
+    missing_submission.submissions = 713;
+    assert!(validate_native_tick_presentation_budget(&missing_submission)
+        .unwrap_err()
+        .contains("successful presentation submissions 713 below native cadence 714"));
+
+    let mut missing_refresh = passing.clone();
+    missing_refresh.refreshed_frames = 713;
+    assert!(validate_native_tick_presentation_budget(&missing_refresh)
+        .unwrap_err()
+        .contains("refreshed frames 713 below native cadence 714"));
 
     let mut too_slow = passing.clone();
     too_slow.graphics_average = Duration::from_micros(28_001);

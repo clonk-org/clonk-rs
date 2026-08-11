@@ -816,8 +816,8 @@
     #[test]
     fn presentation_benchmark_context_reports_actual_network_players() {
         assert_eq!(
-                presentation_benchmark_context_line(24, 24, 24, 24, 24, 24),
-                "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 synchronized_player_infos=24 activated_nonhost_clients=24 runtime_crew_objects=24 runtime_players_with_live_crew=24 runtime_players_with_exactly_one_live_sf5b_crew=24"
+                presentation_benchmark_context_line(24, 24, 24, 24, 24, 24, 1_000, 1_000),
+                "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 synchronized_player_infos=24 activated_nonhost_clients=24 runtime_crew_objects=24 runtime_players_with_live_crew=24 runtime_players_with_exactly_one_live_sf5b_crew=24 runtime_st5b_objects_at_measurement_start=1000 runtime_st5b_objects_at_measurement_end=1000"
             );
     }
 
@@ -908,6 +908,18 @@
             .expect("sandbox crew object")
             .alive = false;
         assert_eq!(runtime_crew_object_count(&app.snapshot), 0);
+    }
+
+    #[test]
+    fn presentation_benchmark_counts_only_active_stippels() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let object = app.snapshot.objects.first_mut().expect("sandbox object");
+        object.definition_id = "ST5B".to_string();
+
+        assert_eq!(runtime_stippel_object_count(&app.snapshot), 1);
+
+        app.snapshot.objects[0].status = ObjectStatus::Inactive;
+        assert_eq!(runtime_stippel_object_count(&app.snapshot), 0);
     }
 
     #[test]
@@ -1114,6 +1126,34 @@
             benchmark.poll(true, base + Duration::from_secs(10), 999),
             None
         );
+    }
+
+    #[test]
+    fn presentation_benchmark_captures_stippels_at_measurement_boundaries() {
+        let base = Instant::now();
+        let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+
+        assert_eq!(benchmark.poll(true, base, 10), None);
+        assert_eq!(
+            benchmark.poll_with_runtime_stippel_census(
+                true,
+                base + PRESENTATION_BENCHMARK_WARMUP,
+                70,
+                || 1_000,
+            ),
+            None
+        );
+        let report = benchmark
+            .poll_with_runtime_stippel_census(
+                true,
+                base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3),
+                175,
+                || 998,
+            )
+            .expect("measurement window completes");
+
+        assert_eq!(report.runtime_stippels_at_start, 1_000);
+        assert_eq!(report.runtime_stippels_at_end, 998);
     }
 
     #[test]

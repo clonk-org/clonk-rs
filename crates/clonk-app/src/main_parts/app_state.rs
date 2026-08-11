@@ -3347,6 +3347,7 @@ impl PresentationStats {
 struct PresentationBenchmarkMeasurement {
     started: Option<Instant>,
     simulation_frame: u64,
+    runtime_stippels_at_start: usize,
     submissions: u64,
     refreshed_frames: u64,
     automatic_graphics_skips: u64,
@@ -3361,6 +3362,8 @@ pub(crate) struct PresentationBenchmarkReport {
     pub(crate) submissions: u64,
     pub(crate) refreshed_frames: u64,
     pub(crate) simulation_frames: u64,
+    pub(crate) runtime_stippels_at_start: usize,
+    pub(crate) runtime_stippels_at_end: usize,
     pub(crate) automatic_graphics_skips: u64,
     pub(crate) graphics_average: Duration,
     pub(crate) graphics_max: Duration,
@@ -3447,6 +3450,16 @@ impl PresentationBenchmark {
         now: Instant,
         simulation_frame: u64,
     ) -> Option<PresentationBenchmarkReport> {
+        self.poll_with_runtime_stippel_census(running, now, simulation_frame, || 0)
+    }
+
+    pub(crate) fn poll_with_runtime_stippel_census(
+        &mut self,
+        running: bool,
+        now: Instant,
+        simulation_frame: u64,
+        runtime_stippel_census: impl FnOnce() -> usize,
+    ) -> Option<PresentationBenchmarkReport> {
         if self.finished {
             return None;
         }
@@ -3460,6 +3473,7 @@ impl PresentationBenchmark {
             if now.saturating_duration_since(warmup_started) >= PRESENTATION_BENCHMARK_WARMUP {
                 self.measurement.started = Some(now);
                 self.measurement.simulation_frame = simulation_frame;
+                self.measurement.runtime_stippels_at_start = runtime_stippel_census();
             }
             return None;
         };
@@ -3485,6 +3499,8 @@ impl PresentationBenchmark {
             submissions,
             refreshed_frames: self.measurement.refreshed_frames,
             simulation_frames: simulation_frame.saturating_sub(self.measurement.simulation_frame),
+            runtime_stippels_at_start: self.measurement.runtime_stippels_at_start,
+            runtime_stippels_at_end: runtime_stippel_census(),
             automatic_graphics_skips: self.measurement.automatic_graphics_skips,
             graphics_average,
             graphics_max: self.measurement.graphics_max,
@@ -3604,6 +3620,21 @@ pub(crate) fn validate_native_tick_presentation_budget(
     if report.submissions == 0 || report.refreshed_frames == 0 {
         return Err("benchmark produced no refreshed presentation".to_string());
     }
+    let native_cadence =
+        u64::try_from(report.elapsed.as_nanos() / INGAME_FRAME_INTERVAL.as_nanos())
+            .unwrap_or(u64::MAX);
+    if report.submissions < native_cadence {
+        return Err(format!(
+            "successful presentation submissions {} below native cadence {native_cadence}",
+            report.submissions
+        ));
+    }
+    if report.refreshed_frames < native_cadence {
+        return Err(format!(
+            "refreshed frames {} below native cadence {native_cadence}",
+            report.refreshed_frames
+        ));
+    }
     if report.automatic_graphics_skips != 0 {
         return Err(format!(
             "automatic graphics skips must be zero (observed {})",
@@ -3626,9 +3657,11 @@ pub(crate) fn presentation_benchmark_context_line(
     runtime_crew_objects: usize,
     runtime_players_with_live_crew: usize,
     runtime_players_with_exactly_one_live_sf5b_crew: usize,
+    runtime_stippels_at_start: usize,
+    runtime_stippels_at_end: usize,
 ) -> String {
     format!(
-        "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players={runtime_players} synchronized_player_infos={synchronized_player_infos} activated_nonhost_clients={activated_nonhost_clients} runtime_crew_objects={runtime_crew_objects} runtime_players_with_live_crew={runtime_players_with_live_crew} runtime_players_with_exactly_one_live_sf5b_crew={runtime_players_with_exactly_one_live_sf5b_crew}"
+        "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players={runtime_players} synchronized_player_infos={synchronized_player_infos} activated_nonhost_clients={activated_nonhost_clients} runtime_crew_objects={runtime_crew_objects} runtime_players_with_live_crew={runtime_players_with_live_crew} runtime_players_with_exactly_one_live_sf5b_crew={runtime_players_with_exactly_one_live_sf5b_crew} runtime_st5b_objects_at_measurement_start={runtime_stippels_at_start} runtime_st5b_objects_at_measurement_end={runtime_stippels_at_end}"
     )
 }
 
@@ -3791,6 +3824,14 @@ pub(crate) fn runtime_crew_object_count(snapshot: &SimulationSnapshot) -> usize 
         .count()
 }
 
+pub(crate) fn runtime_stippel_object_count(snapshot: &SimulationSnapshot) -> usize {
+    snapshot
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "ST5B" && object.status.is_active())
+        .count()
+}
+
 pub(crate) fn runtime_player_has_live_crew(snapshot: &SimulationSnapshot, player_id: i32) -> bool {
     snapshot
         .players
@@ -3876,6 +3917,8 @@ pub(crate) fn finish_presentation_benchmark(
             runtime_crew_objects,
             runtime_players_with_live_crew,
             runtime_players_with_exactly_one_live_sf5b_crew,
+            report.runtime_stippels_at_start,
+            report.runtime_stippels_at_end,
         )
     );
     if let Some(network_evidence) = network_evidence {

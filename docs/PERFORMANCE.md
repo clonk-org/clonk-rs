@@ -886,6 +886,90 @@ The 25ms planning target leaves 3ms of headroom beneath the 28ms in-game
 cadence. Do not split it into arbitrary simulation/render limits before phase
 measurements show where time is spent.
 
+### Arso-Morf 1,000-Stippel simulation profile
+
+Run the checked-in Arso-Morf save with exactly 1,000 real-content ST5B objects:
+
+```sh
+LC_PROFILE_MODE=split \
+  cargo run --release --offline --locked -p clonk-engine \
+    --example scenario_profile -- \
+    "EkeReloaded.c4f/TheStippelAge.c4f/Arso-Morf.c4s" 600 424242 1000
+```
+
+The saved object section contains 20 Stippels and 1,041 non-Stippel objects;
+scenario initialization creates two more, so the applied scenario reports 20
+ST5B and 1,043 other objects. The profiler then joins both players before
+population so all `InitializePlayer` crew/content creation is also outside the
+measured frames (the smoke-run timed census has 1,056 non-ST5B objects). Setup
+creates the remaining fresh ST5B objects through the loaded definition and its
+normal `Initialize` callback, then verifies an exact 1,000-object ST5B census
+before timing begins. The added objects use 49 deterministic, unique horizontal
+offsets around each of the 20 saved-object anchors; fresh-construction vertical
+movement is compensated so their centers remain on the same occupied ground
+bands. They retain the real `LifeCycle` effect and receive only initial stuck
+grace. Content may therefore remove a genuinely stuck Stippel later: the timed
+census is exact, while the separately reported final census makes natural
+attrition visible. Split mode reports simulation advance and
+`SimulationSnapshot` projection samples independently as well as the combined
+frame distribution. The output also includes the seed and resolved content
+paths.
+
+This is a reproducible measurement path, not a portable wall-clock assertion.
+Compare release runs only with matching commit/content/toolchain/machine
+fingerprints, and retain the raw output for both the parent and candidate.
+
+### Arso-Morf 1,000-Stippel network presentation acceptance harness
+
+Build both release executables, then run the same population through the real
+windowed app, simulation, single-host network, viewport, and GPU submission
+paths:
+
+```sh
+cargo build --release --offline --locked \
+  -p clonk-app --bin clonk-app \
+  -p clonk-engine --example arso_morf_stippel_fixture
+scripts/run_arso_morf_stippel_gpu_benchmark.py 20
+```
+
+The runner copies checked-in Arso-Morf below the platform temporary directory.
+The fixture builder refuses an unmarked destination or any path below installed
+content, creates the other 980 objects through the real ST5B `Initialize`
+callback, verifies `LifeCycle` on all 1,000, and serializes the disposable save.
+It uses the same deterministic distribution around the 20 saved anchors as the
+headless profile and verifies that the source `Objects.txt` hash did not change.
+
+The app starts immediately as a real `/network /nosignup` host with one embedded
+player. A private config uses separately probed TCP, UDP, and reference ports
+and disables discovery, master-server signup, and UPnP. This is a component
+acceptance harness for one playing network host, not a multi-peer transport or
+network-throughput benchmark.
+
+The run fails closed unless all of these conditions hold:
+
+- fixture preparation and serialization each contain exactly 1,000 real ST5B
+  objects;
+- exactly one network-inspection line reports `inspection_status=ok` and host
+  `local_client_id=0`, while runtime player infos match the authentic scenario
+  player count, at least one player has one live SF5B crew, and no non-host
+  client is activated;
+- the active ST5B census is at least 990 at both measurement edges. Preparation
+  and serialization are still exactly 1,000, but real `LifeCycle` can naturally
+  remove stuck creatures during the two-second warmup and measured window. Both
+  exact runtime counts remain in the result; losing more than 1% rejects a
+  collapsed workload;
+- simulation frames, refreshed frames, and successful presentation submissions
+  each reach `floor(elapsed / 28ms)`, average graphics-pass time is at most
+  28ms, and automatic graphics skips remain zero.
+
+The two-second warmup precedes the requested measurement window, and a process
+timeout also fails closed. Run from an interactive visible desktop on otherwise
+idle hardware. A background automation session that supplies no refreshed GPU
+frames is intentionally rejected rather than reported as a zero-FPS benchmark.
+For an A/B comparison, reuse identical serialized fixture bytes, config, seed,
+window size, and hardware, and add only the measurement instrumentation to the
+baseline app.
+
 ### Deep Sea retained-GPU presentation benchmark
 
 Build once, then run the real Deep Sea scenario through the windowed GPU path:
@@ -904,11 +988,11 @@ world and gameplay resources remain the real checked-in content.
 
 The app warms up for two seconds, measures for 20 seconds, prints one
 `LC_APP_PRESENTATION_BENCHMARK` machine line, and exits. The assertion exits
-with status 2 unless at least one refreshed frame was presented, average GPU
-graphics-pass time is at most the native 28ms game tick, and
-`automatic_graphics_skips=0`. Record the machine line together with the commit,
-content revision, display size, hardware, OS, and power state; do not compare
-runs with different fingerprints.
+with status 2 unless both refreshed frames and successful presentation
+submissions reach `floor(elapsed / 28ms)`, average GPU graphics-pass time is at
+most the native 28ms game tick, and `automatic_graphics_skips=0`. Record the
+machine line together with the commit, content revision, display size, hardware,
+OS, and power state; do not compare runs with different fingerprints.
 
 Reference run for the retained-GPU scene-composition landing candidate on
 2026-07-21:
