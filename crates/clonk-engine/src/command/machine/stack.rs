@@ -893,6 +893,14 @@ impl CommandStack {
         self.entries.is_empty()
     }
 
+    pub(crate) fn has_execution_tail(&self) -> bool {
+        !self.pending_successful_finishes.is_empty()
+            || self
+                .entries
+                .front()
+                .is_some_and(|entry| entry.finished.is_some())
+    }
+
     /// The front command's kind name, if any (ObjectComStopDig's
     /// C4CMD_Dig check, C4ObjectCom.cpp:776-784).
     pub fn front_command_name(&self) -> Option<&'static str> {
@@ -900,6 +908,17 @@ impl CommandStack {
             .front()
             .and_then(|entry| entry.state.id())
             .map(CommandId::to_name)
+    }
+
+    pub(crate) fn front_command_object_dependencies(
+        &self,
+        action_target: Option<ObjectId>,
+    ) -> Option<[Option<ObjectId>; 2]> {
+        match self.entries.front().map(|entry| &entry.state) {
+            Some(CommandState::MoveTo(state)) => Some([state.target, action_target]),
+            Some(_) => None,
+            None => Some([None, None]),
+        }
     }
 
     /// Drops the front command (ClearCommand on the stack top).

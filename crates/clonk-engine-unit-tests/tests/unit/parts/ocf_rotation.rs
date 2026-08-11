@@ -4353,7 +4353,7 @@ public func Probe(object target) {
         let definition_id = engine.objects[idx].definition_id.clone();
 
         engine
-            .exec_contact_action(idx, CNAT_BOTTOM, &definition_id, &[])
+            .exec_contact_action(idx, CNAT_BOTTOM, &definition_id)
             .expect("contact action applies");
 
         let object = &engine.objects[idx];
@@ -4445,7 +4445,7 @@ protected func HangleStart() { callback_order = callback_order * 10 + 4; return(
             let definition_id = engine.objects[idx].definition_id.clone();
 
             engine
-                .exec_contact_action(idx, contact, &definition_id, &[])
+                .exec_contact_action(idx, contact, &definition_id)
                 .expect("contact action applies");
 
             let object = &engine.objects[idx];
@@ -4501,7 +4501,6 @@ protected func HangleStart() { callback_order = callback_order * 10 + 4; return(
             idx,
             CNAT_RIGHT | CNAT_LEFT | CNAT_TOP,
             &definition_id,
-            &[],
         )
         .expect("contact action applies");
 

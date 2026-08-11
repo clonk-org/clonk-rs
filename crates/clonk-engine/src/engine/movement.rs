@@ -998,13 +998,7 @@ impl Engine {
             // (C4Movement.cpp:443-470).
             self.objects[idx].frame_t_contact = movement_outcome.contact_cnat;
             let definition_id = self.objects[idx].definition_id.clone();
-            let live_solid_mask_indices = self.active_solid_mask_indices();
-            self.exec_contact_action(
-                idx,
-                movement_outcome.contact_cnat,
-                &definition_id,
-                &live_solid_mask_indices,
-            )?;
+            self.exec_contact_action(idx, movement_outcome.contact_cnat, &definition_id)?;
         }
         if movement_outcome.no_attach {
             let Some(idx) = self.find_object_index(object_id) else {
@@ -1014,18 +1008,12 @@ impl Engine {
                 });
             };
             let definition_id = self.objects[idx].definition_id.clone();
-            let live_solid_mask_indices = self.active_solid_mask_indices();
             if let Some(action_library) = self
                 .definitions
                 .get(&definition_id)
-                .map(|definition| definition.action_library().clone())
+                .map(Definition::shared_action_library_handle)
             {
-                self.apply_no_attach_action(
-                    idx,
-                    &definition_id,
-                    &action_library,
-                    &live_solid_mask_indices,
-                )?;
+                self.apply_no_attach_action(idx, &definition_id, &action_library)?;
             }
         }
         if movement_outcome.any_contact {

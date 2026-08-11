@@ -95,6 +95,45 @@ impl WorldAccessor for EffectHostContext {
         self.get_world_object(id)
     }
 
+    fn matches_find_condition_candidate(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        if self.object_scope(id).is_some() {
+            let object = self.get_world_object(id)?;
+            return Some(object.status().is_active() && condition.check(self, &object).ok()?);
+        }
+        if let Some(object) = self.pending_objects.get(&id) {
+            return Some(object.status().is_active() && condition.check(self, object).ok()?);
+        }
+        self.world.matches_find_condition_candidate(id, condition)
+    }
+
+    fn matches_find_condition_scalar_prefix(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        if self.object_scope(id).is_some() {
+            let object = self.get_world_object(id)?;
+            return if object.status().is_active() {
+                condition.matches_host_object(&object)
+            } else {
+                Some(false)
+            };
+        }
+        if let Some(object) = self.pending_objects.get(&id) {
+            return if object.status().is_active() {
+                condition.matches_host_object(object)
+            } else {
+                Some(false)
+            };
+        }
+        self.world
+            .matches_find_condition_scalar_prefix(id, condition)
+    }
+
     fn matches_legacy_find_object_candidate(
         &self,
         id: ObjectId,
@@ -3342,7 +3381,7 @@ pub(crate) struct EffectHostContext {
     /// Callback-private copy of every active grid solid-mask bake. This is
     /// updated together with `world.landscape` so nested callbacks observe
     /// C++'s immediate C4SolidMask Remove/Put lifecycle.
-    solid_mask_bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
+    solid_mask_bakes: Rc<Vec<(ObjectId, crate::SolidMaskBake)>>,
     /// Live instance ages also cover eligible masks clipped fully outside
     /// the raster and therefore absent from `solid_mask_bakes`.
     solid_mask_instance_sequences: Rc<RefCell<HashMap<ObjectId, u64>>>,
@@ -3440,7 +3479,7 @@ impl EffectHostContext {
         let scenario_script_counter = world.scenario_script_counter();
         let sky_adjustment = world.sky_adjustment();
         let teams = world.teams().to_vec();
-        let solid_mask_bakes = world.solid_mask_bakes.as_ref().clone();
+        let solid_mask_bakes = Rc::clone(&world.solid_mask_bakes);
         let solid_mask_instance_sequences = Rc::clone(&world.solid_mask_instance_sequences);
         let next_solid_mask_instance_sequence = Rc::clone(&world.next_solid_mask_instance_sequence);
         let resolved_script_definition = definition_context.clone().or_else(|| {
@@ -3452,7 +3491,7 @@ impl EffectHostContext {
                     .map(DefinitionId::from)
                     .or_else(|| {
                         world
-                            .get(script_object)
+                            .get_shared(script_object)
                             .map(|object| DefinitionId::from(object.definition_id()))
                     })
             })
@@ -3575,10 +3614,11 @@ impl EffectHostContext {
                 scope.current_magic_energy = magic_energy;
                 scope.current_breath = breath;
                 scope.current_need_energy = need_energy;
-                scope.current_selected =
-                    world.get(scope.id()).is_some_and(|object| object.selected);
+                scope.current_selected = world
+                    .get_shared(scope.id())
+                    .is_some_and(|object| object.selected);
                 scope.current_no_collect_delay = world
-                    .get(scope.id())
+                    .get_shared(scope.id())
                     .map(|object| object.no_collect_delay)
                     .unwrap_or(0);
                 if let Some(position) = script_fixed_position {
@@ -3600,7 +3640,7 @@ impl EffectHostContext {
             }
         });
         if let Some(scope) = object.as_mut() {
-            if let Some(world_object) = world.get(scope.id()) {
+            if let Some(world_object) = world.get_shared(scope.id()) {
                 scope.current_compiler_cache = world_object.compiler_cache.clone();
                 scope.unsorted = world_object.unsorted;
                 scope.staged_own_vertices = world_object.own_vertices;
@@ -3844,7 +3884,7 @@ impl EffectHostContext {
             return None;
         }
         let landscape = self.world.landscape_mut()?;
-        remove_host_solid_mask_raster(landscape, &mut self.solid_mask_bakes, id)
+        remove_host_solid_mask_raster(landscape, Rc::make_mut(&mut self.solid_mask_bakes), id)
     }
 
     fn allocate_solid_mask_instance_sequence(&mut self) -> u64 {
@@ -3945,8 +3985,8 @@ impl EffectHostContext {
                 })
                 .unwrap_or(self.solid_mask_bakes.len())
         });
-        self.solid_mask_bakes
-            .insert(insert_at.min(self.solid_mask_bakes.len()), (id, bake));
+        let solid_mask_bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+        solid_mask_bakes.insert(insert_at.min(solid_mask_bakes.len()), (id, bake));
     }
 
     /// The virtual C4SolidMask for one object created inside this still-
@@ -4139,7 +4179,7 @@ impl EffectHostContext {
             return;
         };
         let _ = landscape.preview_draw_material_chunks_with_masks(
-            &mut self.solid_mask_bakes,
+            Rc::make_mut(&mut self.solid_mask_bakes).as_mut_slice(),
             *origin,
             *width,
             *height,
@@ -4151,7 +4191,7 @@ impl EffectHostContext {
             random_offsets,
             texmap.clone(),
         );
-        self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+        self.world.solid_mask_bakes = Rc::clone(&self.solid_mask_bakes);
     }
 
     pub(crate) fn preview_draw_material_quad(&mut self, operation: &LandscapeOperation) {
@@ -4167,7 +4207,7 @@ impl EffectHostContext {
             return;
         };
         let _ = landscape.preview_draw_material_quad_with_masks(
-            &mut self.solid_mask_bakes,
+            Rc::make_mut(&mut self.solid_mask_bakes).as_mut_slice(),
             material_texture,
             *vertices,
             *ift,
@@ -4212,7 +4252,7 @@ impl EffectHostContext {
             return;
         };
         let _ = landscape.preview_draw_indexed_map_with_masks(
-            &mut self.solid_mask_bakes,
+            Rc::make_mut(&mut self.solid_mask_bakes).as_mut_slice(),
             origin,
             bitmap,
             map_width,
@@ -4222,7 +4262,7 @@ impl EffectHostContext {
         if let Some(map_creator) = map_creator {
             let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
         }
-        self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+        self.world.solid_mask_bakes = Rc::clone(&self.solid_mask_bakes);
     }
 
     pub(crate) fn preview_dig_circle(
@@ -4410,7 +4450,7 @@ impl EffectHostContext {
                 .landscape_mut()
                 .expect("mask-bracketed FreeRect has a landscape");
             landscape.preview_raster_transaction_with_masks(
-                &mut self.solid_mask_bakes,
+                Rc::make_mut(&mut self.solid_mask_bakes).as_mut_slice(),
                 bounds,
                 |landscape| -> Result<(), RuntimeError> {
                     for row in origin.y..origin.y.saturating_add(height) {
@@ -4431,7 +4471,7 @@ impl EffectHostContext {
                     Ok(())
                 },
             )?;
-            self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+            self.world.solid_mask_bakes = Rc::clone(&self.solid_mask_bakes);
         } else {
             for row in origin.y..origin.y.saturating_add(height) {
                 if let Some(landscape) = self.world.landscape_mut() {
@@ -4601,8 +4641,8 @@ impl EffectHostContext {
             let own_mass = scope.own_mass();
             object.construction = construction;
             if let Some(state) = object.state.as_mut() {
+                let state = Rc::make_mut(state);
                 if state.construction != construction || state.own_mass != own_mass {
-                    let state = Rc::make_mut(state);
                     state.construction = construction;
                     state.own_mass = own_mass;
                 }
@@ -4715,19 +4755,24 @@ impl EffectHostContext {
         // container's Contents immediately (`Contents.Add(this,
         // C4ObjectList::stContents)`, C4Object.cpp:1601-1605), sorting into
         // the matching category/id cluster (C4ObjectList::Add).
-        let entered: Vec<ObjectId> = self
-            .scopes_in_call_order()
-            .filter(|scope| {
-                scope.current_container == Some(id)
-                    && !self.unlinked_content_links.contains(&(id, scope.id))
-                    && !object.contents.contains(&scope.id)
-                    && !self
-                        .contents_link_operations
-                        .iter()
-                        .any(|operation| operation.mutates_link(id, scope.id))
-            })
-            .map(|scope| scope.id)
-            .collect();
+        let entered: Vec<ObjectId> = if self.contents_link_operations.is_empty() {
+            Vec::new()
+        } else {
+            self.scopes_in_call_order()
+                .filter(|scope| {
+                    #[cfg(test)]
+                    CONTENTS_SCOPE_GROWTH_VISITS.with(|count| count.set(count.get() + 1));
+                    scope.current_container == Some(id)
+                        && !self.unlinked_content_links.contains(&(id, scope.id))
+                        && !object.contents.contains(&scope.id)
+                        && !self
+                            .contents_link_operations
+                            .iter()
+                            .any(|operation| operation.mutates_link(id, scope.id))
+                })
+                .map(|scope| scope.id)
+                .collect()
+        };
         for child in entered {
             let position = self.contents_insert_position(&object.contents, child, preserved_child);
             object.contents.insert(position, child);
@@ -5444,9 +5489,11 @@ impl EffectHostContext {
         self.object_scope(id)
             .map(|scope| scope.current_contents_link_generation)
             .or_else(|| {
-                self.get_world_object(id)
-                    .and_then(|object| object.full_state().cloned())
-                    .map(|state| state.contents_link_generation)
+                self.get_world_object(id).and_then(|object| {
+                    object
+                        .full_state()
+                        .map(|state| state.contents_link_generation)
+                })
             })
             .unwrap_or(0)
     }
@@ -5668,8 +5715,9 @@ impl EffectHostContext {
         }
         for object in self.pending_objects.values_mut() {
             if let Some(state) = object.state.as_mut() {
+                let state = Rc::make_mut(state);
                 if state.layer == Some(target) {
-                    Rc::make_mut(state).layer = None;
+                    state.layer = None;
                     object.compiler_cache.layer = 0;
                 }
             }
@@ -5908,7 +5956,7 @@ impl EffectHostContext {
         let mut snapshot_locals = world_object
             .as_ref()
             .and_then(|object| object.full_state())
-            .map(|state| state.local_vars.clone())
+            .map(|state| state.local_vars.snapshot())
             .or_else(|| {
                 self.session_local_cells
                     .get(&target)
@@ -6018,6 +6066,10 @@ impl EffectHostContext {
             state.physical_changes.clone(),
             definition_physical,
         );
+        // Engine projections may borrow the authoritative ObjectState rather
+        // than an owned script snapshot. Preserve the callback-entry active
+        // shape that `script_state_snapshot` installs for owned projections.
+        scope.shape_vertices.replace_active(object.vertices());
         scope.current_info_rank = self
             .world
             .crew_rank(object.id.as_u64())
@@ -6059,7 +6111,7 @@ impl EffectHostContext {
         // nested scopes carry the snapshot mask like outer scopes do, not
         // the preview-grade recompute.
         scope.cached_ocf = Some(state.ocf);
-        let mut local_vars = state.local_vars.clone();
+        let mut local_vars = state.local_vars.snapshot();
         self.clear_removed_references_in_locals(&mut local_vars);
         Some((scope, local_vars))
     }
@@ -6389,7 +6441,8 @@ impl EffectHostContext {
         {
             return custom_name.clone().filter(|name| !name.is_empty());
         }
-        self.get_world_object(target)
+        self.world
+            .get_shared(target)
             .and_then(|object| object.full_state().map(|state| state.custom_name.clone()))
             .flatten()
             .filter(|name| !name.is_empty())
@@ -6546,15 +6599,15 @@ impl EffectHostContext {
                 .find(|overlay| overlay.id == overlay_id)
                 .map(|overlay| overlay.color_modulation);
         }
-        self.get_world_object(target)
-            .and_then(|object| object.full_state().cloned())
-            .and_then(|state| {
+        self.get_world_object(target).and_then(|object| {
+            object.full_state().and_then(|state| {
                 state
                     .graphics_overlays
                     .iter()
                     .find(|overlay| overlay.id == overlay_id)
                     .map(|overlay| overlay.color_modulation)
             })
+        })
     }
 
     pub(crate) fn object_has_graphics_overlay(&self, target: ObjectId, overlay_id: i32) -> bool {
@@ -6564,14 +6617,14 @@ impl EffectHostContext {
                 .iter()
                 .any(|overlay| overlay.id == overlay_id);
         }
-        self.get_world_object(target)
-            .and_then(|object| object.full_state().cloned())
-            .is_some_and(|state| {
+        self.get_world_object(target).is_some_and(|object| {
+            object.full_state().is_some_and(|state| {
                 state
                     .graphics_overlays
                     .iter()
                     .any(|overlay| overlay.id == overlay_id)
             })
+        })
     }
 
     pub(crate) fn set_object_overlay_color_modulation(
@@ -6632,15 +6685,15 @@ impl EffectHostContext {
                 .find(|overlay| overlay.id == overlay_id)
                 .map(|overlay| overlay.blit_mode);
         }
-        self.get_world_object(target)
-            .and_then(|object| object.full_state().cloned())
-            .and_then(|state| {
+        self.get_world_object(target).and_then(|object| {
+            object.full_state().and_then(|state| {
                 state
                     .graphics_overlays
                     .iter()
                     .find(|overlay| overlay.id == overlay_id)
                     .map(|overlay| overlay.blit_mode)
             })
+        })
     }
 
     pub(crate) fn set_object_overlay_blit_mode(
@@ -7057,7 +7110,10 @@ impl EffectHostContext {
             return false;
         };
         metadata.name = name.clone();
-        if let Some(values) = metadata.fire.def_core_values.def_core.get_mut("Name") {
+        if let Some(values) = Rc::make_mut(&mut metadata.fire.def_core_values)
+            .def_core
+            .get_mut("Name")
+        {
             *values = vec![DefCorePrimitive::String(name.clone())];
         }
         self.definition_metadata_overrides
@@ -7548,7 +7604,7 @@ impl EffectHostContext {
             };
             let mut local_vars = self
                 .get_world_object(id)
-                .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
+                .and_then(|object| object.full_state().map(|state| state.local_vars.snapshot()))
                 .unwrap_or_default();
             local_vars.extend(cells);
             self.clear_removed_references_in_locals(&mut local_vars);
@@ -7653,7 +7709,7 @@ impl EffectHostContext {
         let host_raster_preview =
             (!self.solid_mask_operations.is_empty()).then(|| HostRasterPreview {
                 landscape: self.world.landscape_ref().cloned(),
-                solid_mask_bakes: self.solid_mask_bakes.clone(),
+                solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
                 solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
                 next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
             });
@@ -8389,10 +8445,25 @@ impl ObjectScopeContext {
     }
 
     pub(crate) fn refresh_shape_preview(&mut self, metadata: &DefinitionMetadata) {
+        self.refresh_shape_preview_from_parts(
+            &metadata.vertices,
+            metadata.line,
+            metadata.stretch_growth,
+            metadata.rotateable,
+        );
+    }
+
+    pub(crate) fn refresh_shape_preview_from_parts(
+        &mut self,
+        definition_vertices: &[ObjectVertex],
+        line: i32,
+        stretch_growth: bool,
+        rotateable: i32,
+    ) {
         // C4Object::UpdateShape returns immediately for line defs. Ordinary
         // definitions copy the current definition shape while fOwnVertices
         // restores the object's private backup.
-        if metadata.line == 0 {
+        if line == 0 {
             let replaces_staged_vertex_edit = self.pending_update.live_vertices.is_some()
                 || self.pending_update.shape_vertices.is_some();
             // A same-call SetVertex has already staged the backup half, so
@@ -8401,13 +8472,13 @@ impl ObjectScopeContext {
             let base = if self.staged_own_vertices {
                 buffer.own_original_vertices()
             } else {
-                metadata.vertices.clone()
+                definition_vertices.to_vec()
             };
             let vertices = crate::transformed_shape_vertices(
                 &base,
                 self.construction(),
-                metadata.stretch_growth,
-                metadata.rotateable,
+                stretch_growth,
+                rotateable,
                 self.rotation(),
             );
             buffer.replace_active(&vertices);

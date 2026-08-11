@@ -222,6 +222,7 @@ pub struct StringRegistrationLedger {
 #[cfg(test)]
 thread_local! {
     static STRING_REGISTRATION_MUTABLE_BORROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STRING_REGISTRATION_ENTRY_SWEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -234,6 +235,16 @@ fn string_registration_mutable_borrows() -> usize {
     STRING_REGISTRATION_MUTABLE_BORROWS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+fn reset_string_registration_entry_sweeps() {
+    STRING_REGISTRATION_ENTRY_SWEEPS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn string_registration_entry_sweeps() -> usize {
+    STRING_REGISTRATION_ENTRY_SWEEPS.with(std::cell::Cell::get)
+}
+
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct StringRegistrationLedgerState {
@@ -242,6 +253,11 @@ pub struct StringRegistrationLedgerState {
     /// indexed pointer still has its Weak in `entries`, keeping the Arc
     /// control-block address reserved until both are pruned together.
     registered_identities: FxHashSet<usize>,
+    /// Runtime registrations sweep dead weak entries only after the table has
+    /// grown materially beyond its last live size. Keeping the weak control
+    /// blocks until then prevents pointer reuse, so identity membership stays
+    /// exact while cleanup remains amortized O(1).
+    next_entry_prune_len: usize,
     /// Parse-time literal identities by their parser spelling.
     ///
     /// C++ stores the resolved `C4String *` directly in each AB_STRING
@@ -279,9 +295,25 @@ impl StringRegistrationLedgerState {
     }
 
     fn retain_live_entries(&mut self) {
+        #[cfg(test)]
+        STRING_REGISTRATION_ENTRY_SWEEPS.with(|count| count.set(count.get() + 1));
         self.entries
             .retain(|candidate| candidate.value.strong_count() != 0);
         self.rebuild_registered_identities();
+        self.next_entry_prune_len = self
+            .entries
+            .len()
+            .saturating_mul(2)
+            .max(self.entries.len().saturating_add(64));
+    }
+
+    fn retain_live_entries_if_due(&mut self) -> bool {
+        let prune_at = self.next_entry_prune_len.max(64);
+        if self.entries.len() < prune_at {
+            return false;
+        }
+        self.retain_live_entries();
+        true
     }
 
     fn retain_live_detached(&mut self) {
@@ -454,11 +486,12 @@ fn register_c4_string_locked(
         if registrations.detached_identities.contains(&identity) {
             return;
         }
-        registrations.retain_live_entries();
-        if registrations.registered_identities.contains(&identity) {
-            return;
+        if registrations.retain_live_entries_if_due() {
+            if registrations.registered_identities.contains(&identity) {
+                return;
+            }
+            *pruned = true;
         }
-        *pruned = true;
     }
     registrations.push_entry(StringRegistration {
         value: value.downgrade(),
@@ -2870,6 +2903,19 @@ mod tests {
         register_c4_value_strings(&registrations, &Value::Int(7));
 
         assert_eq!(string_registration_mutable_borrows(), 0);
+    }
+
+    #[test]
+    fn runtime_string_registration_amortizes_dead_entry_sweeps() {
+        let registrations = StringRegistrationLedger::default();
+
+        reset_string_registration_entry_sweeps();
+        for index in 0..32 {
+            let value = C4StringValue::new(format!("temporary-{index}"));
+            register_c4_string(&registrations, &value);
+        }
+
+        assert_eq!(string_registration_entry_sweeps(), 0);
     }
 
     fn compile(source: &str) -> Script {

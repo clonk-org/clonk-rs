@@ -98,120 +98,164 @@ impl Engine {
             .map(|(index, id)| (id, index))
             .collect::<rustc_hash::FxHashMap<_, _>>();
         let command_snapshot_object_count = self.objects.len();
+        let has_initial_commands = self
+            .objects
+            .iter()
+            .any(|object| !object.commands.is_empty());
+        let mut command_snapshots_are_full = self.objects.iter().any(|object| {
+            object
+                .commands
+                .front_command_object_dependencies(object.state.action.target)
+                .is_none()
+        });
         let mut command_snapshots: CommandObjectSnapshots =
             CommandObjectSnapshots::with_capacity_and_hasher(
-                command_snapshot_object_count,
+                if command_snapshots_are_full {
+                    command_snapshot_object_count
+                } else {
+                    usize::from(has_initial_commands)
+                },
                 Default::default(),
             );
-        for fallback_order in 0..command_snapshot_object_count {
-            let physical = self.object_physical_without_fair_fill(fallback_order);
-            let object = &self.objects[fallback_order];
-            let (
-                procedure,
-                line_connect,
-                collectible,
-                move_to_range,
-                pathfinder,
-                no_transfer_zones,
-                no_push_enter,
-                action_idle,
-                action_disabled,
-            ) = self
-                .definitions
-                .get(&object.definition_id)
-                .map(|definition| {
-                    let procedure = definition.action_library().procedure_for_entry(
-                        &object.state.action.name,
-                        object.state.action.act_map_index,
-                    );
-                    (
-                        procedure,
-                        definition.line_connect(),
-                        definition.is_collectible(),
-                        definition.move_to_range(),
-                        definition.pathfinder(),
-                        definition.no_transfer_zones(),
-                        definition.no_push_enter(),
-                        definition
-                            .action_library()
-                            .is_idle_state(&object.state.action),
-                        definition.action_library().disables_object_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        ),
-                    )
-                })
-                .unwrap_or((
-                    ActionProcedure::default(),
-                    OCF_NORMAL,
-                    false,
-                    0,
-                    0,
-                    0,
-                    0,
-                    true,
-                    false,
-                ));
-            // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
-            // Target->OCF etc. straight off the objects).
-            let ocf = object.state.ocf;
-            command_snapshots.insert(
-                object.id,
-                CommandObjectSnapshot {
-                    id: object.id,
-                    master_list_order: master_list_indices
-                        .get(&object.id)
-                        .copied()
-                        .unwrap_or_else(|| self.exec_list.len().saturating_add(fallback_order)),
-                    definition_id: object.definition_id.clone(),
-                    position: object.state.position,
-                    fixed_position: object.fixed_position,
-                    fixed_velocity: object.fixed_velocity,
+        if command_snapshots_are_full {
+            #[cfg(test)]
+            COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| {
+                count.set(count.get().saturating_add(command_snapshot_object_count));
+            });
+            for fallback_order in 0..command_snapshot_object_count {
+                let physical = self.object_physical_without_fair_fill(fallback_order);
+                let object = &self.objects[fallback_order];
+                let (
+                    procedure,
+                    line_connect,
+                    collectible,
                     move_to_range,
                     pathfinder,
                     no_transfer_zones,
                     no_push_enter,
-                    // C4Object::t_contact from the previous movement frame.
-                    contact: object.frame_t_contact,
-                    action_time: object.state.action.time,
-                    shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
-                    shape_height: object
-                        .current_shape_rect()
-                        .map(|rect| rect.height)
-                        .unwrap_or(0),
-                    shape: self.object_shape_rect(object),
-                    entrance: self.object_entrance_area(object),
-                    status: object.state.status,
-                    destroyed: object.destroyed,
-                    category: object.state.category,
-                    container: object.state.container,
-                    action_name: object.state.action.name.clone(),
                     action_idle,
                     action_disabled,
-                    action_target: object.state.action.target,
-                    action_target2: object.state.action.target2,
-                    action_procedure: procedure,
-                    command_direction: object.state.command_direction,
-                    construction: object.state.construction,
-                    direction: object.state.direction,
-                    physical,
-                    physical_deferred: false,
-                    owner: object.state.owner,
-                    controller: object.state.controller,
-                    base: object.state.base,
-                    crew_member: object.state.crew_member,
-                    selected: selected_objects.contains(&object.id),
-                    alive: object.state.alive,
-                    need_energy: object.state.need_energy,
-                    on_fire: object.state.on_fire,
-                    contents: object.state.contents.clone(),
-                    commands: object.commands.command_views(),
-                    line_connect,
-                    ocf,
-                    entrance_status: object.state.entrance_status,
-                    collectible,
-                },
-            );
+                ) = self
+                    .definitions
+                    .get(&object.definition_id)
+                    .map(|definition| {
+                        let procedure = definition.action_library().procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        );
+                        (
+                            procedure,
+                            definition.line_connect(),
+                            definition.is_collectible(),
+                            definition.move_to_range(),
+                            definition.pathfinder(),
+                            definition.no_transfer_zones(),
+                            definition.no_push_enter(),
+                            definition
+                                .action_library()
+                                .is_idle_state(&object.state.action),
+                            definition.action_library().disables_object_for_entry(
+                                &object.state.action.name,
+                                object.state.action.act_map_index,
+                            ),
+                        )
+                    })
+                    .unwrap_or((
+                        ActionProcedure::default(),
+                        OCF_NORMAL,
+                        false,
+                        0,
+                        0,
+                        0,
+                        0,
+                        true,
+                        false,
+                    ));
+                // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
+                // Target->OCF etc. straight off the objects).
+                let ocf = object.state.ocf;
+                command_snapshots.insert(
+                    object.id,
+                    CommandObjectSnapshot {
+                        id: object.id,
+                        master_list_order: master_list_indices
+                            .get(&object.id)
+                            .copied()
+                            .unwrap_or_else(|| self.exec_list.len().saturating_add(fallback_order)),
+                        definition_id: object.definition_id.clone(),
+                        position: object.state.position,
+                        fixed_position: object.fixed_position,
+                        fixed_velocity: object.fixed_velocity,
+                        move_to_range,
+                        pathfinder,
+                        no_transfer_zones,
+                        no_push_enter,
+                        // C4Object::t_contact from the previous movement frame.
+                        contact: object.frame_t_contact,
+                        action_time: object.state.action.time,
+                        shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
+                        shape_height: object
+                            .current_shape_rect()
+                            .map(|rect| rect.height)
+                            .unwrap_or(0),
+                        shape: self.object_shape_rect(object),
+                        entrance: self.object_entrance_area(object),
+                        status: object.state.status,
+                        destroyed: object.destroyed,
+                        category: object.state.category,
+                        container: object.state.container,
+                        action_name: object.state.action.name.clone(),
+                        action_idle,
+                        action_disabled,
+                        action_target: object.state.action.target,
+                        action_target2: object.state.action.target2,
+                        action_procedure: procedure,
+                        command_direction: object.state.command_direction,
+                        construction: object.state.construction,
+                        direction: object.state.direction,
+                        physical,
+                        physical_deferred: false,
+                        owner: object.state.owner,
+                        controller: object.state.controller,
+                        base: object.state.base,
+                        crew_member: object.state.crew_member,
+                        selected: selected_objects.contains(&object.id),
+                        alive: object.state.alive,
+                        need_energy: object.state.need_energy,
+                        on_fire: object.state.on_fire,
+                        contents: object.state.contents.clone(),
+                        commands: object.commands.command_views(),
+                        line_connect,
+                        ocf,
+                        entrance_status: object.state.entrance_status,
+                        collectible,
+                    },
+                );
+            }
+        } else if has_initial_commands {
+            for index in 0..command_snapshot_object_count {
+                if self.objects[index].commands.is_empty() {
+                    continue;
+                }
+                let object_id = self.objects[index].id;
+                let dependencies = self.objects[index]
+                    .commands
+                    .front_command_object_dependencies(self.objects[index].state.action.target)
+                    .unwrap_or([None, None]);
+                for dependency in std::iter::once(Some(object_id))
+                    .chain(dependencies)
+                    .flatten()
+                {
+                    let Some(dependency_index) = self.find_object_index(dependency) else {
+                        continue;
+                    };
+                    let snapshot = self.live_command_snapshot(
+                        dependency_index,
+                        master_list_indices.get(&dependency).copied(),
+                    );
+                    command_snapshots.insert(dependency, snapshot);
+                }
+            }
         }
 
         let player_snapshots: HashMap<i32, CommandPlayerSnapshot> = self
@@ -357,7 +401,58 @@ impl Engine {
             };
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
-            let build_target = (self.objects[idx].commands.front_command_name() == Some("Build"))
+            let object_has_commands = !self.objects[idx].commands.is_empty();
+            let skip_command_stage = !object_has_commands
+                && self.objects[idx].command_queue.is_empty()
+                && !self.objects[idx].commands.has_execution_tail();
+            let (mut definition_id, mut action_library) = self.object_definition_context(idx)?;
+            let previous_action_name = self.objects[idx].state.action.name.clone();
+            if !skip_command_stage {
+                let object_command_dependencies = self.objects[idx]
+                    .commands
+                    .front_command_object_dependencies(self.objects[idx].state.action.target);
+                if object_command_dependencies.is_none() && !command_snapshots_are_full {
+                    let master_list_indices = self
+                        .exec_list
+                        .iter()
+                        .rev()
+                        .copied()
+                        .enumerate()
+                        .map(|(index, id)| (id, index))
+                        .collect::<rustc_hash::FxHashMap<_, _>>();
+                    command_snapshots = (0..self.objects.len())
+                        .map(|index| {
+                            let object_id = self.objects[index].id;
+                            let snapshot = self.live_command_snapshot(
+                                index,
+                                master_list_indices.get(&object_id).copied(),
+                            );
+                            (object_id, snapshot)
+                        })
+                        .collect();
+                    command_snapshots_are_full = true;
+                } else if !command_snapshots_are_full && object_has_commands {
+                    for dependency in object_command_dependencies
+                        .unwrap_or([None, None])
+                        .into_iter()
+                        .flatten()
+                    {
+                        let Some(dependency_index) = self.find_object_index(dependency) else {
+                            continue;
+                        };
+                        let master_list_order = command_snapshots
+                            .get(&dependency)
+                            .map(|snapshot| snapshot.master_list_order);
+                        let snapshot =
+                            self.live_command_snapshot(dependency_index, master_list_order);
+                        command_snapshots.insert(dependency, snapshot);
+                    }
+                    command_snapshots
+                        .entry(current_id)
+                        .or_insert_with(|| self.live_command_snapshot(idx, None));
+                }
+                let build_target = (self.objects[idx].commands.front_command_name()
+                    == Some("Build"))
                 .then(|| {
                     self.objects[idx]
                         .commands
@@ -366,120 +461,62 @@ impl Engine {
                         .and_then(|command| command.target)
                 })
                 .flatten();
-            if let Some(target_id) = build_target {
-                let live_target = self
-                    .find_object_index(target_id)
-                    .map(|target_index| self.live_command_snapshot(target_index));
-                let completing = live_target
-                    .as_ref()
-                    .is_some_and(|target| target.construction >= FULL_CON);
-                if let Some(target) = live_target {
-                    command_snapshots.insert(target_id, target);
-                }
-                if completing {
-                    // Completion scans every live command stack and each
-                    // co-builder's current contents. Foreign callbacks can
-                    // mutate either after that object's own Execute, so
-                    // refresh the full table where C++ calls FindObjectByCommand.
-                    let live_snapshots = (0..self.objects.len())
-                        .map(|index| {
-                            let snapshot = self.live_command_snapshot(index);
-                            (snapshot.id, snapshot)
-                        })
-                        .collect::<Vec<_>>();
-                    command_snapshots.extend(live_snapshots);
-                }
-            }
-            let Some(idx) = self.find_object_index(current_id) else {
-                continue;
-            };
-            // C++ command handlers read the live object and command lists.
-            // Refresh the executing object after any earlier object in this
-            // frame may have changed it; completed objects are likewise
-            // written back below for later command scans.
-            let mut actor_snapshot = self.live_command_snapshot(idx);
-            actor_snapshot.physical_deferred = self.object_physical_will_fill_fair_cache(idx);
-            command_snapshots.insert(current_id, actor_snapshot);
-            let (mut definition_id, mut action_library) = self.object_definition_context(idx)?;
-            let previous_action_state = self.objects[idx].state.action.clone();
-            let previous_action_name = previous_action_state.name.clone();
-            let mut landscape_slot = self.landscape.take();
-            let command_gravity = self.physics.gravity_as_c4fixed();
-            let (
-                queued_spawns,
-                queue_destroy,
-                queue_events,
-                container_updates,
-                command_events,
-                queue_definition_changed,
-                queue_change_def_reinsert,
-                (
-                    object_id,
-                    previous_owner,
-                    previous_crew,
-                    new_owner,
-                    new_crew,
-                    previous_status,
-                    new_status,
-                ),
-            ) = {
-                let object = &mut self.objects[idx];
-                let object_id = object.id;
-                let current_position = object.state.position;
-                let builder_snapshot = command_snapshots
-                    .get(&object_id)
-                    .expect("command snapshot exists");
-                command_rng.replace(std::mem::take(&mut self.rng));
-                let command_context = CommandRuntimeContext {
-                    rng: Some(&command_rng),
-                    frame: self.frame,
-                    position: current_position,
-                    landscape: landscape_slot.as_ref(),
-                    object: builder_snapshot,
-                    objects: &command_snapshots,
-                    players: &player_snapshots,
-                    definitions: definition_snapshots.as_ref(),
-                    structures_need_energy: self.structures_need_energy,
-                    base_buy_enabled: self.base_buy_enabled,
-                    base_sell_enabled: self.base_sell_enabled,
-                    transfer_zones: &self.transfer_zones,
-                };
-                let step_result = object.step_command_stack(command_context, command_gravity);
-                self.rng = command_rng.take();
-                if let Some(result) = step_result {
-                    if result.update.is_some() || !result.events.is_empty() {
-                        let update = result.update.unwrap_or_default();
-                        let mut queued = QueuedCommand::immediate(update);
-                        if !result.events.is_empty() {
-                            queued = queued.with_events(result.events.clone());
-                        }
-                        object.command_queue.push_front(queued);
+                if let Some(target_id) = build_target {
+                    let live_target = self
+                        .find_object_index(target_id)
+                        .map(|target_index| self.live_command_snapshot(target_index, None));
+                    let completing = live_target
+                        .as_ref()
+                        .is_some_and(|target| target.construction >= FULL_CON);
+                    if let Some(target) = live_target {
+                        command_snapshots.insert(target_id, target);
+                    }
+                    if completing {
+                        // Completion scans every live command stack and each
+                        // co-builder's current contents. Foreign callbacks can
+                        // mutate either after that object's own Execute, so
+                        // refresh the full table where C++ calls FindObjectByCommand.
+                        let live_snapshots = (0..self.objects.len())
+                            .map(|index| {
+                                let snapshot = self.live_command_snapshot(index, None);
+                                (snapshot.id, snapshot)
+                            })
+                            .collect::<Vec<_>>();
+                        command_snapshots.extend(live_snapshots);
                     }
                 }
-                let previous_owner = object.state.owner;
-                let previous_crew = object.state.crew_member;
-                let previous_status = object.state.status;
-                let outcome = object.execute_command_queue(
-                    &self.physics,
-                    &self.materials,
-                    landscape_slot.as_mut(),
-                    &action_library,
-                    &self.definitions,
-                    &self.players,
-                );
-                let new_owner = object.state.owner;
-                let new_crew = object.state.crew_member;
-                let new_status = object.state.status;
-                (
-                    outcome.spawns,
-                    outcome.destroy,
-                    outcome.effect_events,
-                    outcome.container_updates,
-                    outcome.command_events,
-                    outcome.definition_changed,
-                    outcome.change_def_reinsert,
+                let Some(idx) = self.find_object_index(current_id) else {
+                    continue;
+                };
+                // C++ command handlers read the live object and command lists.
+                // Refresh the executing object after any earlier object in this
+                // frame may have changed it; completed objects are likewise
+                // written back below for later command scans.
+                if command_snapshots_are_full || object_has_commands {
+                    let master_list_order = command_snapshots
+                        .get(&current_id)
+                        .map(|snapshot| snapshot.master_list_order);
+                    let mut actor_snapshot = self.live_command_snapshot(idx, master_list_order);
+                    actor_snapshot.physical_deferred =
+                        self.object_physical_will_fill_fair_cache(idx);
+                    command_snapshots.insert(current_id, actor_snapshot);
+                }
+                let object_may_execute_command_work =
+                    object_has_commands || !self.objects[idx].command_queue.is_empty();
+                let mut landscape_slot = object_may_execute_command_work
+                    .then(|| self.landscape.take())
+                    .flatten();
+                let command_gravity = self.physics.gravity_as_c4fixed();
+                let (
+                    queued_spawns,
+                    queue_destroy,
+                    queue_events,
+                    container_updates,
+                    command_events,
+                    queue_definition_changed,
+                    queue_change_def_reinsert,
                     (
-                        object.id,
+                        object_id,
                         previous_owner,
                         previous_crew,
                         new_owner,
@@ -487,196 +524,286 @@ impl Engine {
                         previous_status,
                         new_status,
                     ),
-                )
-            };
-            self.landscape = landscape_slot;
-            self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
-            self.update_selection_for_state_change(
-                object_id,
-                previous_owner,
-                previous_crew,
-                new_owner,
-                new_crew,
-            );
-
-            if queue_definition_changed {
-                self.update_sector_for_index(idx);
-                self.update_solid_mask(idx);
-                self.refresh_object_ocf(idx);
-            }
-
-            for update in container_updates {
-                self.apply_container_change(update.object_id, update.previous, update.new, false)?;
-            }
-            if queue_change_def_reinsert {
-                self.reinsert_change_def_contents_link(object_id)?;
-            }
-
-            // GetFairCrewPhysical is ordinary script. Its callback can
-            // mutate any object which a later ExecObjects command will read,
-            // so the frame-wide structural table from before that callback
-            // is no longer valid even though only the actor's captured
-            // physical value feeds the retained continuation.
-            let mut resolved_command_physical = false;
-            for event in command_events {
-                resolved_command_physical |= self.apply_command_event(event)?;
-            }
-            if resolved_command_physical {
-                command_snapshots = (0..self.objects.len())
-                    .map(|index| {
-                        let snapshot = self.live_command_snapshot(index);
-                        (snapshot.id, snapshot)
-                    })
-                    .collect();
-                Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
-                command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
-            }
-
-            if !queue_events.is_empty() {
-                let object_id = self.objects[idx].id;
-                let previous_container = self.objects[idx].state.container;
-                let global_view = self.global_effects.clone();
-                let rng_state = self.rng.clone();
-                let world = self.host_world_context_for_object(idx);
-                let (
-                    global_cmds,
-                    emitted_particles,
-                    physics_delta,
-                    audio_events,
-                    event_messages,
-                    player_commands,
-                    object_order_commands,
-                    next_mission_commands,
-                    landscape_ops,
-                    effect_transfer_zones,
-                    effect_spawns,
-                    effect_other_objects,
-                    effect_solid_mask_operations,
-                    effect_host_raster_preview,
-                    effect_solid_mask_changed,
-                    _effect_action_callbacks_dispatched,
-                    effect_change_def_reinsert,
-                    effect_next_object_id,
-                    triggered_game_over,
-                    effect_script_go,
-                    effect_script_counter,
-                    audio_state,
-                    new_rng,
                 ) = {
-                    let definition = self
-                        .definitions
-                        .get(&definition_id)
-                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
                     let object = &mut self.objects[idx];
-                    Self::run_effect_events_for_object(
-                        definition,
-                        definitions_ref,
-                        self.game_over_triggered,
-                        rng_state,
-                        object_id,
-                        object,
-                        queue_events,
-                        global_view,
-                        &mut self.environment,
-                        self.physics,
-                        self.frame,
-                        world.clone(),
-                        self.audio_registry.clone(),
-                    )?
-                };
-                let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-                let mut outermost = self.stage_host_solid_mask_operations(
-                    effect_solid_mask_operations,
-                    effect_host_raster_preview,
-                );
-                let fold_result = (|| -> Result<(), EngineError> {
-                    self.rng = new_rng;
-                    self.audio_registry = audio_state;
-                    if effect_solid_mask_changed {
-                        self.update_solid_mask(idx);
-                    }
-                    self.sync_next_object_id(effect_next_object_id);
-                    if !effect_spawns.is_empty() {
-                        self.process_spawn_queue(effect_spawns)?;
-                    }
-                    if !effect_transfer_zones.is_empty() {
-                        self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                    }
-                    if !effect_other_objects.is_empty() {
-                        self.apply_nested_object_outcomes(effect_other_objects)?;
-                    }
-                    if !landscape_ops.is_empty() {
-                        self.apply_landscape_operations(landscape_ops);
-                    }
-                    if !player_commands.is_empty() {
-                        self.apply_player_commands(player_commands)?;
-                    }
-                    self.pending_object_order_commands
-                        .extend(object_order_commands);
-                    self.apply_next_mission_commands(next_mission_commands);
-                    if !audio_events.is_empty() {
-                        self.pending_audio.extend(audio_events);
-                    }
-                    if !event_messages.is_empty() {
-                        for command in event_messages {
-                            self.messages.apply_command(command);
+                    let object_id = object.id;
+                    let current_position = object.state.position;
+                    let step_result = if object_has_commands {
+                        let builder_snapshot = command_snapshots
+                            .get(&object_id)
+                            .expect("command snapshot exists");
+                        command_rng.replace(std::mem::take(&mut self.rng));
+                        let command_context = CommandRuntimeContext {
+                            rng: Some(&command_rng),
+                            frame: self.frame,
+                            position: current_position,
+                            landscape: landscape_slot.as_ref(),
+                            object: builder_snapshot,
+                            objects: &command_snapshots,
+                            players: &player_snapshots,
+                            definitions: definition_snapshots.as_ref(),
+                            structures_need_energy: self.structures_need_energy,
+                            base_buy_enabled: self.base_buy_enabled,
+                            base_sell_enabled: self.base_sell_enabled,
+                            transfer_zones: &self.transfer_zones,
+                        };
+                        let result = object.step_command_stack(command_context, command_gravity);
+                        self.rng = command_rng.take();
+                        result
+                    } else {
+                        None
+                    };
+                    if let Some(result) = step_result {
+                        if result.update.is_some() || !result.events.is_empty() {
+                            let update = result.update.unwrap_or_default();
+                            let mut queued = QueuedCommand::immediate(update);
+                            if !result.events.is_empty() {
+                                queued = queued.with_events(result.events.clone());
+                            }
+                            object.command_queue.push_front(queued);
                         }
                     }
-                    if let Some(go) = effect_script_go {
-                        self.scenario_script_go = go;
-                    }
-                    if let Some(counter) = effect_script_counter {
-                        self.scenario_script_counter = counter;
-                    }
-                    if triggered_game_over {
-                        self.request_game_over()?;
-                    }
-                    if !physics_delta.is_empty() {
-                        self.apply_physics_delta(physics_delta);
-                    }
-                    if !global_cmds.is_empty() {
-                        self.apply_global_effect_commands(&global_cmds);
-                    }
-                    self.apply_particle_commands(emitted_particles);
-                    let new_container = self.objects[idx].state.container;
-                    if previous_container != new_container {
-                        self.apply_container_change(
+                    let previous_owner = object.state.owner;
+                    let previous_crew = object.state.crew_member;
+                    let previous_status = object.state.status;
+                    let outcome = if object.command_queue.is_empty() {
+                        CommandQueueOutcome::default()
+                    } else {
+                        object.execute_command_queue(
+                            &self.physics,
+                            &self.materials,
+                            landscape_slot.as_mut(),
+                            &action_library,
+                            &self.definitions,
+                            &self.players,
+                        )
+                    };
+                    let new_owner = object.state.owner;
+                    let new_crew = object.state.crew_member;
+                    let new_status = object.state.status;
+                    (
+                        outcome.spawns,
+                        outcome.destroy,
+                        outcome.effect_events,
+                        outcome.container_updates,
+                        outcome.command_events,
+                        outcome.definition_changed,
+                        outcome.change_def_reinsert,
+                        (
+                            object.id,
+                            previous_owner,
+                            previous_crew,
+                            new_owner,
+                            new_crew,
+                            previous_status,
+                            new_status,
+                        ),
+                    )
+                };
+                if object_may_execute_command_work {
+                    self.landscape = landscape_slot;
+                }
+                self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
+                self.update_selection_for_state_change(
+                    object_id,
+                    previous_owner,
+                    previous_crew,
+                    new_owner,
+                    new_crew,
+                );
+
+                if queue_definition_changed {
+                    self.update_sector_for_index(idx);
+                    self.update_solid_mask(idx);
+                    self.refresh_object_ocf(idx);
+                }
+
+                for update in container_updates {
+                    self.apply_container_change(
+                        update.object_id,
+                        update.previous,
+                        update.new,
+                        false,
+                    )?;
+                }
+                if queue_change_def_reinsert {
+                    self.reinsert_change_def_contents_link(object_id)?;
+                }
+
+                // GetFairCrewPhysical is ordinary script. Its callback can
+                // mutate any object which a later ExecObjects command will read,
+                // so the frame-wide structural table from before that callback
+                // is no longer valid even though only the actor's captured
+                // physical value feeds the retained continuation.
+                let mut resolved_command_physical = false;
+                for event in command_events {
+                    resolved_command_physical |= self.apply_command_event(event)?;
+                }
+                if resolved_command_physical {
+                    command_snapshots = (0..self.objects.len())
+                        .map(|index| {
+                            let snapshot = self.live_command_snapshot(index, None);
+                            (snapshot.id, snapshot)
+                        })
+                        .collect();
+                    command_snapshots_are_full = true;
+                    Self::refresh_command_master_list_order(
+                        &self.exec_list,
+                        &mut command_snapshots,
+                    );
+                    command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
+                }
+
+                if !queue_events.is_empty() {
+                    let object_id = self.objects[idx].id;
+                    let previous_container = self.objects[idx].state.container;
+                    let global_view = self.global_effects.clone();
+                    let rng_state = self.rng.clone();
+                    let world = self.host_world_context_for_object(idx);
+                    let (
+                        global_cmds,
+                        emitted_particles,
+                        physics_delta,
+                        audio_events,
+                        event_messages,
+                        player_commands,
+                        object_order_commands,
+                        next_mission_commands,
+                        landscape_ops,
+                        effect_transfer_zones,
+                        effect_spawns,
+                        effect_other_objects,
+                        effect_solid_mask_operations,
+                        effect_host_raster_preview,
+                        effect_solid_mask_changed,
+                        _effect_action_callbacks_dispatched,
+                        effect_change_def_reinsert,
+                        effect_next_object_id,
+                        triggered_game_over,
+                        effect_script_go,
+                        effect_script_counter,
+                        audio_state,
+                        new_rng,
+                    ) = {
+                        let definition = self
+                            .definitions
+                            .get(&definition_id)
+                            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                        let definitions_ref = &self.definitions;
+                        let object = &mut self.objects[idx];
+                        Self::run_effect_events_for_object(
+                            definition,
+                            definitions_ref,
+                            self.game_over_triggered,
+                            rng_state,
                             object_id,
-                            previous_container,
-                            new_container,
-                            false,
-                        )?;
-                    }
-                    if effect_change_def_reinsert.unwrap_or(false) {
-                        self.reinsert_change_def_contents_link(object_id)?;
-                    }
-                    Ok(())
-                })();
-                outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
-                self.finish_host_solid_mask_operations(outermost, fold_result)?;
+                            object,
+                            queue_events,
+                            global_view,
+                            &mut self.environment,
+                            self.physics,
+                            self.frame,
+                            world.clone(),
+                            self.audio_registry.clone(),
+                        )?
+                    };
+                    let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+                    let mut outermost = self.stage_host_solid_mask_operations(
+                        effect_solid_mask_operations,
+                        effect_host_raster_preview,
+                    );
+                    let fold_result = (|| -> Result<(), EngineError> {
+                        self.rng = new_rng;
+                        self.audio_registry = audio_state;
+                        if effect_solid_mask_changed {
+                            self.update_solid_mask(idx);
+                        }
+                        self.sync_next_object_id(effect_next_object_id);
+                        if !effect_spawns.is_empty() {
+                            self.process_spawn_queue(effect_spawns)?;
+                        }
+                        if !effect_transfer_zones.is_empty() {
+                            self.apply_transfer_zone_commands(effect_transfer_zones)?;
+                        }
+                        if !effect_other_objects.is_empty() {
+                            self.apply_nested_object_outcomes(effect_other_objects)?;
+                        }
+                        if !landscape_ops.is_empty() {
+                            self.apply_landscape_operations(landscape_ops);
+                        }
+                        if !player_commands.is_empty() {
+                            self.apply_player_commands(player_commands)?;
+                        }
+                        self.pending_object_order_commands
+                            .extend(object_order_commands);
+                        self.apply_next_mission_commands(next_mission_commands);
+                        if !audio_events.is_empty() {
+                            self.pending_audio.extend(audio_events);
+                        }
+                        if !event_messages.is_empty() {
+                            for command in event_messages {
+                                self.messages.apply_command(command);
+                            }
+                        }
+                        if let Some(go) = effect_script_go {
+                            self.scenario_script_go = go;
+                        }
+                        if let Some(counter) = effect_script_counter {
+                            self.scenario_script_counter = counter;
+                        }
+                        if triggered_game_over {
+                            self.request_game_over()?;
+                        }
+                        if !physics_delta.is_empty() {
+                            self.apply_physics_delta(physics_delta);
+                        }
+                        if !global_cmds.is_empty() {
+                            self.apply_global_effect_commands(&global_cmds);
+                        }
+                        self.apply_particle_commands(emitted_particles);
+                        let new_container = self.objects[idx].state.container;
+                        if previous_container != new_container {
+                            self.apply_container_change(
+                                object_id,
+                                previous_container,
+                                new_container,
+                                false,
+                            )?;
+                        }
+                        if effect_change_def_reinsert.unwrap_or(false) {
+                            self.reinsert_change_def_contents_link(object_id)?;
+                        }
+                        Ok(())
+                    })();
+                    outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+                    self.finish_host_solid_mask_operations(outermost, fold_result)?;
+                }
+
+                self.finish_object_command_execution(object_id)?;
+                let Some(idx) = self.find_object_index(object_id) else {
+                    continue;
+                };
+                // ExecuteCommand and its synchronous callbacks run before every
+                // later C4Object::Execute stage. ChangeDef therefore changes the
+                // live Def/ActMap used by ExecAction, movement, effects and Timer
+                // in this same frame — including a swap from queue effects or
+                // ControlCommandFinished rather than the direct queued delta.
+                if !queued_spawns.is_empty() {
+                    spawn_requests.extend(queued_spawns);
+                }
+
+                if queue_destroy || self.objects[idx].destroyed {
+                    continue;
+                }
+
+                if !self.objects[idx].state.status.is_active() {
+                    continue;
+                }
             }
 
-            self.finish_object_command_execution(object_id)?;
-            let Some(idx) = self.find_object_index(object_id) else {
+            let Some(idx) = self.find_object_index(current_id) else {
                 continue;
             };
-            // ExecuteCommand and its synchronous callbacks run before every
-            // later C4Object::Execute stage. ChangeDef therefore changes the
-            // live Def/ActMap used by ExecAction, movement, effects and Timer
-            // in this same frame — including a swap from queue effects or
-            // ControlCommandFinished rather than the direct queued delta.
-            if !queued_spawns.is_empty() {
-                spawn_requests.extend(queued_spawns);
-            }
-
-            if queue_destroy || self.objects[idx].destroyed {
-                continue;
-            }
-
-            if !self.objects[idx].state.status.is_active() {
-                continue;
-            }
 
             dbg_stage(&self.objects[idx], "POSTCMD");
             // ExecAction captures pAction before procedure steering. SetDir
@@ -847,11 +974,14 @@ impl Engine {
             // the snap eat the sub-pixel remainder DoMovement just built.
             // Transitions recorded during movement/effects still drain at
             // the post-movement call below.
-            self.trigger_action_callbacks_impl(
-                idx,
-                Some(previous_action_name.clone()),
-                allow_deleted_phase_end_start,
-            )?;
+            if allow_deleted_phase_end_start || !self.objects[idx].pending_action_events.is_empty()
+            {
+                self.trigger_action_callbacks_impl(
+                    idx,
+                    Some(previous_action_name.clone()),
+                    allow_deleted_phase_end_start,
+                )?;
+            }
             if self.objects[idx].destroyed {
                 continue;
             }
@@ -1115,289 +1245,174 @@ impl Engine {
                 self.rng = new_rng;
                 self.sync_next_object_id(next_object_id);
                 self.audio_registry = audio_state;
-                command
+                Some(command)
             } else {
-                CommandBatch::default()
+                None
             };
 
-            let CommandBatch {
-                delta,
-                spawns,
-                destroy,
-                commands,
-                command_ops,
-                effects,
-                other_objects,
-                global_effects,
-                environment,
-                physics,
-                landscape_ops,
-                solid_mask_operations,
-                host_raster_preview: command_host_raster_preview,
-                particles,
-                transfer_zones,
-                audio,
-                messages,
-                player_commands,
-                object_order_commands,
-                next_mission_commands,
-                trigger_game_over,
-                script_go,
-                script_counter,
-            } = command;
+            if let Some(command) = command {
+                let CommandBatch {
+                    delta,
+                    spawns,
+                    destroy,
+                    commands,
+                    command_ops,
+                    effects,
+                    other_objects,
+                    global_effects,
+                    environment,
+                    physics,
+                    landscape_ops,
+                    solid_mask_operations,
+                    host_raster_preview: command_host_raster_preview,
+                    particles,
+                    transfer_zones,
+                    audio,
+                    messages,
+                    player_commands,
+                    object_order_commands,
+                    next_mission_commands,
+                    trigger_game_over,
+                    script_go,
+                    script_counter,
+                } = command;
+                #[cfg(test)]
+                SYNTHETIC_COMMAND_FOLDS.with(|count| count.set(count.get().saturating_add(1)));
 
-            let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
-            let mut outermost = self.stage_host_solid_mask_operations(
-                solid_mask_operations,
-                command_host_raster_preview,
-            );
-            let command_fold_result = (|| -> Result<(), EngineError> {
-                let change_def = delta.change_def.clone();
-                let change_def_reinsert = delta.change_def_reinsert;
-
-                let action_library = change_def
-                    .as_deref()
-                    .and_then(|new_def| {
-                        self.apply_change_object_def(idx, new_def);
-                        self.shared_action_library_for(&self.objects[idx].definition_id)
-                    })
-                    .unwrap_or_else(|| action_library.clone());
-
-                if let Some(go) = script_go {
-                    self.scenario_script_go = go;
-                }
-                if let Some(counter) = script_counter {
-                    self.scenario_script_counter = counter;
-                }
-                if trigger_game_over {
-                    self.request_game_over()?;
-                }
-
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                self.pending_object_order_commands
-                    .extend(object_order_commands);
-                self.apply_next_mission_commands(next_mission_commands);
-
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-
-                if let Some(update) = environment {
-                    self.apply_environment_delta(&update);
-                }
-                if let Some(delta) = physics {
-                    self.apply_physics_delta(delta);
-                }
-
-                let mut effect_events = Vec::new();
-                if !messages.is_empty() {
-                    for command in messages {
-                        self.messages.apply_command(command);
-                    }
-                }
-                let (object_id, previous_owner, previous_crew, previous_status, container_change) = {
-                    let object = &mut self.objects[idx];
-                    let previous_owner = object.state.owner;
-                    let previous_crew = object.state.crew_member;
-                    let previous_status = object.state.status;
-                    let mut container_change = None;
-                    let callbacks_dispatched = delta
-                        .action
-                        .as_ref()
-                        .map(|action| action.callbacks_dispatched)
-                        .unwrap_or(false);
-                    let delta_outcome = object.apply_delta(&delta, &action_library);
-                    if let Some(change) = delta_outcome.action_change {
-                        if !callbacks_dispatched {
-                            object
-                                .record_action_event(change.previous, ActionTransitionKind::Forced);
-                        }
-                    }
-                    if let Some(change) = delta_outcome.container_change {
-                        container_change = Some(change);
-                    }
-                    let mut applied = object.apply_effect_commands(&effects);
-                    effect_events.append(&mut applied);
-                    (
-                        object.id,
-                        previous_owner,
-                        previous_crew,
-                        previous_status,
-                        container_change,
-                    )
-                };
-                let physical_float = self.object_physical_without_fair_fill(idx).float;
-                let (new_owner, new_crew, new_status) = {
-                    let object = &mut self.objects[idx];
-                    let procedure = action_library.procedure_for_entry(
-                        &object.state.action.name,
-                        object.state.action.act_map_index,
-                    );
-                    let native_float =
-                        matches!(procedure, ActionProcedure::Float) && physical_float != 0;
-                    if !matches!(procedure, ActionProcedure::Flight) && !native_float {
-                        object.clamp_velocity(&self.physics);
-                    }
-                    if destroy {
-                        effect_events.extend(object.mark_destroyed());
-                    }
-                    if !command_ops.is_empty() {
-                        object.apply_command_operations(command_ops);
-                    }
-                    if !commands.is_empty() {
-                        object.enqueue_commands(commands);
-                    }
-                    (
-                        object.state.owner,
-                        object.state.crew_member,
-                        object.state.status,
-                    )
-                };
-                self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
-                self.update_sector_for_index(idx);
-                if !audio.is_empty() {
-                    self.pending_audio.extend(audio);
-                }
-                self.update_selection_for_state_change(
-                    object_id,
-                    previous_owner,
-                    previous_crew,
-                    new_owner,
-                    new_crew,
+                let was_deferred = self.solid_mask_staging.defer_solid_mask_updates;
+                let mut outermost = self.stage_host_solid_mask_operations(
+                    solid_mask_operations,
+                    command_host_raster_preview,
                 );
-                if let Some((previous_container, new_container)) = container_change {
-                    self.apply_container_change(
-                        object_id,
-                        previous_container,
-                        new_container,
-                        false,
-                    )?;
-                }
-                if change_def_reinsert {
-                    self.reinsert_change_def_contents_link(object_id)?;
-                }
-                if change_def.is_some() {
-                    self.update_solid_mask(idx);
-                    self.refresh_object_ocf(idx);
-                }
+                let command_fold_result = (|| -> Result<(), EngineError> {
+                    let change_def = delta.change_def.clone();
+                    let change_def_reinsert = delta.change_def_reinsert;
 
-                self.apply_particle_commands(particles);
-                if !transfer_zones.is_empty() {
-                    self.apply_transfer_zone_commands(transfer_zones)?;
-                }
+                    let action_library = change_def
+                        .as_deref()
+                        .and_then(|new_def| {
+                            self.apply_change_object_def(idx, new_def);
+                            self.shared_action_library_for(&self.objects[idx].definition_id)
+                        })
+                        .unwrap_or_else(|| action_library.clone());
 
-                if !global_effects.is_empty() {
-                    self.apply_global_effect_commands(&global_effects);
-                }
+                    if let Some(go) = script_go {
+                        self.scenario_script_go = go;
+                    }
+                    if let Some(counter) = script_counter {
+                        self.scenario_script_counter = counter;
+                    }
+                    if trigger_game_over {
+                        self.request_game_over()?;
+                    }
 
-                if !effect_events.is_empty() {
-                    let previous_container = self.objects[idx].state.container;
-                    let world = self.host_world_context_for_object(idx);
-                    let (
-                        global_cmds,
-                        emitted_particles,
-                        physics_delta,
-                        audio_events,
-                        event_messages,
-                        player_commands,
-                        object_order_commands,
-                        next_mission_commands,
-                        landscape_ops,
-                        effect_transfer_zones,
-                        effect_spawns,
-                        effect_other_objects,
-                        effect_solid_mask_operations,
-                        effect_host_raster_preview,
-                        effect_solid_mask_changed,
-                        _effect_action_callbacks_dispatched,
-                        effect_change_def_reinsert,
-                        effect_next_object_id,
-                        triggered_game_over,
-                        effect_script_go,
-                        effect_script_counter,
-                        audio_state,
-                        new_rng,
-                    ) = {
-                        let definition = self
-                            .definitions
-                            .get(&definition_id)
-                            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                        let definitions_ref = &self.definitions;
-                        let global_view = self.global_effects.clone();
-                        let rng_state = self.rng.clone();
-                        let object = &mut self.objects[idx];
-                        Self::run_effect_events_for_object(
-                            definition,
-                            definitions_ref,
-                            self.game_over_triggered,
-                            rng_state,
-                            object_id,
-                            object,
-                            effect_events,
-                            global_view,
-                            &mut self.environment,
-                            self.physics,
-                            self.frame,
-                            world.clone(),
-                            self.audio_registry.clone(),
-                        )?
-                    };
-                    self.stage_host_solid_mask_operations(
-                        effect_solid_mask_operations,
-                        effect_host_raster_preview,
-                    );
-                    self.rng = new_rng;
-                    self.audio_registry = audio_state;
-                    if effect_solid_mask_changed {
-                        self.update_solid_mask(idx);
-                    }
-                    self.sync_next_object_id(effect_next_object_id);
-                    if !effect_spawns.is_empty() {
-                        self.process_spawn_queue(effect_spawns)?;
-                    }
-                    if !effect_transfer_zones.is_empty() {
-                        self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                    }
-                    if !effect_other_objects.is_empty() {
-                        self.apply_nested_object_outcomes(effect_other_objects)?;
-                    }
                     if !player_commands.is_empty() {
                         self.apply_player_commands(player_commands)?;
                     }
                     self.pending_object_order_commands
                         .extend(object_order_commands);
                     self.apply_next_mission_commands(next_mission_commands);
+
                     if !landscape_ops.is_empty() {
                         self.apply_landscape_operations(landscape_ops);
                     }
-                    if !audio_events.is_empty() {
-                        self.pending_audio.extend(audio_events);
+
+                    if let Some(update) = environment {
+                        self.apply_environment_delta(&update);
                     }
-                    if !event_messages.is_empty() {
-                        for command in event_messages {
+                    if let Some(delta) = physics {
+                        self.apply_physics_delta(delta);
+                    }
+
+                    let mut effect_events = Vec::new();
+                    if !messages.is_empty() {
+                        for command in messages {
                             self.messages.apply_command(command);
                         }
                     }
-                    if let Some(go) = effect_script_go {
-                        self.scenario_script_go = go;
+                    let (
+                        object_id,
+                        previous_owner,
+                        previous_crew,
+                        previous_status,
+                        container_change,
+                    ) = {
+                        let object = &mut self.objects[idx];
+                        let previous_owner = object.state.owner;
+                        let previous_crew = object.state.crew_member;
+                        let previous_status = object.state.status;
+                        let mut container_change = None;
+                        let callbacks_dispatched = delta
+                            .action
+                            .as_ref()
+                            .map(|action| action.callbacks_dispatched)
+                            .unwrap_or(false);
+                        let delta_outcome = object.apply_delta(&delta, &action_library);
+                        if let Some(change) = delta_outcome.action_change {
+                            if !callbacks_dispatched {
+                                object.record_action_event(
+                                    change.previous,
+                                    ActionTransitionKind::Forced,
+                                );
+                            }
+                        }
+                        if let Some(change) = delta_outcome.container_change {
+                            container_change = Some(change);
+                        }
+                        let mut applied = object.apply_effect_commands(&effects);
+                        effect_events.append(&mut applied);
+                        (
+                            object.id,
+                            previous_owner,
+                            previous_crew,
+                            previous_status,
+                            container_change,
+                        )
+                    };
+                    let physical_float = self.object_physical_without_fair_fill(idx).float;
+                    let (new_owner, new_crew, new_status) = {
+                        let object = &mut self.objects[idx];
+                        let procedure = action_library.procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        );
+                        let native_float =
+                            matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+                        if !matches!(procedure, ActionProcedure::Flight) && !native_float {
+                            object.clamp_velocity(&self.physics);
+                        }
+                        if destroy {
+                            effect_events.extend(object.mark_destroyed());
+                        }
+                        if !command_ops.is_empty() {
+                            object.apply_command_operations(command_ops);
+                        }
+                        if !commands.is_empty() {
+                            object.enqueue_commands(commands);
+                        }
+                        (
+                            object.state.owner,
+                            object.state.crew_member,
+                            object.state.status,
+                        )
+                    };
+                    self.update_inactive_list_for_status_change(
+                        object_id,
+                        previous_status,
+                        new_status,
+                    );
+                    self.update_sector_for_index(idx);
+                    if !audio.is_empty() {
+                        self.pending_audio.extend(audio);
                     }
-                    if let Some(counter) = effect_script_counter {
-                        self.scenario_script_counter = counter;
-                    }
-                    if triggered_game_over {
-                        self.request_game_over()?;
-                    }
-                    if !physics_delta.is_empty() {
-                        self.apply_physics_delta(physics_delta);
-                    }
-                    let new_container = self.objects[idx].state.container;
-                    if !global_cmds.is_empty() {
-                        self.apply_global_effect_commands(&global_cmds);
-                    }
-                    self.apply_particle_commands(emitted_particles);
-                    if previous_container != new_container {
+                    self.update_selection_for_state_change(
+                        object_id,
+                        previous_owner,
+                        previous_crew,
+                        new_owner,
+                        new_crew,
+                    );
+                    if let Some((previous_container, new_container)) = container_change {
                         self.apply_container_change(
                             object_id,
                             previous_container,
@@ -1405,144 +1420,300 @@ impl Engine {
                             false,
                         )?;
                     }
-                    if effect_change_def_reinsert.unwrap_or(false) {
+                    if change_def_reinsert {
                         self.reinsert_change_def_contents_link(object_id)?;
                     }
+                    if change_def.is_some() {
+                        self.update_solid_mask(idx);
+                        self.refresh_object_ocf(idx);
+                    }
+
+                    self.apply_particle_commands(particles);
+                    if !transfer_zones.is_empty() {
+                        self.apply_transfer_zone_commands(transfer_zones)?;
+                    }
+
+                    if !global_effects.is_empty() {
+                        self.apply_global_effect_commands(&global_effects);
+                    }
+
+                    if !effect_events.is_empty() {
+                        let previous_container = self.objects[idx].state.container;
+                        let world = self.host_world_context_for_object(idx);
+                        let (
+                            global_cmds,
+                            emitted_particles,
+                            physics_delta,
+                            audio_events,
+                            event_messages,
+                            player_commands,
+                            object_order_commands,
+                            next_mission_commands,
+                            landscape_ops,
+                            effect_transfer_zones,
+                            effect_spawns,
+                            effect_other_objects,
+                            effect_solid_mask_operations,
+                            effect_host_raster_preview,
+                            effect_solid_mask_changed,
+                            _effect_action_callbacks_dispatched,
+                            effect_change_def_reinsert,
+                            effect_next_object_id,
+                            triggered_game_over,
+                            effect_script_go,
+                            effect_script_counter,
+                            audio_state,
+                            new_rng,
+                        ) = {
+                            let definition =
+                                self.definitions.get(&definition_id).ok_or_else(|| {
+                                    EngineError::UnknownDefinition(definition_id.clone())
+                                })?;
+                            let definitions_ref = &self.definitions;
+                            let global_view = self.global_effects.clone();
+                            let rng_state = self.rng.clone();
+                            let object = &mut self.objects[idx];
+                            Self::run_effect_events_for_object(
+                                definition,
+                                definitions_ref,
+                                self.game_over_triggered,
+                                rng_state,
+                                object_id,
+                                object,
+                                effect_events,
+                                global_view,
+                                &mut self.environment,
+                                self.physics,
+                                self.frame,
+                                world.clone(),
+                                self.audio_registry.clone(),
+                            )?
+                        };
+                        self.stage_host_solid_mask_operations(
+                            effect_solid_mask_operations,
+                            effect_host_raster_preview,
+                        );
+                        self.rng = new_rng;
+                        self.audio_registry = audio_state;
+                        if effect_solid_mask_changed {
+                            self.update_solid_mask(idx);
+                        }
+                        self.sync_next_object_id(effect_next_object_id);
+                        if !effect_spawns.is_empty() {
+                            self.process_spawn_queue(effect_spawns)?;
+                        }
+                        if !effect_transfer_zones.is_empty() {
+                            self.apply_transfer_zone_commands(effect_transfer_zones)?;
+                        }
+                        if !effect_other_objects.is_empty() {
+                            self.apply_nested_object_outcomes(effect_other_objects)?;
+                        }
+                        if !player_commands.is_empty() {
+                            self.apply_player_commands(player_commands)?;
+                        }
+                        self.pending_object_order_commands
+                            .extend(object_order_commands);
+                        self.apply_next_mission_commands(next_mission_commands);
+                        if !landscape_ops.is_empty() {
+                            self.apply_landscape_operations(landscape_ops);
+                        }
+                        if !audio_events.is_empty() {
+                            self.pending_audio.extend(audio_events);
+                        }
+                        if !event_messages.is_empty() {
+                            for command in event_messages {
+                                self.messages.apply_command(command);
+                            }
+                        }
+                        if let Some(go) = effect_script_go {
+                            self.scenario_script_go = go;
+                        }
+                        if let Some(counter) = effect_script_counter {
+                            self.scenario_script_counter = counter;
+                        }
+                        if triggered_game_over {
+                            self.request_game_over()?;
+                        }
+                        if !physics_delta.is_empty() {
+                            self.apply_physics_delta(physics_delta);
+                        }
+                        let new_container = self.objects[idx].state.container;
+                        if !global_cmds.is_empty() {
+                            self.apply_global_effect_commands(&global_cmds);
+                        }
+                        self.apply_particle_commands(emitted_particles);
+                        if previous_container != new_container {
+                            self.apply_container_change(
+                                object_id,
+                                previous_container,
+                                new_container,
+                                false,
+                            )?;
+                        }
+                        if effect_change_def_reinsert.unwrap_or(false) {
+                            self.reinsert_change_def_contents_link(object_id)?;
+                        }
+                    }
+                    self.update_sector_for_index(idx);
+
+                    self.apply_nested_object_outcomes(other_objects)?;
+
+                    Ok(())
+                })();
+                outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
+                self.finish_host_solid_mask_operations(outermost, command_fold_result)?;
+                spawn_requests.extend(spawns);
+            } else {
+                // Real C4Script mutates state synchronously through host
+                // calls. Only the synthetic snapshot-fixture Step callback
+                // returns a CommandBatch, so do not manufacture and fold an
+                // empty one for every real-content object. Preserve the one
+                // native tail operation that used to ride in that fold.
+                let physical_float = self.object_physical_without_fair_fill(idx).float;
+                let object = &mut self.objects[idx];
+                let procedure = action_library.procedure_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                );
+                let native_float =
+                    matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+                if !matches!(procedure, ActionProcedure::Flight) && !native_float {
+                    object.clamp_velocity(&self.physics);
                 }
                 self.update_sector_for_index(idx);
+            }
 
-                self.apply_nested_object_outcomes(other_objects)?;
-
-                Ok(())
-            })();
-            outermost |= !was_deferred && self.solid_mask_staging.defer_solid_mask_updates;
-            self.finish_host_solid_mask_operations(outermost, command_fold_result)?;
-
-            self.trigger_action_callbacks(idx, Some(previous_action_name))?;
-            self.update_sector_for_index(idx);
+            if !self.objects[idx].pending_action_events.is_empty() {
+                self.trigger_action_callbacks(idx, Some(previous_action_name))?;
+                self.update_sector_for_index(idx);
+            }
 
             if self.objects[idx].destroyed {
                 continue;
             }
-
-            self.update_sector_for_index(idx);
-            let (
-                procedure,
-                line_connect,
-                collectible,
-                move_to_range,
-                pathfinder,
-                no_transfer_zones,
-                no_push_enter,
-                action_idle,
-                action_disabled,
-            ) = self
-                .definitions
-                .get(&self.objects[idx].definition_id)
-                .map(|definition| {
-                    (
-                        definition.action_library().procedure_for_entry(
-                            &self.objects[idx].state.action.name,
-                            self.objects[idx].state.action.act_map_index,
-                        ),
-                        definition.line_connect(),
-                        definition.is_collectible(),
-                        definition.move_to_range(),
-                        definition.pathfinder(),
-                        definition.no_transfer_zones(),
-                        definition.no_push_enter(),
-                        definition
-                            .action_library()
-                            .is_idle_state(&self.objects[idx].state.action),
-                        definition.action_library().disables_object_for_entry(
-                            &self.objects[idx].state.action.name,
-                            self.objects[idx].state.action.act_map_index,
-                        ),
-                    )
-                })
-                .unwrap_or((
-                    action_library.procedure_for_entry(
-                        &self.objects[idx].state.action.name,
-                        self.objects[idx].state.action.act_map_index,
-                    ),
-                    OCF_NORMAL,
-                    false,
-                    0,
-                    0,
-                    0,
-                    0,
-                    action_library.is_idle_state(&self.objects[idx].state.action),
-                    action_library.disables_object_for_entry(
-                        &self.objects[idx].state.action.name,
-                        self.objects[idx].state.action.act_map_index,
-                    ),
-                ));
-            // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
-            // object's Execute-start, C4Object.cpp:1058).
-            let ocf = self.objects[idx].state.ocf;
-            let master_list_order = self
-                .exec_list
-                .iter()
-                .rev()
-                .position(|&id| id == object_id)
-                .unwrap_or_else(|| self.exec_list.len().saturating_add(idx));
-            command_snapshots.insert(
-                object_id,
-                CommandObjectSnapshot {
-                    id: object_id,
-                    master_list_order,
-                    definition_id: self.objects[idx].definition_id.clone(),
-                    position: self.objects[idx].state.position,
-                    fixed_position: self.objects[idx].fixed_position,
-                    fixed_velocity: self.objects[idx].fixed_velocity,
+            if command_snapshots_are_full
+                || command_snapshots.contains_key(&object_id)
+                || !self.objects[idx].commands.is_empty()
+            {
+                let (
+                    procedure,
+                    line_connect,
+                    collectible,
                     move_to_range,
                     pathfinder,
                     no_transfer_zones,
                     no_push_enter,
-                    contact: self.objects[idx].frame_t_contact,
-                    action_time: self.objects[idx].state.action.time,
-                    shape_top: self.objects[idx]
-                        .current_shape_rect()
-                        .map(|rect| rect.y)
-                        .unwrap_or(0),
-                    shape_height: self.objects[idx]
-                        .current_shape_rect()
-                        .map(|rect| rect.height)
-                        .unwrap_or(0),
-                    shape: self.object_shape_rect(&self.objects[idx]),
-                    entrance: self.object_entrance_area(&self.objects[idx]),
-                    status: self.objects[idx].state.status,
-                    destroyed: self.objects[idx].destroyed,
-                    category: self.objects[idx].state.category,
-                    container: self.objects[idx].state.container,
-                    action_name: self.objects[idx].state.action.name.clone(),
                     action_idle,
                     action_disabled,
-                    action_target: self.objects[idx].state.action.target,
-                    action_target2: self.objects[idx].state.action.target2,
-                    action_procedure: procedure,
-                    command_direction: self.objects[idx].state.command_direction,
-                    construction: self.objects[idx].state.construction,
-                    direction: self.objects[idx].state.direction,
-                    physical: self.object_physical_without_fair_fill(idx),
-                    physical_deferred: false,
-                    owner: self.objects[idx].state.owner,
-                    controller: self.objects[idx].state.controller,
-                    base: self.objects[idx].state.base,
-                    crew_member: self.objects[idx].state.crew_member,
-                    selected: self.objects[idx].state.selected,
-                    alive: self.objects[idx].state.alive,
-                    need_energy: self.objects[idx].state.need_energy,
-                    on_fire: self.objects[idx].state.on_fire,
-                    contents: self.objects[idx].state.contents.clone(),
-                    commands: self.objects[idx].commands.command_views(),
-                    line_connect,
-                    ocf,
-                    entrance_status: self.objects[idx].state.entrance_status,
-                    collectible,
-                },
-            );
-            spawn_requests.extend(spawns);
+                ) = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .map(|definition| {
+                        (
+                            definition.action_library().procedure_for_entry(
+                                &self.objects[idx].state.action.name,
+                                self.objects[idx].state.action.act_map_index,
+                            ),
+                            definition.line_connect(),
+                            definition.is_collectible(),
+                            definition.move_to_range(),
+                            definition.pathfinder(),
+                            definition.no_transfer_zones(),
+                            definition.no_push_enter(),
+                            definition
+                                .action_library()
+                                .is_idle_state(&self.objects[idx].state.action),
+                            definition.action_library().disables_object_for_entry(
+                                &self.objects[idx].state.action.name,
+                                self.objects[idx].state.action.act_map_index,
+                            ),
+                        )
+                    })
+                    .unwrap_or((
+                        action_library.procedure_for_entry(
+                            &self.objects[idx].state.action.name,
+                            self.objects[idx].state.action.act_map_index,
+                        ),
+                        OCF_NORMAL,
+                        false,
+                        0,
+                        0,
+                        0,
+                        0,
+                        action_library.is_idle_state(&self.objects[idx].state.action),
+                        action_library.disables_object_for_entry(
+                            &self.objects[idx].state.action.name,
+                            self.objects[idx].state.action.act_map_index,
+                        ),
+                    ));
+                // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
+                // object's Execute-start, C4Object.cpp:1058).
+                let ocf = self.objects[idx].state.ocf;
+                let master_list_order = command_snapshots
+                    .get(&object_id)
+                    .map(|snapshot| snapshot.master_list_order)
+                    .unwrap_or_else(|| self.exec_list.len().saturating_add(idx));
+                command_snapshots.insert(
+                    object_id,
+                    CommandObjectSnapshot {
+                        id: object_id,
+                        master_list_order,
+                        definition_id: self.objects[idx].definition_id.clone(),
+                        position: self.objects[idx].state.position,
+                        fixed_position: self.objects[idx].fixed_position,
+                        fixed_velocity: self.objects[idx].fixed_velocity,
+                        move_to_range,
+                        pathfinder,
+                        no_transfer_zones,
+                        no_push_enter,
+                        contact: self.objects[idx].frame_t_contact,
+                        action_time: self.objects[idx].state.action.time,
+                        shape_top: self.objects[idx]
+                            .current_shape_rect()
+                            .map(|rect| rect.y)
+                            .unwrap_or(0),
+                        shape_height: self.objects[idx]
+                            .current_shape_rect()
+                            .map(|rect| rect.height)
+                            .unwrap_or(0),
+                        shape: self.object_shape_rect(&self.objects[idx]),
+                        entrance: self.object_entrance_area(&self.objects[idx]),
+                        status: self.objects[idx].state.status,
+                        destroyed: self.objects[idx].destroyed,
+                        category: self.objects[idx].state.category,
+                        container: self.objects[idx].state.container,
+                        action_name: self.objects[idx].state.action.name.clone(),
+                        action_idle,
+                        action_disabled,
+                        action_target: self.objects[idx].state.action.target,
+                        action_target2: self.objects[idx].state.action.target2,
+                        action_procedure: procedure,
+                        command_direction: self.objects[idx].state.command_direction,
+                        construction: self.objects[idx].state.construction,
+                        direction: self.objects[idx].state.direction,
+                        physical: self.object_physical_without_fair_fill(idx),
+                        physical_deferred: false,
+                        owner: self.objects[idx].state.owner,
+                        controller: self.objects[idx].state.controller,
+                        base: self.objects[idx].state.base,
+                        crew_member: self.objects[idx].state.crew_member,
+                        selected: self.objects[idx].state.selected,
+                        alive: self.objects[idx].state.alive,
+                        need_energy: self.objects[idx].state.need_energy,
+                        on_fire: self.objects[idx].state.on_fire,
+                        contents: self.objects[idx].state.contents.clone(),
+                        commands: self.objects[idx].commands.command_views(),
+                        line_connect,
+                        ocf,
+                        entrance_status: self.objects[idx].state.entrance_status,
+                        collectible,
+                    },
+                );
+                #[cfg(test)]
+                COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| {
+                    count.set(count.get().saturating_add(1));
+                });
+            }
         }
         self.exec_cursor = None;
 
@@ -1580,6 +1751,11 @@ impl Engine {
             }
         });
         if !removed_ids.is_empty() {
+            if let Some(sectors) = self.sectors.as_mut() {
+                for id in &removed_ids {
+                    sectors.remove(*id);
+                }
+            }
             // C4Object::Clear drops both attached particle lists
             // (C4Object.cpp:272-273). Without it a removed object's
             // particles are never executed again — nothing iterates their
@@ -1600,7 +1776,6 @@ impl Engine {
             }
             self.note_objects_changed();
         }
-        self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
         // C4Game::Execute phase order (C4Game.cpp:810-822): ExecObjects
         // runs FIRST; then GlobalEffects, PXS, Particles, MassMover,
@@ -2355,6 +2530,8 @@ impl Engine {
         previous_action: Option<String>,
         allow_deleted_initial_start: bool,
     ) -> Result<(), EngineError> {
+        #[cfg(test)]
+        ACTION_CALLBACK_DRAIN_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
         if self.objects[index].destroyed && !allow_deleted_initial_start {
             return Ok(());
         }
@@ -2907,7 +3084,7 @@ impl Engine {
             // in this object's own context) apply first; host-command
             // updates below may override.
             if let Some(locals) = context_locals {
-                object.state.local_vars = locals;
+                object.state.local_vars = locals.into();
             }
 
             if let Some(update) = object_update {
@@ -3657,5 +3834,30 @@ impl Engine {
             .ok_or(EngineError::UnknownObject(id))?;
         object.enqueue_commands(commands);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_reuses_snapshot_master_order_for_existing_objects() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        for _ in 0..2 {
+            engine
+                .spawn_object(SpawnConfig::new("Plain"))
+                .expect("plain object spawns");
+        }
+
+        EXEC_LIST_MASTER_ORDER_SCANS.with(|count| count.set(0));
+        engine.tick().expect("tick succeeds");
+
+        // C4Game::ExecObjects preserves one master-list order during this
+        // walk (C4Game.cpp:1582); the frame snapshot already records it.
+        assert_eq!(EXEC_LIST_MASTER_ORDER_SCANS.with(Cell::get), 0);
     }
 }

@@ -1240,7 +1240,7 @@
 
         let metadata = DefinitionMetadata {
             fire: DefinitionFireMetadata {
-                def_core_values: DefCoreValueStore::from_definition(&definition),
+                def_core_values: DefCoreValueStore::from_definition(&definition).into(),
                 ..DefinitionFireMetadata::default()
             },
             ..DefinitionMetadata::default()

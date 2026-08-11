@@ -109,7 +109,7 @@ pub(crate) struct DefinitionFireMetadata {
     /// Complete compiler-shaped DefCore/Physical reflection surface. It
     /// lives in this already-aggregated definition payload so legacy test
     /// fixtures can keep using `DefinitionMetadata` struct literals.
-    pub def_core_values: DefCoreValueStore,
+    pub def_core_values: Rc<DefCoreValueStore>,
     /// C4Shape::FireTop, reflected through GetDefCoreVal.
     pub fire_top: i32,
     /// DefCore SmokeRate (default 100): the divisor in ExecFire's smoke
@@ -193,10 +193,21 @@ impl DefCorePrimitive {
 /// separate preserves both exact section matching and the C++ no-section
 /// search where duplicate `Float`/`Scale` names are indexed in traversal
 /// order (DefCore first, Physical second).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct DefCoreValueStore {
     pub(crate) def_core: HashMap<&'static str, Vec<DefCorePrimitive>>,
     pub(crate) physical: HashMap<&'static str, Vec<DefCorePrimitive>>,
+}
+
+impl Clone for DefCoreValueStore {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        crate::EFFECT_DEF_CORE_VALUE_DEEP_CLONES.with(|count| count.set(count.get() + 1));
+        Self {
+            def_core: self.def_core.clone(),
+            physical: self.physical.clone(),
+        }
+    }
 }
 
 impl DefCoreValueStore {
@@ -1849,6 +1860,7 @@ pub(crate) struct LazyHostWorldProvider {
     /// object callbacks.
     sector_map_borrow: Option<unsafe fn(*const ()) -> Option<*const SectorMap>>,
     legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
+    find_condition: Option<unsafe fn(*const (), ObjectId, &FindCondition) -> Option<bool>>,
 }
 
 impl LazyHostWorldProvider {
@@ -1881,6 +1893,7 @@ impl LazyHostWorldProvider {
             landscape_borrow: None,
             sector_map_borrow: None,
             legacy_find_object: None,
+            find_condition: None,
         }
     }
 
@@ -1978,10 +1991,23 @@ impl LazyHostWorldProvider {
         self
     }
 
+    pub(crate) fn with_find_condition(
+        mut self,
+        find_condition: unsafe fn(*const (), ObjectId, &FindCondition) -> Option<bool>,
+    ) -> Self {
+        self.find_condition = Some(find_condition);
+        self
+    }
+
     fn object(self, id: ObjectId) -> Option<(usize, HostWorldObject)> {
         // SAFETY: the constructor's source-lifetime and aliasing contract is
         // upheld by the engine's synchronous callback wrappers.
         unsafe { (self.object)(self.source, id) }
+    }
+
+    fn matches_find_condition(self, id: ObjectId, condition: &FindCondition) -> Option<bool> {
+        // SAFETY: see `object`; this reads only callback-entry scalar fields.
+        unsafe { (self.find_condition?)(self.source, id, condition) }
     }
 
     fn objects(self, excluded: &HashSet<usize>) -> Vec<(usize, HostWorldObject)> {
@@ -2039,7 +2065,7 @@ impl LazyHostWorldProvider {
 
 #[derive(Clone, Default)]
 pub(crate) struct HostWorldObjectStore {
-    objects: HashMap<ObjectId, HostWorldObject>,
+    objects: HashMap<ObjectId, Rc<HostWorldObject>>,
     pub(crate) order: Vec<ObjectId>,
     indices: HashMap<ObjectId, usize>,
     removed: HashSet<ObjectId>,
@@ -2469,7 +2495,7 @@ impl HostWorldContext {
             let id = object.id;
             store.order.push(id);
             store.indices.insert(id, index);
-            store.objects.insert(id, object);
+            store.objects.insert(id, Rc::new(object));
         }
         self.object_store = RefCell::new(Rc::new(store));
         self.lazy_world = None;
@@ -2543,7 +2569,7 @@ impl HostWorldContext {
         let store = Rc::make_mut(self.object_store.get_mut());
         store.removed.remove(&id);
         store.indices.insert(id, index);
-        store.objects.insert(id, object);
+        store.objects.insert(id, Rc::new(object));
         if !store.order.contains(&id) {
             store.order.push(id);
             store.order.sort_by_key(|object_id| {
@@ -2736,6 +2762,10 @@ impl HostWorldContext {
                 }
             }
         }
+        let lookup = lookup
+            .into_iter()
+            .map(|(id, object)| (id, Rc::new(object)))
+            .collect();
         let order = Rc::new(order);
         let mut player_ids: Vec<_> = players.keys().copied().collect();
         player_ids.sort_unstable();
@@ -3469,6 +3499,14 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_shared_particle_defs(
+        mut self,
+        defs: Rc<std::collections::HashSet<String>>,
+    ) -> Self {
+        self.particle_defs = Some(defs);
+        self
+    }
+
     /// Seed the synchronous answer for `FnReloadParticle` and the channel its
     /// accepted names travel back on.
     pub(crate) fn with_particle_reloads(
@@ -3477,6 +3515,16 @@ impl HostWorldContext {
         requests: Rc<RefCell<Vec<String>>>,
     ) -> Self {
         self.reloadable_particle_defs = Some(Rc::new(reloadable));
+        self.particle_reload_requests = requests;
+        self
+    }
+
+    pub(crate) fn with_shared_particle_reloads(
+        mut self,
+        reloadable: Rc<std::collections::HashSet<String>>,
+        requests: Rc<RefCell<Vec<String>>>,
+    ) -> Self {
+        self.reloadable_particle_defs = Some(reloadable);
         self.particle_reload_requests = requests;
         self
     }
@@ -3593,7 +3641,7 @@ impl HostWorldContext {
                 continue;
             }
             store.indices.insert(id, index);
-            store.objects.insert(id, object);
+            store.objects.insert(id, Rc::new(object));
         }
         store.order = store.objects.keys().copied().collect();
         store
@@ -3609,7 +3657,9 @@ impl HostWorldContext {
                 return None;
             }
             if let Some(object) = store.objects.get(&id) {
-                return Some(object.clone());
+                #[cfg(test)]
+                crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(count.get() + 1));
+                return Some(object.as_ref().clone());
             }
             if store.complete {
                 return None;
@@ -3622,7 +3672,35 @@ impl HostWorldContext {
             return None;
         }
         store.indices.insert(id, index);
-        store.objects.insert(id, object.clone());
+        #[cfg(test)]
+        crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(count.get() + 1));
+        store.objects.insert(id, Rc::new(object.clone()));
+        store.insert_ordered_by_index(id, index);
+        Some(object)
+    }
+
+    pub(crate) fn get_shared(&self, id: ObjectId) -> Option<Rc<HostWorldObject>> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return None;
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return Some(Rc::clone(object));
+            }
+            if store.complete {
+                return None;
+            }
+        }
+        let (index, object) = self.lazy_world?.object(id)?;
+        let object = Rc::new(object);
+        let mut store = self.object_store.borrow_mut();
+        let store = Rc::make_mut(&mut store);
+        if store.removed.contains(&id) {
+            return None;
+        }
+        store.indices.insert(id, index);
+        store.objects.insert(id, Rc::clone(&object));
         store.insert_ordered_by_index(id, index);
         Some(object)
     }
@@ -3656,6 +3734,71 @@ impl HostWorldContext {
         unsafe { matches(provider.source, id, params) }
     }
 
+    pub(crate) fn matches_find_condition_candidate(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return None;
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return Some(object.status().is_active() && condition.check(self, object).ok()?);
+            }
+            if store.complete {
+                return None;
+            }
+        }
+        if let Some(result) = self
+            .lazy_world
+            .and_then(|provider| provider.matches_find_condition(id, condition))
+        {
+            return Some(result);
+        }
+        let object = self.get(id)?;
+        Some(object.status().is_active() && condition.check(self, &object).ok()?)
+    }
+
+    /// Evaluate only the callback-free prefix of a condition tree. A false
+    /// result is final and lets mixed `Find_Func` searches reject a candidate
+    /// before constructing its complete host projection.
+    pub(crate) fn matches_find_condition_scalar_prefix(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return Some(false);
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return if object.status().is_active() {
+                    condition.matches_host_object(object)
+                } else {
+                    Some(false)
+                };
+            }
+            if store.complete {
+                return Some(false);
+            }
+        }
+        if let Some(result) = self
+            .lazy_world
+            .and_then(|provider| provider.matches_find_condition(id, condition))
+        {
+            return Some(result);
+        }
+        let object = self.get(id)?;
+        if object.status().is_active() {
+            condition.matches_host_object(&object)
+        } else {
+            Some(false)
+        }
+    }
+
     /// Update the callback-visible identity of a live command target while
     /// one engine-owned effect batch is still running. C++
     /// OnObjectChangedDef refreshes effect callback functions immediately;
@@ -3664,6 +3807,7 @@ impl HostWorldContext {
         let _ = self.get(id);
         let store = Rc::make_mut(self.object_store.get_mut());
         if let Some(object) = store.objects.get_mut(&id) {
+            let object = Rc::make_mut(object);
             object.definition_id = definition_id.to_string();
             object.unsorted = true;
         }
@@ -3761,6 +3905,7 @@ impl HostWorldContext {
         let Some(object) = store.objects.get_mut(&id) else {
             return;
         };
+        let object = Rc::make_mut(object);
         if let Some(position) = update.position {
             object.position = position;
             object.fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -3787,7 +3932,6 @@ impl HostWorldContext {
         if let Some(material_contents) = update.material_contents.as_ref() {
             object.material_contents = material_contents.clone();
         }
-
         if let Some(state) = object.state.as_mut() {
             let state = Rc::make_mut(state);
             if update.change_def.is_some() {
@@ -3824,7 +3968,7 @@ impl HostWorldContext {
                 state.shape_override = shape_override;
             }
             if let Some(local_vars) = update.local_vars.as_ref() {
-                state.local_vars = local_vars.clone();
+                state.local_vars = local_vars.clone().into();
             }
         }
         if incrementally_updates_sector {
@@ -3853,6 +3997,7 @@ impl HostWorldContext {
         let Some(object) = store.objects.get_mut(&id) else {
             return;
         };
+        let object = Rc::make_mut(object);
         if let Some(state) = object.state.as_mut() {
             Rc::make_mut(state).effects = effects.to_vec();
         }
@@ -3868,6 +4013,7 @@ impl HostWorldContext {
         let Some(object) = store.objects.get_mut(&container) else {
             return;
         };
+        let object = Rc::make_mut(object);
         object.contents = contents.to_vec();
         if let Some(state) = object.state.as_mut() {
             Rc::make_mut(state).contents = contents.to_vec();
@@ -4351,6 +4497,14 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_shared_solid_mask_bakes(
+        mut self,
+        bakes: Rc<Vec<(ObjectId, crate::SolidMaskBake)>>,
+    ) -> Self {
+        self.solid_mask_bakes = bakes;
+        self
+    }
+
     pub(crate) fn with_solid_mask_instance_sequences(
         mut self,
         sequences: HashMap<ObjectId, u64>,
@@ -4643,8 +4797,8 @@ impl HostWorldContext {
         if let Some(sectors) = self.sectors.borrow().clone() {
             return Some(sectors);
         }
-        self.materialize_objects();
         let (width, height) = self.landscape_dimensions()?;
+        self.materialize_objects();
         let mut cache = self.sectors.borrow_mut();
         if cache.is_none() {
             let store = self.object_store.borrow();
@@ -4658,7 +4812,7 @@ impl HostWorldContext {
                 .iter()
                 .chain(store.order.iter())
                 .filter(|id| seen.insert(**id))
-                .filter_map(|id| store.objects.get(id));
+                .filter_map(|id| store.objects.get(id).map(Rc::as_ref));
             *cache = Some(Rc::new(build_host_sector_map(
                 ordered,
                 &self.definitions,
@@ -4903,6 +5057,29 @@ pub(crate) fn host_vertex_bounds_rect(
 
 pub(crate) trait WorldAccessor {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
+    fn matches_find_condition_candidate(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool>
+    where
+        Self: Sized,
+    {
+        let object = self.get_object(id)?;
+        Some(object.status().is_active() && condition.check(self, &object).ok()?)
+    }
+    fn matches_find_condition_scalar_prefix(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        let object = self.get_object(id)?;
+        if object.status().is_active() {
+            condition.matches_host_object(&object)
+        } else {
+            Some(false)
+        }
+    }
     fn matches_legacy_find_object_candidate(
         &self,
         id: ObjectId,
@@ -4999,6 +5176,22 @@ impl WorldAccessor for HostWorldContext {
         self.matches_legacy_find_object_candidate(id, params)
     }
 
+    fn matches_find_condition_candidate(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        self.matches_find_condition_candidate(id, condition)
+    }
+
+    fn matches_find_condition_scalar_prefix(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        self.matches_find_condition_scalar_prefix(id, condition)
+    }
+
     fn object_ids(&self) -> Vec<ObjectId> {
         self.object_ids()
     }
@@ -5066,6 +5259,18 @@ impl LiveFuncFindView {
 impl WorldAccessor for LiveFuncFindView {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.read(|context| context.get_world_object(id))
+    }
+
+    fn matches_find_condition_scalar_prefix(
+        &self,
+        id: ObjectId,
+        condition: &FindCondition,
+    ) -> Option<bool> {
+        self.read(|context| {
+            <EffectHostContext as WorldAccessor>::matches_find_condition_scalar_prefix(
+                context, id, condition,
+            )
+        })
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {

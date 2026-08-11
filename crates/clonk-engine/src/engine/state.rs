@@ -1073,7 +1073,7 @@ impl Engine {
                     base_graphics: snapshot.base_graphics.clone(),
                     graphics_overlays: snapshot.graphics_overlays.clone(),
                     draw_transform: snapshot.draw_transform,
-                    local_vars: snapshot.local_vars.clone(),
+                    local_vars: snapshot.local_vars.clone().into(),
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
                     solid_mask_override: persisted.solid_mask_override,
@@ -2357,7 +2357,7 @@ impl Engine {
             // (C4Effect.cpp:129) — persist its local writes. VM finals
             // apply first; host-command updates below may override.
             if let Some(locals) = context_locals {
-                object.state.local_vars = locals;
+                object.state.local_vars = locals.into();
                 state_snapshot = object.script_state_snapshot();
             }
 

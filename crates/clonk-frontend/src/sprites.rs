@@ -15,12 +15,44 @@ const DEFAULT_PLAYER_COLORS: [Color; 12] = [
     Color::opaque(0xC0, 0x00, 0xBC),
 ];
 
+#[cfg(test)]
+std::thread_local! {
+    static DEFAULT_SPRITE_KEY_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_default_sprite_key_allocations() {
+    DEFAULT_SPRITE_KEY_ALLOCATIONS.with(|allocations| allocations.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn default_sprite_key_allocations() -> usize {
+    DEFAULT_SPRITE_KEY_ALLOCATIONS.with(std::cell::Cell::get)
+}
+
 pub(crate) fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
     match graphics_name {
         Some(name) if !name.is_empty() => {
             format!("{}::{}", definition_id, name.to_ascii_lowercase())
         }
-        _ => definition_id.to_string(),
+        _ => {
+            #[cfg(test)]
+            DEFAULT_SPRITE_KEY_ALLOCATIONS.with(|allocations| {
+                allocations.set(allocations.get().saturating_add(1));
+            });
+            definition_id.to_string()
+        }
+    }
+}
+
+pub(crate) fn sprite_map_get<'sprites, T>(
+    sprites: &'sprites HashMap<String, T>,
+    definition_id: &str,
+    graphics_name: Option<&str>,
+) -> Option<&'sprites T> {
+    match graphics_name {
+        Some(name) if !name.is_empty() => sprites.get(&sprite_map_key(definition_id, Some(name))),
+        _ => sprites.get(definition_id),
     }
 }
 

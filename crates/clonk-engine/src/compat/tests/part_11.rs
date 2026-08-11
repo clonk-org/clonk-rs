@@ -1086,6 +1086,115 @@ protected func Construction()
         }
     }
 
+    #[test]
+    fn scalar_find_condition_tree_reuses_one_live_object_read() {
+        // C4FindObject::Check nodes all read the same C4Object pointer; only
+        // C4FindObjectFunc may mutate it between sibling checks
+        // (oracle-src-pinned src/C4FindObject.cpp:390-679).
+        let target = crate::Definition::from_script("ROCK", "Rock", "#strict")
+            .expect("target definition compiles");
+        let caller = crate::Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict
+public func Probe()
+{
+    return ObjectCount2([20, ROCK], [10, 0, 0, 30, 40], [40, 0]);
+}
+"#,
+        )
+        .expect("caller definition compiles");
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(target)
+            .expect("target definition registers");
+        engine
+            .register_definition(caller)
+            .expect("caller definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(10, 20)))
+            .expect("target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller = engine.find_object_index(caller).expect("caller exists");
+
+        FIND_CONDITION_OBJECT_REFRESHES.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(caller, "Probe", Vec::new())
+                .expect("condition checks"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            FIND_CONDITION_OBJECT_REFRESHES.with(Cell::get),
+            0,
+            "scalar siblings cannot mutate the shared C4Object and need no refresh"
+        );
+    }
+
+    #[test]
+    fn nested_broadcasts_do_not_rescan_untouched_contents_scopes() {
+        // C4ObjectList::Contents changes only through the native list-link
+        // operations; unrelated nested calls do not scan all live objects
+        // (oracle-src-pinned src/C4Object.cpp:1529-1605).
+        let stippel = crate::Definition::from_script(
+            "STIP",
+            "Stippel",
+            r#"#strict
+protected func Initialize() { GameCallEx("ReportCreation", this); }
+"#,
+        )
+        .expect("stippel definition compiles");
+        let mut rule = crate::Definition::from_script(
+            "RULE",
+            "Rule",
+            r#"#strict
+public func ReportCreation(object created) { return !!created; }
+"#,
+        )
+        .expect("rule definition compiles");
+        rule.set_category(1 << 19);
+        let caller = crate::Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict
+public func Trigger()
+{
+    for (var i = 0; i < 8; i++) CreateObject(STIP);
+    return ObjectCount2([20, STIP]);
+}
+"#,
+        )
+        .expect("caller definition compiles");
+        let mut engine = crate::Engine::with_seed(0);
+        for definition in [stippel, rule, caller] {
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+        engine
+            .spawn_object(SpawnConfig::new("RULE"))
+            .expect("rule spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller = engine.find_object_index(caller).expect("caller exists");
+
+        CONTENTS_SCOPE_GROWTH_VISITS.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(caller, "Trigger", Vec::new())
+                .expect("nested broadcasts run"),
+            Value::Int(8)
+        );
+        assert_eq!(
+            CONTENTS_SCOPE_GROWTH_VISITS.with(Cell::get),
+            0,
+            "no Enter or Exit occurred, so the contents projection is already current"
+        );
+    }
+
     fn parsed_condition(entries: Vec<Value>) -> FindCondition {
         match FindCondition::parse(&Value::Array(entries)) {
             ParsedCriterion::Condition(condition) => condition,

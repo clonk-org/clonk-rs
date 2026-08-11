@@ -1740,7 +1740,7 @@ func Death(by) { death_by = by; return 1; }
             .clone();
 
         engine
-            .apply_no_attach_action(actor_idx, &definition_id, &actions, &[])
+            .apply_no_attach_action(actor_idx, &definition_id, &actions)
             .expect("no-attach transition succeeds");
         assert_eq!(engine.objects[actor_idx].state.action.name, "Jump");
         assert_eq!(

@@ -4514,7 +4514,6 @@ func ProbeGraphicsBounds() {
                     idx,
                     &definition_id,
                     ActionProcedure::Swim,
-                    &[],
                 )
                 .expect("corner scale action applies")
         );
@@ -4593,7 +4592,6 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
             hooked_wall_idx,
             CNAT_LEFT,
             &hook_definition_id,
-            &[],
         )?;
 
         let hooked_wall_idx = engine
@@ -4643,7 +4641,6 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
             hooked_no_attach_idx,
             &hook_definition_id,
             &hook_actions,
-            &[],
         )?;
 
         let hooked_no_attach_idx = engine
@@ -4688,7 +4685,6 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
             hooked_scale_idx,
             &hook_definition_id,
             &hook_actions,
-            &[],
         )?;
         let hooked_scale = &engine.objects[hooked_scale_idx];
         assert_eq!(hooked_scale.state.action.name, "Scale");
@@ -4728,7 +4724,6 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
             fallback_wall_idx,
             CNAT_LEFT,
             &fallback_definition_id,
-            &[],
         )?;
         let fallback_wall = &engine.objects[fallback_wall_idx];
         assert_eq!(fallback_wall.state.action.name, "Jump");
@@ -4808,7 +4803,7 @@ protected func OnTumbleStart()
         let definition_id = engine.objects[index].definition_id.clone();
 
         engine
-            .exec_contact_action(index, CNAT_TOP | CNAT_LEFT, &definition_id, &[])
+            .exec_contact_action(index, CNAT_TOP | CNAT_LEFT, &definition_id)
             .expect("contact action executes");
 
         let object = &engine.objects[engine
@@ -4867,7 +4862,7 @@ protected func OnTumbleStart()
             let definition_id = engine.objects[idx].definition_id.clone();
 
             engine
-                .apply_no_attach_action(idx, &definition_id, &actions, &[])
+                .apply_no_attach_action(idx, &definition_id, &actions)
                 .expect("no-attach transition succeeds");
 
             let object = &engine.objects[idx];
@@ -4937,7 +4932,7 @@ protected func OnTumbleStart()
             ActionProcedure::Scale
         );
         engine
-            .apply_no_attach_action(idx, &definition_id, &actions, &[])
+            .apply_no_attach_action(idx, &definition_id, &actions)
             .expect("no-attach transition succeeds");
 
         let object = &engine.objects[idx];

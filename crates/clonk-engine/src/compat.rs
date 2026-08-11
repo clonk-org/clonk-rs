@@ -47,7 +47,9 @@ use crate::{
     DEFAULT_MUSIC_LEVEL, FULL_CON, OWNER_NONE,
 };
 #[cfg(test)]
-use crate::{LiquidSegment, PlayerViewport};
+use crate::{
+    LiquidSegment, PlayerViewport, CONTENTS_SCOPE_GROWTH_VISITS, FIND_CONDITION_OBJECT_REFRESHES,
+};
 use chrono::{Datelike, Local, Timelike};
 use clonk_resources::{PhysicalInfo, RankNameTable};
 use clonk_script::{

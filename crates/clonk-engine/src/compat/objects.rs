@@ -2993,7 +2993,7 @@ impl FindObjectParams {
     /// (C4Game.cpp:1367-1424).
     fn candidate_ids(&self, world: &impl WorldAccessor) -> Vec<ObjectId> {
         if self.is_closest_query() || self.is_full_range() {
-            return world.object_ids();
+            return world.master_object_ids();
         }
 
         if self.is_point_query() {
@@ -3499,32 +3499,42 @@ impl FindCondition {
     /// `Func` callback error passes through (`fPassErrors=true`,
     /// C4FindObject.cpp:661); And/Or evaluate children in array order with
     /// short-circuit, so Func side effects land in C++ order.
-    fn check(
+    pub(crate) fn check(
         &self,
         world: &impl WorldAccessor,
         object: &HostWorldObject,
     ) -> Result<bool, RuntimeError> {
         // Every C++ node dereferences the same live C4Object pointer. An
-        // earlier Func sibling (or an earlier candidate's callback) may
-        // have changed any field, so never retain the driver's clone across
-        // a condition boundary. A vanished pending preview falls back to the
+        // earlier Func sibling may have changed any field. Scalar nodes
+        // cannot mutate it, so retain the driver's fresh clone until a Func
+        // actually runs. A vanished pending preview falls back to that
         // pointer-equivalent clone for the remainder of the current Check.
-        let refreshed = world.get_object(object.id);
-        let object = refreshed.as_ref().unwrap_or(object);
         Ok(match self {
             FindCondition::Not(child) => !child.check(world, object)?,
             FindCondition::And(children) => {
-                for child in children {
-                    if !child.check(world, object)? {
+                let mut refreshed = None;
+                for (index, child) in children.iter().enumerate() {
+                    if !child.check(world, refreshed.as_ref().unwrap_or(object))? {
                         return Ok(false);
+                    }
+                    if index + 1 < children.len() && child.uses_func() {
+                        #[cfg(test)]
+                        FIND_CONDITION_OBJECT_REFRESHES.with(|count| count.set(count.get() + 1));
+                        refreshed = world.get_object(object.id);
                     }
                 }
                 true
             }
             FindCondition::Or(children) => {
-                for child in children {
-                    if child.check(world, object)? {
+                let mut refreshed = None;
+                for (index, child) in children.iter().enumerate() {
+                    if child.check(world, refreshed.as_ref().unwrap_or(object))? {
                         return Ok(true);
+                    }
+                    if index + 1 < children.len() && child.uses_func() {
+                        #[cfg(test)]
+                        FIND_CONDITION_OBJECT_REFRESHES.with(|count| count.set(count.get() + 1));
+                        refreshed = world.get_object(object.id);
                     }
                 }
                 false
@@ -3584,6 +3594,114 @@ impl FindCondition {
                 object.full_state().and_then(|state| state.layer) == *layer
             }
         })
+    }
+
+    /// Evaluate the scalar-only subset directly on the engine's live object.
+    /// `None` keeps shape-dependent and callback-bearing conditions on the
+    /// complete host-object path.
+    pub(crate) fn matches_engine_object(&self, object: &crate::Object) -> Option<bool> {
+        match self {
+            Self::Not(child) => child.matches_engine_object(object).map(|matches| !matches),
+            Self::And(children) => {
+                for child in children {
+                    if !child.matches_engine_object(object)? {
+                        return Some(false);
+                    }
+                }
+                Some(true)
+            }
+            Self::Or(children) => {
+                for child in children {
+                    if child.matches_engine_object(object)? {
+                        return Some(true);
+                    }
+                }
+                Some(false)
+            }
+            Self::Exclude(excluded) => Some(Some(object.id) != *excluded),
+            Self::Id(id) => Some(clonk_script::c4_id_parse(&object.definition_id) == *id),
+            Self::InRect(rect) => {
+                let position = object.state.position;
+                Some(
+                    position.x >= rect.x
+                        && position.x < rect.x + rect.width
+                        && position.y >= rect.y
+                        && position.y < rect.y + rect.height,
+                )
+            }
+            Self::Distance { x, y, r2, .. } => {
+                let dx = i64::from(object.state.position.x - x);
+                let dy = i64::from(object.state.position.y - y);
+                Some(dx * dx + dy * dy <= *r2)
+            }
+            Self::Ocf(mask) => Some(object.state.ocf & mask != 0),
+            Self::Category(category) => Some(object.state.category & category != 0),
+            Self::Action(name) => Some(object.state.action.name == *name),
+            Self::ActionTarget { target, index } => Some(
+                match index {
+                    0 => object.state.action.target,
+                    _ => object.state.action.target2,
+                } == *target,
+            ),
+            Self::Container(container) => Some(object.state.container == *container),
+            Self::AnyContainer => Some(object.state.container.is_some()),
+            Self::Owner(owner) => Some(object.state.owner == *owner),
+            Self::Controller(controller) => Some(object.state.controller == *controller),
+            Self::Layer(layer) => Some(object.state.layer == *layer),
+            Self::AtPoint(..) | Self::AtRect(..) | Self::OnLine(..) | Self::Func { .. } => None,
+        }
+    }
+
+    /// Evaluate the same non-callback prefix on a callback-local host
+    /// projection. `None` means evaluation reached a shape predicate or
+    /// `Find_Func`; `Some` is already final under C++ short-circuit order.
+    pub(crate) fn matches_host_object(&self, object: &HostWorldObject) -> Option<bool> {
+        match self {
+            Self::Not(child) => child.matches_host_object(object).map(|matches| !matches),
+            Self::And(children) => {
+                for child in children {
+                    if !child.matches_host_object(object)? {
+                        return Some(false);
+                    }
+                }
+                Some(true)
+            }
+            Self::Or(children) => {
+                for child in children {
+                    if child.matches_host_object(object)? {
+                        return Some(true);
+                    }
+                }
+                Some(false)
+            }
+            Self::Exclude(excluded) => Some(Some(object.id) != *excluded),
+            Self::Id(id) => Some(clonk_script::c4_id_parse(object.definition_id()) == *id),
+            Self::InRect(rect) => {
+                let position = object.position();
+                Some(
+                    position.x >= rect.x
+                        && position.x < rect.x + rect.width
+                        && position.y >= rect.y
+                        && position.y < rect.y + rect.height,
+                )
+            }
+            Self::Distance { x, y, r2, .. } => {
+                let position = object.position();
+                let dx = i64::from(position.x - x);
+                let dy = i64::from(position.y - y);
+                Some(dx * dx + dy * dy <= *r2)
+            }
+            Self::Ocf(mask) => Some(object.ocf() & mask != 0),
+            Self::Category(category) => Some(object.category() & category != 0),
+            Self::Action(name) => Some(object.action_name() == name),
+            Self::ActionTarget { target, index } => Some(object.action_target(*index) == *target),
+            Self::Container(container) => Some(object.container() == *container),
+            Self::AnyContainer => Some(object.container().is_some()),
+            Self::Owner(owner) => Some(object.owner() == *owner),
+            Self::Controller(controller) => Some(object.controller() == *controller),
+            Self::Layer(layer) => Some(object.full_state().and_then(|state| state.layer) == *layer),
+            Self::AtPoint(..) | Self::AtRect(..) | Self::OnLine(..) | Self::Func { .. } => None,
+        }
     }
 
     /// IsImpossible/IsEnsured pruning (C4FindObject.cpp:453-590). `Func` is
@@ -4140,7 +4258,25 @@ fn find_condition_matches(
         return Ok(Vec::new());
     }
     let mut matches = Vec::new();
-    for object_id in find_candidate_ids(world, condition) {
+    if !condition.uses_func() {
+        let candidates = find_candidate_ids(world, condition);
+        for object_id in candidates {
+            if world.matches_find_condition_candidate(object_id, condition) == Some(true) {
+                matches.push(object_id);
+            }
+        }
+        return Ok(matches);
+    }
+    let candidates = find_candidate_ids(world, condition);
+    for object_id in candidates {
+        match world.matches_find_condition_scalar_prefix(object_id, condition) {
+            Some(false) => continue,
+            Some(true) => {
+                matches.push(object_id);
+                continue;
+            }
+            None => {}
+        }
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -4164,7 +4300,20 @@ fn find_first_condition_match(
     if condition.is_impossible(world) {
         return Ok(None);
     }
-    for object_id in find_candidate_ids(world, condition) {
+    if !condition.uses_func() {
+        let candidates = find_candidate_ids(world, condition);
+        let result = candidates.into_iter().find(|object_id| {
+            world.matches_find_condition_candidate(*object_id, condition) == Some(true)
+        });
+        return Ok(result);
+    }
+    let candidates = find_candidate_ids(world, condition);
+    for object_id in candidates {
+        match world.matches_find_condition_scalar_prefix(object_id, condition) {
+            Some(false) => continue,
+            Some(true) => return Ok(Some(object_id)),
+            None => {}
+        }
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -4675,16 +4824,26 @@ fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams)
     let mut matches = Vec::new();
     let mut skip_until = params.find_next;
     for object_id in params.candidate_ids(world) {
-        let Some(object) = world.get_object(object_id) else {
-            continue;
-        };
         if let Some(target) = skip_until {
             if object_id == target {
                 skip_until = None;
             }
             continue;
         }
-        if params.matches_object(&object) && params.matches_area(world, &object) {
+        if !world
+            .matches_legacy_find_object_candidate(object_id, params)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if params.is_full_range() {
+            matches.push(object_id);
+            continue;
+        }
+        if world
+            .get_object(object_id)
+            .is_some_and(|object| params.matches_area(world, &object))
+        {
             matches.push(object_id);
         }
     }
@@ -4695,12 +4854,15 @@ fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams
     let reference = params.reference_distance(world);
     let mut matches = Vec::new();
     for (order_index, object_id) in params.candidate_ids(world).into_iter().enumerate() {
+        if !world
+            .matches_legacy_find_object_candidate(object_id, params)
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
-        if !params.matches_object(&object) {
-            continue;
-        }
         let distance = squared_distance(object.position(), params.x, params.y);
         if let Some(reference) = reference {
             if distance <= reference {
@@ -7876,7 +8038,7 @@ pub(crate) fn reflected_object_mass(
         visited.remove(&target);
         return 1;
     };
-    let state = object.full_state().map(Rc::as_ref);
+    let state = object.full_state();
     let definition = scope
         .and_then(|scope| {
             scope
@@ -7922,7 +8084,7 @@ fn reflected_object_locals(
     scope: Option<&ObjectScopeContext>,
 ) -> HashMap<String, Value> {
     let mut locals = state
-        .map(|state| state.local_vars.clone())
+        .map(|state| state.local_vars.snapshot())
         .unwrap_or_default();
     if let Some(nested) = context.nested_objects.get(&target) {
         locals.extend(nested.local_vars.clone());
@@ -7946,10 +8108,7 @@ fn reflect_object_values(
     if scope.is_none() && world_object.is_none() {
         return None;
     }
-    let state = world_object
-        .as_ref()
-        .and_then(HostWorldObject::full_state)
-        .map(Rc::as_ref);
+    let state = world_object.as_ref().and_then(|object| object.full_state());
     let definition_id = scope
         .and_then(|scope| {
             scope
@@ -7995,7 +8154,7 @@ fn reflect_object_values(
         .map(ObjectScopeContext::shape_vertex_buffer)
         .or_else(|| state.map(|state| state.shape_vertices.clone()))
         .unwrap_or_default();
-    let local_vars = reflected_object_locals(context, target, state, scope);
+    let local_vars = reflected_object_locals(context, target, state.map(Rc::as_ref), scope);
     let compiler_cache = scope
         .map(|scope| &scope.current_compiler_cache)
         .or_else(|| world_object.as_ref().map(|object| &object.compiler_cache))

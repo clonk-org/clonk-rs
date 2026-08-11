@@ -90,6 +90,7 @@ impl Engine {
             self.objects[index].solid_mask_instance_sequence = None;
             return;
         };
+        self.note_solid_mask_host_state_changed();
         let instance_sequence = match self.objects[index].solid_mask_instance_sequence {
             Some(sequence) => {
                 self.solid_mask_staging.next_solid_mask_instance_sequence = self
@@ -127,6 +128,7 @@ impl Engine {
         position: Vector2,
         instance_sequence: u64,
     ) {
+        self.note_solid_mask_host_state_changed();
         if index >= self.objects.len()
             || self.objects[index].solid_mask_bake.is_some()
             || self.objects[index].solid_mask_empty_put
@@ -375,6 +377,12 @@ impl Engine {
     ) -> Option<SolidMaskAttachmentBackup> {
         if index >= self.objects.len() {
             return None;
+        }
+        if self.objects[index].solid_mask_bake.is_some()
+            || self.objects[index].solid_mask_empty_put
+            || self.objects[index].solid_mask_instance_sequence.is_some()
+        {
+            self.note_solid_mask_host_state_changed();
         }
         let Some(landscape) = self.landscape.as_mut() else {
             self.objects[index].solid_mask_bake.take();
@@ -629,7 +637,7 @@ impl Engine {
         let indices: Vec<usize> = (0..self.objects.len()).collect();
         let masks = self.solid_masks_for_movement(&indices);
         let contact_density = object.state.contact_density;
-        !shape_contact_check(
+        shape_contact_check(
             &object.state.vertices,
             position,
             landscape,
@@ -638,8 +646,7 @@ impl Engine {
             Some(object.id),
             contact_density,
         )
-        .vertices
-        .is_empty()
+        .is_contact()
     }
 
     fn object_contacts_solid_mask_bake(object: &Object, bake: &SolidMaskBake, vehicle: u8) -> bool {
@@ -787,6 +794,14 @@ impl Engine {
     pub fn update_solid_mask(&mut self, index: usize) {
         if self.solid_mask_staging.defer_solid_mask_updates {
             return;
+        }
+        if self.objects.get(index).is_some_and(|object| {
+            object.solid_mask_bake.is_some()
+                || object.solid_mask_empty_put
+                || object.solid_mask_instance_sequence.is_some()
+        }) || self.solid_mask_spec(index).is_some()
+        {
+            self.note_solid_mask_host_state_changed();
         }
         self.remove_solid_mask(index);
         self.put_solid_mask(index);
@@ -2893,6 +2908,28 @@ mod tests {
             1,
             "the rect overlay still reports the masked object"
         );
+    }
+
+    #[test]
+    fn frozen_solid_mask_candidates_survive_a_grid_mode_change() {
+        let mut engine = grid_world_engine();
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine
+            .register_definition(masked)
+            .expect("masked definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
+
+        // Rust movement freezes fixture-overlay candidates before some
+        // contact/action callbacks and consumes them afterwards. A mode
+        // change across that seam must not erase an otherwise-live candidate.
+        let candidates = engine.active_solid_mask_indices();
+        engine.clear_landscape();
+
+        assert_eq!(engine.solid_masks_for_movement(&candidates).len(), 1);
     }
 
     #[test]

@@ -1248,21 +1248,33 @@ fn preview_command_failure_feedback(
             if let Some(target) = command.target {
                 let (component, count) = with_host_context((None, 0), |context| {
                     let scope = context.object_scope(target);
-                    let state = context
-                        .get_world_object(target)
-                        .and_then(|object| object.full_state().cloned());
-                    let components = scope
-                        .and_then(|scope| scope.pending_update.components.as_ref())
-                        .or_else(|| state.as_deref().map(|state| &state.components));
-                    let order = scope
+                    let id = scope
                         .and_then(|scope| scope.pending_update.component_order.as_ref())
-                        .or_else(|| state.as_deref().map(|state| &state.component_order));
-                    let Some(id) = order.and_then(|order| order.first()).cloned() else {
+                        .and_then(|order| order.first())
+                        .cloned()
+                        .or_else(|| {
+                            context.get_world_object(target).and_then(|object| {
+                                object
+                                    .full_state()
+                                    .and_then(|state| state.component_order.first())
+                                    .cloned()
+                            })
+                        });
+                    let Some(id) = id else {
                         return (None, 0);
                     };
-                    let count = components
+                    let count = scope
+                        .and_then(|scope| scope.pending_update.components.as_ref())
                         .and_then(|components| components.get(&id))
                         .copied()
+                        .or_else(|| {
+                            context.get_world_object(target).and_then(|object| {
+                                object
+                                    .full_state()
+                                    .and_then(|state| state.components.get(&id))
+                                    .copied()
+                            })
+                        })
                         .unwrap_or(0);
                     (Some(id), count)
                 });

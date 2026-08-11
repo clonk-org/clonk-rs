@@ -4,6 +4,57 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LocalVariables(Rc<HashMap<String, Value>>);
+
+impl LocalVariables {
+    pub fn snapshot(&self) -> HashMap<String, Value> {
+        self.0.as_ref().clone()
+    }
+}
+
+impl std::ops::Deref for LocalVariables {
+    type Target = HashMap<String, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for LocalVariables {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        #[cfg(test)]
+        if Rc::strong_count(&self.0) > 1 {
+            SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES.with(|count| count.set(count.get() + 1));
+        }
+        Rc::make_mut(&mut self.0)
+    }
+}
+
+impl From<HashMap<String, Value>> for LocalVariables {
+    fn from(values: HashMap<String, Value>) -> Self {
+        Self(Rc::new(values))
+    }
+}
+
+impl Serialize for LocalVariables {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalVariables {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        HashMap::<String, Value>::deserialize(deserializer).map(Into::into)
+    }
+}
+
 /// `C4ViewDelay` (C4Constants.h:35): how many object ticks the cursor's
 /// energy/magic/breath bars stay visible after a relevant change.
 pub const C4_VIEW_DELAY: i32 = 100;
@@ -147,7 +198,7 @@ pub struct ObjectState {
     /// Per-object storage for script-level local variables
     /// These are initialized to nil in Construction() and persist across all function calls
     #[serde(default)]
-    pub local_vars: HashMap<String, Value>,
+    pub local_vars: LocalVariables,
     /// Cached liquid flag (C4Object::InLiquid, C4Object.h:156): loaded from
     /// Objects.txt (default false, C4Object.cpp:2775), updated inside
     /// movement (DoMovement, C4Movement.cpp:443-460), cleared on container
@@ -354,7 +405,7 @@ pub(crate) fn preview_spawn_state(
         base_graphics: None,
         graphics_overlays: Vec::new(),
         draw_transform: None,
-        local_vars: HashMap::new(),
+        local_vars: LocalVariables::default(),
         in_liquid: false,
         mobile: false,
         solid_mask_override: None,
@@ -677,7 +728,7 @@ impl ObjectState {
                 normalized_component_order(&self.components, component_order.clone(), &[]);
         }
         if let Some(local_vars) = &delta.local_vars {
-            self.local_vars = local_vars.clone();
+            self.local_vars = local_vars.clone().into();
         }
         if let Some(physicals) = &delta.physicals {
             self.info_physical = physicals.info;
@@ -3456,7 +3507,7 @@ impl Object {
             draw_transform: self.state.draw_transform,
             command_queue: self.command_queue.iter().cloned().collect(),
             command_stack: self.commands.snapshot(),
-            local_vars: self.state.local_vars.clone(),
+            local_vars: self.state.local_vars.snapshot(),
             in_liquid: self.state.in_liquid,
             mobile: self.state.mobile,
             ocf: self.state.ocf,
@@ -3718,6 +3769,10 @@ impl Object {
         definitions: &HashMap<DefinitionId, Definition>,
         players: &HashMap<i32, Player>,
     ) -> CommandQueueOutcome {
+        #[cfg(test)]
+        if self.command_queue.is_empty() {
+            EMPTY_COMMAND_QUEUE_EXECUTIONS.with(|count| count.set(count.get() + 1));
+        }
         let mut outcome = CommandQueueOutcome::default();
         loop {
             let execute_now = match self.command_queue.front_mut() {

@@ -1642,7 +1642,8 @@ func Probe(state) {
         state.local_vars = HashMap::from([
             ("named".to_string(), Value::Int(7)),
             ("__local_0".to_string(), Value::Int(42)),
-        ]);
+        ])
+        .into();
         let temporary = PhysicalInfo {
             energy: 900,
             ..PhysicalInfo::default()
@@ -2243,4 +2244,3 @@ func Probe(state) {
             ])
         );
     }
-

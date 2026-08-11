@@ -1206,7 +1206,12 @@ fn run() -> Result<()> {
                     let benchmark_runtime_ready =
                         presentation_benchmark_runtime_readiness.ready(app.mode);
                     if let Some(report) = presentation_benchmark.as_mut().and_then(|benchmark| {
-                        benchmark.poll(benchmark_runtime_ready, benchmark_now, app.engine.frame())
+                        benchmark.poll_with_runtime_stippel_census(
+                            benchmark_runtime_ready,
+                            benchmark_now,
+                            app.engine.frame(),
+                            || runtime_stippel_object_count(&app.snapshot),
+                        )
                     }) {
                         finish_app_presentation_benchmark(
                             event_target,

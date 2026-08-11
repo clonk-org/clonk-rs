@@ -50,12 +50,15 @@ fn sprite_with_fallback<'sprites, T>(
     graphics_name: Option<&str>,
     fallback_definition_id: &str,
 ) -> Option<&'sprites T> {
-    sprites
-        .get(&sprite_map_key(definition_id, graphics_name))
-        .or_else(|| graphics_name.and_then(|_| sprites.get(&sprite_map_key(definition_id, None))))
+    sprite_map_get(sprites, definition_id, graphics_name)
+        .or_else(|| {
+            graphics_name
+                .filter(|name| !name.is_empty())
+                .and_then(|_| sprites.get(definition_id))
+        })
         .or_else(|| {
             (definition_id != fallback_definition_id)
-                .then(|| sprites.get(&sprite_map_key(fallback_definition_id, None)))
+                .then(|| sprites.get(fallback_definition_id))
                 .flatten()
         })
 }
@@ -299,6 +302,10 @@ std::thread_local! {
     /// Particle entries examined to decide layer membership, whether by the
     /// linear scan or by the grouping pass that replaces it.
     static PARTICLE_LAYER_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Calls into C4Object::IsVisible from the presentation object walk.
+    static OBJECT_VISIBILITY_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Objects entering the construction-sign/TopFace drawing body.
+    static TOP_FACE_DRAW_SETUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -309,6 +316,26 @@ pub(crate) fn reset_particle_layer_scans() {
 #[cfg(test)]
 pub(crate) fn particle_layer_scans() -> usize {
     PARTICLE_LAYER_SCANS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_object_visibility_evaluations() {
+    OBJECT_VISIBILITY_EVALUATIONS.with(|evaluations| evaluations.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn object_visibility_evaluations() -> usize {
+    OBJECT_VISIBILITY_EVALUATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_top_face_draw_setups() {
+    TOP_FACE_DRAW_SETUPS.with(|setups| setups.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn top_face_draw_setups() -> usize {
+    TOP_FACE_DRAW_SETUPS.with(std::cell::Cell::get)
 }
 
 pub struct GraphicsSystem {
@@ -1809,7 +1836,7 @@ impl GraphicsSystem {
 
             let shape = self
                 .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
+                .get(object.definition_id.as_str())
                 .map(Self::sprite_def_shape)
                 .filter(|shape| shape.width > 0 && shape.height > 0)
                 .unwrap_or_else(|| DefinitionRect::new(-6, -6, 12, 12));
@@ -3357,7 +3384,7 @@ impl GraphicsSystem {
 
             let shape = self
                 .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
+                .get(object.definition_id.as_str())
                 .map(Self::sprite_def_shape)
                 .filter(|shape| shape.width > 0 && shape.height > 0)
                 .unwrap_or_else(|| DefinitionRect::new(-6, -6, 12, 12));
@@ -5843,6 +5870,10 @@ impl GraphicsSystem {
         for_player: i32,
         as_overlay: bool,
     ) -> bool {
+        #[cfg(test)]
+        OBJECT_VISIBILITY_EVALUATIONS.with(|evaluations| {
+            evaluations.set(evaluations.get().saturating_add(1));
+        });
         object_visible_for_player(objects, players, object, for_player, as_overlay)
     }
 
@@ -5989,7 +6020,7 @@ impl GraphicsSystem {
         );
         let geometry_sprite = self
             .object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
+            .get(object.definition_id.as_str())
             .or(sprite);
         if let Some(geometry_sprite) = geometry_sprite {
             let shape = self.live_object_shape(geometry_sprite, object);
@@ -6079,36 +6110,27 @@ impl GraphicsSystem {
             if object.status != ObjectStatus::Normal {
                 continue;
             }
+            let selected_for_pass = match pass {
+                ObjectRenderPass::Background => object.category & CATEGORY_BACKGROUND_FLAG != 0,
+                ObjectRenderPass::Normal => {
+                    object.category & (CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG) == 0
+                }
+                ObjectRenderPass::ForegroundNonParallax => {
+                    object.category & CATEGORY_FOREGROUND_FLAG != 0
+                        && object.category & CATEGORY_PARALLAX_FLAG == 0
+                }
+                ObjectRenderPass::ForegroundParallax => {
+                    object.category & CATEGORY_FOREGROUND_FLAG != 0
+                        && object.category & CATEGORY_PARALLAX_FLAG != 0
+                }
+            };
+            if !selected_for_pass {
+                continue;
+            }
             if !Self::object_is_visible(objects, players, object, for_player, false) {
                 continue;
             }
-            match pass {
-                ObjectRenderPass::Background => {
-                    if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
-                        selected.push(object);
-                    }
-                }
-                ObjectRenderPass::Normal => {
-                    if object.category & (CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG) == 0
-                    {
-                        selected.push(object);
-                    }
-                }
-                ObjectRenderPass::ForegroundNonParallax => {
-                    if object.category & CATEGORY_FOREGROUND_FLAG != 0
-                        && object.category & CATEGORY_PARALLAX_FLAG == 0
-                    {
-                        selected.push(object);
-                    }
-                }
-                ObjectRenderPass::ForegroundParallax => {
-                    if object.category & CATEGORY_FOREGROUND_FLAG != 0
-                        && object.category & CATEGORY_PARALLAX_FLAG != 0
-                    {
-                        selected.push(object);
-                    }
-                }
-            }
+            selected.push(object);
         }
 
         for object in &selected {
@@ -6364,10 +6386,7 @@ impl GraphicsSystem {
         objects: &[ObjectSnapshot],
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let Some(sprite) = self
-            .object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
-        else {
+        let Some(sprite) = self.object_sprites.get(object.definition_id.as_str()) else {
             return;
         };
         let shape = self.live_object_shape(sprite, object);
@@ -6630,7 +6649,7 @@ impl GraphicsSystem {
             let (_, height) = font.text_extent_markup(&text);
             let shape_y = self
                 .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
+                .get(object.definition_id.as_str())
                 .map(|sprite| self.live_object_shape(sprite, object).y)
                 .unwrap_or(0);
             let anchor = self.object_debug_screen_position(
@@ -6704,9 +6723,7 @@ impl GraphicsSystem {
         // The range gate reads the live object shape; the vertical anchor
         // retains the definition shape even after SetShape/Con changes.
         let object_sprites = Arc::clone(&self.object_sprites);
-        let Some(definition_sprite) =
-            object_sprites.get(&sprite_map_key(&object.definition_id, None))
-        else {
+        let Some(definition_sprite) = object_sprites.get(object.definition_id.as_str()) else {
             return;
         };
         let shape = self.live_object_shape(definition_sprite, object);
@@ -6796,10 +6813,7 @@ impl GraphicsSystem {
         let Some(energy) = self.hud_graphics.energy.clone() else {
             return;
         };
-        let Some(definition_sprite) = self
-            .object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
-        else {
+        let Some(definition_sprite) = self.object_sprites.get(object.definition_id.as_str()) else {
             return;
         };
         let shape = self.live_object_shape(definition_sprite, object);
@@ -6893,24 +6907,42 @@ impl GraphicsSystem {
         // references can then survive the mutable drawing calls below without
         // cloning their action maps.
         let object_sprites = Arc::clone(&self.object_sprites);
-        let bitmap_sprite = sprite_with_fallback(
-            object_sprites.as_ref(),
-            base_definition_id,
-            base_graphics_name,
-            &object.definition_id,
-        );
-        let Some(bitmap_sprite) = bitmap_sprite else {
-            return;
-        };
         let definition_sprite = object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
+            .get(object.definition_id.as_str())
             // A same-definition named sheet carries identical definition
             // metadata in imported atlases. Preserve that legacy fallback
             // when the default atlas entry itself is unavailable.
             .or_else(|| {
-                (base_definition_id == object.definition_id.as_str()).then_some(bitmap_sprite)
+                (base_definition_id == object.definition_id.as_str())
+                    .then(|| {
+                        sprite_with_fallback(
+                            object_sprites.as_ref(),
+                            base_definition_id,
+                            base_graphics_name,
+                            &object.definition_id,
+                        )
+                    })
+                    .flatten()
             });
         let Some(definition_sprite) = definition_sprite else {
+            return;
+        };
+        let construction = object.construction.max(0);
+        let draws_construction = object.ocf & clonk_engine::ocf::CONSTRUCT != 0
+            && object.rotation == 0
+            && self.hud_graphics.construction.is_some();
+        let draws_top_face = definition_sprite.top_face.is_some()
+            && (construction >= FULL_CON || definition_sprite.stretch_growth)
+            && object.rotation.rem_euclid(360) == 0;
+        if !draws_construction && !draws_top_face {
+            return;
+        }
+        let Some(bitmap_sprite) = sprite_with_fallback(
+            object_sprites.as_ref(),
+            base_definition_id,
+            base_graphics_name,
+            &object.definition_id,
+        ) else {
             return;
         };
         self.paint_object_top_face_with(
@@ -6939,6 +6971,8 @@ impl GraphicsSystem {
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        #[cfg(test)]
+        TOP_FACE_DRAW_SETUPS.with(|setups| setups.set(setups.get().saturating_add(1)));
         // `if (Contained) if (eDrawMode != ODM_Overlay) return;`
         // (src/C4Object.cpp:2656). The ordinary list pass filters contained
         // objects before it gets here, so this only bites for ODM_BaseOnly.
@@ -7157,9 +7191,7 @@ impl GraphicsSystem {
             base_graphics_name,
             &object.definition_id,
         );
-        let geometry_sprite = object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
-            .or(sprite);
+        let geometry_sprite = object_sprites.get(object.definition_id.as_str()).or(sprite);
         if let Some(geometry_sprite) = geometry_sprite {
             let target_position = (target_x, target_y);
             let shape = self.live_object_shape(geometry_sprite, object);
@@ -7687,10 +7719,7 @@ impl GraphicsSystem {
             else {
                 return;
             };
-            let Some(target_sprite) = self
-                .object_sprites
-                .get(&sprite_map_key(&target.definition_id, None))
-            else {
+            let Some(target_sprite) = self.object_sprites.get(target.definition_id.as_str()) else {
                 return;
             };
             let target_shape = Self::con_scaled_shape(
@@ -8333,7 +8362,7 @@ impl GraphicsSystem {
             let owner_color = Some(object_color_by_owner_tint(target));
             let rotation_degrees = (target.rotation.rem_euclid(360)) as f32;
             let geometry_sprite = object_sprites
-                .get(&sprite_map_key(&target.definition_id, None))
+                .get(target.definition_id.as_str())
                 .unwrap_or(sprite);
             if geometry_sprite.line != 0 {
                 // C4Object::Draw dispatches lines before every draw-mode
@@ -8594,7 +8623,7 @@ impl GraphicsSystem {
         // denominator with an integer max before the float divide
         // (src/C4DefGraphics.cpp:821-824).
         let host_shape = object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
+            .get(object.definition_id.as_str())
             .map(|host| self.live_object_shape(host, object))
             .unwrap_or_else(|| Self::sprite_def_shape(sprite));
         let fzoom = (host_shape.width as f32 / facet.width.max(1) as f32)
@@ -9733,7 +9762,7 @@ impl GraphicsSystem {
         let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
         let shape = self
             .object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
+            .get(object.definition_id.as_str())
             .map(|sprite| {
                 Self::con_scaled_shape(
                     Self::sprite_def_shape(sprite),

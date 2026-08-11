@@ -1471,6 +1471,7 @@ impl Engine {
     pub(crate) fn note_objects_changed(&self) {
         self.objects_generation
             .set(self.objects_generation.get().wrapping_add(1));
+        self.note_solid_mask_host_state_changed();
     }
 
     pub(crate) fn layer_movement_bounds_for(&self, index: usize) -> Option<LayerMovementBounds> {
