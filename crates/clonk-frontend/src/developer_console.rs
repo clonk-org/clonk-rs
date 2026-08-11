@@ -9,33 +9,24 @@
 
 use std::path::PathBuf;
 
-use clonk_graphics::{Color, Surface, TextFont};
-use clonk_gui::Rect as GuiRect;
+use clonk_graphics::{Surface, TextFont};
 
 use crate::classic_gui::IntRect;
-use crate::{fill_rect, GuiPoint};
+use crate::developer_chrome::{
+    contains, draw_bottom_line, draw_fitted_text, draw_raised, draw_sunken, fill,
+    CONTROL_BACKGROUND, CONTROL_TEXT, DISABLED_TEXT, FONT_SIZE, LIGHT_EDGE, MENU_ITEM_HEIGHT,
+    MENU_SEPARATOR_HEIGHT, MID_EDGE, SELECTED_BACKGROUND, SELECTED_TEXT, SMALL_FONT_SIZE,
+    WINDOW_BACKGROUND,
+};
+use crate::GuiPoint;
 
 pub const CONSOLE_LOG_CHARACTER_CAP: usize = 60_000;
 
 const MENU_BAR_HEIGHT: i32 = 24;
-const MENU_ITEM_HEIGHT: i32 = 22;
-const MENU_SEPARATOR_HEIGHT: i32 = 8;
 const STATUS_BAR_HEIGHT: i32 = 24;
 const TOOLBAR_HEIGHT: i32 = 34;
 const INPUT_HEIGHT: i32 = 26;
 const WINDOW_PADDING: i32 = 5;
-const FONT_SIZE: f32 = 13.0;
-const SMALL_FONT_SIZE: f32 = 11.0;
-
-const WINDOW_BACKGROUND: Color = Color::opaque(0xd4, 0xd0, 0xc8);
-const CONTROL_BACKGROUND: Color = Color::opaque(0xff, 0xff, 0xff);
-const CONTROL_TEXT: Color = Color::opaque(0x10, 0x10, 0x10);
-const DISABLED_TEXT: Color = Color::opaque(0x78, 0x78, 0x78);
-const SELECTED_BACKGROUND: Color = Color::opaque(0x31, 0x6a, 0xc5);
-const SELECTED_TEXT: Color = Color::opaque(0xff, 0xff, 0xff);
-const LIGHT_EDGE: Color = Color::opaque(0xff, 0xff, 0xff);
-const DARK_EDGE: Color = Color::opaque(0x60, 0x60, 0x60);
-const MID_EDGE: Color = Color::opaque(0x9a, 0x9a, 0x9a);
 
 /// `C4COPYRIGHT_YEAR`/`C4COPYRIGHT_COMPANY` (`C4Console.cpp:1190-1191`).
 const ABOUT_COPYRIGHT_YEAR: &str = "2008";
@@ -2472,161 +2463,6 @@ fn ascii_prefix_matches(candidate: &str, prefix: &str) -> bool {
     candidate
         .get(..prefix.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-}
-
-fn contains(rect: IntRect, point: GuiPoint) -> bool {
-    point.x >= rect.x as f32
-        && point.y >= rect.y as f32
-        && point.x < rect.x.saturating_add(rect.w) as f32
-        && point.y < rect.y.saturating_add(rect.h) as f32
-}
-
-fn gui_rect(rect: IntRect) -> GuiRect {
-    GuiRect::new(
-        rect.x as f32,
-        rect.y as f32,
-        rect.w.max(0) as f32,
-        rect.h.max(0) as f32,
-    )
-}
-
-fn fill(surface: &mut Surface, rect: IntRect, color: Color) {
-    if rect.w > 0 && rect.h > 0 {
-        fill_rect(surface, &gui_rect(rect), color);
-    }
-}
-
-fn draw_bottom_line(surface: &mut Surface, rect: IntRect, color: Color) {
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y + rect.h - 1,
-            w: rect.w,
-            h: 1,
-        },
-        color,
-    );
-}
-
-fn draw_raised(surface: &mut Surface, rect: IntRect, color: Color) {
-    fill(surface, rect, color);
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: 1,
-        },
-        LIGHT_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
-        LIGHT_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y + rect.h - 1,
-            w: rect.w,
-            h: 1,
-        },
-        DARK_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x + rect.w - 1,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
-        DARK_EDGE,
-    );
-}
-
-fn draw_sunken(surface: &mut Surface, rect: IntRect, color: Color) {
-    fill(surface, rect, color);
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: 1,
-        },
-        DARK_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
-        DARK_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x,
-            y: rect.y + rect.h - 1,
-            w: rect.w,
-            h: 1,
-        },
-        LIGHT_EDGE,
-    );
-    fill(
-        surface,
-        IntRect {
-            x: rect.x + rect.w - 1,
-            y: rect.y,
-            w: 1,
-            h: rect.h,
-        },
-        LIGHT_EDGE,
-    );
-}
-
-fn draw_fitted_text(
-    surface: &mut Surface,
-    font: &dyn TextFont,
-    rect: IntRect,
-    text: &str,
-    color: Color,
-    size: f32,
-    padding: i32,
-) {
-    if rect.w <= padding * 2 || rect.h <= 0 {
-        return;
-    }
-    let available = (rect.w - padding * 2) as f32;
-    let mut fitted = String::new();
-    for character in text.chars() {
-        let mut candidate = fitted.clone();
-        candidate.push(character);
-        if font.measure_text(&candidate, size).width > available {
-            break;
-        }
-        fitted.push(character);
-    }
-    font.draw_text(
-        surface,
-        (rect.x + padding) as f32,
-        (rect.y + ((rect.h as f32 - size) / 2.0).max(1.0) as i32) as f32,
-        &fitted,
-        size,
-        color,
-    );
 }
 
 #[cfg(test)]

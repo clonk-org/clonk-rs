@@ -9,6 +9,7 @@ pub mod classic_gui;
 pub mod clonk_fonts;
 pub mod context_menu;
 pub mod definition_sel;
+mod developer_chrome;
 pub mod developer_console;
 pub mod download_dialog;
 mod draw_primitives;
