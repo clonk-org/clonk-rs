@@ -508,6 +508,13 @@ pub struct ControlPlayerInfoRegistry {
     last_player_id: i32,
     issued_join_ids: HashSet<i32>,
     pending_reserved_join_ids: HashSet<i32>,
+    /// Info IDs `C4PlayerList::Retire` released after an elimination, kept
+    /// beside the retained rows so a host that bars rejoining can tell them
+    /// from a profile that merely left. Host-local, like the join-ID sets.
+    retired_by_elimination: HashSet<i32>,
+    /// Inverse of the host's rejoin-after-elimination admission policy, so the
+    /// derived default is the oracle's: released profiles may rejoin.
+    no_rejoin_after_elimination: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +685,7 @@ impl ControlPlayerInfoRegistry {
         self.last_player_id = last_player_id;
         self.issued_join_ids.clear();
         self.pending_reserved_join_ids.clear();
+        self.retired_by_elimination.clear();
         clients.into_iter().for_each(|client| self.apply(client));
     }
 
@@ -2244,14 +2252,15 @@ impl ControlPlayerInfoRegistry {
                     index -= 1;
                     let player = &request.players[index];
                     let is_duplicate = player.id == 0
-                        && player.resource.as_ref().is_some_and(|resource| {
+                        && (player.resource.as_ref().is_some_and(|resource| {
                             existing.players.iter().any(|existing_player| {
                                 existing_player.flags & PLAYER_INFO_FLAG_REMOVED == 0
                                     && existing_player.resource.as_ref().is_some_and(
                                         |existing_resource| existing_resource.id == resource.id,
                                     )
                             })
-                        });
+                        }) || self.no_rejoin_after_elimination
+                            && self.repeats_an_eliminated_profile(existing, player));
                     if is_duplicate {
                         request.players.swap_remove(index);
                     }
@@ -2767,6 +2776,52 @@ impl ControlPlayerInfoRegistry {
         }
         info.game_part_frame = game_part_frame;
         true
+    }
+
+    /// `C4PlayerList::Retire`'s removal, recorded as an elimination so a host
+    /// barring rejoins can refuse the released profile
+    /// (src/C4PlayerList.cpp:219-267,398-409). Only an eliminated or
+    /// surrendered player is ever retired, so this path never sees a player
+    /// that quit or was removed by its client.
+    pub fn mark_retired(&mut self, info_id: i32, game_part_frame: i32) -> bool {
+        let retired = self.mark_removed(info_id, false, game_part_frame);
+        if retired {
+            self.retired_by_elimination.insert(info_id);
+        }
+        retired
+    }
+
+    /// Whether the host readmits a profile its player was eliminated with.
+    /// The oracle always does; `Config.Network.NoRejoinAfterElimination`
+    /// turns that off for round types where returning defeats the goal.
+    pub fn rejoin_after_elimination_allowed(&self) -> bool {
+        !self.no_rejoin_after_elimination
+    }
+
+    pub fn set_rejoin_after_elimination_allowed(&mut self, allowed: bool) {
+        self.no_rejoin_after_elimination = !allowed;
+    }
+
+    /// Whether `player` repeats a profile this client was eliminated with.
+    /// The published `C4Network2Res` is reused for an unchanged file, so its
+    /// ID matches first; the profile filename covers a republished resource.
+    fn repeats_an_eliminated_profile(
+        &self,
+        client: &ClientPlayerInfos,
+        player: &ControlPlayerInfoEntry,
+    ) -> bool {
+        client.players.iter().any(|retired| {
+            let same_resource = player
+                .resource
+                .as_ref()
+                .zip(retired.resource.as_ref())
+                .is_some_and(|(resource, retired)| resource.id == retired.id);
+            let same_profile_file =
+                !player.filename.is_empty() && player.filename == retired.filename;
+            retired.flags & PLAYER_INFO_FLAG_REMOVED != 0
+                && self.retired_by_elimination.contains(&retired.id)
+                && (same_resource || same_profile_file)
+        })
     }
 
     pub fn get(&self, info_id: i32) -> Option<&ControlPlayerInfoEntry> {
@@ -3336,6 +3391,24 @@ mod tests {
     fn player(id: i32) -> ControlPlayerInfoEntry {
         ControlPlayerInfoEntry {
             id,
+            ..Default::default()
+        }
+    }
+
+    /// A runtime participant row carrying the published NRT_Player resource
+    /// and the profile filename an `ActivateNewPlayer` request repeats. One
+    /// profile file owns one resource, so both identify the same participant.
+    fn profile_row(id: i32, resource_id: i32) -> ControlPlayerInfoEntry {
+        ControlPlayerInfoEntry {
+            id,
+            flags: crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            filename: LegacyCString::from_bytes(format!("Player{resource_id}.c4p").into_bytes())
+                .expect("NUL-free filename"),
+            resource: Some(NetworkResourceCore {
+                resource_type: 3,
+                id: resource_id,
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
@@ -4530,6 +4603,113 @@ mod tests {
             vec![(8, 63), (9, 62)]
         );
         assert_eq!(callback_resource_ids, vec![63, 62]);
+    }
+
+    #[test]
+    fn host_admission_readmits_an_eliminated_profile_by_default() {
+        // The oracle has no rejoin policy: Retire released the profile, so the
+        // request is an ordinary runtime join and takes the next player ID
+        // (src/C4PlayerList.cpp:398-409; src/C4PlayerInfo.cpp:568-580,781-807).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![profile_row(7, 61)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(7);
+        assert!(registry.mark_retired(7, 120));
+        assert!(registry.rejoin_after_elimination_allowed());
+
+        let admitted = registry
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![profile_row(0, 61)],
+                },
+                8,
+            )
+            .expect("the released profile rejoins");
+
+        assert_eq!(
+            admitted
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+    }
+
+    #[test]
+    fn host_admission_bars_only_the_profile_that_was_eliminated() {
+        // A barred host still admits an untouched profile, and a row removed
+        // by something other than Retire — a client part, or the host's
+        // CID_RemovePlr — never entered the eliminated set at all
+        // (src/C4PlayerList.cpp:219-239; src/C4PlayerInfo.cpp:327-334).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![profile_row(7, 61), profile_row(8, 62)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(8);
+        assert!(registry.mark_removed(7, false, 120));
+        assert!(registry.mark_retired(8, 130));
+        registry.set_rejoin_after_elimination_allowed(false);
+
+        let admitted = registry
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![profile_row(0, 61), profile_row(0, 63)],
+                },
+                8,
+            )
+            .expect("neither request repeats an eliminated profile");
+
+        assert_eq!(
+            admitted
+                .players
+                .iter()
+                .map(|player| player.resource.as_ref().unwrap().id)
+                .collect::<Vec<_>>(),
+            vec![61, 63]
+        );
+    }
+
+    #[test]
+    fn host_admission_bars_readmitting_an_eliminated_profile_when_the_host_opted_in() {
+        // clonk-org/clonk-rs#240. C4PlayerList::Retire routes through Remove,
+        // which calls C4PlayerInfo::SetRemoved, so the oracle admits the later
+        // CIF_AddPlayers request for that released profile
+        // (src/C4PlayerList.cpp:219-267,398-409; src/C4PlayerInfo.cpp:568-580).
+        // A host that bars rejoining after elimination denies it silently,
+        // exactly like the double join that request otherwise would be
+        // (src/C4Network2Players.cpp:166-181).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![profile_row(7, 61)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(7);
+        assert!(registry.mark_retired(7, 120));
+        registry.set_rejoin_after_elimination_allowed(false);
+        let before = registry.retained_rows_snapshot();
+
+        let refused = registry.admit_request(
+            PlayerInfoUpdateRequest {
+                client_id: 3,
+                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![profile_row(0, 61)],
+            },
+            8,
+        );
+
+        assert_eq!(refused, None);
+        assert_eq!(registry.retained_rows_snapshot(), before);
     }
 
     #[test]
