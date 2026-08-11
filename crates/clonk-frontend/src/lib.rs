@@ -3031,6 +3031,213 @@ mod tests {
     }
 
     #[test]
+    fn oversized_gpu_sprite_uses_native_physical_texture_tiles() {
+        // C4Surface::CreateTextures and CStdDDraw::Blit split an image into
+        // independently padded C4TexRefs before drawing each intersecting tile
+        // (C4Surface.cpp:166-189; StdDDraw2.cpp:695-741).
+        let width = 4_100_u32;
+        let height = 16_u32;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&[(x % 251) as u8, 2, 3, 255]);
+            }
+        }
+        let image = ImageData::new(width, height, pixels);
+        let mut surface = Surface::new(24, 16, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 24.0, 16.0),
+            (0.0, 0.0, 24.0, 16.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 4_088.0,
+                y: 0.0,
+                width: 12.0,
+                height: 16.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Linear,
+            false,
+        ));
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene(
+                [24, 16],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        assert_eq!(scene.textures.len(), 2);
+        assert!(scene
+            .textures
+            .iter()
+            .all(|resource| resource.extent == [16, 16]));
+        assert_eq!(scene.commands.len(), 2);
+        let quads = scene
+            .commands
+            .iter()
+            .map(|command| match command {
+                GpuCommand::Quad {
+                    texture,
+                    vertices,
+                    sampler,
+                    ..
+                } => (*texture, *vertices, *sampler),
+                _ => panic!("native image tile did not lower to a quad"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(quads[0].1[0].position[0], 0.0);
+        assert_eq!(quads[0].1[3].position[0], 16.0);
+        assert_eq!(quads[1].1[0].position[0], 16.0);
+        assert_eq!(quads[1].1[3].position[0], 24.0);
+        assert!(quads.iter().all(|(_, vertices, sampler)| {
+            *sampler == GpuSampler::Linear
+                && vertices.iter().all(|vertex| {
+                    vertex
+                        .uv
+                        .iter()
+                        .all(|coordinate| (0.0..=1.0).contains(coordinate))
+                        && vertex.sample_tile == [0.0, 0.0, 16.0, 1.0]
+                })
+        }));
+        assert!(quads.iter().all(|(texture, _, _)| scene
+            .textures
+            .iter()
+            .any(|resource| resource.id == *texture)));
+
+        let right_tile = scene
+            .textures
+            .iter()
+            .find(|resource| resource.pixels[0] == (4_096 % 251) as u8)
+            .expect("the right physical texture tile is present");
+        assert_eq!(&right_tile.pixels[0..4], &[(4_096 % 251) as u8, 2, 3, 255]);
+        assert_eq!(&right_tile.pixels[4 * 4..5 * 4], &[255, 255, 255, 0]);
+    }
+
+    #[test]
+    fn oversized_gpu_sprite_clamps_roundoff_at_physical_tile_edge() {
+        // C4Surface::CreateTextures and CStdDDraw::Blit hand each C4TexRef
+        // tile-local coordinates at its exact edge (C4Surface.cpp:166-189;
+        // StdDDraw2.cpp:695-741).
+        let image = ImageData::new(22_320, 2, [32, 64, 96, 255].repeat(22_320 * 2));
+        let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 2.0, 2.0),
+            (0.0, 0.0, 2.0, 2.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 511.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Linear,
+            false,
+        ));
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene(
+                [2, 2],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        assert_eq!(scene.commands.len(), 2);
+        assert!(scene.commands.iter().all(|command| match command {
+            GpuCommand::Quad { vertices, .. } => vertices.iter().all(|vertex| {
+                vertex
+                    .uv
+                    .iter()
+                    .all(|coordinate| (0.0..=1.0).contains(coordinate))
+            }),
+            _ => false,
+        }));
+        let GpuCommand::Quad { vertices, .. } = &scene.commands[1] else {
+            panic!("second native image tile did not lower to a quad");
+        };
+        assert_eq!(vertices[0].uv[0], 0.0);
+        assert_eq!(vertices[2].uv[0], 0.0);
+    }
+
+    #[test]
+    fn oversized_inclusive_sprite_uses_cpu_parity_path() {
+        // CStdDDraw::Blit8 scales the inclusive source endpoint before its
+        // per-C4TexRef traversal (StdDDraw2.cpp:695-741). Retained native-tile
+        // splitting must decline until it can split in that scaled space.
+        let image = ImageData::new(4_098, 2, [32, 64, 96, 255].repeat(4_098 * 2));
+        let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(!capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 3.0, 2.0),
+            (0.0, 0.0, 3.0, 2.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 9.0,
+                y: 0.0,
+                width: 3.0,
+                height: 2.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            true,
+        ));
+    }
+
+    #[test]
+    fn physical_texture_tile_cache_evicts_the_least_recently_used_resource() {
+        let mut cache = PhysicalTextureTileCache::with_limits(2, 8);
+        let source = GpuTextureId::fresh();
+        let keys = [0, 1, 2].map(|x| PhysicalTextureTileKey {
+            source,
+            x,
+            y: 0,
+            size: 1,
+        });
+        let resources = std::array::from_fn::<_, 3, _>(|_| {
+            GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 1, 1, Arc::from([0, 0, 0, 0]))
+        });
+
+        cache.insert(keys[0], resources[0].clone());
+        cache.insert(keys[1], resources[1].clone());
+        assert!(cache.get(&keys[0]).is_some());
+        cache.insert(keys[2], resources[2].clone());
+
+        assert!(cache.get(&keys[0]).is_some());
+        assert!(cache.get(&keys[1]).is_none());
+        assert!(cache.get(&keys[2]).is_some());
+        assert_eq!(cache.retained_bytes(), 8);
+    }
+
+    #[test]
     fn simple_gpu_sprite_capture_avoids_temporary_batching() {
         let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
