@@ -2886,6 +2886,39 @@ an ordered-map model gap.
   doing if a second window, or a driver that cannot re-initialise after its last
   instance goes, ever makes the launcher present through two of them.
 
+- Open: **Native object-menu rows resolve their symbol at draw time, not at
+  refill time.** `C4ObjectMenu::RefillInternal` renders each row's picture into
+  the item's own `C4FacetExSurface` while the row is built —
+  `pObj->Picture2Facet(fctSymbol)` then `Add(..., fctSymbol, ...)`
+  (`src/C4ObjectMenu.cpp`, the `C4MN_Contents` and context/sell arms) — so the
+  drawn symbol is a snapshot that later graphics, colour or *deletion* changes
+  cannot disturb. `AddMenuItem`'s Object/ObjectRank recipes mirror that here via
+  `ObjectMenuPictureSnapshot`, but the native Contents/Get/Put, Activate and
+  base-sell rows keep only `picture_object` (`crates/clonk-engine/src/
+  direct_com.rs`) and `object_menu_item_picture_with_context_height` re-resolves
+  it against the *frame's* `SimulationSnapshot`. A row therefore draws blank for
+  any frame whose snapshot no longer holds the object the refill picked —
+  removal later in the same tick is enough. Until 2026-08-11 that blank also
+  failed the whole frame and ended the event loop, which is the crash reported
+  in clonk-org/clonk-rs#235; the frame now survives (`C4Menu.cpp:166` draws no
+  symbol), leaving only the one-frame blank icon. Closing it fully means
+  capturing the picture at refill, which changes serialized `ObjectMenuItem`
+  state and the many tests asserting `picture_object`. `parity verify` has no
+  menu section and cannot cover it.
+
+- Open: **Dialog-style menu hit-testing approximates `Symbol.Surface` with the
+  recipe.** `C4MenuItem::GetSymbolWidth` reserves a symbol column for a Dialog
+  row only when the resolved facet has a surface (`C4Menu.cpp:138`). The render
+  path matches it exactly — `render_engine_script_menu_with_gamma` derives
+  `item_has_symbols` from `item_icons.iter().map(Option::is_some)`
+  (`crates/clonk-app-menus/src/object_menu.rs:337`) — but the pointer and
+  geometry helpers in the same file receive no icons and fall back to
+  `item.image != ObjectMenuImage::None`, i.e. the *recipe*. A Dialog row whose
+  picture does not resolve is hit-tested one symbol column wider than it draws.
+  This was unreachable while an unresolved picture failed the frame outright;
+  it became observable with the clonk-org/clonk-rs#235 fix. Closing it means
+  threading resolved icons into the input-side helpers.
+
 ## Deliberate divergences from the oracle
 
 - **Tall intermediate MoveTo waypoints stage one native-height wall jump**
