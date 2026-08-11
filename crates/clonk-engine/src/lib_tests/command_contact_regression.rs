@@ -3,6 +3,38 @@ use crate::landscape::PixelGrid;
 use std::collections::HashMap;
 
 #[test]
+fn previewing_an_unchanged_effect_list_reuses_the_seeded_object_state() {
+    // C4Effect::Execute walks the one live effect list; preparing the next
+    // callback does not copy that list when it has not changed
+    // (C4Effect.cpp:319-363; C4Object.cpp:1069-1090).
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("FXOB", "Effect preview fixture", "")
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("FXOB"))
+        .expect("object spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+    engine.objects[index]
+        .state
+        .effects
+        .push(EffectState::new("Pulse"));
+
+    let mut world = engine.host_world_context_for_object(index);
+    let before = world
+        .get_shared(object)
+        .and_then(|object| object.full_state().cloned())
+        .expect("seeded object has full state");
+    world.preview_object_effects(object, &before.effects);
+    let after = world
+        .get_shared(object)
+        .and_then(|object| object.full_state().cloned())
+        .expect("previewed object has full state");
+
+    assert!(std::rc::Rc::ptr_eq(&before, &after));
+}
+
+#[test]
 fn pixel_less_landscape_does_not_invent_column_surface_contact() {
     // C4Object::ContactCheck samples the current shape against landscape
     // pixels (C4Movement.cpp:165-181); C4Object::DoMovement consumes that

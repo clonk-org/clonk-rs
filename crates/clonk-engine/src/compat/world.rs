@@ -3992,7 +3992,21 @@ impl HostWorldContext {
     /// must see the same list the event loop holds — including the victim
     /// C4Effect::Kill keeps linked across `Fx*Stop` (C4Effect.cpp:365-405).
     pub(crate) fn preview_object_effects(&mut self, id: ObjectId, effects: &[EffectState]) {
-        let _ = self.get(id);
+        let Some(current) = self.get_shared(id) else {
+            return;
+        };
+        let unchanged = current.full_state().is_some_and(|state| {
+            state.effects.len() == effects.len()
+                && state
+                    .effects
+                    .iter()
+                    .zip(effects)
+                    .all(|(current, next)| current.shares_preview_identity_with(next))
+        });
+        if unchanged {
+            return;
+        }
+        drop(current);
         let store = Rc::make_mut(self.object_store.get_mut());
         let Some(object) = store.objects.get_mut(&id) else {
             return;

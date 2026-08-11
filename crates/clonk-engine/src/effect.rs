@@ -125,6 +125,44 @@ impl EffectState {
     pub fn vars(&self) -> &[EffectVarValue] {
         &self.vars
     }
+
+    pub(crate) fn shares_preview_identity_with(&self, other: &Self) -> bool {
+        self.number == other.number
+            && self.name == other.name
+            && self.priority == other.priority
+            && self.interval == other.interval
+            && self.timer == other.timer
+            && self.command_target == other.command_target
+            && self.command_id == other.command_id
+            && self.start_dispatched == other.start_dispatched
+            && self.vars.len() == other.vars.len()
+            && self
+                .vars
+                .iter()
+                .zip(&other.vars)
+                .all(|(left, right)| match (left, right) {
+                    (EffectVarValue::Int(left), EffectVarValue::Int(right)) => left == right,
+                    (EffectVarValue::Bool(left), EffectVarValue::Bool(right)) => left == right,
+                    (EffectVarValue::RawBool(left), EffectVarValue::RawBool(right)) => {
+                        left == right
+                    }
+                    (EffectVarValue::String(left), EffectVarValue::String(right)) => {
+                        left.ptr_eq(right)
+                    }
+                    (EffectVarValue::C4Id(left), EffectVarValue::C4Id(right)) => left == right,
+                    (EffectVarValue::Object(left), EffectVarValue::Object(right)) => left == right,
+                    (EffectVarValue::Nil, EffectVarValue::Nil) => true,
+                    // Array and map identity can be script-visible. Their
+                    // public equality is content-based, so conservatively
+                    // refresh the preview instead of treating equal contents
+                    // as the same live C4Value.
+                    (
+                        EffectVarValue::Array(_) | EffectVarValue::Proplist(_),
+                        EffectVarValue::Array(_) | EffectVarValue::Proplist(_),
+                    ) => false,
+                    _ => false,
+                })
+    }
 }
 
 #[cfg(test)]
