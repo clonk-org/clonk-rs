@@ -32,6 +32,143 @@ struct PendingViewportForeground {
 }
 
 const MAX_TILED_UNDERLAY_CACHE_ENTRIES: usize = 8;
+const CELESTIAL_BODY_TEXTURE_SIZE: u32 = 24;
+const LEGACY_TIME_CYCLE: i64 = 10_000;
+
+#[derive(Clone, Copy)]
+enum CelestialBodyKind {
+    Sun,
+    Moon,
+}
+
+#[derive(Clone, Copy)]
+struct CelestialClock {
+    time_of_day: u16,
+}
+
+fn legacy_time_object_clock(object: &ObjectSnapshot) -> Option<CelestialClock> {
+    (object.status.is_active() && object.definition_id.as_str() == "TIME")
+        .then_some(object)
+        .and_then(|object| match object.local_vars.get("__local_1") {
+            Some(clonk_script::Value::Int(time)) => {
+                // Standard TIME counts noon-to-noon; the engine clock counts
+                // midnight-to-midnight.
+                let legacy_time = i64::from(*time).rem_euclid(LEGACY_TIME_CYCLE);
+                let time_of_day = ((legacy_time + LEGACY_TIME_CYCLE / 2)
+                    .rem_euclid(LEGACY_TIME_CYCLE)
+                    * i64::from(EnvironmentSettings::TIME_CYCLE)
+                    / LEGACY_TIME_CYCLE) as u16;
+                Some(CelestialClock { time_of_day })
+            }
+            _ => None,
+        })
+}
+
+fn celestial_clock(
+    settings: &EnvironmentSettings,
+    objects: &[ObjectSnapshot],
+    render_order: &[ObjectId],
+) -> Option<CelestialClock> {
+    let scripted_clock = if render_order.is_empty() {
+        objects.iter().rev().find_map(legacy_time_object_clock)
+    } else {
+        // The renderer appends objects omitted from a partial sidecar in
+        // canonical order. Reverse that effective Last -> Prev draw order to
+        // recover the master First -> Next order used by C4Game::FindObject.
+        let mut seen = HashSet::with_capacity(render_order.len());
+        let explicit = render_order
+            .iter()
+            .filter(|id| seen.insert(**id))
+            .copied()
+            .collect::<Vec<_>>();
+        objects
+            .iter()
+            .rev()
+            .filter(|object| !seen.contains(&object.id))
+            .chain(explicit.iter().rev().filter_map(|id| {
+                objects
+                    .binary_search_by_key(id, |object| object.id)
+                    .ok()
+                    .map(|index| &objects[index])
+            }))
+            .find_map(legacy_time_object_clock)
+    };
+
+    scripted_clock.or_else(|| {
+        // The native all-zero settings are the disabled/full-daylight sentinel.
+        (settings.time_of_day != 0 || settings.time_speed != 0).then_some(CelestialClock {
+            time_of_day: settings.time_of_day % EnvironmentSettings::TIME_CYCLE,
+        })
+    })
+}
+
+fn celestial_body_kind(clock: CelestialClock) -> CelestialBodyKind {
+    let dawn = EnvironmentSettings::TIME_CYCLE / 4;
+    let dusk = EnvironmentSettings::TIME_CYCLE * 3 / 4;
+    if (dawn..dusk).contains(&clock.time_of_day) {
+        CelestialBodyKind::Sun
+    } else {
+        CelestialBodyKind::Moon
+    }
+}
+
+fn celestial_body_image(kind: CelestialBodyKind) -> &'static ImageData {
+    static SUN: OnceLock<ImageData> = OnceLock::new();
+    static MOON: OnceLock<ImageData> = OnceLock::new();
+
+    match kind {
+        CelestialBodyKind::Sun => SUN.get_or_init(|| celestial_body_texture(kind)),
+        CelestialBodyKind::Moon => MOON.get_or_init(|| celestial_body_texture(kind)),
+    }
+}
+
+fn celestial_body_texture(kind: CelestialBodyKind) -> ImageData {
+    let size = CELESTIAL_BODY_TEXTURE_SIZE as i32;
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x * 2 + 1 - size;
+            let dy = y * 2 + 1 - size;
+            let distance_squared = dx * dx + dy * dy;
+            let color = match kind {
+                CelestialBodyKind::Sun => {
+                    let ray = dx.abs() <= 1
+                        || dy.abs() <= 1
+                        || (dx - dy).abs() <= 1
+                        || (dx + dy).abs() <= 1;
+                    if distance_squared <= 9 * 9 {
+                        [255, 248, 176, 255]
+                    } else if distance_squared <= 15 * 15 {
+                        [255, 210, 48, 255]
+                    } else if ray && distance_squared <= 21 * 21 {
+                        [255, 190, 32, 190]
+                    } else if distance_squared <= 19 * 19 {
+                        [255, 190, 32, 72]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                }
+                CelestialBodyKind::Moon => {
+                    let carved_dx = dx - 8;
+                    let carved = carved_dx * carved_dx + dy * dy <= 16 * 16;
+                    if distance_squared <= 17 * 17 && !carved {
+                        [232, 238, 255, 255]
+                    } else if distance_squared <= 20 * 20 && !carved {
+                        [196, 210, 248, 80]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                }
+            };
+            pixels.extend_from_slice(&color);
+        }
+    }
+    ImageData::new(
+        CELESTIAL_BODY_TEXTURE_SIZE,
+        CELESTIAL_BODY_TEXTURE_SIZE,
+        pixels,
+    )
+}
 
 fn object_base_sprite_request(object: &ObjectSnapshot) -> (&str, Option<&str>) {
     object.base_graphics.as_ref().map_or_else(
@@ -3089,7 +3226,15 @@ impl GraphicsSystem {
         let events = &snapshot.weather_events;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
 
-        self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting, gamma);
+        self.draw_sky(
+            snapshot.sky.as_ref(),
+            environment,
+            events,
+            &snapshot.objects,
+            &snapshot.render_order,
+            lighting,
+            gamma,
+        );
         // C4D_Background objects live in Game.BackObjects and draw between
         // sky and landscape (C4Viewport.cpp:1051-1063).
         self.draw_objects_at_frame(
@@ -3545,6 +3690,8 @@ impl GraphicsSystem {
         frame: Option<&SkyFrame>,
         environment: &EnvironmentFrame,
         events: &[WeatherEvent],
+        objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
         lighting: f32,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
@@ -3560,6 +3707,60 @@ impl GraphicsSystem {
             let tinted = Self::apply_lighting(base, lighting);
             self.fill_world_color(tinted, true, gamma);
         }
+        if let Some(clock) = celestial_clock(&environment.settings, objects, render_order) {
+            self.draw_celestial_body(clock, gamma);
+        }
+    }
+
+    fn draw_celestial_body(
+        &mut self,
+        clock: CelestialClock,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        let kind = celestial_body_kind(clock);
+        if self.surface_width < CELESTIAL_BODY_TEXTURE_SIZE
+            || self.surface_height < CELESTIAL_BODY_TEXTURE_SIZE
+        {
+            return;
+        }
+
+        let image = celestial_body_image(kind);
+        let time_of_day = i32::from(clock.time_of_day);
+        let cycle = i32::from(EnvironmentSettings::TIME_CYCLE);
+        let daylight = cycle / 2;
+        let dawn = cycle / 4;
+        let dusk = cycle * 3 / 4;
+        let elapsed = match kind {
+            CelestialBodyKind::Sun => time_of_day - dawn,
+            CelestialBodyKind::Moon => (time_of_day - dusk).rem_euclid(cycle),
+        };
+        let progress = (elapsed as f32 / daylight as f32).clamp(0.0, 1.0);
+        let x = (self.surface_width - image.width()) as f32 * (1.0 - progress);
+        let radius = image.height() as f32 * 0.5;
+        let horizon = self.surface_height as f32 * 0.72;
+        let apex = radius + self.surface_height as f32 * 0.06;
+        let center_y =
+            horizon - (progress * core::f32::consts::PI).sin() * (horizon - apex).max(0.0);
+        let y = (center_y - radius).clamp(0.0, (self.surface_height - image.height()) as f32);
+        let fog = self.fog_draw_context();
+        draw_image_region_float_source(
+            &mut self.surface,
+            &GuiRect::new(x, y, image.width() as f32, image.height() as f32),
+            image,
+            None,
+            &FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: image.width() as f32,
+                height: image.height() as f32,
+            },
+            BlitSampling::Nearest,
+            false,
+            None,
+            SpriteBlitState::normal().with_renderer_config(self.advanced_renderer_config),
+            gamma,
+            fog.as_ref(),
+        );
     }
 
     fn render_configured_sky(

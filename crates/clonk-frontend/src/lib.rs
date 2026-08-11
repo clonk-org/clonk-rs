@@ -5616,7 +5616,7 @@ mod tests {
         };
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
 
-        graphics.draw_sky(None, &environment, &[], 1.0, Some(&gamma));
+        graphics.draw_sky(None, &environment, &[], &[], &[], 1.0, Some(&gamma));
 
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
@@ -16599,6 +16599,247 @@ mod tests {
         assert!(
             top.r > top.b,
             "expected the red fade_top at the top of the view, got {top:?}"
+        );
+    }
+
+    #[test]
+    fn sky_draws_distinct_sun_and_moon_for_noon_and_midnight() {
+        let background = [24, 48, 96, 255];
+        let render = |time_of_day| {
+            let mut graphics = test_graphics(120, 80, 80, "Celestial Clock");
+            let environment = EnvironmentFrame {
+                settings: EnvironmentSettings::new(0).with_time_of_day(time_of_day),
+                sky_color: Some(RgbColor::new(background[0], background[1], background[2])),
+                ..EnvironmentFrame::default()
+            };
+
+            graphics.draw_sky(None, &environment, &[], &[], &[], 1.0, None);
+            graphics.surface().pixels().to_vec()
+        };
+
+        let noon = render(1_200);
+        let midnight = render(1);
+        let disabled = render(0);
+
+        assert!(
+            noon.chunks_exact(4).any(|pixel| pixel != background),
+            "noon must show a sun against a flat sky"
+        );
+        assert!(
+            midnight.chunks_exact(4).any(|pixel| pixel != background),
+            "midnight must show a moon against a flat sky"
+        );
+        assert!(
+            disabled.chunks_exact(4).all(|pixel| pixel == background),
+            "the native all-zero clock must leave ordinary skies unchanged"
+        );
+        assert_ne!(noon, midnight, "sun and moon must be visually distinct");
+    }
+
+    #[test]
+    fn non_clock_time_controller_leaves_the_sky_unchanged() {
+        // Arctic's PolarNight controller also uses ID TIME but has no numbered
+        // Local(1) clock (FarWorlds.c4d/Arctic.c4d/Environment.c4d/
+        // PolarNight.c4d/Script.c:5-22).
+        let background = [24, 48, 96, 255];
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "TIME".into();
+        let environment = EnvironmentFrame {
+            sky_color: Some(RgbColor::new(background[0], background[1], background[2])),
+            ..EnvironmentFrame::default()
+        };
+        let mut graphics = test_graphics(120, 80, 80, "Non-clock TIME");
+
+        graphics.draw_sky(None, &environment, &[], &[object], &[], 1.0, None);
+
+        assert!(graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == background));
+    }
+
+    #[test]
+    fn gpu_capture_retains_the_celestial_body_texture() {
+        let mut graphics = test_graphics(120, 80, 80, "Retained Celestial Clock");
+        let environment = EnvironmentFrame {
+            settings: EnvironmentSettings::new(0).with_time_of_day(1_200),
+            sky_color: Some(RgbColor::new(24, 48, 96)),
+            ..EnvironmentFrame::default()
+        };
+        let gamma =
+            clonk_graphics::GammaRamp::from_control_points([0x10_20_30, 0x40_50_60, 0x70_80_90]);
+
+        graphics.begin_gpu_scene_capture();
+        graphics.draw_sky(None, &environment, &[], &[], &[], 1.0, Some(&gamma));
+        let scene = graphics
+            .finish_gpu_scene_capture(&gamma)
+            .expect("GPU capture remains active");
+        let (body_index, texture) = scene
+            .commands
+            .iter()
+            .enumerate()
+            .find_map(|(index, command)| match command {
+                GpuCommand::Quad {
+                    texture,
+                    sampler: GpuSampler::Nearest,
+                    blend: GpuBlend::Normal,
+                    gamma: true,
+                    ..
+                } => Some((index, *texture)),
+                _ => None,
+            })
+            .expect("the celestial body must be a retained textured quad");
+
+        assert!(matches!(
+            scene.commands.first(),
+            Some(GpuCommand::Solid { .. })
+        ));
+        assert!(body_index > 0, "the body must draw after the sky");
+        assert!(scene
+            .textures
+            .iter()
+            .any(|resource| resource.id == texture && resource.extent == [24, 24]));
+    }
+
+    #[test]
+    fn sun_and_moon_follow_the_clock_across_the_sky() {
+        // The moving sun in shipped Desert content follows horizon -> apex ->
+        // horizon (Worlds.c4f/Desert.c4s/Sonne.c4d/Script.c:103-171). Convert
+        // that readout to this port's 600/1200/1800 dawn/noon/dusk clock.
+        let background = [24, 48, 96, 255];
+        let body_center = |time_of_day| {
+            let width = 120_u32;
+            let mut graphics = test_graphics(width, 80, 80, "Celestial Orbit");
+            let mut settings = EnvironmentSettings::new(0);
+            settings.time_of_day = time_of_day;
+            let environment = EnvironmentFrame {
+                settings,
+                sky_color: Some(RgbColor::new(background[0], background[1], background[2])),
+                ..EnvironmentFrame::default()
+            };
+            graphics.draw_sky(None, &environment, &[], &[], &[], 1.0, None);
+
+            let (x_sum, y_sum, count) = graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, pixel)| *pixel != background)
+                .fold(
+                    (0_u64, 0_u64, 0_u64),
+                    |(x_sum, y_sum, count), (index, _)| {
+                        (
+                            x_sum + index as u64 % u64::from(width),
+                            y_sum + index as u64 / u64::from(width),
+                            count + 1,
+                        )
+                    },
+                );
+            assert!(count > 0, "time {time_of_day} must expose a celestial body");
+            (x_sum as f32 / count as f32, y_sum as f32 / count as f32)
+        };
+
+        let dawn = body_center(600);
+        let noon = body_center(1_200);
+        let dusk = body_center(1_799);
+        assert!(dawn.0 > noon.0 && noon.0 > dusk.0);
+        assert!(noon.1 < dawn.1 && noon.1 < dusk.1);
+
+        let moonrise = body_center(1_800);
+        let midnight = body_center(1);
+        let moonset = body_center(599);
+        assert!(moonrise.0 > midnight.0 && midnight.0 > moonset.0);
+        assert!(midnight.1 < moonrise.1 && midnight.1 < moonset.1);
+        assert_eq!(dawn, body_center(3_000), "snapshot clock values must wrap");
+    }
+
+    #[test]
+    fn shipped_time_object_drives_the_celestial_clock() {
+        // The standard TIME definition stores its noon-to-noon 0..10000 clock
+        // in Local(1) (Objects.c4d/Environment.c4d/Time.c4d/Script.c:15-16,
+        // 52-69). Shipped scenarios use this object instead of Rust's
+        // synthetic EnvironmentSettings clock.
+        let render = |legacy_time| {
+            let mut snapshot = make_snapshot();
+            snapshot.environment.sky_color = Some(RgbColor::new(24, 48, 96));
+            snapshot.landscape = None;
+            snapshot.objects[0].definition_id = "TIME".into();
+            snapshot.objects[0].local_vars.insert(
+                "__local_1".to_string(),
+                clonk_script::Value::Int(legacy_time),
+            );
+
+            let mut graphics = test_graphics(120, 80, 80, "Script Time");
+            let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+            graphics.render_frame(&snapshot, &viewports);
+            graphics.surface().pixels().to_vec()
+        };
+
+        let background = [24, 48, 96, 255];
+        let noon = render(0);
+        let midnight = render(5_000);
+        assert!(noon
+            .chunks_exact(4)
+            .any(|pixel| pixel != background && pixel[0] > pixel[2]));
+        assert!(midnight
+            .chunks_exact(4)
+            .any(|pixel| pixel != background && pixel[2] > pixel[0]));
+    }
+
+    #[test]
+    fn time_object_selection_follows_master_object_order() {
+        // Script FindObject returns the first full-range match while walking
+        // Game.Objects First -> Next (C4Game.cpp:1366-1391).
+        let render = |clocks: &[(ObjectId, i32)], render_order: Vec<ObjectId>| {
+            let mut snapshot = make_snapshot();
+            snapshot.environment.sky_color = Some(RgbColor::new(24, 48, 96));
+            snapshot.landscape = None;
+
+            let template = snapshot.objects[0].clone();
+            for (id, legacy_time) in clocks {
+                let mut object = template.clone();
+                object.id = *id;
+                object.definition_id = "TIME".into();
+                object.crew_member = false;
+                object.local_vars.insert(
+                    "__local_1".to_string(),
+                    clonk_script::Value::Int(*legacy_time),
+                );
+                snapshot.objects.push(object);
+            }
+            snapshot.render_order = render_order;
+
+            let mut graphics = test_graphics(120, 80, 80, "Ordered Script Time");
+            let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+            graphics.render_frame(&snapshot, &viewports);
+            graphics.surface().pixels().to_vec()
+        };
+
+        let focus_id = ObjectId::new(1);
+        let noon_id = ObjectId::new(2);
+        let midnight_id = ObjectId::new(3);
+        let expected = render(&[(midnight_id, 5_000)], vec![focus_id, midnight_id]);
+        let actual = render(
+            &[(noon_id, 0), (midnight_id, 5_000)],
+            vec![focus_id, noon_id, midnight_id],
+        );
+
+        assert!(
+            actual == expected,
+            "the TIME object first in master order must drive the sky"
+        );
+
+        let partial = render(&[(midnight_id, 5_000)], vec![focus_id]);
+        assert!(
+            partial == expected,
+            "objects omitted from a partial draw-order sidecar must remain searchable"
+        );
+
+        let legacy = render(&[(noon_id, 0), (midnight_id, 5_000)], Vec::new());
+        assert!(
+            legacy == expected,
+            "the canonical draw-order fallback must be reversed for selection"
         );
     }
 
