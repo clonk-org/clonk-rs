@@ -3568,6 +3568,38 @@ an ordered-map model gap.
   `classic_release_is_emitted_only_when_no_autostop_set_claims_the_key` and
   `selected_player_classic_control_synchronizes_horizontal_key_release`.
 
+- **The Eke GPED's remote-control pilot stays parked under Jump'n'Run control**
+  (`planet/System.c4g/EkeGpedRemoteControl.c`; C++ `C4Object::AutoStopDirectCom`
+  / `C4Object::AutoStopUpdateComDir`, LegacyClonk 7d43b47
+  src/C4Object.cpp:3579-3593,3743-3755, and `C4Player::InCom` /
+  `C4Player::ExecuteControl`, src/C4Player.cpp:1212-1228,1522-1531).
+  Fixes clonk-org/clonk-rs#202. The Eke GPED steers an airbike by remote
+  (`EkeReloaded.c4d/Equipment.c4d/GPED.c4d/Script.c:15-121`): the SFT forwards
+  `ControlLeft`/`Right`/`Up`/`Down` to the selected item, the GPED consumes all
+  four, and `C4Object::DirectCom`'s object script override then returns before
+  any `ObjectComMovement` (C4Object.cpp:3399-3403). Under Jump'n'Run control —
+  the style a new player is created with — every com the script does *not*
+  consume instead refreshes the crew member's `ComDir` from the pressed keys.
+  Nothing in the SF5B -> GP5B chain answers the stale
+  `LastCom | COM_Single` com the player layer flushes when the previous key is
+  superseded or its double-click window expires, nor the `"Undefined"` name
+  `ComName` gives a `LastCom` that already carries `COM_Double`
+  (C4ObjectCom.cpp:800-851), so each of those walks the pilot off in whatever
+  direction is currently held. Shipped LegacyClonk behaves the same way; this is
+  a content-level gap the port closes rather than a parity failure.
+  One `#appendto SF5B` in the port's own `planet/System.c4g` consumes
+  `Control{Left,Right,Up,Down,Throw,Special,Special2}Single` and
+  `ControlUndefined` — and only while the *selected* item is a GP5B whose action
+  is `AirbikeFly` with a live `target`, so every other item, every other com and
+  classic control are untouched. Classic control never had the symptom:
+  `C4Object::DirectCom`'s procedure switch has no arm for those coms
+  (C4Object.cpp:3419-3570).
+  Pinned by `eke_gped_remote_control_steers_the_airbike_without_walking_its_pilot`
+  and, for the shipped-content A/B in both control styles,
+  `shipped_eke_content_walks_the_remote_control_pilot_only_under_jump_and_run`.
+  `appendto_inherited_reaches_a_function_the_target_only_includes` pins the
+  `_inherited()` fallback both this append and `EkeSftRelease.c` depend on.
+
 - **Accepted divergence: the repeated-key flag is set on every target,
   including macOS.** C++ decides this per windowing backend, chosen at build
   time. Win32 reads the hardware bit (`!!(lParam & 0x40000000)`,

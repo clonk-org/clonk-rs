@@ -339,6 +339,10 @@ fn shipped_global_appends_stay_quiet_without_their_optional_targets() {
             "EkeGuidedMissile.c",
             include_str!("../../../../planet/System.c4g/EkeGuidedMissile.c"),
         ),
+        (
+            "EkeGpedRemoteControl.c",
+            include_str!("../../../../planet/System.c4g/EkeGpedRemoteControl.c"),
+        ),
     ]
     .into_iter()
     .map(|(name, source)| (name.to_owned(), source.to_owned()))
