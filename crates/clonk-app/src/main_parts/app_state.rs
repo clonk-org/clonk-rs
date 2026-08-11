@@ -3370,6 +3370,8 @@ struct PresentationBenchmarkMeasurement {
     simulation_frame: u64,
     runtime_stippels_at_start: usize,
     submissions: u64,
+    retained_gpu_submissions: u64,
+    cpu_submissions: u64,
     refreshed_frames: u64,
     automatic_graphics_skips: u64,
     graphics_total: Duration,
@@ -3381,6 +3383,8 @@ struct PresentationBenchmarkMeasurement {
 pub(crate) struct PresentationBenchmarkReport {
     pub(crate) elapsed: Duration,
     pub(crate) submissions: u64,
+    pub(crate) retained_gpu_submissions: u64,
+    pub(crate) cpu_submissions: u64,
     pub(crate) refreshed_frames: u64,
     pub(crate) simulation_frames: u64,
     pub(crate) runtime_stippels_at_start: usize,
@@ -3406,8 +3410,10 @@ impl PresentationBenchmarkReport {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6} graphics_pass_sample_count={} graphics_pass_p50_ms={:.6} graphics_pass_p95_ms={:.6} graphics_pass_p99_ms={:.6} graphics_pass_samples_ns=[{graphics_samples_ns}]",
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} retained_gpu_present_submissions={} cpu_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6} graphics_pass_sample_count={} graphics_pass_p50_ms={:.6} graphics_pass_p95_ms={:.6} graphics_pass_p99_ms={:.6} graphics_pass_samples_ns=[{graphics_samples_ns}]",
             self.submissions,
+            self.retained_gpu_submissions,
+            self.cpu_submissions,
             self.refreshed_frames,
             self.simulation_frames,
             self.automatic_graphics_skips,
@@ -3419,6 +3425,12 @@ impl PresentationBenchmarkReport {
             self.graphics_p99.as_secs_f64() * 1_000.0,
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PresentationPath {
+    RetainedGpu,
+    Cpu,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3518,6 +3530,8 @@ impl PresentationBenchmark {
         Some(PresentationBenchmarkReport {
             elapsed,
             submissions,
+            retained_gpu_submissions: self.measurement.retained_gpu_submissions,
+            cpu_submissions: self.measurement.cpu_submissions,
             refreshed_frames: self.measurement.refreshed_frames,
             simulation_frames: simulation_frame.saturating_sub(self.measurement.simulation_frame),
             runtime_stippels_at_start: self.measurement.runtime_stippels_at_start,
@@ -3543,6 +3557,7 @@ impl PresentationBenchmark {
         now: Instant,
         graphics_duration: Duration,
         refreshed: bool,
+        path: PresentationPath,
     ) {
         if self.finished {
             return;
@@ -3554,6 +3569,16 @@ impl PresentationBenchmark {
             return;
         }
         self.measurement.submissions = self.measurement.submissions.saturating_add(1);
+        match path {
+            PresentationPath::RetainedGpu => {
+                self.measurement.retained_gpu_submissions =
+                    self.measurement.retained_gpu_submissions.saturating_add(1);
+            }
+            PresentationPath::Cpu => {
+                self.measurement.cpu_submissions =
+                    self.measurement.cpu_submissions.saturating_add(1);
+            }
+        }
         self.measurement.refreshed_frames = self
             .measurement
             .refreshed_frames
@@ -3641,6 +3666,18 @@ pub(crate) fn validate_native_tick_presentation_budget(
     if report.submissions == 0 || report.refreshed_frames == 0 {
         return Err("benchmark produced no refreshed presentation".to_string());
     }
+    if report.cpu_submissions != 0 {
+        return Err(format!(
+            "CPU presentation submissions must be zero (observed {})",
+            report.cpu_submissions
+        ));
+    }
+    if report.retained_gpu_submissions != report.submissions {
+        return Err(format!(
+            "retained GPU submissions {} do not match total submissions {}",
+            report.retained_gpu_submissions, report.submissions
+        ));
+    }
     let native_cadence =
         u64::try_from(report.elapsed.as_nanos() / INGAME_FRAME_INTERVAL.as_nanos())
             .unwrap_or(u64::MAX);
@@ -3654,6 +3691,12 @@ pub(crate) fn validate_native_tick_presentation_budget(
         return Err(format!(
             "refreshed frames {} below native cadence {native_cadence}",
             report.refreshed_frames
+        ));
+    }
+    if report.simulation_frames < native_cadence {
+        return Err(format!(
+            "simulation frames {} below native cadence {native_cadence}",
+            report.simulation_frames
         ));
     }
     if report.automatic_graphics_skips != 0 {

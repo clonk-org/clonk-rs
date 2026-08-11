@@ -1062,7 +1062,12 @@
         let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
 
         assert_eq!(benchmark.poll(false, base, 10), None);
-        benchmark.record_successful_presentation(base, Duration::from_millis(100), true);
+        benchmark.record_successful_presentation(
+            base,
+            Duration::from_millis(100),
+            true,
+            PresentationPath::RetainedGpu,
+        );
         benchmark.record_automatic_graphics_skip();
         assert_eq!(benchmark.poll(true, base, 10), None);
         assert_eq!(
@@ -1082,11 +1087,13 @@
             base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(10),
             Duration::from_millis(10),
             true,
+            PresentationPath::RetainedGpu,
         );
         benchmark.record_successful_presentation(
             base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(20),
             Duration::from_millis(20),
             false,
+            PresentationPath::Cpu,
         );
         assert_eq!(
             benchmark.poll(
@@ -1106,6 +1113,8 @@
             .expect("measurement window completes");
         assert_eq!(report.elapsed, Duration::from_secs(3));
         assert_eq!(report.submissions, 2);
+        assert_eq!(report.retained_gpu_submissions, 1);
+        assert_eq!(report.cpu_submissions, 1);
         assert_eq!(report.refreshed_frames, 1);
         assert_eq!(report.simulation_frames, 105);
         assert_eq!(report.automatic_graphics_skips, 1);
@@ -1120,7 +1129,7 @@
         );
         assert_eq!(
                 report.machine_line(),
-                "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]"
+                "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]"
             );
         assert_eq!(
             benchmark.poll(true, base + Duration::from_secs(10), 999),
@@ -1167,7 +1176,12 @@
             None
         );
         let deadline = base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3);
-        benchmark.record_successful_presentation(deadline, Duration::from_millis(10), true);
+        benchmark.record_successful_presentation(
+            deadline,
+            Duration::from_millis(10),
+            true,
+            PresentationPath::RetainedGpu,
+        );
         let report = benchmark
             .poll(true, deadline, 70)
             .expect("the running clock completes an occluded client's measurement");

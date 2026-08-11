@@ -80,6 +80,8 @@ DEFAULT_PROFILE_BIG_ICON = (
 )
 INTEGER_METRICS = {
     "successful_present_submissions",
+    "retained_gpu_present_submissions",
+    "cpu_present_submissions",
     "refreshed_frames",
     "simulation_frames",
     "automatic_graphics_skips",
@@ -542,8 +544,22 @@ def benchmark_failures(
             f"simulation FPS {report['simulation_fps']:.6f} is below "
             f"{minimum_simulation_fps:.6f}"
         )
+    cpu_submissions = report.get("cpu_present_submissions")
+    if cpu_submissions != 0:
+        failures.append(
+            "CPU presentation submissions must be zero "
+            f"(observed {cpu_submissions})"
+        )
+    retained_submissions = report.get("retained_gpu_present_submissions")
+    successful_submissions = report["successful_present_submissions"]
+    if retained_submissions != successful_submissions:
+        failures.append(
+            f"retained GPU submissions {retained_submissions} do not match "
+            "successful presentation submissions "
+            f"{successful_submissions}"
+        )
     if require_presentation:
-        if report["successful_present_submissions"] <= 0:
+        if successful_submissions <= 0:
             failures.append("benchmark produced no successful presentation")
         if report["refreshed_frames"] <= 0:
             failures.append("benchmark produced no refreshed frame")

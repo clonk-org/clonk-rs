@@ -1458,6 +1458,7 @@ fn run() -> Result<()> {
                                         completed_at,
                                         graphics_duration,
                                         true,
+                                        PresentationPath::RetainedGpu,
                                     );
                                 }
                                 false
@@ -1688,6 +1689,7 @@ fn run() -> Result<()> {
                                     completed_at,
                                     graphics_duration,
                                     refreshed,
+                                    PresentationPath::Cpu,
                                 );
                             }
                         }

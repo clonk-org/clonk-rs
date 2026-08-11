@@ -692,6 +692,8 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
     let passing = PresentationBenchmarkReport {
         elapsed: Duration::from_secs(20),
         submissions: 1_200,
+        retained_gpu_submissions: 1_200,
+        cpu_submissions: 0,
         refreshed_frames: 1_200,
         simulation_frames: 714,
         runtime_stippels_at_start: 0,
@@ -708,6 +710,7 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
 
     let mut missing_submission = passing.clone();
     missing_submission.submissions = 713;
+    missing_submission.retained_gpu_submissions = 713;
     assert!(validate_native_tick_presentation_budget(&missing_submission)
         .unwrap_err()
         .contains("successful presentation submissions 713 below native cadence 714"));
@@ -717,6 +720,12 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
     assert!(validate_native_tick_presentation_budget(&missing_refresh)
         .unwrap_err()
         .contains("refreshed frames 713 below native cadence 714"));
+
+    let mut missing_simulation = passing.clone();
+    missing_simulation.simulation_frames = 713;
+    assert!(validate_native_tick_presentation_budget(&missing_simulation)
+        .unwrap_err()
+        .contains("simulation frames 713 below native cadence 714"));
 
     let mut too_slow = passing.clone();
     too_slow.graphics_average = Duration::from_micros(28_001);
@@ -729,6 +738,19 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
     assert!(validate_native_tick_presentation_budget(&skipped)
         .unwrap_err()
         .contains("must be zero"));
+
+    let mut cpu_fallback = passing.clone();
+    cpu_fallback.retained_gpu_submissions -= 1;
+    cpu_fallback.cpu_submissions = 1;
+    assert!(validate_native_tick_presentation_budget(&cpu_fallback)
+        .unwrap_err()
+        .contains("CPU presentation submissions must be zero"));
+
+    let mut missing_retained = passing.clone();
+    missing_retained.retained_gpu_submissions -= 1;
+    assert!(validate_native_tick_presentation_budget(&missing_retained)
+        .unwrap_err()
+        .contains("retained GPU submissions 1199 do not match total submissions 1200"));
 
     let mut not_refreshed = passing;
     not_refreshed.refreshed_frames = 0;
