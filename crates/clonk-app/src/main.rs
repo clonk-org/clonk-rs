@@ -2430,6 +2430,7 @@ impl GameApp {
             runtime_network_committed_control_mode: None,
             runtime_network_committed_status: None,
             runtime_network_join_allowed: None,
+            network_rejoin_after_elimination_allowed: None,
             network_control_clock,
             network_max_players,
             network_is_league,

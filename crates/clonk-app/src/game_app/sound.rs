@@ -489,6 +489,23 @@ impl GameApp {
             .collect()
     }
 
+    /// Whether a host readmits the profile an eliminated player retired with
+    /// (clonk-org/clonk-rs#240). The oracle has no such policy, so an unset
+    /// `Config.Network.NoRejoinAfterElimination` keeps its behaviour.
+    pub(crate) fn rejoin_after_elimination_allowed(&self) -> bool {
+        self.network_rejoin_after_elimination_allowed
+            .unwrap_or_else(|| {
+                !native_config_text(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                    "Network",
+                    "NoRejoinAfterElimination",
+                )
+                .as_deref()
+                .map(parse_config_bool)
+                .unwrap_or(false)
+            })
+    }
+
     /// `C4PlayerList::Retire` routes through `Remove`, which calls
     /// `C4PlayerInfo::SetRemoved` before the live player is deleted, releasing
     /// the profile for a later `ActivateNewPlayer`
@@ -502,9 +519,15 @@ impl GameApp {
             .filter(|player_info| *player_info != 0);
         if let Some(player_info) = retired_player_info {
             let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+            // Resolve the rejoin policy here so it and the elimination records
+            // it gates always share one lifetime: every path that replaces the
+            // registry drops both together.
+            let rejoin_allowed = self.rejoin_after_elimination_allowed();
+            self.control_player_infos
+                .set_rejoin_after_elimination_allowed(rejoin_allowed);
             if self
                 .control_player_infos
-                .mark_removed(player_info, false, game_part_frame)
+                .mark_retired(player_info, game_part_frame)
             {
                 self.prune_host_local_alternate_colors();
                 self.publish_current_host_player_infos();

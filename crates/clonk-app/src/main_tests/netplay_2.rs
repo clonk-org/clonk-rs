@@ -7106,6 +7106,147 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
 }
 
 #[test]
+fn rejoin_after_elimination_policy_reads_its_network_config_key() {
+    // clonk-org/clonk-rs#240. The key is a clonk-rs extension with no C4Config
+    // counterpart, so an absent one must leave the oracle behaviour in place.
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("isolated rejoin-policy user data");
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let mut app = new_menu_app_with_paths(640, 480, &paths);
+
+    assert!(app.rejoin_after_elimination_allowed());
+
+    persist_config_value(&paths, "Network", "NoRejoinAfterElimination", "1")
+        .expect("bar rejoining after elimination");
+    assert!(!app.rejoin_after_elimination_allowed());
+
+    persist_config_value(&paths, "Network", "NoRejoinAfterElimination", "0")
+        .expect("restore the oracle policy");
+    assert!(app.rejoin_after_elimination_allowed());
+
+    // A host that changed the policy for this session outranks the file, the
+    // same way runtime join does.
+    app.network_rejoin_after_elimination_allowed = Some(false);
+    assert!(!app.rejoin_after_elimination_allowed());
+}
+
+#[test]
+fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
+    // clonk-org/clonk-rs#240: the same runtime readmission a stock host grants,
+    // refused because this host set Config.Network.NoRejoinAfterElimination.
+    // Admission still denies without a synchronized message, exactly like the
+    // double join it is treated as (src/C4Network2Players.cpp:160-181).
+    let directory = tempdir().expect("create runtime player directory");
+    let player_path = directory.path().join("HostRejoin.c4p");
+    let mut player_group = clonk_resources::MutableGroup::new("HostRejoin.c4p");
+    player_group
+        .add_file_with_metadata(
+            "Player.txt",
+            b"[Player]\nName=Host Rejoin\n[Preferences]\nColorDw=1193046\n".to_vec(),
+            1,
+            false,
+        )
+        .expect("add runtime player core");
+    fs::write(
+        &player_path,
+        player_group.pack().expect("pack runtime player"),
+    )
+    .expect("write runtime player");
+
+    let mut app = new_running_sandbox_app();
+    app.player_name = "Exact host maker".to_string();
+    app.control_clients.register(0, true, false);
+    app.network_rejoin_after_elimination_allowed = Some(false);
+
+    let wire_name = clonk_engine::LegacyCString::from_bytes(
+        player_path.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .expect("fixture player path is NUL-free");
+    let resource = clonk_engine::NetworkResourceCore {
+        resource_type: clonk_network::HostResourceType::Player as u8,
+        id: 17,
+        loadable: true,
+        filename: wire_name.clone(),
+        ..Default::default()
+    };
+    app.control_player_infos.replace_snapshot(
+        41,
+        [clonk_engine::PlayerInfoControlData {
+            client_id: 0,
+            flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 41,
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
+                    | clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                filename: wire_name.clone(),
+                resource: Some(resource.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+        }],
+    );
+    let retiring = app.local_owner + 1;
+    app.engine
+        .register_player(PlayerConfig::new(retiring, "Host Rejoin").with_player_info_id(41))
+        .expect("register the host's joined runtime player");
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+
+    assert!(app
+        .engine
+        .execute_eliminate_player_control(&clonk_engine::EliminatePlayerControlData {
+            player: retiring,
+            by_client: 0,
+        })
+        .expect("execute host elimination"));
+    let players_before_tick = app.player_info_ids_by_player();
+    for _ in 0..60 {
+        app.snapshot = app.engine.tick().expect("advance retirement delay");
+    }
+    app.mirror_retired_player_info(&players_before_tick);
+    assert!(
+        app.engine.player(retiring).is_none(),
+        "the eliminated player retires after the 60-frame delay"
+    );
+
+    let (direct_ready, _direct_wait) = std::sync::mpsc::channel();
+    let command_observer = thread::spawn(move || {
+        commands.complete_runtime_host_join(resource, event_tx, direct_ready)
+    });
+
+    app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+        player_path.to_string_lossy().into_owned(),
+    ))
+    .expect("runtime host player menu action");
+    assert!(
+        app.status_text.starts_with("Unable to join player"),
+        "the eliminated profile must be refused: {}",
+        app.status_text
+    );
+    drop(app.network.take());
+
+    // The resource is published before admission runs, as in C++, but nothing
+    // is broadcast and no player is queued to join.
+    let (order, _publications, player_infos, joins) =
+        command_observer.join().expect("command observer");
+    assert_eq!(order, vec!["publish"]);
+    assert!(player_infos.is_empty());
+    assert!(joins.is_empty());
+    assert_eq!(
+        app.control_player_infos.player_count(),
+        1,
+        "only the retired history row remains"
+    );
+}
+
+#[test]
 fn active_network_host_runtime_join_assigns_team_before_broadcast() {
     // The host handles its local CIF_AddPlayers packet directly, assigning
     // its ID and team before broadcasting authoritative PlayerInfo
