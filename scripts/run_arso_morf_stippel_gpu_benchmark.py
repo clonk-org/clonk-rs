@@ -10,11 +10,16 @@ Build the two release executables first:
 The checked-in scenario remains untouched. This runner copies it to a temporary
 directory, asks the fixture executable to create real initialized ST5B objects
 in that copy, and launches the normal app/viewport benchmark against the copy.
+Optional paired mode retains one canonical fixture/config and complete baseline
+and candidate evidence in a caller-selected artifact directory.
 """
 
 import argparse
+import datetime as dt
 import hashlib
+import json
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -71,13 +76,30 @@ def parse_fields(line, prefix):
     if not words or words[0] != prefix:
         raise BenchmarkFailure(f"expected {prefix} machine line")
     fields = {}
+    pending = None
     for word in words[1:]:
+        if pending is not None:
+            key, value = pending
+            value = f"{value} {word}"
+            if word.endswith("]"):
+                fields[key] = value
+                pending = None
+            else:
+                pending = (key, value)
+            continue
         if "=" not in word:
             raise BenchmarkFailure(f"malformed {prefix} field: {word}")
         key, value = word.split("=", 1)
         if key in fields:
             raise BenchmarkFailure(f"duplicate {prefix} field: {key}")
-        fields[key] = value
+        if value.startswith("[") and not value.endswith("]"):
+            pending = (key, value)
+        else:
+            fields[key] = value
+    if pending is not None:
+        raise BenchmarkFailure(
+            f"unterminated {prefix} list field: {pending[0]}"
+        )
     return fields
 
 
@@ -150,18 +172,41 @@ def parse_presentation_line(line):
         "refreshed_frames",
         "simulation_frames",
         "automatic_graphics_skips",
+        "graphics_pass_sample_count",
     )
     float_fields = (
         "elapsed_seconds",
         "presentation_submission_fps",
         "simulation_fps",
         "average_graphics_pass_ms",
+        "max_graphics_pass_ms",
+        "graphics_pass_p50_ms",
+        "graphics_pass_p95_ms",
+        "graphics_pass_p99_ms",
     )
     try:
         parsed = {key: int(fields[key]) for key in integer_fields}
         parsed.update({key: float(fields[key]) for key in float_fields})
+        raw_samples = fields["graphics_pass_samples_ns"]
+        if not raw_samples.startswith("[") or not raw_samples.endswith("]"):
+            raise ValueError("graphics samples must use a bracketed list")
+        values = raw_samples[1:-1].strip()
+        parsed["graphics_pass_samples_ns"] = (
+            []
+            if not values
+            else [int(value.strip()) for value in values.split(",")]
+        )
     except (KeyError, ValueError) as error:
         raise BenchmarkFailure(f"invalid presentation evidence: {error}") from error
+    sample_count = parsed["graphics_pass_sample_count"]
+    raw_sample_count = len(parsed["graphics_pass_samples_ns"])
+    if sample_count != raw_sample_count:
+        raise BenchmarkFailure(
+            f"graphics pass sample count is {sample_count} but "
+            f"{raw_sample_count} raw samples were reported"
+        )
+    if any(sample < 0 for sample in parsed["graphics_pass_samples_ns"]):
+        raise BenchmarkFailure("graphics pass samples cannot be negative")
     return parsed
 
 
@@ -272,6 +317,24 @@ def require_single_result(lines, expected):
         )
 
 
+def single_budget_result(lines):
+    matches = [
+        line.strip()
+        for line in lines
+        if line.startswith(f"{PRESENTATION_PREFIX} result=")
+    ]
+    if len(matches) != 1:
+        raise BenchmarkFailure(
+            "expected exactly one presentation budget result; observed "
+            f"{len(matches)}"
+        )
+    if matches[0] == PRESENTATION_PASS:
+        return "pass"
+    if matches[0].startswith(f"{PRESENTATION_PREFIX} result=fail"):
+        return "fail"
+    raise BenchmarkFailure(f"invalid presentation budget result: {matches[0]}")
+
+
 def require_network_evidence(lines):
     matches = [
         line.strip()
@@ -310,8 +373,371 @@ def single_machine_line(lines, prefix, first_field):
     return matches[0]
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def sha256(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return sha256_file(path)
+
+
+def canonical_json(value):
+    return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
+def json_sha256(value):
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(canonical_json(value), encoding="utf-8")
+    temporary.replace(path)
+
+
+def file_fingerprint(path):
+    stat = path.stat()
+    return {
+        "sha256": sha256_file(path),
+        "size_bytes": stat.st_size,
+    }
+
+
+def tree_fingerprint(path):
+    entries = []
+    for child in sorted(path.rglob("*")):
+        relative = child.relative_to(path).as_posix()
+        if child.is_symlink():
+            entries.append(
+                {
+                    "kind": "symlink",
+                    "path": relative,
+                    "target": os.readlink(child),
+                }
+            )
+        elif child.is_file():
+            entries.append(
+                {
+                    "kind": "file",
+                    "path": relative,
+                    **file_fingerprint(child),
+                }
+            )
+    return {
+        "sha256": json_sha256(entries),
+        "files": entries,
+    }
+
+
+def capture_paired_input_fingerprint(fixture, config):
+    value = {
+        "fixture": tree_fingerprint(fixture),
+        "config": file_fingerprint(config),
+    }
+    return {"sha256": json_sha256(value), **value}
+
+
+def verify_paired_input_fingerprint(expected, fixture, config, *, stage):
+    observed = capture_paired_input_fingerprint(fixture, config)
+    if observed != expected:
+        raise BenchmarkFailure(
+            f"paired fixture or config changed {stage}; refusing a non-identical A/B run"
+        )
+    return observed
+
+
+def binary_provenance(path):
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "sha256": sha256_file(resolved),
+        "size_bytes": stat.st_size,
+        "modified_ns": stat.st_mtime_ns,
+    }
+
+
+def resolve_source_root(explicit_root, binary, *, label):
+    if explicit_root is not None:
+        candidates = [explicit_root.resolve()]
+    else:
+        candidates = list(binary.resolve().parents)
+    root = next(
+        (
+            candidate
+            for candidate in candidates
+            if (candidate / ".git").exists()
+            and (candidate / "Cargo.toml").is_file()
+        ),
+        None,
+    )
+    if root is None:
+        raise BenchmarkFailure(
+            f"could not identify the {label} source worktree; pass "
+            f"--{label}-source-root"
+        )
+    return root
+
+
+def _command_bytes(command, *, cwd):
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BenchmarkFailure(
+            f"provenance command failed ({' '.join(command)}): {error}"
+        ) from error
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise BenchmarkFailure(
+            f"provenance command failed ({' '.join(command)}): "
+            f"{stderr or f'exit {completed.returncode}'}"
+        )
+    return completed.stdout
+
+
+def _command_text(command, *, cwd):
+    return _command_bytes(command, cwd=cwd).decode(
+        "utf-8", errors="replace"
+    ).strip()
+
+
+def _untracked_file_hashes(root, command):
+    output = _command_bytes(command, cwd=root)
+    paths = [
+        root / entry.decode("utf-8", errors="surrogateescape")
+        for entry in output.split(b"\0")
+        if entry
+    ]
+    hashes = {}
+    for path in sorted(paths):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            hashes[relative] = hashlib.sha256(
+                b"symlink\0" + os.fsencode(os.readlink(path))
+            ).hexdigest()
+        elif path.is_file():
+            hashes[relative] = sha256_file(path)
+    return hashes
+
+
+def collect_source_provenance(root):
+    root = root.resolve()
+    tracked_patch = _command_bytes(
+        (
+            "git",
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            ".",
+            ":(exclude)content",
+        ),
+        cwd=root,
+    )
+    untracked = _untracked_file_hashes(
+        root,
+        (
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+            ":(exclude)content",
+            ":(exclude)target",
+        ),
+    )
+    cargo_lock = root / "Cargo.lock"
+    return {
+        "path": str(root),
+        "commit": _command_text(("git", "rev-parse", "HEAD"), cwd=root),
+        "head_tree": _command_text(
+            ("git", "rev-parse", "HEAD^{tree}"), cwd=root
+        ),
+        "cargo_lock": (
+            file_fingerprint(cargo_lock) if cargo_lock.is_file() else None
+        ),
+        "tracked_patch_sha256": hashlib.sha256(tracked_patch).hexdigest(),
+        "untracked_files": untracked,
+        "untracked_files_sha256": json_sha256(untracked),
+        "dirty": bool(tracked_patch or untracked),
+    }
+
+
+def collect_content_provenance():
+    content = (WORKSPACE / "content").resolve()
+    tracked_patch = _command_bytes(
+        ("git", "diff", "--binary", "--no-ext-diff", "HEAD", "--", "."),
+        cwd=content,
+    )
+    untracked = _untracked_file_hashes(
+        content,
+        ("git", "ls-files", "--others", "--exclude-standard", "-z"),
+    )
+    gitlink = _command_text(
+        ("git", "ls-tree", "HEAD", "--", "content"), cwd=WORKSPACE
+    ).split()
+    return {
+        "head": _command_text(("git", "rev-parse", "HEAD"), cwd=content),
+        "tree": _command_text(
+            ("git", "rev-parse", "HEAD^{tree}"), cwd=content
+        ),
+        "parent_gitlink_revision": gitlink[2] if len(gitlink) >= 3 else None,
+        "tracked_patch_sha256": hashlib.sha256(tracked_patch).hexdigest(),
+        "untracked_files": untracked,
+        "untracked_files_sha256": json_sha256(untracked),
+        "dirty": bool(tracked_patch or untracked),
+    }
+
+
+def _best_effort_probe(command):
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=WORKSPACE,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            "command": list(command),
+            "status": "unavailable",
+            "reason": str(error),
+        }
+    output = "\n".join(
+        line
+        for line in completed.stdout.splitlines()
+        if "serial" not in line.lower() and "uuid" not in line.lower()
+    )
+    return {
+        "command": list(command),
+        "status": "observed" if completed.returncode == 0 else "failed",
+        "exit_status": completed.returncode,
+        "stdout": output,
+        "stderr": completed.stderr,
+    }
+
+
+def _linux_power_probe():
+    status_paths = sorted(Path("/sys/class/power_supply").glob("*/status"))
+    if not status_paths:
+        return {"status": "unavailable", "reason": "no power-supply status files"}
+    return {
+        "status": "observed",
+        "supplies": {
+            path.parent.name: path.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
+            for path in status_paths
+        },
+    }
+
+
+def collect_machine_and_display_provenance():
+    system = platform.system()
+    if system == "Darwin":
+        machine_probe = _best_effort_probe(
+            ("sysctl", "-n", "hw.model", "machdep.cpu.brand_string", "hw.memsize")
+        )
+        display_probe = _best_effort_probe(
+            ("system_profiler", "SPDisplaysDataType", "-detailLevel", "mini")
+        )
+        power_probe = _best_effort_probe(("pmset", "-g", "batt"))
+    elif system == "Linux":
+        machine_probe = _best_effort_probe(("lscpu",))
+        display_probe = _best_effort_probe(("xrandr", "--current"))
+        power_probe = _linux_power_probe()
+    else:
+        machine_probe = {"status": "unavailable", "reason": "no platform probe"}
+        display_probe = {"status": "unavailable", "reason": "no platform probe"}
+        power_probe = {"status": "unavailable", "reason": "no platform probe"}
+    return {
+        "machine": {
+            "platform": platform.platform(),
+            "system": system,
+            "release": platform.release(),
+            "architecture": platform.machine(),
+            "processor": platform.processor(),
+            "logical_cpu_count": os.cpu_count(),
+            "probe": machine_probe,
+        },
+        "display": {
+            "configured_window": {
+                "width": 800,
+                "height": 600,
+                "scale_percent": 100,
+            },
+            "session_environment": {
+                key: os.environ.get(key)
+                for key in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE")
+            },
+            "probe": display_probe,
+        },
+        "power": power_probe,
+    }
+
+
+def collect_run_provenance(arguments):
+    cargo_lock = WORKSPACE / "Cargo.lock"
+    machine = collect_machine_and_display_provenance()
+    baseline_source = resolve_source_root(
+        getattr(arguments, "baseline_source_root", None),
+        arguments.baseline_app_binary,
+        label="baseline",
+    )
+    candidate_source = resolve_source_root(
+        getattr(arguments, "candidate_source_root", WORKSPACE),
+        arguments.app_binary,
+        label="candidate",
+    )
+    return {
+        "source": {
+            "baseline": collect_source_provenance(baseline_source),
+            "candidate": collect_source_provenance(candidate_source),
+        },
+        "content": collect_content_provenance(),
+        "inputs": {
+            "cargo_lock": file_fingerprint(cargo_lock),
+            "source_scenario": tree_fingerprint(SOURCE_SCENARIO),
+            "embedded_player": file_fingerprint(EMBEDDED_PLAYER),
+            "runner": binary_provenance(Path(__file__)),
+        },
+        "binaries": {
+            "baseline_app": binary_provenance(arguments.baseline_app_binary),
+            "candidate_app": binary_provenance(arguments.app_binary),
+            "fixture_builder": binary_provenance(arguments.fixture_builder),
+        },
+        "toolchain": {
+            "rustc_vv": _command_text(
+                (os.environ.get("RUSTC", "rustc"), "-Vv"),
+                cwd=WORKSPACE,
+            ),
+            "cargo_vv": _command_text(("cargo", "-Vv"), cwd=WORKSPACE),
+            "python": sys.version,
+        },
+        **machine,
+    }
 
 
 def count_stippels(objects_path):
@@ -343,7 +769,29 @@ def controlled_process_environment(inherited):
     return environment
 
 
-def run_and_echo(command, *, environment=None, check=True, timeout=None):
+def _output_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _retain_process_output(path, value):
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_output_text(value), encoding="utf-8")
+
+
+def run_and_echo(
+    command,
+    *,
+    environment=None,
+    check=True,
+    timeout=None,
+    stdout_path=None,
+    stderr_path=None,
+):
     try:
         completed = subprocess.run(
             command,
@@ -354,9 +802,13 @@ def run_and_echo(command, *, environment=None, check=True, timeout=None):
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
+        _retain_process_output(stdout_path, error.stdout)
+        _retain_process_output(stderr_path, error.stderr)
         raise BenchmarkFailure(
             f"command timed out after {timeout} seconds: {command[0]}"
         ) from error
+    _retain_process_output(stdout_path, completed.stdout)
+    _retain_process_output(stderr_path, completed.stderr)
     sys.stdout.write(completed.stdout)
     sys.stdout.flush()
     sys.stderr.write(completed.stderr)
@@ -436,9 +888,9 @@ def write_process_config(path, ports):
     )
 
 
-def app_command(arguments, *, config, fixture, ports):
+def app_command(arguments, *, config, fixture, ports, app_binary=None):
     return [
-        str(arguments.app_binary),
+        str(app_binary or arguments.app_binary),
         "--config",
         str(config),
         str(fixture),
@@ -461,11 +913,43 @@ def build_argument_parser():
     )
     parser.add_argument(
         "--app-binary",
+        "--candidate-app-binary",
+        dest="app_binary",
         type=Path,
         default=Path(
             os.environ.get(
                 "LC_APP_BINARY", WORKSPACE / "target/release/clonk-app"
             )
+        ),
+    )
+    parser.add_argument(
+        "--baseline-app-binary",
+        type=Path,
+        help=(
+            "origin/main app binary for a paired run; requires "
+            "--paired-artifact-dir"
+        ),
+    )
+    parser.add_argument(
+        "--baseline-source-root",
+        type=Path,
+        help=(
+            "Git worktree used to build the baseline; inferred from the "
+            "binary path when it remains below that worktree"
+        ),
+    )
+    parser.add_argument(
+        "--candidate-source-root",
+        type=Path,
+        default=WORKSPACE,
+        help="Git worktree used to build the candidate (default: this workspace)",
+    )
+    parser.add_argument(
+        "--paired-artifact-dir",
+        type=Path,
+        help=(
+            "new directory that retains one fixture/config, both arms' raw "
+            "logs, and the provenance manifest"
         ),
     )
     parser.add_argument(
@@ -479,6 +963,359 @@ def build_argument_parser():
         ),
     )
     return parser
+
+
+def validate_paired_arguments(arguments):
+    if (
+        arguments.baseline_source_root is not None
+        and arguments.baseline_app_binary is None
+    ):
+        raise BenchmarkFailure(
+            "--baseline-source-root requires --baseline-app-binary"
+        )
+    requested = (
+        arguments.baseline_app_binary is not None,
+        arguments.paired_artifact_dir is not None,
+    )
+    if any(requested) and not all(requested):
+        raise BenchmarkFailure(
+            "--baseline-app-binary and --paired-artifact-dir must be used together"
+        )
+    return all(requested)
+
+
+def parse_presentation_evidence(lines, process_status):
+    report = parse_presentation_line(
+        single_machine_line(lines, PRESENTATION_PREFIX, "elapsed_seconds")
+    )
+    if (
+        report["successful_present_submissions"] <= 0
+        or report["refreshed_frames"] <= 0
+        or report["graphics_pass_sample_count"] <= 0
+    ):
+        raise BenchmarkFailure("paired arm produced no refreshed presentation")
+    context = parse_presentation_context_line(
+        single_machine_line(
+            lines,
+            PRESENTATION_CONTEXT_PREFIX,
+            "runtime_players",
+        )
+    )
+    network = require_network_evidence(lines)
+    validate_playing_context(context)
+    validate_runtime_stippel_census(context)
+    budget_result = single_budget_result(lines)
+    expected_status = 0 if budget_result == "pass" else 2
+    if process_status != expected_status:
+        raise BenchmarkFailure(
+            f"app reported budget result={budget_result} but exited with status "
+            f"{process_status}; expected {expected_status}"
+        )
+    return {
+        "process_status": process_status,
+        "budget_result": budget_result,
+        "presentation": report,
+        "context": context,
+        "network": network,
+    }
+
+
+def run_paired_arm(
+    arguments,
+    *,
+    label,
+    binary,
+    config,
+    fixture,
+    ports,
+    environment,
+    artifact_dir,
+    expected_inputs,
+):
+    output_dir = artifact_dir / label
+    output_dir.mkdir(parents=True, exist_ok=False)
+    run_config = output_dir / "config.ini"
+    shutil.copyfile(config, run_config)
+    input_before = capture_paired_input_fingerprint(fixture, run_config)
+    if input_before != expected_inputs:
+        raise BenchmarkFailure(
+            f"{label} did not receive the canonical fixture and config bytes"
+        )
+    command = app_command(
+        arguments,
+        config=run_config,
+        fixture=fixture,
+        ports=ports,
+        app_binary=binary,
+    )
+    lines, process_status = run_and_echo(
+        command,
+        environment=environment,
+        check=False,
+        timeout=(
+            arguments.measurement_seconds
+            + PRESENTATION_WARMUP_SECONDS
+            + APP_TIMEOUT_GRACE_SECONDS
+        ),
+        stdout_path=output_dir / "stdout.log",
+        stderr_path=output_dir / "stderr.log",
+    )
+    evidence = {
+        "label": label,
+        "binary": binary_provenance(binary),
+        "command": command,
+        "input_sha256_before": input_before["sha256"],
+        "config_after": file_fingerprint(run_config),
+        **parse_presentation_evidence(lines, process_status),
+    }
+    write_json(output_dir / "report.json", evidence)
+    return evidence
+
+
+def comparison_summary(baseline, candidate):
+    baseline_report = baseline["presentation"]
+    candidate_report = candidate["presentation"]
+    metrics = {}
+    for field in (
+        "presentation_submission_fps",
+        "simulation_fps",
+        "average_graphics_pass_ms",
+        "max_graphics_pass_ms",
+        "graphics_pass_p50_ms",
+        "graphics_pass_p95_ms",
+        "graphics_pass_p99_ms",
+    ):
+        baseline_value = baseline_report[field]
+        candidate_value = candidate_report[field]
+        metrics[field] = {
+            "baseline": baseline_value,
+            "candidate": candidate_value,
+            "candidate_minus_baseline": candidate_value - baseline_value,
+            "candidate_over_baseline": (
+                candidate_value / baseline_value
+                if baseline_value != 0
+                else None
+            ),
+        }
+    return {"metrics": metrics}
+
+
+def run_paired_benchmark(arguments):
+    executable(
+        arguments.app_binary,
+        "cargo build --release --offline --locked -p clonk-app --bin clonk-app",
+    )
+    executable(
+        arguments.baseline_app_binary,
+        "build an instrumented origin/main clonk-app release binary",
+    )
+    executable(
+        arguments.fixture_builder,
+        "cargo build --release --offline --locked -p clonk-engine "
+        "--example arso_morf_stippel_fixture",
+    )
+    if count_stippels(SOURCE_SCENARIO / "Objects.txt") != SOURCE_STIPPELS:
+        raise BenchmarkFailure(
+            "checked-in Arso-Morf no longer has the expected 20-ST5B baseline"
+        )
+    source_hash = sha256_file(SOURCE_SCENARIO / "Objects.txt")
+    artifact_dir = arguments.paired_artifact_dir.resolve()
+    content_root = (WORKSPACE / "content").resolve()
+    try:
+        artifact_dir.relative_to(content_root)
+    except ValueError:
+        pass
+    else:
+        raise BenchmarkFailure(
+            "paired artifact directory must remain outside installed content"
+        )
+    provenance = collect_run_provenance(arguments)
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise BenchmarkFailure(
+            f"paired artifact directory already exists: {artifact_dir}"
+        ) from error
+
+    manifest = {
+        "schema_version": 1,
+        "benchmark": "Arso-Morf 1,000-ST5B network presentation A/B",
+        "result": "running",
+        "started_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "settings": {
+            "measurement_seconds": arguments.measurement_seconds,
+            "warmup_seconds": PRESENTATION_WARMUP_SECONDS,
+            "seed": SEED,
+            "target_stippels": TARGET_STIPPELS,
+            "minimum_retained_stippels": MINIMUM_RETAINED_STIPPELS,
+            "native_tick_seconds": NATIVE_TICK_SECONDS,
+            "run_order": ["baseline", "candidate"],
+        },
+        "provenance": provenance,
+        "input_checks": [],
+        "runs": {},
+    }
+    write_json(artifact_dir / "manifest.json", manifest)
+
+    try:
+        fixture = artifact_dir / "fixture" / "Arso-Morf.c4s"
+        fixture.parent.mkdir()
+        shutil.copytree(SOURCE_SCENARIO, fixture)
+        (fixture / FIXTURE_MARKER).write_text(
+            "clonk-rs Arso-Morf ST5B GPU benchmark fixture v1\n",
+            encoding="utf-8",
+        )
+        fixture_command = [
+            str(arguments.fixture_builder),
+            str(fixture),
+            str(SEED),
+        ]
+        fixture_lines, _ = run_and_echo(
+            fixture_command,
+            stdout_path=artifact_dir / "fixture-builder.stdout.log",
+            stderr_path=artifact_dir / "fixture-builder.stderr.log",
+        )
+        fixture_report = parse_fixture_line(
+            single_machine_line(
+                fixture_lines,
+                FIXTURE_PREFIX,
+                "source_stippels",
+            )
+        )
+        validate_fixture_report(fixture_report)
+        serialized_count = count_stippels(fixture / "Objects.txt")
+        if serialized_count != TARGET_STIPPELS:
+            raise BenchmarkFailure(
+                "independent Objects.txt census found "
+                f"{serialized_count} ST5B objects; expected exactly "
+                f"{TARGET_STIPPELS}"
+            )
+
+        config = artifact_dir / "config.ini"
+        ports = allocate_network_ports()
+        write_process_config(config, ports)
+        inputs = capture_paired_input_fingerprint(fixture, config)
+        manifest["fixture_builder"] = {
+            "command": fixture_command,
+            "report": fixture_report,
+        }
+        manifest["ports"] = ports
+        manifest["paired_inputs"] = inputs
+        manifest["input_checks"].append(
+            {"stage": "after fixture generation", "sha256": inputs["sha256"]}
+        )
+        write_json(artifact_dir / "input-fingerprint.json", inputs)
+        write_json(artifact_dir / "manifest.json", manifest)
+
+        environment = controlled_process_environment(os.environ)
+        environment.update(
+            {
+                "LC_PIN_SEED": str(SEED),
+                "LC_APP_PRESENTATION_BENCHMARK_SECONDS": str(
+                    arguments.measurement_seconds
+                ),
+                "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK": "1",
+            }
+        )
+        manifest["environment"] = {
+            key: environment[key]
+            for key in (
+                "LC_INSTALL_ROOT",
+                "LC_CONTENT_DIR",
+                "LC_LOG",
+                "LC_PIN_SEED",
+                "LC_APP_PRESENTATION_BENCHMARK_SECONDS",
+                "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK",
+            )
+        }
+
+        observed = verify_paired_input_fingerprint(
+            inputs, fixture, config, stage="before baseline"
+        )
+        manifest["input_checks"].append(
+            {"stage": "before baseline", "sha256": observed["sha256"]}
+        )
+        try:
+            baseline = run_paired_arm(
+                arguments,
+                label="baseline",
+                binary=arguments.baseline_app_binary,
+                config=config,
+                fixture=fixture,
+                ports=ports,
+                environment=environment,
+                artifact_dir=artifact_dir,
+                expected_inputs=inputs,
+            )
+            manifest["runs"]["baseline"] = baseline
+            write_json(artifact_dir / "manifest.json", manifest)
+        finally:
+            observed = verify_paired_input_fingerprint(
+                inputs, fixture, config, stage="after baseline"
+            )
+            manifest["input_checks"].append(
+                {"stage": "after baseline", "sha256": observed["sha256"]}
+            )
+
+        observed = verify_paired_input_fingerprint(
+            inputs, fixture, config, stage="before candidate"
+        )
+        manifest["input_checks"].append(
+            {"stage": "before candidate", "sha256": observed["sha256"]}
+        )
+        try:
+            candidate = run_paired_arm(
+                arguments,
+                label="candidate",
+                binary=arguments.app_binary,
+                config=config,
+                fixture=fixture,
+                ports=ports,
+                environment=environment,
+                artifact_dir=artifact_dir,
+                expected_inputs=inputs,
+            )
+            manifest["runs"]["candidate"] = candidate
+            write_json(artifact_dir / "manifest.json", manifest)
+        finally:
+            observed = verify_paired_input_fingerprint(
+                inputs, fixture, config, stage="after candidate"
+            )
+            manifest["input_checks"].append(
+                {"stage": "after candidate", "sha256": observed["sha256"]}
+            )
+
+        validate_native_cadence(candidate["presentation"])
+        validate_native_presentation_cadence(candidate["presentation"])
+        if candidate["budget_result"] != "pass":
+            raise BenchmarkFailure("candidate did not pass the native presentation budget")
+        if sha256_file(SOURCE_SCENARIO / "Objects.txt") != source_hash:
+            raise BenchmarkFailure("checked-in Arso-Morf Objects.txt was modified")
+
+        manifest["comparison"] = comparison_summary(baseline, candidate)
+        manifest["result"] = "pass"
+        manifest["completed_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        write_json(artifact_dir / "manifest.json", manifest)
+    except (BenchmarkFailure, OSError) as error:
+        manifest["result"] = "fail"
+        manifest["error"] = str(error)
+        manifest["completed_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        write_json(artifact_dir / "manifest.json", manifest)
+        if isinstance(error, BenchmarkFailure):
+            raise
+        raise BenchmarkFailure(f"paired benchmark artifact failure: {error}") from error
+
+    print(
+        "LC_ARSO_MORF_STIPPEL_GPU_BENCHMARK_PAIRED "
+        f"result=pass artifact_dir={artifact_dir} "
+        f"input_sha256={inputs['sha256']} "
+        f"baseline_budget_result={baseline['budget_result']} "
+        f"candidate_budget_result={candidate['budget_result']} "
+        "baseline_average_graphics_pass_ms="
+        f"{baseline['presentation']['average_graphics_pass_ms']:.6f} "
+        "candidate_average_graphics_pass_ms="
+        f"{candidate['presentation']['average_graphics_pass_ms']:.6f}"
+    )
 
 
 def run_benchmark(arguments):
@@ -608,7 +1445,11 @@ def run_benchmark(arguments):
 
 def main():
     try:
-        run_benchmark(build_argument_parser().parse_args())
+        arguments = build_argument_parser().parse_args()
+        if validate_paired_arguments(arguments):
+            run_paired_benchmark(arguments)
+        else:
+            run_benchmark(arguments)
     except BenchmarkFailure as error:
         print(
             f"LC_ARSO_MORF_STIPPEL_GPU_BENCHMARK result=fail error={error}",

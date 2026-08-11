@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import tempfile
 import unittest
@@ -82,7 +83,7 @@ class NativeCadenceTests(unittest.TestCase):
         "presentation_submission_fps=59.994001 refreshed_frames=1200 "
         "simulation_frames=714 simulation_fps=35.696430 "
         "automatic_graphics_skips=0 average_graphics_pass_ms=5.794000 "
-        "max_graphics_pass_ms=9.000000 graphics_pass_sample_count=1200 "
+        "max_graphics_pass_ms=9.000000 graphics_pass_sample_count=1 "
         "graphics_pass_p50_ms=5.000000 graphics_pass_p95_ms=7.000000 "
         "graphics_pass_p99_ms=8.000000 graphics_pass_samples_ns=[5000000]"
     )
@@ -110,6 +111,34 @@ class NativeCadenceTests(unittest.TestCase):
 
         self.assertEqual(MODULE.required_native_frames(report), 714)
         MODULE.validate_native_cadence(report)
+
+    def test_preserves_every_raw_graphics_pass_sample(self):
+        line = self.BENCHMARK_LINE.replace(
+            "graphics_pass_sample_count=1",
+            "graphics_pass_sample_count=3",
+        ).replace(
+            "graphics_pass_samples_ns=[5000000]",
+            "graphics_pass_samples_ns=[5000000, 7000000, 9000000]",
+        )
+
+        report = MODULE.parse_presentation_line(line)
+
+        self.assertEqual(
+            report["graphics_pass_samples_ns"],
+            [5_000_000, 7_000_000, 9_000_000],
+        )
+
+    def test_rejects_a_truncated_raw_graphics_pass_distribution(self):
+        line = self.BENCHMARK_LINE.replace(
+            "graphics_pass_sample_count=1",
+            "graphics_pass_sample_count=2",
+        )
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "graphics pass sample count is 2 but 1 raw samples were reported",
+        ):
+            MODULE.parse_presentation_line(line)
 
     def test_native_frame_count_is_exact_at_a_tick_boundary(self):
         report = MODULE.parse_presentation_line(
@@ -160,6 +189,32 @@ class NativeCadenceTests(unittest.TestCase):
             MODULE.require_single_result(
                 [self.BENCHMARK_LINE],
                 "LC_APP_PRESENTATION_BENCHMARK result=pass native_tick_budget_ms=28",
+            )
+
+    def test_paired_evidence_rejects_a_headless_zero_sample_baseline(self):
+        headless = (
+            self.BENCHMARK_LINE.replace(
+                "successful_present_submissions=1200",
+                "successful_present_submissions=0",
+            )
+            .replace("refreshed_frames=1200", "refreshed_frames=0")
+            .replace("graphics_pass_sample_count=1", "graphics_pass_sample_count=0")
+            .replace("graphics_pass_samples_ns=[5000000]", "graphics_pass_samples_ns=[]")
+        )
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "paired arm produced no refreshed presentation",
+        ):
+            MODULE.parse_presentation_evidence(
+                [
+                    headless,
+                    self.CONTEXT_LINE,
+                    self.NETWORK_LINE,
+                    "LC_APP_PRESENTATION_BENCHMARK result=fail "
+                    "error=benchmark produced no refreshed presentation",
+                ],
+                2,
             )
 
     def test_requires_ninety_nine_percent_retention_at_both_edges(self):
@@ -266,6 +321,26 @@ class NetworkLaunchTests(unittest.TestCase):
             ):
                 MODULE.run_and_echo(["clonk-app"], timeout=32)
 
+    def test_process_output_can_be_retained_verbatim(self):
+        completed = subprocess.CompletedProcess(
+            ["clonk-app"],
+            0,
+            stdout="one\ntwo\n",
+            stderr="warning\n",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            stdout_path = Path(temporary) / "stdout.log"
+            stderr_path = Path(temporary) / "stderr.log"
+            with patch.object(MODULE.subprocess, "run", return_value=completed):
+                MODULE.run_and_echo(
+                    ["clonk-app"],
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                )
+
+            self.assertEqual(stdout_path.read_text(encoding="utf-8"), "one\ntwo\n")
+            self.assertEqual(stderr_path.read_text(encoding="utf-8"), "warning\n")
+
     def test_immediate_host_command_uses_isolated_network_ports(self):
         command = MODULE.app_command(
             SimpleNamespace(app_binary=Path("/bin/clonk-app")),
@@ -295,6 +370,219 @@ class NetworkLaunchTests(unittest.TestCase):
         self.assertIn("PortDiscovery=0", text)
         self.assertIn("MasterServerSignUp=false", text)
         self.assertIn("AutoFrameSkip=true", text)
+
+
+class PairedBenchmarkTests(unittest.TestCase):
+    FIXTURE_LINE = (
+        "LC_ARSO_MORF_STIPPEL_FIXTURE "
+        "source_stippels=20 prepared_stippels=1000 "
+        "source_lifecycle_stippels=20 prepared_lifecycle_stippels=1000 "
+        "serialized_stippels=1000 source_objects=1063 "
+        "serialized_objects=2043 seed=424242"
+    )
+    PRESENTATION_LINE = NativeCadenceTests.BENCHMARK_LINE.replace(
+        "graphics_pass_sample_count=1",
+        "graphics_pass_sample_count=3",
+    ).replace(
+        "graphics_pass_samples_ns=[5000000]",
+        "graphics_pass_samples_ns=[5000000, 7000000, 9000000]",
+    )
+    CONTEXT_LINE = NativeCadenceTests.CONTEXT_LINE
+    NETWORK_LINE = NativeCadenceTests.NETWORK_LINE
+
+    def test_parser_preserves_the_existing_single_arm_cli(self):
+        arguments = MODULE.build_argument_parser().parse_args(
+            ["17", "--app-binary", "/tmp/single-app"]
+        )
+
+        self.assertEqual(arguments.measurement_seconds, 17)
+        self.assertEqual(arguments.app_binary, Path("/tmp/single-app"))
+        self.assertIsNone(arguments.baseline_app_binary)
+        self.assertIsNone(arguments.paired_artifact_dir)
+
+    def test_parser_accepts_explicit_baseline_and_candidate_binaries(self):
+        arguments = MODULE.build_argument_parser().parse_args(
+            [
+                "20",
+                "--baseline-app-binary",
+                "/tmp/baseline-app",
+                "--baseline-source-root",
+                "/tmp/origin-main",
+                "--candidate-app-binary",
+                "/tmp/candidate-app",
+                "--paired-artifact-dir",
+                "/tmp/artifacts",
+            ]
+        )
+
+        self.assertEqual(arguments.baseline_app_binary, Path("/tmp/baseline-app"))
+        self.assertEqual(arguments.baseline_source_root, Path("/tmp/origin-main"))
+        self.assertEqual(arguments.app_binary, Path("/tmp/candidate-app"))
+        self.assertEqual(arguments.paired_artifact_dir, Path("/tmp/artifacts"))
+
+    def test_discovers_the_git_worktree_that_built_a_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "origin-main"
+            binary = root / "target" / "release" / "clonk-app"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"app")
+            (root / ".git").write_text("gitdir: /tmp/worktrees/origin-main\n")
+            (root / "Cargo.toml").write_text("[workspace]\n")
+
+            resolved = MODULE.resolve_source_root(None, binary, label="baseline")
+
+        self.assertEqual(resolved, root.resolve())
+
+    def test_paired_arguments_are_all_or_nothing(self):
+        arguments = MODULE.build_argument_parser().parse_args(
+            ["--baseline-app-binary", "/tmp/baseline-app"]
+        )
+
+        with self.assertRaisesRegex(
+            MODULE.BenchmarkFailure,
+            "--baseline-app-binary and --paired-artifact-dir must be used together",
+        ):
+            MODULE.validate_paired_arguments(arguments)
+
+    def test_fixture_and_config_fingerprint_detects_byte_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "Arso-Morf.c4s"
+            fixture.mkdir()
+            (fixture / "Objects.txt").write_bytes(b"[Object]\nid=ST5B\n")
+            (fixture / "Game.txt").write_bytes(b"seed=424242\n")
+            config = root / "config.ini"
+            config.write_bytes(b"[Graphics]\nResolutionX=800\n")
+            expected = MODULE.capture_paired_input_fingerprint(fixture, config)
+
+            MODULE.verify_paired_input_fingerprint(
+                expected,
+                fixture,
+                config,
+                stage="before baseline",
+            )
+            (fixture / "Objects.txt").write_bytes(b"changed\n")
+
+            with self.assertRaisesRegex(
+                MODULE.BenchmarkFailure,
+                "paired fixture or config changed before baseline",
+            ):
+                MODULE.verify_paired_input_fingerprint(
+                    expected,
+                    fixture,
+                    config,
+                    stage="before baseline",
+                )
+
+    def test_binary_provenance_binds_size_and_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "clonk-app"
+            binary.write_bytes(b"candidate executable")
+
+            provenance = MODULE.binary_provenance(binary)
+
+        self.assertEqual(provenance["size_bytes"], 20)
+        self.assertEqual(
+            provenance["sha256"],
+            "99470767eb36321a2b5ebe7dc1e9a085fdcf6ac9153712ee554804c438044975",
+        )
+
+    def test_paired_run_reuses_inputs_and_retains_raw_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.c4s"
+            source.mkdir()
+            (source / "Objects.txt").write_bytes(b"id=ST5B\n" * 20)
+            embedded_player = root / "embedded_player.c4p"
+            embedded_player.write_bytes(b"player")
+            baseline = root / "baseline-app"
+            candidate = root / "candidate-app"
+            builder = root / "fixture-builder"
+            for executable in (baseline, candidate, builder):
+                executable.write_bytes(executable.name.encode("ascii"))
+                executable.chmod(0o755)
+            artifacts = root / "artifacts"
+            arguments = SimpleNamespace(
+                app_binary=candidate,
+                baseline_app_binary=baseline,
+                baseline_source_root=MODULE.WORKSPACE,
+                candidate_source_root=MODULE.WORKSPACE,
+                fixture_builder=builder,
+                paired_artifact_dir=artifacts,
+                measurement_seconds=20,
+            )
+            app_inputs = []
+
+            def fake_run(command, **keywords):
+                stdout_path = keywords.get("stdout_path")
+                stderr_path = keywords.get("stderr_path")
+                if command[0] == str(builder):
+                    fixture = Path(command[1])
+                    (fixture / "Objects.txt").write_bytes(b"id=ST5B\n" * 1_000)
+                    lines = [self.FIXTURE_LINE]
+                    status = 0
+                else:
+                    config = Path(command[2])
+                    fixture = Path(command[3])
+                    app_inputs.append(
+                        (
+                            command[0],
+                            MODULE.capture_paired_input_fingerprint(fixture, config),
+                        )
+                    )
+                    config.write_text(
+                        f"saved by {Path(command[0]).name}\n",
+                        encoding="utf-8",
+                    )
+                    result = "pass" if command[0] == str(candidate) else "fail"
+                    lines = [
+                        self.PRESENTATION_LINE,
+                        self.CONTEXT_LINE,
+                        self.NETWORK_LINE,
+                        "LC_APP_PRESENTATION_BENCHMARK "
+                        f"result={result} native_tick_budget_ms=28",
+                    ]
+                    status = 0 if result == "pass" else 2
+                if stdout_path is not None:
+                    stdout_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                if stderr_path is not None:
+                    stderr_path.write_text("", encoding="utf-8")
+                return lines, status
+
+            with patch.object(MODULE, "SOURCE_SCENARIO", source), patch.object(
+                MODULE, "EMBEDDED_PLAYER", embedded_player
+            ), patch.object(
+                MODULE, "allocate_network_ports",
+                return_value={"tcp": 21_001, "udp": 21_002, "reference": 21_003},
+            ), patch.object(
+                MODULE, "run_and_echo", side_effect=fake_run
+            ), patch.object(
+                MODULE,
+                "collect_run_provenance",
+                return_value={"test_provenance": True},
+            ):
+                MODULE.run_paired_benchmark(arguments)
+
+            manifest = json.loads(
+                (artifacts / "manifest.json").read_text(encoding="utf-8")
+            )
+            retained_artifacts = {
+                "fixture": (artifacts / "fixture" / "Arso-Morf.c4s").is_dir(),
+                "config": (artifacts / "config.ini").is_file(),
+                "baseline_stdout": (artifacts / "baseline" / "stdout.log").is_file(),
+                "candidate_stderr": (artifacts / "candidate" / "stderr.log").is_file(),
+            }
+
+        self.assertEqual([entry[0] for entry in app_inputs], [str(baseline), str(candidate)])
+        self.assertEqual(app_inputs[0][1], app_inputs[1][1])
+        self.assertEqual(manifest["result"], "pass")
+        self.assertEqual(manifest["runs"]["baseline"]["budget_result"], "fail")
+        self.assertEqual(manifest["runs"]["candidate"]["budget_result"], "pass")
+        self.assertEqual(
+            manifest["runs"]["candidate"]["presentation"]["graphics_pass_samples_ns"],
+            [5_000_000, 7_000_000, 9_000_000],
+        )
+        self.assertTrue(all(retained_artifacts.values()))
 
 
 if __name__ == "__main__":
