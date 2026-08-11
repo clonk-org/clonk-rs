@@ -4,6 +4,20 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-08-11
+
+### Bug fixes
+
+- Keep the Eke remote control from walking its pilot (#258)
+- Return a failed network host start to the startup dialog with its error log (#257)
+- Give a network host's pre-publication load its scenario folder materials (#255)
+- Name the game a network join is connecting to instead of its addresses (#249)
+
+### Performance
+
+- Sustain native cadence with 1000 Stippels (#259)
+- Skip the discarded solid mask scan in grid worlds (#250)
+
 ## [0.9.6] - 2026-08-10
 
 ### Performance
