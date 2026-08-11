@@ -3629,36 +3629,32 @@ fn dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in(
     );
     assert_eq!(hidden.len(), 24, "generator #2779 saved iHiddenObjCnt=24");
 
-    // Just outside the authored rect — one pixel above its top edge. The
-    // Clonk is already 159px inside the 235px fully-black disc here, which is
-    // exactly the reported lateness. `C4FindObjectInRect::Check` is a plain
-    // point-in-rect on the object centre, so the boundary is exact; the crew
-    // member is re-placed every tick so gravity cannot walk it in and pass
-    // this probe for the wrong reason.
+    // 343px above the centre: outside the authored rect and outside the
+    // widened circle (235 dark radius + 100 margin = 335), and far enough
+    // from the other three generators that none of them can answer for it.
+    // The crew member is re-placed every tick so gravity cannot walk it into
+    // range and pass this probe for the wrong reason.
     assert_eq!(
-        drachenfels_ticks_until_dispelled(
-            &mut engine,
-            knight,
-            shadow,
-            Vector2::new(1472, 1142),
-            40
-        ),
+        drachenfels_ticks_until_dispelled(&mut engine, knight, shadow, Vector2::new(1472, 960), 40),
         None,
-        "a Clonk outside the authored search rect must not dispel the shadow"
+        "a Clonk outside both the authored rect and the reveal circle must not dispel the shadow"
     );
 
-    // Two pixels lower is inside, and one 20-tick `Active` poll dispels it.
-    // `Deactivate` then restores every object it was hiding (Script.c:96-112).
+    // One pixel above the rect's top edge — 161px up, which C++ answers `no`
+    // to (`C4FindObjectInRect::Check` is a plain point-in-rect on the object
+    // centre) while already 74px inside the fully-black disc. The reveal
+    // circle is what dispels it here, within one 20-tick poll, and
+    // `Deactivate` restores every object it was hiding (Script.c:96-112).
     assert!(
         drachenfels_ticks_until_dispelled(
             &mut engine,
             knight,
             shadow,
-            Vector2::new(1472, 1144),
+            Vector2::new(1472, 1142),
             20
         )
         .is_some(),
-        "a Clonk inside the authored search rect dispels the shadow within one poll"
+        "the reveal circle dispels a shadow the Clonk has reached the edge of"
     );
     for object in hidden {
         assert_eq!(
@@ -3679,6 +3675,22 @@ fn dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in(
             .view_objects
             .contains(&shadow),
         "a removed generator leaves every player's FoWViewObjs"
+    );
+
+    // The authored rect is still an independent arm of the union, not a
+    // subset of the circle: #2781's top-left corner sits 488px from its
+    // centre, outside its own 456px reveal circle, and the C++ rect answers
+    // for it there exactly as it always did.
+    assert!(
+        drachenfels_ticks_until_dispelled(
+            &mut engine,
+            knight,
+            ObjectId::new(2781),
+            Vector2::new(1658, 1113),
+            20
+        )
+        .is_some(),
+        "the authored search rect still dispels at the corners it reaches past the circle"
     );
 }
 

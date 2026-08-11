@@ -3245,6 +3245,33 @@ an ordered-map model gap.
   reads it back, so subdividing it renderer-side (to 16px cells) is
   presentation-only and cannot desync; the snapshot's own value is untouched.
 
+- **Dragon Rock's shadow generators lift at the edge of their own darkness**
+  (`planet/System.c4g/FoWReveal.c`, `#appendto _FOW`; no key — it is
+  unconditional). Approved 2026-08-11 for clonk-org/clonk-rs#214. Unlike every
+  other entry in this section this is a **simulation** divergence, not a
+  presentation one: `SetObjectStatus` fires earlier than in C++.
+  `Fantasy.c4f/Drachenfels.c4s` is the only shipped content that uses a
+  negative `PlrViewRange` as a persistent map-authored shadow volume, and the
+  four generators it saves in `Objects.txt` lift only when a crew member
+  enters a search rect the map author stored beside them. Several of those rect
+  edges fall *inside* the fully-black disc the same object generates — nearest
+  edge vs dark radius is 160/235 (#2779), 220/356 (#2781), 130/257 (#3835) and
+  100/247 (#3905) — so a Clonk walks up to 147px through solid black before the
+  area opens, and #2781 is late from three of its four sides. The append widens
+  `CheckClonk`'s criterion to the **union** of the authored rect and a circle of
+  `-PlrViewRange + 100`, so the shadow lifts as the Clonk reaches the edge of
+  the black instead of after crossing it. Union, never replacement: the rect
+  still triggers alone and still reaches past the circle at its corners, so no
+  approach reveals later than before. No synchronized `Random()` draw is added
+  and no callback order changes, and every peer loads the same
+  `planet/System.c4g`, so Rust peers stay in sync with each other — but Dragon
+  Rock replays recorded before this change will not reproduce, and a
+  Rust-vs-C++ shadow-diff of this scenario will diverge by design. Pinned by
+  `drachenfels_real_scenario_subcases_batch_4`, which probes both arms of the
+  union and a point outside both. Nothing in `parity verify` or the engine
+  snapshots covers it: the golden is ~31 primitive sections and no gate
+  executes content script.
+
 - **Higher-resolution GUI sheets are recognised by their dimensions**
   (`GuiArtScale::detect`, `crates/clonk-frontend/src/hud.rs`; no key — the
   opt-in is the presence of the art). Approved 2026-07-28. Graphics.c4g carries
