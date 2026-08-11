@@ -174,7 +174,7 @@ output. The parity wrapper invokes the pinned cargo-nextest 0.9.91 tool listed
 above.
 The explicit Clippy target set covers every production library, binary, and
 test without rebuilding `test = false` libraries as implicit benchmark
-harnesses. The two Criterion benchmarks remain opt-in through their `bench`
+harnesses. The three Criterion benchmarks remain opt-in through their `bench`
 features.
 Behavior changes can additionally require the relevant scenario sweep/audit
 and rebuilt live C++ comparison described in `PORT_STATUS.md`.
