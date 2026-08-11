@@ -189,6 +189,15 @@ pub(crate) struct Cli {
     pub(crate) sandbox: bool,
 
     #[arg(
+        long = "display-server",
+        value_name = "BACKEND",
+        value_enum,
+        default_value = "auto",
+        help = "Linux and BSD: which display server the window uses. `auto` keeps winit's Wayland-first order unless Steam Input is running on a Wayland session, whose XTEST controller input only ever reaches X11 clients."
+    )]
+    pub(crate) display_server: crate::display_backend::DisplayServerPreference,
+
+    #[arg(
         long = "headless",
         help = "Run as a dedicated server: no window, no render device and no sound, driven by the stdin console. Equivalent to [Graphics] Engine=3 (NoGfx), which is honoured on its own."
     )]
