@@ -29,7 +29,6 @@ pub enum TokenKind {
     Eof,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
     Func,
@@ -53,16 +52,6 @@ pub enum Keyword {
     False,
     Nil,
     This,
-    // Keyword operators (synonyms for symbolic operators)
-    Eq,  // ==
-    Ne,  // !=
-    Lt,  // <
-    Le,  // <=
-    Gt,  // >
-    Ge,  // >=
-    And, // &&
-    Or,  // ||
-    Not, // !
 }
 
 impl Keyword {
@@ -93,15 +82,6 @@ impl Keyword {
             Keyword::False => "false",
             Keyword::Nil => "nil",
             Keyword::This => "this",
-            Keyword::Eq => "eq",
-            Keyword::Ne => "ne",
-            Keyword::Lt => "lt",
-            Keyword::Le => "le",
-            Keyword::Gt => "gt",
-            Keyword::Ge => "ge",
-            Keyword::And => "and",
-            Keyword::Or => "or",
-            Keyword::Not => "not",
         }
     }
 }

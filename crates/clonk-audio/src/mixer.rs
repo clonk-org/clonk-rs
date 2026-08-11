@@ -2,7 +2,9 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+#[cfg(test)]
+use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -341,15 +343,6 @@ impl AudioSystem {
         sound.duration_ms()
     }
 
-    pub fn set_channel_finished_callback_ffi(
-        &self,
-        callback: Option<extern "C" fn(i32, *mut std::ffi::c_void)>,
-        user_data: *mut std::ffi::c_void,
-    ) {
-        self.mixer
-            .set_channel_finished_callback_ffi(callback, user_data);
-    }
-
     pub fn mixer(&self) -> &Arc<AudioMixer> {
         &self.mixer
     }
@@ -664,10 +657,14 @@ impl Drop for NullBackend {
     }
 }
 
+#[cfg(test)]
+type ChannelFinishedCallback = Arc<dyn Fn(usize) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AudioMixer {
     state: Arc<Mutex<MixerState>>,
-    channel_finished: Arc<RwLock<Option<ChannelFinished>>>,
+    #[cfg(test)]
+    channel_finished: Arc<RwLock<Option<ChannelFinishedCallback>>>,
     #[cfg(test)]
     channel_slot_probe_count: Arc<AtomicUsize>,
     sample_rate: u32,
@@ -729,19 +726,6 @@ struct MusicPlayback {
     fade_out: Option<FadeState>,
 }
 
-#[derive(Clone)]
-enum ChannelFinished {
-    Ffi {
-        callback: extern "C" fn(i32, *mut std::ffi::c_void),
-        user_data: *mut std::ffi::c_void,
-    },
-    #[allow(dead_code)]
-    Rust(Arc<dyn Fn(usize) + Send + Sync>),
-}
-
-unsafe impl Send for ChannelFinished {}
-unsafe impl Sync for ChannelFinished {}
-
 impl AudioMixer {
     pub fn new(sample_rate: u32, max_channels: usize) -> Self {
         Self::new_with_resampling(sample_rate, max_channels, ResamplingMode::Default)
@@ -778,6 +762,7 @@ impl AudioMixer {
         };
         Self {
             state: Arc::new(Mutex::new(state)),
+            #[cfg(test)]
             channel_finished: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             channel_slot_probe_count: Arc::new(AtomicUsize::new(0)),
@@ -1044,10 +1029,6 @@ impl AudioMixer {
         self.mix_into_channels(output, 2);
     }
 
-    pub fn mix_u16(&self, output: &mut [u16]) {
-        self.mix_into_channels(output, 2);
-    }
-
     #[cfg(test)]
     fn reset_channel_slot_probe_count(&self) {
         self.channel_slot_probe_count.store(0, Ordering::Relaxed);
@@ -1058,33 +1039,9 @@ impl AudioMixer {
         self.channel_slot_probe_count.load(Ordering::Relaxed)
     }
 
-    pub fn set_channel_finished_callback_ffi(
-        &self,
-        callback: Option<extern "C" fn(i32, *mut std::ffi::c_void)>,
-        user_data: *mut std::ffi::c_void,
-    ) {
-        let mut guard = self.channel_finished.write().unwrap();
-        if let Some(callback) = callback {
-            *guard = Some(ChannelFinished::Ffi {
-                callback,
-                user_data,
-            });
-        } else {
-            *guard = None;
-        }
-    }
-
     #[cfg(test)]
-    pub fn set_channel_finished_callback_rust(
-        &self,
-        callback: Option<Arc<dyn Fn(usize) + Send + Sync>>,
-    ) {
-        let mut guard = self.channel_finished.write().unwrap();
-        if let Some(cb) = callback {
-            *guard = Some(ChannelFinished::Rust(cb));
-        } else {
-            *guard = None;
-        }
+    fn set_channel_finished_callback_rust(&self, callback: Option<ChannelFinishedCallback>) {
+        *self.channel_finished.write().unwrap() = callback;
     }
 
     fn prepare_clip(&self, decoded: DecodedAudio) -> Arc<AudioClip> {
@@ -1121,7 +1078,7 @@ impl AudioMixer {
         let mut finished_channels: Vec<usize> = Vec::new();
         let mut finished_music = false;
 
-        let (callback, finished_list) = {
+        {
             let mut state = self.state.lock().unwrap();
             let MixerState {
                 channels,
@@ -1222,30 +1179,12 @@ impl AudioMixer {
             if finished_music {
                 *active_music = None;
             }
+        }
 
-            (
-                self.channel_finished.read().unwrap().clone(),
-                finished_channels.clone(),
-            )
-        };
-
-        if let Some(callback) = callback {
-            if !finished_list.is_empty() {
-                match callback {
-                    ChannelFinished::Ffi {
-                        callback,
-                        user_data,
-                    } => {
-                        for index in finished_list {
-                            callback(index as i32, user_data);
-                        }
-                    }
-                    ChannelFinished::Rust(handler) => {
-                        for index in finished_list {
-                            handler(index);
-                        }
-                    }
-                }
+        #[cfg(test)]
+        if let Some(callback) = self.channel_finished.read().unwrap().clone() {
+            for index in finished_channels {
+                callback(index);
             }
         }
     }

@@ -268,10 +268,6 @@ impl Config {
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
     }
 
-    pub fn get_i32(&self, key: &str) -> Option<i32> {
-        self.get(key)?.parse().ok()
-    }
-
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.set_in(None, key, value);
     }
@@ -322,11 +318,6 @@ impl Config {
 
     pub fn iter(&self) -> impl Iterator<Item = &Entry> {
         self.entries.values()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn entry_map(&self) -> &IndexMap<(Option<String>, String), Entry> {
-        &self.entries
     }
 
     pub fn set_section_commented(&mut self, section: &str, commented: bool) {

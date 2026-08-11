@@ -798,10 +798,7 @@ dependencies = [
  "indexmap",
  "libc",
  "once_cell",
- "rand 0.10.2",
  "tempfile",
- "tracing",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1835,7 +1832,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.1",
 ]
 
 [[package]]
