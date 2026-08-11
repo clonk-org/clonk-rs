@@ -2921,6 +2921,46 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **A host may refuse to readmit a profile its player was eliminated with**
+  (`ControlPlayerInfoRegistry::admit_request_with`,
+  `crates/clonk-engine/src/control_execution.rs`; opt-in per host through
+  `Config.Network.NoRejoinAfterElimination`, default off). Added 2026-08-11 for
+  clonk-org/clonk-rs#240. `C4PlayerList::Retire` routes through `Remove`, which
+  calls `C4PlayerInfo::SetRemoved` before the live player is deleted
+  (`src/C4PlayerList.cpp:219-267,398-409`; `src/C4PlayerInfo.cpp:568-580`), so
+  the released profile stops matching the active-resource scan
+  `HandlePlayerInfoUpdRequest` uses to deny a double join
+  (`src/C4Network2Players.cpp:166-181`). The oracle therefore always lets an
+  eliminated participant add itself straight back, which defeats the goal of
+  last-one-standing rounds such as airbike fight and melt me.
+
+  With the key set, the host's admission scan additionally treats a zero-ID
+  request row as a duplicate when the requesting client already holds a removed
+  row that `C4PlayerList::Retire` released and that names the same profile —
+  the same published `C4Network2Res` ID, or the same profile filename for a
+  republished resource. Only retirement records an elimination: a client part,
+  the host's `CID_RemovePlr`, and a savegame restore all still readmit. The
+  refusal reuses the native denial, which sends no synchronized message.
+
+  **Blast radius.** The key is absent from C4Config and from
+  `legacy_registry.rs`'s migration schema, so an unset key — every existing
+  install, and every config C++ writes — keeps the oracle behaviour exactly.
+  Nothing here enters JoinData, controls, savegames or simulation snapshots:
+  the policy and its elimination records are host-local bookkeeping beside
+  `issued_join_ids`, dropped together whenever the registry is replaced, and
+  only the host admits. Peers therefore stay lockstep deterministic and a
+  barred host is indistinguishable to a C++ client from one whose player never
+  asked to rejoin. The host's own refused request surfaces as `Unable to join
+  player`; a remote one is denied silently, as in C++. Not surfaced in the
+  lobby options sheet, which mirrors `C4GameOptionsList` row for row; the
+  advanced-config editor owns it instead. Pinned by
+  `host_admission_bars_readmitting_an_eliminated_profile_when_the_host_opted_in`,
+  `host_admission_readmits_an_eliminated_profile_by_default`,
+  `host_admission_bars_only_the_profile_that_was_eliminated`,
+  `active_network_host_barring_rejoins_refuses_its_own_retired_profile`,
+  `rejoin_after_elimination_policy_reads_its_network_config_key`, and the
+  unchanged `active_network_host_readmits_its_own_retired_profile_at_runtime`.
+
 - **Tall intermediate MoveTo waypoints stage one native-height wall jump**
   (`MoveToState::jump_control`,
   `crates/clonk-engine/src/command/machine.rs`; no setting). Approved

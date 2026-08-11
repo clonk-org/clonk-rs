@@ -487,6 +487,10 @@ fn network(config: &Config) -> AdvancedConfigSection {
             i32_row(config, section, "ControlRate", 2),
             text_row(config, section, "WorkPath", "Network"),
             bool_row(config, section, "NoRuntimeJoin", true),
+            // clonk-rs extension, absent from C4Config: a host that sets this
+            // refuses to readmit a profile its player was eliminated with
+            // (clonk-org/clonk-rs#240).
+            bool_row(config, section, "NoRejoinAfterElimination", false),
             i32_row(config, section, "MaxResSearchRecursion", 1),
             validated_text_row(config, section, "Comment", "", validate_network_comment),
             i32_row(config, section, "PortTCP", 11_112),

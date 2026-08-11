@@ -507,6 +507,10 @@ pub(crate) struct GameApp {
     /// until the next status request resets them.
     pub(crate) runtime_network_committed_status: Option<clonk_network::NetworkStatus>,
     pub(crate) runtime_network_join_allowed: Option<bool>,
+    /// Host-owned override of `Config.Network.NoRejoinAfterElimination`
+    /// (clonk-org/clonk-rs#240). `None` reads the key, which the oracle has no
+    /// counterpart for and which therefore defaults to readmitting.
+    pub(crate) network_rejoin_after_elimination_allowed: Option<bool>,
     pub(crate) network_control_clock: Option<NetworkControlClock>,
     pub(crate) network_max_players: usize,
     pub(crate) network_is_league: bool,
