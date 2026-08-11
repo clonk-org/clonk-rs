@@ -339,6 +339,10 @@ fn shipped_global_appends_stay_quiet_without_their_optional_targets() {
             "EkeGuidedMissile.c",
             include_str!("../../../../planet/System.c4g/EkeGuidedMissile.c"),
         ),
+        (
+            "EkeGpedRemoteControl.c",
+            include_str!("../../../../planet/System.c4g/EkeGpedRemoteControl.c"),
+        ),
     ]
     .into_iter()
     .map(|(name, source)| (name.to_owned(), source.to_owned()))
@@ -351,6 +355,47 @@ fn shipped_global_appends_stay_quiet_without_their_optional_targets() {
     assert!(
         messages.is_empty(),
         "shipped global appends must not warn without EkeReloaded: {messages:?}"
+    );
+}
+
+/// `#appendto`'s `inherited` chain reaches past the target's own script into
+/// what it pulled in with `#include` (C4AulLink.cpp:114-141 appends onto the
+/// already-resolved include chain). The shipped `planet/System.c4g` appends
+/// rely on it: `EkeSftRelease.c` and `EkeGpedRemoteControl.c` both override
+/// SF5B callbacks that only `Objects.c4d/Crew.c4d/Clonk.c4d` (CLNK) defines and
+/// hand the unhandled case back with `_inherited()`.
+#[test]
+fn appendto_inherited_reaches_a_function_the_target_only_includes() {
+    let mut engine = Engine::new();
+    register(&mut engine, "BASI", "func Probe() { return 7; }");
+    register(
+        &mut engine,
+        "DERI",
+        "#include BASI\nfunc Own() { return 1; }",
+    );
+    register(
+        &mut engine,
+        "APND",
+        "#strict\n#appendto DERI\nfunc Probe() { return 100 + _inherited(); }",
+    );
+
+    engine.resolve_includes().expect("include resolves");
+    let messages = capture_warnings(|| engine.resolve_appends());
+    assert!(
+        messages.is_empty(),
+        "unexpected link warnings: {messages:?}"
+    );
+
+    let object = engine
+        .spawn_object(SpawnConfig::new("DERI"))
+        .expect("the appended definition spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("the appended override runs"),
+        Value::Int(107),
+        "_inherited() must reach the included BASI::Probe, not return zero"
     );
 }
 

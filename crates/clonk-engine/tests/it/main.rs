@@ -88,6 +88,7 @@ shard_modules!(
     effect_check_conversion,
     effect_command_target_context,
     eke_flamethrower_particles,
+    eke_gped_remote_control,
     eke_missile_guidance,
     eke_missile_schedule,
     far_worlds_arctic_kayak,
