@@ -424,8 +424,6 @@ impl Picture {
 #[derive(Debug)]
 struct WidgetNode {
     id: WidgetId,
-    #[allow(dead_code)]
-    parent: Option<WidgetId>,
     children: Vec<WidgetId>,
     kind: WidgetKind,
     rect: Rect,
@@ -455,10 +453,9 @@ impl WidgetKind {
 }
 
 impl WidgetNode {
-    fn new(id: WidgetId, parent: Option<WidgetId>, kind: WidgetKind) -> Self {
+    fn new(id: WidgetId, kind: WidgetKind) -> Self {
         Self {
             id,
-            parent,
             children: Vec::new(),
             kind,
             rect: Rect::default(),
@@ -698,11 +695,7 @@ pub struct Gui {
 impl Gui {
     pub fn new(font: Arc<dyn TextFont>) -> Self {
         let root_id = WidgetId::new(0);
-        let root_node = WidgetNode::new(
-            root_id,
-            None,
-            WidgetKind::Column(Column::new(8.0, 6.0, true)),
-        );
+        let root_node = WidgetNode::new(root_id, WidgetKind::Column(Column::new(8.0, 6.0, true)));
         Self {
             nodes: vec![root_node],
             root: root_id,
@@ -719,58 +712,42 @@ impl Gui {
 
     pub fn add_column(&mut self, parent: WidgetId, expand_width: bool) -> WidgetId {
         let id = self.alloc_id();
-        let node = WidgetNode::new(
-            id,
-            Some(parent),
-            WidgetKind::Column(Column::new(8.0, 6.0, expand_width)),
-        );
+        let node = WidgetNode::new(id, WidgetKind::Column(Column::new(8.0, 6.0, expand_width)));
         self.attach_child(parent, node);
         id
     }
 
     pub fn add_row(&mut self, parent: WidgetId, expand_height: bool) -> WidgetId {
         let id = self.alloc_id();
-        let node = WidgetNode::new(
-            id,
-            Some(parent),
-            WidgetKind::Row(Row::new(8.0, 6.0, expand_height)),
-        );
+        let node = WidgetNode::new(id, WidgetKind::Row(Row::new(8.0, 6.0, expand_height)));
         self.attach_child(parent, node);
         id
     }
 
     pub fn add_label(&mut self, parent: WidgetId, text: impl Into<String>) -> WidgetId {
         let id = self.alloc_id();
-        let node = WidgetNode::new(id, Some(parent), WidgetKind::Label(Label::new(text.into())));
+        let node = WidgetNode::new(id, WidgetKind::Label(Label::new(text.into())));
         self.attach_child(parent, node);
         id
     }
 
     pub fn add_button(&mut self, parent: WidgetId, text: impl Into<String>) -> WidgetId {
         let id = self.alloc_id();
-        let node = WidgetNode::new(
-            id,
-            Some(parent),
-            WidgetKind::Button(Button::new(text.into())),
-        );
+        let node = WidgetNode::new(id, WidgetKind::Button(Button::new(text.into())));
         self.attach_child(parent, node);
         id
     }
 
     pub fn add_gauge(&mut self, parent: WidgetId) -> WidgetId {
         let id = self.alloc_id();
-        let node = WidgetNode::new(id, Some(parent), WidgetKind::Gauge(Gauge::new()));
+        let node = WidgetNode::new(id, WidgetKind::Gauge(Gauge::new()));
         self.attach_child(parent, node);
         id
     }
 
     pub fn add_picture(&mut self, parent: WidgetId, width: f32, height: f32) -> WidgetId {
         let id = self.alloc_id();
-        let node = WidgetNode::new(
-            id,
-            Some(parent),
-            WidgetKind::Picture(Picture::new(width, height)),
-        );
+        let node = WidgetNode::new(id, WidgetKind::Picture(Picture::new(width, height)));
         self.attach_child(parent, node);
         id
     }

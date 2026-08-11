@@ -52,18 +52,6 @@ pub struct Script {
 }
 
 impl Script {
-    #[allow(dead_code)]
-    pub fn new(functions: Vec<Function>) -> Self {
-        Self {
-            functions,
-            var_decls: Vec::new(),
-            string_literals: Vec::new(),
-            includes: Vec::new(),
-            appends: Vec::new(),
-            strict_level: None,
-        }
-    }
-
     pub fn with_directives(
         functions: Vec<Function>,
         var_decls: Vec<VarDecl>,

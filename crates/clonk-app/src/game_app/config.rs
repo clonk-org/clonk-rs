@@ -495,17 +495,6 @@ impl GameApp {
         Ok(true)
     }
 
-    pub(crate) fn options_keyboard_control_capture_active(&self) -> bool {
-        use clonk_frontend::startup_options_controls::ControlDevice;
-        self.message_dialogs.last().is_some_and(|pending| {
-            matches!(
-                pending.continuation,
-                MessageDialogContinuation::OptionsControlCapture(target)
-                    if target.device == ControlDevice::Keyboard
-            )
-        })
-    }
-
     pub(crate) fn option_flags(&self, player: i32) -> OptionFlags {
         let player_mouse = self
             .engine

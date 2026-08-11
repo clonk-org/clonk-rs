@@ -2284,11 +2284,6 @@ impl Object {
         }
     }
 
-    #[allow(dead_code)]
-    fn command_count(&self) -> usize {
-        self.commands.len()
-    }
-
     fn fixed_vec_to_pixels(value: FixedVec2) -> Vector2 {
         Vector2::new(value.int_x(), value.int_y())
     }

@@ -497,13 +497,6 @@ impl GameApp {
         }
     }
 
-    fn local_tab_player_control_in_scope(&self) -> bool {
-        // Configured player controls are PRIO_PlrControl. They are outside the
-        // input scope while an exclusive dialog has keyboard focus. Ordinary
-        // dialogs remain non-exclusive on the shared running Screen.
-        self.local_player_key_binding_in_scope(VirtualKeyCode::Tab)
-    }
-
     pub(crate) fn dispatch_control_event_for_local_player(
         &mut self,
         owner: i32,

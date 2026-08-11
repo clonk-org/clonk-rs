@@ -324,11 +324,6 @@ impl Config {
         self.entries.values()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn entry_map(&self) -> &IndexMap<(Option<String>, String), Entry> {
-        &self.entries
-    }
-
     pub fn set_section_commented(&mut self, section: &str, commented: bool) {
         let section_owned = Some(section.to_string());
         self.ensure_section(section_owned.clone(), commented);

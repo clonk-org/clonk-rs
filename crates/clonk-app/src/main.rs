@@ -4883,14 +4883,6 @@ impl GameApp {
         self.status_text = "Network desync detected; disconnected from host".to_string();
     }
 
-    fn ingame_region_drag_active(&self) -> bool {
-        self.mouse_state
-            .is_some_and(|state| state.motion.region_drag_started)
-            || self
-                .ingame_right_mouse_state
-                .is_some_and(|state| state.motion.region_drag_started)
-    }
-
     fn ingame_moving_drag_active(&self) -> bool {
         self.mouse_state.is_some_and(|state| {
             state.motion.region_drag_started || state.motion.world_drag_started
@@ -7546,23 +7538,6 @@ impl GameApp {
     /// `Game.Time` from the last deterministic engine snapshot.
     fn game_time_seconds(&self) -> u64 {
         self.snapshot.game_time.max(0) as u64
-    }
-
-    fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
-        if let Some(clipped) = rect.intersection(surface.bounds()) {
-            for y in clipped.y..(clipped.y + clipped.height as i32) {
-                for x in clipped.x..(clipped.x + clipped.width as i32) {
-                    let result = if color.a == 255 {
-                        surface.set_pixel(x as u32, y as u32, color)
-                    } else {
-                        surface.blend_pixel(x as u32, y as u32, color)
-                    };
-                    if result.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     fn install_active_classic_fonts(

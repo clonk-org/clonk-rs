@@ -1795,7 +1795,6 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
             let context = borrow.as_ref()?;
             let metadata = context.definition_metadata(definition)?;
             Some(crate::direct_com::InternalObjectMenuDefinition {
-                name: metadata.name.clone(),
                 description: context
                     .world
                     .definition_description(definition)

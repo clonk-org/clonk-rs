@@ -90,7 +90,6 @@ pub(crate) struct InternalObjectMenuObject {
 
 #[derive(Clone)]
 pub(crate) struct InternalObjectMenuDefinition {
-    pub name: String,
     pub description: String,
     pub no_get: bool,
     pub collection_limit: i32,
@@ -1129,7 +1128,6 @@ impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
             .definitions
             .get(definition)
             .map(|definition| InternalObjectMenuDefinition {
-                name: definition.name().to_string(),
                 description: definition.description().unwrap_or_default().to_string(),
                 no_get: definition.no_get(),
                 collection_limit: definition.collection_limit(),
@@ -1283,7 +1281,6 @@ const COM_DOWN_D: u8 = COM_DOWN | COM_DOUBLE;
 const COM_DIG_S: u8 = COM_DIG | COM_SINGLE;
 const COM_DIG_D: u8 = COM_DIG | COM_DOUBLE;
 const COM_THROW_D: u8 = COM_THROW | COM_DOUBLE;
-const COM_DOWN_R: u8 = COM_DOWN + COM_RELEASE_OFFSET;
 
 /// `SimFlight` (C4Movement.cpp:623-653): fixed-point frame integration with
 /// sign-step pixel traversal and an inclusive density contact interval.

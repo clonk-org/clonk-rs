@@ -2746,18 +2746,6 @@ pub(crate) fn scenario_activation_scenario_error(
     ScenarioActivationError::Recoverable(format!("Failed to start {scenario_title}: {error}"))
 }
 
-fn classic_startup_subscreen_error(subscreen: ClassicStartupSubscreen) -> EngineError {
-    classic_parity_engine_error(report_classic_parity_boundary(
-        ClassicParityBoundary::StartupSubscreen(subscreen),
-    ))
-}
-
-fn classic_startup_action_error(action: ClassicStartupAction) -> EngineError {
-    classic_parity_engine_error(report_classic_parity_boundary(
-        ClassicParityBoundary::StartupAction(action),
-    ))
-}
-
 pub(crate) fn classic_game_lobby_error(boundary: ClassicGameLobbyBoundary) -> anyhow::Error {
     anyhow::Error::new(report_classic_parity_boundary(
         ClassicParityBoundary::GameLobby(boundary),

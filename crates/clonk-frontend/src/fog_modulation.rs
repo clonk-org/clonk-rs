@@ -224,6 +224,7 @@ impl FogModulationSample {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn interpolate(self) -> u32 {
         interpolate_packed_modulation(self.modulation, self.weights)
     }
@@ -532,6 +533,7 @@ impl FogSpriteSampler {
         (quad, weights)
     }
 
+    #[cfg(test)]
     pub(crate) fn modulation_at(&self, normalized_x: f32, normalized_y: f32) -> u32 {
         self.modulation_sample(normalized_x, normalized_y)
             .interpolate()
@@ -561,40 +563,11 @@ impl FogSpriteSampler {
         }
     }
 
-    fn color_at(&self, color: Color, normalized_x: f32, normalized_y: f32) -> Color {
-        let (quad, weights) = self.quad_and_weights(normalized_x, normalized_y);
-        interpolate_quad_color(
-            quad.modulation
-                .map(|modulation| modulate_surface_color(color, modulation)),
-            weights,
-        )
-    }
-
     pub(crate) fn color_at_axes(&self, color: Color, x: FogAxisSample, y: FogAxisSample) -> Color {
         let (quad, weights) = self.quad_and_weights_for_axes(x, y);
         interpolate_quad_color(
             quad.modulation
                 .map(|modulation| modulate_surface_color(color, modulation)),
-            weights,
-        )
-    }
-
-    fn vertical_color_at(
-        &self,
-        normalized_x: f32,
-        normalized_y: f32,
-        color_at_y: impl Fn(f32) -> Color,
-    ) -> Color {
-        let (quad, weights) = self.quad_and_weights(normalized_x, normalized_y);
-        let top = color_at_y(quad.y.0 / self.source_height);
-        let bottom = color_at_y(quad.y.1 / self.source_height);
-        interpolate_quad_color(
-            [
-                modulate_surface_color(top, quad.modulation[0]),
-                modulate_surface_color(top, quad.modulation[1]),
-                modulate_surface_color(bottom, quad.modulation[2]),
-                modulate_surface_color(bottom, quad.modulation[3]),
-            ],
             weights,
         )
     }
@@ -1251,6 +1224,7 @@ pub(crate) fn fog_cell_resolution(fow_resolution: i32, cell_divisor: i32) -> i32
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_fog_modulation_map(
     snapshot: &SimulationSnapshot,
     owner: i32,

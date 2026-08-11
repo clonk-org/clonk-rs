@@ -1858,10 +1858,6 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
     }
 }
 
-fn script_text_spec_resources_from_assets(assets: &FrontendAssets) -> ScriptTextSpecResources<'_> {
-    script_text_spec_resources_from_assets_and_hud(assets, assets.hud_graphics.as_ref())
-}
-
 pub(crate) fn script_text_spec_resources_from_assets_and_hud<'a>(
     assets: &'a FrontendAssets,
     hud: &'a HudGraphics,

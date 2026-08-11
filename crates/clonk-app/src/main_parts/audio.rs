@@ -2674,10 +2674,6 @@ impl AudioContext {
         self.music_resolver.set_playlist(playlist);
     }
 
-    fn music_enabled(&self) -> bool {
-        self.options.music_enabled
-    }
-
     pub(crate) fn menu_music_enabled(&self) -> bool {
         self.options.menu_music_enabled
     }

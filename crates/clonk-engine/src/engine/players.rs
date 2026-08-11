@@ -945,8 +945,8 @@ impl Engine {
 
     /// Resolves a PlayerStart ID token against the loaded definitions with
     /// the legacy loader's semantics (C4Id match first, then a lenient
-    /// name match — mirrors find_definition_by_token). Ties resolve to the
-    /// lexicographically smallest id for determinism.
+    /// name match). Ties resolve to the lexicographically smallest id for
+    /// determinism.
     fn resolve_definition_token(&self, token: &str) -> Option<DefinitionId> {
         let trimmed = token.trim();
         if trimmed.is_empty() {

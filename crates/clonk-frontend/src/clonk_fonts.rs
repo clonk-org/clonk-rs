@@ -2911,6 +2911,14 @@ mod tests {
             .expect("build scale-one native fonts");
         let logical = build_font_set(&endeavour_bytes()).expect("build logical fonts");
 
+        // (1303 - (-308)) * size / 1024 (StdFont.cpp:351).
+        assert_eq!(logical.title.line_height, 34);
+        assert_eq!(logical.caption.line_height, 25);
+        assert_eq!(logical.text.line_height, 22);
+        assert_eq!(logical.main_small.line_height, 20);
+        assert_eq!(logical.mini.line_height, 18);
+        assert_eq!(logical.title.cell_height, 35);
+        assert_eq!(logical.title.h_space, -1);
         assert_eq!(native.text.raster_height(), 14);
         assert_eq!(native.text.effective_scale(), 1.0);
         assert_eq!(native.text.raster_line_height(), logical.text.line_height);
@@ -2919,6 +2927,53 @@ mod tests {
         assert_eq!(
             native.text.measure("A A", false),
             logical.text.measure("A A", false)
+        );
+    }
+
+    #[test]
+    fn tooltip_is_an_independent_shadowless_main_14_font() {
+        let bytes = endeavour_bytes();
+        let regular = build_font_set(&bytes).expect("build GUI font set");
+        let tooltip = build_tooltip_font(&bytes).expect("build tooltip font");
+
+        let title_cell = regular.title.glyph('A').expect("title A glyph");
+        assert!(title_cell.width > 5, "A should be wider than 5px");
+        // The glyph core bakes to 254 (BltAlpha >>8 quirk) or 255 (pure src),
+        // with full alpha; verify some near-white fully-opaque pixel exists.
+        assert!(
+            title_cell
+                .pixels
+                .iter()
+                .any(|pixel| pixel.r >= 254 && pixel.g >= 254 && pixel.b >= 254 && pixel.a == 255),
+            "expected an opaque white core pixel in 'A'"
+        );
+        assert!(
+            title_cell
+                .pixels
+                .iter()
+                .any(|pixel| pixel.r == 0 && pixel.a > 0 && pixel.a < 255),
+            "expected a translucent black shadow pixel in 'A'"
+        );
+
+        assert_eq!(tooltip.line_height, regular.text.line_height);
+        assert_eq!(tooltip.h_space, 0);
+        assert_eq!(tooltip.cell_height, tooltip.line_height);
+        let cell = tooltip.glyph('A').expect("tooltip A glyph");
+        assert!(
+            cell.pixels
+                .iter()
+                .all(|pixel| pixel.a == 0 || (pixel.r == 255 && pixel.g == 255 && pixel.b == 255)),
+            "FontTooltip must not contain the regular font's black shadow pixels"
+        );
+        assert!(
+            regular
+                .text
+                .glyph('A')
+                .expect("regular A glyph")
+                .pixels
+                .iter()
+                .any(|pixel| pixel.a > 0 && pixel.r == 0 && pixel.g == 0 && pixel.b == 0),
+            "control glyph should retain a baked black shadow"
         );
     }
 

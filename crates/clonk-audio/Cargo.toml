@@ -14,7 +14,6 @@ default = ["cpal"]
 
 [dependencies]
 thiserror = "2"
-hound = "3"
 lewton = "0.10"
 libloading = "0.9"
 midly = { version = "=0.5.3", default-features = false, features = ["std", "strict"] }
@@ -22,3 +21,6 @@ symphonia-bundle-mp3 = "0.6"
 symphonia-core = "0.6"
 cpal = { version = "0.18.1", optional = true }
 tracing = "0.1"
+
+[dev-dependencies]
+hound = "3"

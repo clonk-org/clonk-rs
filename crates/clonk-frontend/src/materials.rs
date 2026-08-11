@@ -321,6 +321,7 @@ pub(crate) fn landscape_destination_samples() -> usize {
     LANDSCAPE_DESTINATION_SAMPLES.with(|samples| samples.load(Ordering::Relaxed))
 }
 
+#[cfg(test)]
 pub(crate) fn compose_material_pixel(
     material: &MaterialRenderInfo,
     landscape_pixel: u8,
@@ -459,6 +460,7 @@ fn pack_triplet(values: &[u8], offset: usize) -> u32 {
         | (u32::from(values[offset + 2]) << 16)
 }
 
+#[cfg(test)]
 fn unpack_triplet(packed: u32, channel: u32) -> u8 {
     ((packed >> (channel * 8)) & 0xff) as u8
 }
@@ -516,13 +518,14 @@ pub(crate) fn pack_material_gpu_slot(
 }
 
 /// A single RGBA pattern atlas. `Surface8` patterns occupy the red channel.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MaterialAtlasView<'a> {
     pub(crate) width: u32,
-    pub(crate) height: u32,
     pub(crate) pixels: &'a [u8],
 }
 
+#[cfg(test)]
 impl MaterialAtlasView<'_> {
     fn texel(&self, rect: [u32; 4], x: i32, y: i32, zoom: u32) -> Option<[u8; 4]> {
         if rect[2] == 0 || rect[3] == 0 {
@@ -543,6 +546,7 @@ impl MaterialAtlasView<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn apply_gpu_pattern(
     pixel: &mut MaterialPixel,
     slot: &MaterialGpuSlot,
@@ -595,6 +599,7 @@ fn apply_gpu_pattern(
 /// Reference evaluation of a packed slot, written in the integer arithmetic the
 /// WGSL landscape shader uses. Proven equal to `compose_material_surface_pixel`
 /// by `packed_material_slot_matches_the_cpu_composer`.
+#[cfg(test)]
 pub(crate) fn compose_material_gpu_slot(
     slot: &MaterialGpuSlot,
     landscape_pixel: u8,
@@ -946,7 +951,6 @@ mod gpu_slot_tests {
 
         let atlas = MaterialAtlasView {
             width: plan.atlas_extent[0],
-            height: plan.atlas_extent[1],
             pixels: &plan.atlas,
         };
         let mut compared = 0_usize;
@@ -997,10 +1001,9 @@ mod gpu_slot_tests {
             MaterialPatternRef::Surface32(&image),
             MaterialPatternRef::from(&indexed),
         ];
-        let (atlas_width, atlas_height, atlas_pixels, rects) = build_material_atlas(&primary_refs);
+        let (atlas_width, _, atlas_pixels, rects) = build_material_atlas(&primary_refs);
         let atlas = MaterialAtlasView {
             width: atlas_width,
-            height: atlas_height,
             pixels: &atlas_pixels,
         };
 
@@ -1059,7 +1062,6 @@ mod gpu_slot_tests {
         let atlas_pixels = [0_u8; 4];
         let atlas = MaterialAtlasView {
             width: 1,
-            height: 1,
             pixels: &atlas_pixels,
         };
         let composed = compose_material_gpu_slot(&MaterialGpuSlot::default(), 1, 0, 0, atlas);

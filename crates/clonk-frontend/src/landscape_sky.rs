@@ -929,6 +929,7 @@ impl SkyTileBounds {
         self.source_bottom - self.source_top
     }
 
+    #[cfg(test)]
     pub(crate) fn pixel_count(self) -> usize {
         self.width() as usize * self.height() as usize
     }

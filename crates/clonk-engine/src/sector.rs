@@ -241,10 +241,6 @@ impl SectorMap {
         &self.sector(key).objects
     }
 
-    pub(crate) fn object_ids_at(&self, x: i32, y: i32) -> &[ObjectId] {
-        self.object_ids(self.sector_at(x, y))
-    }
-
     /// Candidates in C++ area-enumeration order: sectors row-major with the
     /// outside-sector last (C4LArea::Next, C4Sector.cpp:264-277), each
     /// sector's list in master-list rank order, duplicates dropped at their

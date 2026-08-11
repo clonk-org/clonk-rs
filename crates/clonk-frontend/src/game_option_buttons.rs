@@ -40,7 +40,9 @@ const ICON_CELL: u32 = 64;
 const ICON_COLUMNS: u32 = 4;
 const ICON_SHEET_WIDTH: u32 = 256;
 const ICON_SHEET_HEIGHT: u32 = 320;
+#[cfg(test)]
 const HIGHLIGHT_WIDTH: u32 = 16;
+#[cfg(test)]
 const HIGHLIGHT_HEIGHT: u32 = 16;
 const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 

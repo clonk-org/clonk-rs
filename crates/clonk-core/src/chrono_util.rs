@@ -1,9 +1,9 @@
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use chrono::Local;
 
-static BASE_TIME: OnceCell<SystemTime> = OnceCell::new();
+static BASE_TIME: OnceLock<SystemTime> = OnceLock::new();
 
 /// Rust port of `timeGetTime`.
 /// Returns milliseconds elapsed since the first invocation,

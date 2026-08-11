@@ -124,7 +124,6 @@ const PANEL_SHADOW_COLOR: Color = Color::new(0, 0, 0, 120);
 const PANEL_BACKGROUND_COLOR: Color = Color::new(16, 28, 52, 235);
 const TEXT_PRIMARY_COLOR: Color = Color::new(232, 238, 255, 255);
 const TEXT_SECONDARY_COLOR: Color = Color::new(196, 206, 226, 255);
-const TEXT_NICK_COLOR: Color = Color::new(247, 247, 111, 255);
 const BUTTON_NORMAL_COLOR: Color = Color::new(36, 62, 104, 230);
 const BUTTON_HOVER_COLOR: Color = Color::new(54, 90, 160, 240);
 const BUTTON_PRESSED_COLOR: Color = Color::new(44, 70, 120, 240);

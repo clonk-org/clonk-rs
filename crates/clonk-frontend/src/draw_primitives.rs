@@ -279,6 +279,7 @@ pub(crate) fn object_color(object: &ObjectSnapshot) -> Color {
     Color::opaque(r, g, b)
 }
 
+#[cfg(test)]
 pub(crate) fn c4_palette_color(index: u8) -> Color {
     GamePalette::default().color(index)
 }
