@@ -3101,7 +3101,8 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
             modules: vec!["Objects.c4d".to_string()],
             definition_root: None,
         },
-    );
+    )
+    .expect("stale staged host scenario is discarded");
     assert!(app.staged_network_host_scenario.is_none());
     assert!(app.startup_network_connection.is_none());
     reset_cached_app_paths();

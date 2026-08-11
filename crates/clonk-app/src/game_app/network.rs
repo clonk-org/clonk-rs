@@ -5864,7 +5864,7 @@ impl GameApp {
         match action {
             clonk_frontend::network_start_wait::NetworkStartWaitAction::Restart => {
                 self.network_start_wait = None;
-                self.restart_current_network_scenario();
+                self.restart_current_network_scenario()?;
             }
             clonk_frontend::network_start_wait::NetworkStartWaitAction::Cancel => {
                 self.network_start_wait = None;
@@ -5942,7 +5942,7 @@ impl GameApp {
         self.launch_pending_network_join()
     }
 
-    pub(crate) fn restart_current_network_scenario(&mut self) {
+    pub(crate) fn restart_current_network_scenario(&mut self) -> Result<(), EngineError> {
         // Before anything is torn down: a restart re-hosts from scratch, and
         // the only thing a client would otherwise observe is its connection
         // closing — indistinguishable from a dead host
@@ -5951,7 +5951,7 @@ impl GameApp {
         self.announce_network_round_restart();
         let Some(scenario) = self.active_scenario.clone() else {
             self.return_to_menu();
-            return;
+            return Ok(());
         };
         let definition_load = self
             .active_definition_load
@@ -5965,7 +5965,7 @@ impl GameApp {
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
         self.scenario_selector_mode = ScenarioSelectorMode::NetworkHost;
-        self.stage_network_host_scenario(scenario, definition_load);
+        self.stage_network_host_scenario(scenario, definition_load)
     }
 
     /// Ports the `C4Network2::Clear` that every torn-down round runs.
@@ -8209,7 +8209,7 @@ impl GameApp {
         &mut self,
         frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
-    ) {
+    ) -> Result<(), EngineError> {
         self.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
         self.staged_network_host_scenario = None;
@@ -8226,7 +8226,7 @@ impl GameApp {
                     "network host scenario validation failed before socket creation"
                 );
                 self.status_text = format!("Cannot host {title}: {error}");
-                return;
+                return Ok(());
             }
         };
         let selected = staged.frontend.clone();
@@ -8243,6 +8243,7 @@ impl GameApp {
         if self.startup_network_connection.is_none() {
             self.staged_network_host_scenario = None;
         }
+        Ok(())
     }
 
     pub(crate) fn prepare_network_host_scenario(

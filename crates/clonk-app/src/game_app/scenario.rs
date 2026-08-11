@@ -335,7 +335,7 @@ impl GameApp {
             );
         }
         if self.classic_command_line.network_active == Some(true) && !replay_disables_network {
-            self.stage_network_host_scenario(scenario, definition_load);
+            self.stage_network_host_scenario(scenario, definition_load)?;
             Ok(())
         } else {
             self.start_scenario_with_definition_load(scenario, definition_load)?;
@@ -564,8 +564,7 @@ impl GameApp {
         // restores it for any scheduled NextMission. Even a Film2 client
         // therefore re-enters the network-host/lobby path on Restart.
         if self.network.is_some() {
-            self.restart_current_network_scenario();
-            return Ok(());
+            return self.restart_current_network_scenario();
         }
         let Some(scenario) = self.active_scenario.clone() else {
             self.return_to_menu();
