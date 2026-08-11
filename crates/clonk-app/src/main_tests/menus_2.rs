@@ -2348,44 +2348,52 @@ fn first_local_menu_press_reveals_progressive_text_before_navigation() {
 }
 
 #[test]
-fn normal_menu_render_rejects_an_unresolved_non_textspec_item_picture() {
-    let mut app = new_classic_running_sandbox_app();
-    let cursor = app
-        .engine
-        .crew_cursor(app.local_owner)
-        .expect("sandbox cursor");
-    let mut menu = two_item_script_menu(cursor);
-    menu.style = 0;
-    menu.items[0].item_id = "MISS".to_string();
-    menu.items[0].image = clonk_engine::ObjectMenuImage::Definition;
-    menu.items[0].presentation_definition_id = Some("MISS".to_string());
-    assert!(
-        object_menu_item_picture(
-            &app.engine,
-            &app.snapshot,
-            &menu.items[0],
-            0,
-            &HudGraphics::default(),
-            menu.style,
-        )
-        .is_none(),
-        "fixture must exercise the unresolved non-TextSpec branch"
-    );
-    install_test_cursor_menu(&mut app, cursor, menu);
+fn normal_menu_render_draws_no_symbol_for_an_unresolved_item_picture() {
+    // C4MenuItem::DrawElement blits a row symbol only while its facet holds a
+    // surface (C4Menu.cpp:166), so a picture that never resolved leaves the
+    // cell empty and the round continues. A refill can outlive the object a
+    // row was built from; failing the frame there ends the event loop and
+    // drops the client out of a running network game instead.
+    fn render_first_item_recipe(image: clonk_engine::ObjectMenuImage) -> Vec<u8> {
+        let mut app = new_classic_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.style = 0;
+        menu.items[0].item_id = "MISS".to_string();
+        menu.items[0].image = image;
+        menu.items[0].presentation_definition_id = Some("MISS".to_string());
+        assert!(
+            object_menu_item_picture(
+                &app.engine,
+                &app.snapshot,
+                &menu.items[0],
+                0,
+                &HudGraphics::default(),
+                menu.style,
+            )
+            .is_none(),
+            "both fixtures must leave the row without a resolved symbol"
+        );
+        install_test_cursor_menu(&mut app, cursor, menu);
 
-    let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
-    let error = app
-        .render(&mut frame)
-        .expect_err("Normal menu must fail closed on an unresolved definition image");
+        let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render(&mut frame)
+            .expect("an unresolved item picture must not fail the frame");
+        frame
+    }
+
+    let unresolved = render_first_item_recipe(clonk_engine::ObjectMenuImage::Definition);
+    let empty = render_first_item_recipe(clonk_engine::ObjectMenuImage::None);
     assert!(
-        error
-            .to_string()
-            .contains("unresolved classic menu image at item 0"),
-        "unexpected error: {error:#}"
+        unresolved.iter().any(|&channel| channel != 0),
+        "the menu around the empty cell must still be drawn"
     );
-    assert!(
-        error.to_string().contains("Definition"),
-        "unexpected recipe: {error:#}"
+    assert_eq!(
+        unresolved, empty,
+        "an unresolved picture must draw exactly like an empty C++ symbol facet"
     );
 }
 

@@ -3903,24 +3903,24 @@ impl GameApp {
                         )
                     })
                     .collect::<Vec<_>>();
+                // C4MenuItem::DrawElement blits a row symbol only while its
+                // facet holds a surface (C4Menu.cpp:166), so a picture that
+                // never resolved draws an empty cell. C++ renders each symbol
+                // once at refill time, while these recipes resolve against the
+                // frame's snapshot, so a row can outlive the object it was
+                // built from; failing the frame there ends the event loop.
                 for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
-                    // Native Buy/Sell/Exit/etc. rows retain Definition as the
-                    // serde default while their non-definition symbol still
-                    // supplies a valid icon. AddMenuItem picture recipes use
-                    // the Definition symbol and would otherwise render blank.
                     if item.symbol == clonk_engine::ObjectMenuSymbol::Definition
                         && item.image != clonk_engine::ObjectMenuImage::None
                         && image.is_none()
                     {
-                        tracing::error!(
+                        // Redraws repeat this every frame the row survives, so
+                        // it stays below the default log level.
+                        tracing::debug!(
                             index,
                             style = menu.style,
                             recipe = ?item.image,
-                            "classic menu image preflight failed"
-                        );
-                        anyhow::bail!(
-                            "unresolved classic menu image at item {index}: {:?}",
-                            item.image
+                            "classic menu item drawn without its unresolved picture"
                         );
                     }
                 }
