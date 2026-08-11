@@ -5377,20 +5377,6 @@ impl GameApp {
         }
     }
 
-    fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
-        if rect.width == 0 || rect.height == 0 {
-            return;
-        }
-        let top = Rect::new(rect.x, rect.y, rect.width, 1);
-        let bottom = Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1);
-        let left = Rect::new(rect.x, rect.y, 1, rect.height);
-        let right = Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height);
-        Self::fill_rect(surface, top, color);
-        Self::fill_rect(surface, bottom, color);
-        Self::fill_rect(surface, left, color);
-        Self::fill_rect(surface, right, color);
-    }
-
     fn draw_border_with_gamma(
         surface: &mut Surface,
         rect: Rect,

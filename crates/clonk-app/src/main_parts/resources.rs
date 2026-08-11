@@ -1428,26 +1428,11 @@ pub(crate) fn existing_quick_save_path() -> Option<PathBuf> {
     }
 }
 
-fn quick_save_exists() -> bool {
-    existing_quick_save_path().is_some()
-}
-
 pub(crate) fn is_save_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("lcsave"))
         .unwrap_or(false)
-}
-
-fn any_saved_games_exist() -> bool {
-    let dir = resolve_save_directory();
-    match fs::read_dir(&dir) {
-        Ok(entries) => entries.flatten().any(|entry| {
-            let path = entry.path();
-            is_save_file(&path)
-        }),
-        Err(_) => quick_save_exists(),
-    }
 }
 
 pub(crate) fn load_install_material_library(paths: Option<&AppPaths>) -> Option<Arc<MaterialSet>> {

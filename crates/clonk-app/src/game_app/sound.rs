@@ -1128,10 +1128,6 @@ impl GameApp {
         }
     }
 
-    fn play_viewport_feedback_sound(&mut self) {
-        self.play_viewport_feedback_sound_for_game_state(matches!(self.mode, AppMode::Running));
-    }
-
     pub(crate) fn play_viewport_feedback_sound_for_game_state(&mut self, game_running: bool) {
         #[cfg(test)]
         self.ui_sound_log.push("CloseViewport".to_owned());

@@ -3929,21 +3929,6 @@ impl GameApp {
         }
     }
 
-    fn play_network_lobby_sounds(&mut self) {
-        let sounds = self.take_network_lobby_sounds();
-        self.play_lobby_sound_events(sounds);
-    }
-
-    fn take_network_lobby_sounds(&mut self) -> Vec<LobbySound> {
-        // The retained classic controller is the joined lobby's only live
-        // C4GUI control tree (C4GuiButton.cpp SetDown/SetUp), so it is the
-        // single sound source; the reduced adapter dispatches commands only.
-        self.network_lobby
-            .as_mut()
-            .map(|state| state.controller.take_sounds())
-            .unwrap_or_default()
-    }
-
     fn play_classic_lobby_sounds(&mut self) {
         let sounds = self
             .visible_classic_lobby_controller_mut()

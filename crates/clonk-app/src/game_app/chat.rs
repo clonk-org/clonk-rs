@@ -535,19 +535,6 @@ impl GameApp {
         })
     }
 
-    fn running_chat_contains_point(&self, point: GuiPoint) -> bool {
-        self.running_chat_controller().is_some()
-            && self
-                .game_option_input_layout()
-                .as_ref()
-                .is_some_and(|layout| Self::point_in_input_dialog_bounds(point, layout))
-    }
-
-    fn running_chat_contains_current_pointer(&self) -> bool {
-        self.running_pointer_position
-            .is_some_and(|point| self.running_chat_contains_point(point))
-    }
-
     pub(crate) fn running_chat_text(&self) -> Option<&str> {
         self.running_chat_controller()
             .map(InputDialogController::text)

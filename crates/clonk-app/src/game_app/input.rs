@@ -8570,18 +8570,6 @@ impl GameApp {
         Ok(self.scoreboard_pointer_target(point)?.is_some())
     }
 
-    fn scoreboard_is_top_scoreboard_message_at_running_pointer(
-        &mut self,
-    ) -> Result<bool, EngineError> {
-        let Some(point) = self.running_pointer_position else {
-            return Ok(false);
-        };
-        Ok(matches!(
-            self.top_running_shared_pointer_target(point, false)?,
-            Some(RunningDialogStackEntry::Scoreboard)
-        ))
-    }
-
     fn handle_scoreboard_touch(
         &mut self,
         position: GuiPoint,
