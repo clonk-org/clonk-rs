@@ -17863,6 +17863,131 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normal_object_visibility_is_evaluated_only_in_the_normal_pass() {
+        const OBJECTS: usize = 1_000;
+
+        let template = make_snapshot().objects.remove(0);
+        let objects = (0..OBJECTS)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index as u64 + 1);
+                object
+            })
+            .collect::<Vec<_>>();
+        let mut graphics = test_graphics(1, 1, 1, "object visibility pass filtering");
+
+        reset_object_visibility_evaluations();
+        for pass in [
+            ObjectRenderPass::Background,
+            ObjectRenderPass::Normal,
+            ObjectRenderPass::ForegroundNonParallax,
+            ObjectRenderPass::ForegroundParallax,
+        ] {
+            graphics.draw_objects_at_frame(
+                0,
+                &objects,
+                &[],
+                &HashMap::new(),
+                &[],
+                &[],
+                OWNER_NONE,
+                1.0,
+                &HashMap::new(),
+                pass,
+                None,
+            );
+        }
+
+        assert_eq!(object_visibility_evaluations(), OBJECTS);
+    }
+
+    #[test]
+    fn normal_object_draw_borrows_default_sprite_keys() {
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![255; 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let snapshot = make_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            120,
+            "borrowed sprite keys",
+            test_font(),
+            Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        reset_default_sprite_key_allocations();
+        graphics.draw_objects(
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.definition_lines,
+            &snapshot.players,
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(default_sprite_key_allocations(), 0);
+    }
+
+    #[test]
+    fn object_without_top_face_or_construction_skips_top_face_draw_setup() {
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![255; 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let snapshot = make_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            120,
+            "absent top face",
+            test_font(),
+            Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        reset_top_face_draw_setups();
+        graphics.draw_objects(
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.definition_lines,
+            &snapshot.players,
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(top_face_draw_setups(), 0);
+    }
+
     /// The landscape cache re-anchors to the byte plane the frame presented so
     /// the engine's next write forks a distinct COW generation
     /// (clonk-engine landscape.rs:550-554). A frame that changed nothing is
