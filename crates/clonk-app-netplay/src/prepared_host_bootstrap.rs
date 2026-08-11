@@ -46,7 +46,7 @@ use thiserror::Error;
 
 use crate::host_game_resource_sources::{
     executable_relative_group_name, freeze_host_definition_resource_sources, open_group_path,
-    opened_physical_group_name, resolve_host_game_resource_sources,
+    opened_physical_group_name, resolve_host_game_resource_sources, resolve_host_material_groups,
     validate_host_group_resource_source, HostGameResourceSourceError, HostGameResourceSourceKind,
 };
 
@@ -2135,6 +2135,16 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
         })
     }
 
+    fn resolve_material_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        // C4GameParameters::Load publishes every registered parent folder's
+        // Material.c4g as NRT_Material ahead of the global one, and
+        // C4Game::InitMaterialTexture walks exactly that chain. Reading it
+        // here keeps this pre-publication load's texture map identical to the
+        // post-publication reload, which consumes the very same groups after
+        // they are published (C4GameParameters.cpp:214-222; C4Game.cpp:901-977).
+        resolve_host_material_groups(scenario.root(), self.roots).map_err(ScenarioError::Resources)
+    }
+
     fn resolve_graphics_groups_with_definition_roots(
         &self,
         scenario: &Group,
@@ -3114,6 +3124,37 @@ mod definition_root_graphics_tests {
                 .map(|group| group.root().to_path_buf())
                 .collect::<Vec<_>>(),
             [definition_graphics, base_graphics]
+        );
+    }
+
+    /// C4GameParameters::Load publishes every registered parent folder's
+    /// Material.c4g as NRT_Material before the global one, so the host's
+    /// pre-publication scenario load must see the same overload chain
+    /// (C4GameParameters.cpp:214-222; C4Game.cpp:901-977).
+    #[test]
+    fn scenario_folder_materials_precede_prepared_host_installed_materials() {
+        let dir = tempdir().expect("prepared host material fixture");
+        let folder = dir.path().join("Pack.c4f");
+        let scenario = folder.join("Scenario.c4s");
+        let folder_materials = folder.join("Material.c4g");
+        let installed_materials = dir.path().join("Material.c4g");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::create_dir_all(&folder_materials).expect("folder materials");
+        fs::create_dir_all(&installed_materials).expect("installed materials");
+
+        let roots = [dir.path().to_path_buf()];
+        let language_packs = LanguagePacks::default();
+        let resolver = InstallRootDefinitionResolver::new(&roots, &language_packs, &[], &[], false);
+        let materials = resolver
+            .resolve_material_groups(&Group::open(&scenario).expect("scenario root"))
+            .expect("prepared host material chain");
+
+        assert_eq!(
+            materials
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [folder_materials, installed_materials]
         );
     }
 }

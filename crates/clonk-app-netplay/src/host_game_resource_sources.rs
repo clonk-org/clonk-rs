@@ -180,6 +180,42 @@ fn folder_local_lookup_names(
         .collect()
 }
 
+/// The ordered `NRT_Material` groups a host publishes for `scenario_path`:
+/// every registered parent folder's `Material.c4g`, innermost folder first,
+/// then the installed one (C4GameParameters.cpp:214-222).
+///
+/// Inputs that carry no chain — a scenario outside every install root, an
+/// installation without `Material.c4g` — resolve to the shorter chain they
+/// produce rather than to an error. `resolve_host_game_resource_sources`
+/// remains the authority that rejects them, so reading this chain never
+/// changes which failure a host bootstrap reports first.
+pub fn resolve_host_material_groups(
+    scenario_path: &Path,
+    install_roots: &[PathBuf],
+) -> Result<Vec<Group>, GroupError> {
+    let mut groups = scenario_install_root(scenario_path, install_roots)
+        .ok()
+        .map(|(scenario_root, scenario_relative)| {
+            folder_material_groups(scenario_root, scenario_relative)
+        })
+        .transpose()
+        .map_err(|(_, source)| source)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|folder| folder.material)
+        .collect::<Vec<_>>();
+    match open_installed_group(
+        HostGameResourceSourceKind::Material,
+        "Material.c4g",
+        install_roots,
+    ) {
+        Ok((_, installed)) => groups.push(installed),
+        Err(HostGameResourceSourceError::ResourceGroup { source, .. }) => return Err(source),
+        Err(_) => {}
+    }
+    Ok(groups)
+}
+
 /// Resolves the C4GameRes sources without consulting process-global app state.
 pub fn resolve_host_game_resource_sources(
     scenario_path: impl AsRef<Path>,
