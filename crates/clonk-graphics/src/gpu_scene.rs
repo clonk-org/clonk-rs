@@ -1034,6 +1034,25 @@ struct ObjectRunCapacityHint {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GpuObjectRunCapacityHints(Vec<ObjectRunCapacityHint>);
 
+/// What splits one retained run of solid primitives from the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SolidRunKey {
+    topology: GpuPrimitiveTopology,
+    alpha_mode: GpuSolidAlphaMode,
+    clip: Option<Rect>,
+    blend: GpuBlend,
+    style: GpuSolidStyle,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SolidRunCapacityHint {
+    key: SolidRunKey,
+    capacity: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GpuSolidRunCapacityHints(Vec<SolidRunCapacityHint>);
+
 /// Mutable command sink carried by recording surfaces and flattened when a
 /// CPU scratch surface is presented into its parent.
 #[derive(Clone, Debug, Default)]
@@ -1042,6 +1061,8 @@ pub struct GpuSceneRecorder {
     commands: Vec<GpuCommand>,
     object_run_capacity_hints: GpuObjectRunCapacityHints,
     next_object_run_hint: usize,
+    solid_run_capacity_hints: GpuSolidRunCapacityHints,
+    next_solid_run_hint: usize,
 }
 
 impl GpuSceneRecorder {
@@ -1049,12 +1070,15 @@ impl GpuSceneRecorder {
         command_capacity: usize,
         texture_capacity: usize,
         object_run_capacity_hints: GpuObjectRunCapacityHints,
+        solid_run_capacity_hints: GpuSolidRunCapacityHints,
     ) -> Self {
         Self {
             textures: HashMap::with_capacity(texture_capacity),
             commands: Vec::with_capacity(command_capacity),
             object_run_capacity_hints,
             next_object_run_hint: 0,
+            solid_run_capacity_hints,
+            next_solid_run_hint: 0,
         }
     }
 
@@ -1093,6 +1117,91 @@ impl GpuSceneRecorder {
 
     pub(crate) fn take_object_run_capacity_hints(&mut self) -> GpuObjectRunCapacityHints {
         std::mem::take(&mut self.object_run_capacity_hints)
+    }
+
+    pub(crate) fn retain_solid_run_capacities(&mut self) {
+        let mut retained = std::mem::take(&mut self.solid_run_capacity_hints.0);
+        retained.clear();
+        for command in &self.commands {
+            let GpuCommand::Solid {
+                vertices,
+                topology,
+                alpha_mode,
+                clip,
+                blend,
+                style,
+            } = command
+            else {
+                continue;
+            };
+            retained.push(SolidRunCapacityHint {
+                key: SolidRunKey {
+                    topology: *topology,
+                    alpha_mode: *alpha_mode,
+                    clip: *clip,
+                    blend: *blend,
+                    style: *style,
+                },
+                capacity: vertices.capacity().max(vertices.len()).max(1),
+            });
+        }
+        self.solid_run_capacity_hints.0 = retained;
+    }
+
+    pub(crate) fn take_solid_run_capacity_hints(&mut self) -> GpuSolidRunCapacityHints {
+        std::mem::take(&mut self.solid_run_capacity_hints)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_solid_run_capacity(&self) -> Option<usize> {
+        self.commands.iter().find_map(|command| match command {
+            GpuCommand::Solid { vertices, .. } => Some(vertices.capacity()),
+            _ => None,
+        })
+    }
+
+    fn next_solid_run_capacity(&mut self, key: SolidRunKey) -> usize {
+        let capacity = self
+            .solid_run_capacity_hints
+            .0
+            .get(self.next_solid_run_hint)
+            .filter(|hint| hint.key == key)
+            .map(|hint| hint.capacity)
+            .unwrap_or(1)
+            .max(1);
+        self.next_solid_run_hint = self.next_solid_run_hint.saturating_add(1);
+        capacity
+    }
+
+    fn open_solid_run(
+        &mut self,
+        key: SolidRunKey,
+        endpoints: impl IntoIterator<Item = GpuSolidVertex>,
+    ) {
+        let mut vertices = Vec::with_capacity(self.next_solid_run_capacity(key));
+        vertices.extend(endpoints);
+        self.push_solid_run(key, vertices);
+    }
+
+    /// Open a run around storage the caller already owns.
+    ///
+    /// A whole command arrives with its own buffer, so take it rather than
+    /// copying it into a fresh one, and only grow it to last frame's length.
+    fn adopt_solid_run(&mut self, key: SolidRunKey, mut vertices: Vec<GpuSolidVertex>) {
+        let capacity = self.next_solid_run_capacity(key);
+        vertices.reserve_exact(capacity.saturating_sub(vertices.len()));
+        self.push_solid_run(key, vertices);
+    }
+
+    fn push_solid_run(&mut self, key: SolidRunKey, vertices: Vec<GpuSolidVertex>) {
+        self.commands.push(GpuCommand::Solid {
+            vertices,
+            topology: key.topology,
+            alpha_mode: key.alpha_mode,
+            clip: key.clip,
+            blend: key.blend,
+            style: key.style,
+        });
     }
 
     #[cfg(test)]
@@ -1274,14 +1383,16 @@ impl GpuSceneRecorder {
                     return;
                 }
             }
-            self.commands.push(GpuCommand::Solid {
+            self.adopt_solid_run(
+                SolidRunKey {
+                    topology,
+                    alpha_mode,
+                    clip,
+                    blend,
+                    style,
+                },
                 vertices,
-                topology,
-                alpha_mode,
-                clip,
-                blend,
-                style,
-            });
+            );
             return;
         }
         self.commands.push(command);
@@ -1342,14 +1453,64 @@ impl GpuSceneRecorder {
                 return;
             }
         }
-        self.commands.push(GpuCommand::Solid {
-            vertices: vec![vertex],
-            topology,
-            alpha_mode,
-            clip,
-            blend,
-            style,
-        });
+        self.open_solid_run(
+            SolidRunKey {
+                topology,
+                alpha_mode,
+                clip,
+                blend,
+                style,
+            },
+            [vertex],
+        );
+    }
+
+    /// Append both endpoints of one line primitive to the open solid run.
+    ///
+    /// A moving PXS produces a line every frame, so handing the recorder a
+    /// fresh two-element `Vec` per particle would allocate once per particle
+    /// only to copy it into the run and drop it. The pair is appended as a
+    /// unit: half a line list is not a line list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_solid_vertex_pair(
+        &mut self,
+        start: GpuSolidVertex,
+        end: GpuSolidVertex,
+        topology: GpuPrimitiveTopology,
+        alpha_mode: GpuSolidAlphaMode,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        style: GpuSolidStyle,
+    ) {
+        if let Some(GpuCommand::Solid {
+            vertices,
+            topology: previous_topology,
+            alpha_mode: previous_alpha_mode,
+            clip: previous_clip,
+            blend: previous_blend,
+            style: previous_style,
+        }) = self.commands.last_mut()
+        {
+            if *previous_topology == topology
+                && *previous_alpha_mode == alpha_mode
+                && *previous_clip == clip
+                && *previous_blend == blend
+                && *previous_style == style
+            {
+                vertices.extend([start, end]);
+                return;
+            }
+        }
+        self.open_solid_run(
+            SolidRunKey {
+                topology,
+                alpha_mode,
+                clip,
+                blend,
+                style,
+            },
+            [start, end],
+        );
     }
 
     /// Apply one active C++ blit modulation to all retained draws atomically.
@@ -2080,6 +2241,122 @@ mod tests {
             })
         ));
         assert_eq!(recorder.commands, before);
+    }
+
+    #[test]
+    fn a_whole_solid_command_keeps_the_buffer_it_arrived_with() {
+        // GUI lines and flattened scratch surfaces hand over a command they
+        // already built. Opening its run must adopt that buffer; copying it
+        // into a fresh one would allocate for every such command.
+        let vertex = GpuSolidVertex {
+            position: [0.5, 0.5, 1.0],
+            color: [1.0; 4],
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let mut vertices = Vec::with_capacity(8);
+        vertices.extend([vertex, vertex]);
+        let mut recorder = GpuSceneRecorder::default();
+
+        recorder.push(GpuCommand::Solid {
+            vertices,
+            topology: GpuPrimitiveTopology::LineList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: None,
+            blend: GpuBlend::Normal,
+            style: GpuSolidStyle::NONE,
+        });
+
+        assert_eq!(recorder.first_solid_run_capacity(), Some(8));
+    }
+
+    #[test]
+    fn a_retained_solid_run_capacity_presizes_the_next_frame() {
+        // A steady rain draws about as many endpoints every frame. Carrying the
+        // run length forward means the second frame reserves once instead of
+        // doubling its way back up, so allocation stops tracking particle count.
+        let endpoint = |x: f32| GpuSolidVertex {
+            position: [x, 0.5, 1.0],
+            color: [1.0; 4],
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let mut recorder = GpuSceneRecorder::default();
+        for index in 0..8 {
+            recorder.push_solid_vertex_pair(
+                endpoint(index as f32),
+                endpoint(index as f32 + 0.5),
+                GpuPrimitiveTopology::LineList,
+                GpuSolidAlphaMode::SourceOver,
+                None,
+                GpuBlend::Normal,
+                GpuSolidStyle::NONE,
+            );
+        }
+        recorder.retain_solid_run_capacities();
+        let hints = recorder.take_solid_run_capacity_hints();
+
+        let mut next = GpuSceneRecorder::with_capacities(0, 0, Default::default(), hints);
+        next.push_solid_vertex_pair(
+            endpoint(0.0),
+            endpoint(0.5),
+            GpuPrimitiveTopology::LineList,
+            GpuSolidAlphaMode::SourceOver,
+            None,
+            GpuBlend::Normal,
+            GpuSolidStyle::NONE,
+        );
+
+        assert_eq!(
+            next.first_solid_run_capacity(),
+            Some(16),
+            "the run did not reopen at last frame's length"
+        );
+    }
+
+    #[test]
+    fn recorder_keeps_line_endpoint_pairs_whole_inside_one_run() {
+        // A moving PXS appends its two endpoints to the open run rather than
+        // handing over a fresh two-element `Vec` per particle. A pair may never
+        // straddle a run boundary: an odd endpoint count is not a line list.
+        let endpoint = |x: f32| GpuSolidVertex {
+            position: [x, 0.5, 1.0],
+            color: [1.0; 4],
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let mut recorder = GpuSceneRecorder::default();
+        let push = |recorder: &mut GpuSceneRecorder, first: f32, style| {
+            recorder.push_solid_vertex_pair(
+                endpoint(first),
+                endpoint(first + 1.0),
+                GpuPrimitiveTopology::LineList,
+                GpuSolidAlphaMode::SourceOver,
+                None,
+                GpuBlend::Normal,
+                style,
+            );
+        };
+        push(&mut recorder, 0.5, GpuSolidStyle::NONE);
+        push(&mut recorder, 2.5, GpuSolidStyle::NONE);
+        push(&mut recorder, 4.5, GpuSolidStyle::with_gamma(true));
+
+        let [GpuCommand::Solid {
+            vertices: run,
+            topology,
+            ..
+        }, GpuCommand::Solid {
+            vertices: gamma_run,
+            ..
+        }] = recorder.commands.as_slice()
+        else {
+            panic!("endpoint pairs did not group by fragment style");
+        };
+        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
+        assert_eq!(
+            run.iter()
+                .map(|vertex| vertex.position[0])
+                .collect::<Vec<_>>(),
+            vec![0.5, 1.5, 2.5, 3.5]
+        );
+        assert_eq!(gamma_run.len(), 2, "a new run still starts with both ends");
     }
 
     #[test]

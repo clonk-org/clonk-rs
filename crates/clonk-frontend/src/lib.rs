@@ -9671,6 +9671,46 @@ mod tests {
     }
 
     #[test]
+    fn retained_consecutive_pxs_lines_append_to_one_solid_run() {
+        let mut surface = Surface::new(16, 12, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        for index in 0..4 {
+            let offset = index as f32;
+            draw_pxs_line(
+                &mut surface,
+                (1.0 + offset, 2.0),
+                (3.0 + offset, 5.0),
+                Color::new(200, 100, 50, 157),
+                None,
+                None,
+            );
+        }
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("PXS capture remains active")
+            .into_scene(
+                [16, 12],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        let [GpuCommand::Solid {
+            vertices, topology, ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("a PXS burst did not stay one retained solid run");
+        };
+        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
+        assert_eq!(
+            vertices.len(),
+            8,
+            "every endpoint pair appends to the same reusable storage"
+        );
+        assert_eq!(vertices[0].position, [1.5, 2.5, 1.0]);
+        assert_eq!(vertices[7].position, [6.5, 5.5, 1.0]);
+    }
+
+    #[test]
     fn retained_degenerate_pxs_line_is_not_promoted_to_a_point() {
         let mut surface = Surface::new(8, 8, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();

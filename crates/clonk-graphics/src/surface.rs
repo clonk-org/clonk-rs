@@ -2,8 +2,9 @@ use crate::clonk_font::CapturedClonkText;
 use crate::color::Color;
 use crate::gpu_scene::{
     GpuBlend, GpuCommand, GpuObjectRunCapacityHints, GpuObjectSprite, GpuPrimitiveTopology,
-    GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle,
-    GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex,
+    GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode, GpuSolidOuterModulation,
+    GpuSolidRunCapacityHints, GpuSolidStyle, GpuSolidVertex, GpuTextureId, GpuTextureResource,
+    GpuVertex,
 };
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use std::cell::{Cell, OnceCell};
@@ -599,6 +600,7 @@ pub struct Surface {
     gpu_scene_command_capacity: usize,
     gpu_scene_texture_capacity: usize,
     gpu_scene_object_run_capacities: GpuObjectRunCapacityHints,
+    gpu_scene_solid_run_capacities: GpuSolidRunCapacityHints,
 }
 
 impl Clone for Surface {
@@ -627,6 +629,7 @@ impl Clone for Surface {
             gpu_scene_command_capacity: 0,
             gpu_scene_texture_capacity: 0,
             gpu_scene_object_run_capacities: GpuObjectRunCapacityHints::default(),
+            gpu_scene_solid_run_capacities: GpuSolidRunCapacityHints::default(),
         }
     }
 }
@@ -651,6 +654,7 @@ impl Surface {
             gpu_scene_command_capacity: 0,
             gpu_scene_texture_capacity: 0,
             gpu_scene_object_run_capacities: GpuObjectRunCapacityHints::default(),
+            gpu_scene_solid_run_capacities: GpuSolidRunCapacityHints::default(),
         }
     }
 
@@ -684,6 +688,7 @@ impl Surface {
             gpu_scene_command_capacity: 0,
             gpu_scene_texture_capacity: 0,
             gpu_scene_object_run_capacities: GpuObjectRunCapacityHints::default(),
+            gpu_scene_solid_run_capacities: GpuSolidRunCapacityHints::default(),
         })
     }
 
@@ -696,6 +701,7 @@ impl Surface {
             self.gpu_scene_command_capacity,
             self.gpu_scene_texture_capacity,
             std::mem::take(&mut self.gpu_scene_object_run_capacities),
+            std::mem::take(&mut self.gpu_scene_solid_run_capacities),
         ));
     }
 
@@ -713,6 +719,8 @@ impl Surface {
                 .max(recorder.texture_count());
             recorder.retain_object_run_capacities();
             self.gpu_scene_object_run_capacities = recorder.take_object_run_capacity_hints();
+            recorder.retain_solid_run_capacities();
+            self.gpu_scene_solid_run_capacities = recorder.take_solid_run_capacity_hints();
         }
         self.gpu_scene.take()
     }
@@ -752,7 +760,7 @@ impl Surface {
         true
     }
 
-    fn push_gpu_solid_vertex(
+    pub fn push_gpu_solid_vertex(
         &mut self,
         vertex: GpuSolidVertex,
         topology: GpuPrimitiveTopology,
@@ -765,6 +773,25 @@ impl Surface {
             return false;
         };
         scene.push_solid_vertex(vertex, topology, alpha_mode, clip, blend, style);
+        true
+    }
+
+    /// Append one line primitive's endpoints to the open retained solid run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_gpu_solid_vertex_pair(
+        &mut self,
+        start: GpuSolidVertex,
+        end: GpuSolidVertex,
+        topology: GpuPrimitiveTopology,
+        alpha_mode: GpuSolidAlphaMode,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        style: GpuSolidStyle,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.push_solid_vertex_pair(start, end, topology, alpha_mode, clip, blend, style);
         true
     }
 
