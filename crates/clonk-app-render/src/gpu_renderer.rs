@@ -217,6 +217,97 @@ const PACKED_OBJECT_SPRITE_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
     },
 ];
 
+const PACKED_SOLID_RECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 16,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 32,
+        shader_location: 2,
+    },
+];
+
+// The fragment stage is SOLID_SHADER's, unchanged: a covered pixel resolves
+// the same gamma ramp whichever stage assembled its rectangle. Only the vertex
+// stage differs, expanding one instance into the shared unit quad. Colour and
+// flags interpolate flat because every corner of a fragment already shared
+// them.
+const SOLID_RECT_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) clip_rect: vec4<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) packed_flags: u32,
+    @builtin(vertex_index) vertex_index: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+    @location(1) @interpolate(flat) flags: vec2<f32>,
+};
+
+@group(0) @binding(0) var gamma_lut: texture_2d<u32>;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    let right = input.vertex_index == 1u || input.vertex_index == 3u;
+    let bottom = input.vertex_index >= 2u;
+    var output: VertexOutput;
+    output.position = vec4<f32>(
+        select(input.clip_rect.x, input.clip_rect.z, right),
+        select(input.clip_rect.y, input.clip_rect.w, bottom),
+        0.0,
+        1.0,
+    );
+    output.color = input.color;
+    output.flags = vec2<f32>(
+        select(0.0, 1.0, (input.packed_flags & 1u) != 0u),
+        select(0.0, 1.0, (input.packed_flags & 2u) != 0u),
+    );
+    return output;
+}
+
+fn gamma_channel(channel: u32, value: f32) -> f32 {
+    let index = min(u32(clamp(value, 0.0, 1.0) * 256.0), 255u);
+    let sample = textureLoad(gamma_lut, vec2<i32>(i32(index), i32(channel)), 0).r;
+    return f32(sample) / 65535.0;
+}
+
+fn dither_offset(position: vec2<f32>) -> f32 {
+    let uniform_noise = fract(52.9829189 * fract(dot(position, vec2<f32>(0.06711056, 0.00583715))));
+    let triangular = select(
+        1.0 - sqrt(2.0 - 2.0 * uniform_noise),
+        sqrt(2.0 * uniform_noise) - 1.0,
+        uniform_noise < 0.5,
+    );
+    return triangular / 255.0;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    var rgb = input.color.rgb;
+    if input.flags.x > 0.5 {
+        rgb = vec3<f32>(
+            gamma_channel(0u, rgb.r),
+            gamma_channel(1u, rgb.g),
+            gamma_channel(2u, rgb.b),
+        );
+    }
+    if input.flags.y > 0.5 {
+        rgb = clamp(rgb + vec3<f32>(dither_offset(input.position.xy)), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return vec4<f32>(rgb, input.color.a);
+}
+"#;
+
 const QUAD_SHADER: &str = r#"
 struct VertexInput {
     @location(0) clip_position_0: vec4<f32>,
@@ -1056,8 +1147,11 @@ pub struct GpuRendererStats {
     pub total_draw_calls: usize,
     pub quad_instances: usize,
     pub object_sprite_instances: usize,
+    /// Physical point and line-fragment rectangles uploaded as compact instances.
+    pub solid_rect_instances: usize,
     pub quad_instance_upload_bytes: usize,
     pub object_sprite_upload_bytes: usize,
+    pub solid_rect_upload_bytes: usize,
     pub composition_recreated: bool,
 }
 
@@ -1229,6 +1323,7 @@ enum DrawKind {
     ObjectSprite(QuadBindingKey),
     Landscape(LandscapeBindingKey),
     Solid { alpha_mode: GpuSolidAlphaMode },
+    SolidRect { alpha_mode: GpuSolidAlphaMode },
 }
 
 #[derive(Clone, Debug)]
@@ -1244,6 +1339,7 @@ struct BuiltDrawStream {
     quad_instances: Vec<PackedQuadInstance>,
     sprite_instances: Vec<PackedSpriteInstance>,
     object_sprite_instances: Vec<PackedObjectSpriteInstance>,
+    solid_rect_instances: Vec<PackedSolidRectInstance>,
     calls: Vec<DrawCall>,
 }
 
@@ -1370,6 +1466,10 @@ pub struct RetainedGpuRenderer {
     solid_over_normal_pipeline: wgpu::RenderPipeline,
     solid_non_separate_normal_pipeline: wgpu::RenderPipeline,
     solid_additive_pipeline: wgpu::RenderPipeline,
+    solid_rect_replace_pipeline: wgpu::RenderPipeline,
+    solid_rect_over_normal_pipeline: wgpu::RenderPipeline,
+    solid_rect_non_separate_normal_pipeline: wgpu::RenderPipeline,
+    solid_rect_additive_pipeline: wgpu::RenderPipeline,
     monitor_gamma_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
 
@@ -1402,11 +1502,14 @@ pub struct RetainedGpuRenderer {
     sprite_instance_buffer_size: u64,
     object_sprite_instance_buffer: wgpu::Buffer,
     object_sprite_instance_buffer_size: u64,
+    solid_rect_instance_buffer: wgpu::Buffer,
+    solid_rect_instance_buffer_size: u64,
     quad_index_buffer: wgpu::Buffer,
     vertex_scratch: Vec<PackedVertex>,
     quad_instance_scratch: Vec<PackedQuadInstance>,
     sprite_instance_scratch: Vec<PackedSpriteInstance>,
     object_sprite_instance_scratch: Vec<PackedObjectSpriteInstance>,
+    solid_rect_instance_scratch: Vec<PackedSolidRectInstance>,
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
@@ -1505,6 +1608,7 @@ impl RetainedGpuRenderer {
             shader(device, "lc_gpu_object_sprite_shader", OBJECT_SPRITE_SHADER);
         let landscape_shader = shader(device, "lc_gpu_landscape_shader", LANDSCAPE_SHADER);
         let solid_shader = shader(device, "lc_gpu_solid_shader", SOLID_SHADER);
+        let solid_rect_shader = shader(device, "lc_gpu_solid_rect_shader", SOLID_RECT_SHADER);
         let present_shader = shader(device, "lc_gpu_present_shader", PRESENT_SHADER);
 
         let quad_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1621,8 +1725,9 @@ impl RetainedGpuRenderer {
             GpuBlend::Normal,
             GpuSolidAlphaMode::SourceOver,
         );
-        // Point and line commands are expanded to physical triangle quads
-        // before submission, so every solid uses one TriangleList pipeline.
+        // Triangle-list solids interpolate across a whole primitive, so they
+        // keep the generic vertex stream. Point and line commands resolve to
+        // whole physical pixels and ride the instanced rectangle pipeline.
         let solid_replace_pipeline = scene_pipeline(
             device,
             "lc_gpu_solid_replace",
@@ -1656,6 +1761,38 @@ impl RetainedGpuRenderer {
             &solid_pipeline_layout,
             &solid_shader,
             wgpu::PrimitiveTopology::TriangleList,
+            GpuBlend::Additive,
+            GpuSolidAlphaMode::SourceOver,
+        );
+        let solid_rect_replace_pipeline = solid_rect_scene_pipeline(
+            device,
+            "lc_gpu_solid_rect_replace",
+            &solid_pipeline_layout,
+            &solid_rect_shader,
+            GpuBlend::Replace,
+            GpuSolidAlphaMode::SourceOver,
+        );
+        let solid_rect_over_normal_pipeline = solid_rect_scene_pipeline(
+            device,
+            "lc_gpu_solid_rect_over_normal",
+            &solid_pipeline_layout,
+            &solid_rect_shader,
+            GpuBlend::Normal,
+            GpuSolidAlphaMode::SourceOver,
+        );
+        let solid_rect_non_separate_normal_pipeline = solid_rect_scene_pipeline(
+            device,
+            "lc_gpu_solid_rect_non_separate_normal",
+            &solid_pipeline_layout,
+            &solid_rect_shader,
+            GpuBlend::Normal,
+            GpuSolidAlphaMode::NonSeparate,
+        );
+        let solid_rect_additive_pipeline = solid_rect_scene_pipeline(
+            device,
+            "lc_gpu_solid_rect_additive",
+            &solid_pipeline_layout,
+            &solid_rect_shader,
             GpuBlend::Additive,
             GpuSolidAlphaMode::SourceOver,
         );
@@ -1764,6 +1901,12 @@ impl RetainedGpuRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let solid_rect_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_solid_rect_instances"),
+            size: INITIAL_VERTEX_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let quad_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lc_gpu_quad_indices"),
             contents: &[0, 0, 1, 0, 2, 0, 2, 0, 1, 0, 3, 0],
@@ -1799,6 +1942,10 @@ impl RetainedGpuRenderer {
             solid_over_normal_pipeline,
             solid_non_separate_normal_pipeline,
             solid_additive_pipeline,
+            solid_rect_replace_pipeline,
+            solid_rect_over_normal_pipeline,
+            solid_rect_non_separate_normal_pipeline,
+            solid_rect_additive_pipeline,
             monitor_gamma_pipeline,
             present_pipeline,
             nearest_sampler,
@@ -1824,11 +1971,14 @@ impl RetainedGpuRenderer {
             sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             object_sprite_instance_buffer,
             object_sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
+            solid_rect_instance_buffer,
+            solid_rect_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             quad_index_buffer,
             vertex_scratch: Vec::new(),
             quad_instance_scratch: Vec::new(),
             sprite_instance_scratch: Vec::new(),
             object_sprite_instance_scratch: Vec::new(),
+            solid_rect_instance_scratch: Vec::new(),
             draw_call_scratch: Vec::new(),
             composition: None,
             last_presented_monitor_gamma: None,
@@ -2014,6 +2164,7 @@ impl RetainedGpuRenderer {
             quad_instances,
             sprite_instances,
             object_sprite_instances,
+            solid_rect_instances,
             calls,
         } = self.build_layered_draw_stream(layers)?;
         let vertex_bytes = packed_vertex_bytes(&vertices);
@@ -2021,6 +2172,7 @@ impl RetainedGpuRenderer {
         let sprite_instance_bytes = packed_sprite_instance_bytes(&sprite_instances);
         let object_sprite_instance_bytes =
             packed_object_sprite_instance_bytes(&object_sprite_instances);
+        let solid_rect_instance_bytes = packed_solid_rect_instance_bytes(&solid_rect_instances);
         self.ensure_bind_groups(device, &calls)?;
         let mut used_quad_bindings = HashSet::new();
         let mut used_landscape_bindings = HashSet::new();
@@ -2032,7 +2184,7 @@ impl RetainedGpuRenderer {
                 DrawKind::Landscape(key) => {
                     used_landscape_bindings.insert(key);
                 }
-                DrawKind::Solid { .. } => {}
+                DrawKind::Solid { .. } | DrawKind::SolidRect { .. } => {}
             }
         }
         // Bind groups are cheap to recreate and can otherwise grow with every
@@ -2063,6 +2215,14 @@ impl RetainedGpuRenderer {
                 object_sprite_instance_bytes,
             );
         }
+        self.ensure_solid_rect_instance_buffer(device, solid_rect_instance_bytes.len())?;
+        if !solid_rect_instance_bytes.is_empty() {
+            queue.write_buffer(
+                &self.solid_rect_instance_buffer,
+                0,
+                solid_rect_instance_bytes,
+            );
+        }
         self.last_stats.draw_calls = calls.len();
         self.last_stats.total_draw_calls =
             calls.len() + 1 + usize::from(scene.gamma_mode.monitor_postpass());
@@ -2070,6 +2230,8 @@ impl RetainedGpuRenderer {
         self.last_stats.object_sprite_instances = object_sprite_instances.len();
         self.last_stats.quad_instance_upload_bytes = quad_instance_bytes.len();
         self.last_stats.object_sprite_upload_bytes = object_sprite_instance_bytes.len();
+        self.last_stats.solid_rect_instances = solid_rect_instances.len();
+        self.last_stats.solid_rect_upload_bytes = solid_rect_instance_bytes.len();
         self.last_stats.resident_source_textures = self.textures.len();
 
         self.ensure_composition(device, base.presentation.physical_extent);
@@ -2168,6 +2330,7 @@ impl RetainedGpuRenderer {
         self.quad_instance_scratch = quad_instances;
         self.sprite_instance_scratch = sprite_instances;
         self.object_sprite_instance_scratch = object_sprite_instances;
+        self.solid_rect_instance_scratch = solid_rect_instances;
         self.draw_call_scratch = calls;
         self.check_health()?;
         Ok(readback)
@@ -2489,11 +2652,13 @@ impl RetainedGpuRenderer {
         let mut quad_instances = std::mem::take(&mut self.quad_instance_scratch);
         let mut sprite_instances = std::mem::take(&mut self.sprite_instance_scratch);
         let mut object_sprite_instances = std::mem::take(&mut self.object_sprite_instance_scratch);
+        let mut solid_rect_instances = std::mem::take(&mut self.solid_rect_instance_scratch);
         let mut calls = std::mem::take(&mut self.draw_call_scratch);
         vertices.clear();
         quad_instances.clear();
         sprite_instances.clear();
         object_sprite_instances.clear();
+        solid_rect_instances.clear();
         calls.clear();
         calls.reserve(layers.iter().map(|layer| layer.scene.commands.len()).sum());
         for layer in layers {
@@ -2505,6 +2670,7 @@ impl RetainedGpuRenderer {
                 &mut quad_instances,
                 &mut sprite_instances,
                 &mut object_sprite_instances,
+                &mut solid_rect_instances,
                 &mut calls,
                 layer_call_start,
             )?;
@@ -2514,6 +2680,7 @@ impl RetainedGpuRenderer {
             quad_instances,
             sprite_instances,
             object_sprite_instances,
+            solid_rect_instances,
             calls,
         })
     }
@@ -2528,6 +2695,7 @@ impl RetainedGpuRenderer {
         quad_instances: &mut Vec<PackedQuadInstance>,
         sprite_instances: &mut Vec<PackedSpriteInstance>,
         object_sprite_instances: &mut Vec<PackedObjectSpriteInstance>,
+        solid_rect_instances: &mut Vec<PackedSolidRectInstance>,
         calls: &mut Vec<DrawCall>,
         layer_call_start: usize,
     ) -> Result<(), GpuRendererError> {
@@ -2733,7 +2901,6 @@ impl RetainedGpuRenderer {
                     else {
                         continue;
                     };
-                    let start = vertex_count(vertices)?;
                     if !solid
                         .iter()
                         .flat_map(|vertex| vertex.color)
@@ -2741,53 +2908,81 @@ impl RetainedGpuRenderer {
                     {
                         return Err(GpuRendererError::NonFiniteCoordinate);
                     }
-                    match topology {
+                    let gamma = fragment_gamma_flag(scene.gamma_mode, style.gamma);
+                    // Points and line fragments resolve to whole physical
+                    // rectangles, so they share one compact instance stream and
+                    // coalesce across commands; only interpolated triangles
+                    // still need the generic vertex stream.
+                    let (start, end, kind) = match topology {
                         GpuPrimitiveTopology::PointList => {
+                            let start = solid_rect_instance_count(solid_rect_instances)?;
                             for vertex in solid {
-                                if let Some(point) = packed_point_rect(
-                                    *vertex,
-                                    fragment_gamma_flag(scene.gamma_mode, style.gamma),
-                                    &projection,
-                                )? {
-                                    vertices.extend(expanded_rect_vertices(point));
+                                if let Some(point) = packed_point_rect(*vertex, gamma, &projection)?
+                                {
+                                    solid_rect_instances.push(point);
                                 }
                             }
+                            (
+                                start,
+                                solid_rect_instance_count(solid_rect_instances)?,
+                                DrawKind::SolidRect {
+                                    alpha_mode: *alpha_mode,
+                                },
+                            )
                         }
                         GpuPrimitiveTopology::LineList => {
+                            let start = solid_rect_instance_count(solid_rect_instances)?;
                             for pair in solid.chunks_exact(2) {
-                                vertices.extend(packed_line_fragments(
+                                append_line_fragment_instances(
+                                    solid_rect_instances,
                                     pair[0],
                                     pair[1],
-                                    fragment_gamma_flag(scene.gamma_mode, style.gamma),
+                                    gamma,
                                     &projection,
-                                )?);
+                                )?;
                             }
+                            (
+                                start,
+                                solid_rect_instance_count(solid_rect_instances)?,
+                                DrawKind::SolidRect {
+                                    alpha_mode: *alpha_mode,
+                                },
+                            )
                         }
                         GpuPrimitiveTopology::TriangleList => {
+                            let start = vertex_count(vertices)?;
                             for vertex in solid {
                                 append_vertex(
                                     vertices,
                                     packed_solid_vertex(
                                         vertex.position,
                                         vertex.color,
-                                        fragment_gamma_flag(scene.gamma_mode, style.gamma),
+                                        gamma,
                                         style.dither,
                                         &projection,
                                     )?,
                                 );
                             }
+                            (
+                                start,
+                                vertex_count(vertices)?,
+                                DrawKind::Solid {
+                                    alpha_mode: *alpha_mode,
+                                },
+                            )
                         }
-                    }
-                    let end = vertex_count(vertices)?;
+                    };
                     if start != end {
-                        calls.push(DrawCall {
-                            vertices: start..end,
-                            scissor: projection.scissor,
-                            blend: *blend,
-                            kind: DrawKind::Solid {
-                                alpha_mode: *alpha_mode,
+                        DrawCall::push_compatible_quad(
+                            calls,
+                            layer_call_start,
+                            DrawCall {
+                                vertices: start..end,
+                                scissor: projection.scissor,
+                                blend: *blend,
+                                kind,
                             },
-                        });
+                        );
                     }
                 }
             }
@@ -3008,6 +3203,30 @@ impl RetainedGpuRenderer {
         Ok(())
     }
 
+    fn ensure_solid_rect_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        required: usize,
+    ) -> Result<(), GpuRendererError> {
+        let required =
+            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        if required <= self.solid_rect_instance_buffer_size {
+            return Ok(());
+        }
+        let size = required
+            .checked_next_power_of_two()
+            .ok_or(GpuRendererError::VertexRangeOverflow)?
+            .max(INITIAL_VERTEX_BUFFER_SIZE);
+        self.solid_rect_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_solid_rect_instances"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.solid_rect_instance_buffer_size = size;
+        Ok(())
+    }
+
     fn ensure_composition(&mut self, device: &wgpu::Device, extent: [u32; 2]) {
         if self
             .composition
@@ -3083,6 +3302,21 @@ impl RetainedGpuRenderer {
             // The CPU reference preserves destination alpha for every
             // additive producer, so one additive state serves both modes.
             GpuBlend::Additive => &self.solid_additive_pipeline,
+        }
+    }
+
+    fn solid_rect_pipeline(
+        &self,
+        blend: GpuBlend,
+        alpha_mode: GpuSolidAlphaMode,
+    ) -> &wgpu::RenderPipeline {
+        match blend {
+            GpuBlend::Replace => &self.solid_rect_replace_pipeline,
+            GpuBlend::Normal => match alpha_mode {
+                GpuSolidAlphaMode::SourceOver => &self.solid_rect_over_normal_pipeline,
+                GpuSolidAlphaMode::NonSeparate => &self.solid_rect_non_separate_normal_pipeline,
+            },
+            GpuBlend::Additive => &self.solid_rect_additive_pipeline,
         }
     }
 
@@ -3175,6 +3409,15 @@ impl RetainedGpuRenderer {
                     pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_pipeline(self.solid_pipeline(call.blend, alpha_mode));
                     pass.draw(call.vertices.clone(), 0..1);
+                }
+                DrawKind::SolidRect { alpha_mode } => {
+                    pass.set_vertex_buffer(0, self.solid_rect_instance_buffer.slice(..));
+                    pass.set_index_buffer(
+                        self.quad_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint16,
+                    );
+                    pass.set_pipeline(self.solid_rect_pipeline(call.blend, alpha_mode));
+                    pass.draw_indexed(0..6, 0, call.vertices.clone());
                 }
             }
         }
@@ -3839,34 +4082,6 @@ fn packed_solid_rect_instance(
     })
 }
 
-/// Lower one physical rectangle to the triangle pair the solid pipeline draws.
-///
-/// The corner order matches the shared unit-quad index buffer, so the same two
-/// triangles cover the rectangle whichever path issues them.
-fn expanded_rect_vertices(instance: PackedSolidRectInstance) -> [PackedVertex; 6] {
-    let [left, top, right, bottom] = instance.clip_rect;
-    let corner = |x: f32, y: f32| PackedVertex {
-        clip: [x, y, 0.0, 1.0],
-        uv: [0.0, 0.0],
-        data0: instance.color,
-        data1: [
-            flag(instance.flags & SOLID_RECT_FLAG_GAMMA != 0),
-            0.0,
-            0.0,
-            0.0,
-        ],
-        data2: [0.0; 4],
-    };
-    [
-        corner(left, top),
-        corner(right, top),
-        corner(left, bottom),
-        corner(left, bottom),
-        corner(right, top),
-        corner(right, bottom),
-    ]
-}
-
 fn append_line_fragment_instances(
     instances: &mut Vec<PackedSolidRectInstance>,
     start: GpuSolidVertex,
@@ -3893,20 +4108,6 @@ fn append_line_fragment_instances(
         )?);
         Ok(())
     })
-}
-
-fn packed_line_fragments(
-    start: GpuSolidVertex,
-    end: GpuSolidVertex,
-    gamma: bool,
-    projection: &DrawProjection,
-) -> Result<Vec<PackedVertex>, GpuRendererError> {
-    let mut instances = Vec::new();
-    append_line_fragment_instances(&mut instances, start, end, gamma, projection)?;
-    Ok(instances
-        .into_iter()
-        .flat_map(expanded_rect_vertices)
-        .collect())
 }
 
 fn projected_physical_position(
@@ -4089,6 +4290,7 @@ fn validate_scene(
     }
 
     let mut packed_vertices = 0_u64;
+    let mut solid_rect_instances = 0_u64;
     for command in &scene.commands {
         match command {
             GpuCommand::Quad {
@@ -4218,7 +4420,7 @@ fn validate_scene(
             } => {
                 validate_primitive_count(*topology, vertices.len())?;
                 let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
-                let mut expanded_line_vertices = 0_u64;
+                let mut line_fragments = 0_u64;
                 for vertex in vertices {
                     if !vertex
                         .position
@@ -4250,27 +4452,30 @@ fn validate_scene(
                                 projection,
                                 |_, _, _| Ok(()),
                             )?;
-                            expanded_line_vertices = expanded_line_vertices
-                                .checked_add(
-                                    fragment_count
-                                        .checked_mul(6)
-                                        .ok_or(GpuRendererError::VertexRangeOverflow)?,
-                                )
+                            line_fragments = line_fragments
+                                .checked_add(fragment_count)
                                 .ok_or(GpuRendererError::VertexRangeOverflow)?;
                         }
                     }
                 }
                 let count = u64::try_from(vertices.len())
                     .map_err(|_| GpuRendererError::VertexRangeOverflow)?;
-                let expanded = match topology {
-                    GpuPrimitiveTopology::PointList => count.saturating_mul(6),
-                    GpuPrimitiveTopology::LineList => expanded_line_vertices,
-                    GpuPrimitiveTopology::TriangleList => count,
-                };
-                packed_vertices = packed_vertices.saturating_add(expanded);
+                // Points and line fragments each cost one instance; only
+                // triangles consume the shared vertex range.
+                match topology {
+                    GpuPrimitiveTopology::PointList => {
+                        solid_rect_instances = solid_rect_instances.saturating_add(count);
+                    }
+                    GpuPrimitiveTopology::LineList => {
+                        solid_rect_instances = solid_rect_instances.saturating_add(line_fragments);
+                    }
+                    GpuPrimitiveTopology::TriangleList => {
+                        packed_vertices = packed_vertices.saturating_add(count);
+                    }
+                }
             }
         }
-        if packed_vertices > u64::from(u32::MAX) {
+        if packed_vertices > u64::from(u32::MAX) || solid_rect_instances > u64::from(u32::MAX) {
             return Err(GpuRendererError::VertexRangeOverflow);
         }
     }
@@ -4592,6 +4797,12 @@ fn object_sprite_instance_count(
     u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
 }
 
+fn solid_rect_instance_count(
+    instances: &[PackedSolidRectInstance],
+) -> Result<u32, GpuRendererError> {
+    u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
+}
+
 fn append_vertex(vertices: &mut Vec<PackedVertex>, vertex: PackedVertex) {
     vertices.push(vertex);
 }
@@ -4632,6 +4843,23 @@ fn packed_sprite_instance_bytes(instances: &[PackedSpriteInstance]) -> &[u8] {
         );
     }
     // SAFETY: `PackedSpriteInstance` is `repr(C)`, contains only contiguous
+    // `f32` and `u32` fields, and the size assertion above excludes padding.
+    unsafe {
+        std::slice::from_raw_parts(
+            instances.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(instances),
+        )
+    }
+}
+
+fn packed_solid_rect_instance_bytes(instances: &[PackedSolidRectInstance]) -> &[u8] {
+    const {
+        assert!(
+            std::mem::size_of::<PackedSolidRectInstance>()
+                == PACKED_SOLID_RECT_INSTANCE_STRIDE as usize
+        );
+    }
+    // SAFETY: `PackedSolidRectInstance` is `repr(C)`, contains only contiguous
     // `f32` and `u32` fields, and the size assertion above excludes padding.
     unsafe {
         std::slice::from_raw_parts(
@@ -5045,6 +5273,14 @@ fn packed_sprite_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+fn packed_solid_rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: PACKED_SOLID_RECT_INSTANCE_STRIDE,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &PACKED_SOLID_RECT_INSTANCE_ATTRIBUTES,
+    }
+}
+
 fn packed_object_sprite_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: PACKED_OBJECT_SPRITE_INSTANCE_STRIDE,
@@ -5090,6 +5326,27 @@ fn sprite_scene_pipeline(
         blend,
         GpuSolidAlphaMode::SourceOver,
         packed_sprite_instance_layout(),
+        "vs_main",
+    )
+}
+
+fn solid_rect_scene_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    blend: GpuBlend,
+    alpha_mode: GpuSolidAlphaMode,
+) -> wgpu::RenderPipeline {
+    scene_pipeline_with_vertex_layout(
+        device,
+        label,
+        layout,
+        shader,
+        wgpu::PrimitiveTopology::TriangleList,
+        blend,
+        alpha_mode,
+        packed_solid_rect_instance_layout(),
         "vs_main",
     )
 }
@@ -6363,8 +6620,24 @@ mod tests {
         assert_eq!(flags(true, true), [1.0, 1.0, 0.0, 0.0]);
     }
 
+    fn physical_rect(instance: PackedSolidRectInstance, projection: &DrawProjection) -> [f64; 4] {
+        let width = f64::from(projection.physical_extent[0]);
+        let height = f64::from(projection.physical_extent[1]);
+        let x = |clip: f32| ((f64::from(clip) + 1.0) * width / 2.0).round();
+        let y = |clip: f32| ((1.0 - f64::from(clip)) * height / 2.0).round();
+        [
+            x(instance.clip_rect[0]),
+            y(instance.clip_rect[1]),
+            x(instance.clip_rect[2]),
+            y(instance.clip_rect[3]),
+        ]
+    }
+
     #[test]
     fn logical_line_pair_expands_to_cpp_application_scale_in_physical_space() {
+        // Every selected physical pixel is one whole rectangle, so it costs one
+        // compact instance. Lowering it to a triangle pair spent six 72-byte
+        // vertices restating the same rectangle and colour.
         let presentation = GpuPresentation {
             physical_extent: [12, 8],
             scale: 2.0,
@@ -6374,23 +6647,27 @@ mod tests {
             .expect("valid line presentation")
             .expect("line clip intersects the framebuffer");
         let color = [1.0, 0.0, 0.0, 1.0];
-        let expanded = packed_line_fragments(
+        let mut instances = Vec::new();
+        append_line_fragment_instances(
+            &mut instances,
             solid_vertex(1.5, 1.5, color),
             solid_vertex(4.5, 1.5, color),
             false,
             &projection,
         )
         .expect("expand line pair");
-        let physical = |vertex: PackedVertex| {
-            [
-                ((f64::from(vertex.clip[0]) + 1.0) * 6.0).round(),
-                ((1.0 - f64::from(vertex.clip[1])) * 4.0).round(),
-            ]
-        };
 
-        let mut origins = expanded
-            .chunks_exact(6)
-            .map(|fragment| physical(fragment[0]))
+        let mut origins = instances
+            .iter()
+            .map(|instance| {
+                let [left, top, right, bottom] = physical_rect(*instance, &projection);
+                assert_eq!(
+                    [right - left, bottom - top],
+                    [1.0, 1.0],
+                    "a line fragment covers exactly one physical pixel"
+                );
+                [left, top]
+            })
             .collect::<Vec<_>>();
         origins.sort_by(|left, right| left.partial_cmp(right).expect("finite physical origin"));
         let mut expected = (2..8)
@@ -6398,8 +6675,8 @@ mod tests {
             .collect::<Vec<_>>();
         expected.sort_by(|left, right| left.partial_cmp(right).expect("finite expected origin"));
         assert_eq!(origins, expected);
-        assert_eq!(expanded.len(), 6 * 2 * 6);
-        assert!(expanded.iter().all(|vertex| vertex.data0 == color));
+        assert_eq!(instances.len(), 6 * 2);
+        assert!(instances.iter().all(|instance| instance.color == color));
     }
 
     #[test]
@@ -6408,24 +6685,20 @@ mod tests {
         let projection = draw_projection(None, [5, 4], &presentation)
             .expect("valid line presentation")
             .expect("line clip intersects the framebuffer");
-        let expanded = packed_line_fragments(
+        let mut instances = Vec::new();
+        append_line_fragment_instances(
+            &mut instances,
             solid_vertex(0.5, 0.5, [0.0, 0.0, 0.0, 1.0]),
             solid_vertex(4.5, 2.5, [1.0, 0.0, 0.0, 1.0]),
             false,
             &projection,
         )
         .expect("expand diagonal line");
-        let physical = |vertex: PackedVertex| {
-            [
-                ((f64::from(vertex.clip[0]) + 1.0) * 2.5).round(),
-                ((1.0 - f64::from(vertex.clip[1])) * 2.0).round(),
-            ]
-        };
-        let fragment = expanded
-            .chunks_exact(6)
-            .find(|fragment| physical(fragment[0]) == [1.0, 1.0])
+        let fragment = instances
+            .iter()
+            .find(|instance| physical_rect(**instance, &projection)[..2] == [1.0, 1.0])
             .expect("slope-one-half line covers physical pixel (1,1)");
-        assert!((fragment[0].data0[0] - 0.3).abs() < 1.0e-6);
+        assert!((fragment.color[0] - 0.3).abs() < 1.0e-6);
     }
 
     #[test]
@@ -6453,56 +6726,6 @@ mod tests {
         assert_eq!(collect(0.5, 5.5), vec![(2, 1)]);
         assert_eq!(collect(5.5, 0.5), vec![(3, 1), (2, 1)]);
         assert!(collect(0.5, 2.0).is_empty(), "clip-point degeneracy");
-    }
-
-    fn physical_rect_origin(
-        instance: PackedSolidRectInstance,
-        projection: &DrawProjection,
-    ) -> [f64; 2] {
-        let width = f64::from(projection.physical_extent[0]);
-        let height = f64::from(projection.physical_extent[1]);
-        [
-            ((f64::from(instance.clip_rect[0]) + 1.0) * width / 2.0).round(),
-            ((1.0 - f64::from(instance.clip_rect[1])) * height / 2.0).round(),
-        ]
-    }
-
-    #[test]
-    fn line_fragments_pack_one_compact_instance_per_covered_pixel() {
-        // Every selected physical pixel is a one-pixel rectangle, so it needs
-        // its rectangle and its interpolated color and nothing else. Lowering
-        // one to a triangle pair spent six 72-byte vertices restating both.
-        let presentation = GpuPresentation {
-            physical_extent: [12, 8],
-            scale: 2.0,
-            crop_top: 0,
-        };
-        let projection = draw_projection(None, [6, 4], &presentation)
-            .expect("valid line presentation")
-            .expect("line clip intersects the framebuffer");
-        let color = [1.0, 0.0, 0.0, 1.0];
-        let mut instances = Vec::new();
-        append_line_fragment_instances(
-            &mut instances,
-            solid_vertex(1.5, 1.5, color),
-            solid_vertex(4.5, 1.5, color),
-            false,
-            &projection,
-        )
-        .expect("expand line pair");
-
-        let mut origins = instances
-            .iter()
-            .map(|instance| physical_rect_origin(*instance, &projection))
-            .collect::<Vec<_>>();
-        origins.sort_by(|left, right| left.partial_cmp(right).expect("finite physical origin"));
-        let mut expected = (2..8)
-            .flat_map(|x| (2..4).map(move |y| [f64::from(x), f64::from(y)]))
-            .collect::<Vec<_>>();
-        expected.sort_by(|left, right| left.partial_cmp(right).expect("finite expected origin"));
-        assert_eq!(origins, expected);
-        assert_eq!(instances.len(), 6 * 2);
-        assert!(instances.iter().all(|instance| instance.color == color));
     }
 
     #[test]
@@ -7184,6 +7407,82 @@ mod tests {
             .rgba
             .chunks_exact(4)
             .any(|pixel| pixel == [32, 72, 232, 255]));
+    }
+
+    #[test]
+    fn compatible_pxs_line_commands_share_one_draw_of_compact_instances() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact PXS fragment check");
+            return;
+        };
+        const SOLID: [u8; 4] = [255, 64, 32, 255];
+        const CLEAR: [u8; 4] = [0, 0, 0, 255];
+        let line = |row: f32| GpuCommand::Solid {
+            vertices: vec![
+                solid_vertex(0.5, row, rgba_f32(SOLID)),
+                solid_vertex(3.5, row, rgba_f32(SOLID)),
+            ],
+            topology: GpuPrimitiveTopology::LineList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: None,
+            blend: GpuBlend::Replace,
+            style: GpuSolidStyle::NONE,
+        };
+        let scene = GpuScene {
+            logical_extent: [6, 4],
+            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![line(0.5), line(2.5)],
+        };
+        let presentation = GpuPresentation::identity(6, 4);
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(&mut renderer, &device, &queue, &scene, &presentation);
+        let stats = renderer.last_stats();
+
+        let projection = draw_projection(None, [6, 4], &presentation)
+            .expect("valid fixture presentation")
+            .expect("fixture clip intersects the framebuffer");
+        let mut covered = HashSet::new();
+        for row in [0.5_f32, 2.5] {
+            walk_aliased_line_fragments(
+                solid_vertex(0.5, row, rgba_f32(SOLID)),
+                solid_vertex(3.5, row, rgba_f32(SOLID)),
+                &projection,
+                |x, y, _| {
+                    covered.insert((x, y));
+                    Ok(())
+                },
+            )
+            .expect("walk fixture line");
+        }
+
+        assert_eq!(stats.solid_rect_instances, covered.len());
+        assert_eq!(
+            stats.solid_rect_upload_bytes,
+            covered.len() * PACKED_SOLID_RECT_INSTANCE_STRIDE as usize
+        );
+        assert_eq!(
+            stats.draw_calls, 1,
+            "compatible fragment runs share one painter-order draw"
+        );
+        for y in 0..4 {
+            for x in 0..6 {
+                let expected = if covered.contains(&(i64::from(x), i64::from(y))) {
+                    SOLID
+                } else {
+                    CLEAR
+                };
+                assert_eq!(
+                    readback_pixel(&frame, x, y),
+                    expected,
+                    "PXS fragment ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]
