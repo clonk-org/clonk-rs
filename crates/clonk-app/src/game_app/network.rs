@@ -8225,8 +8225,8 @@ impl GameApp {
                     %error,
                     "network host scenario validation failed before socket creation"
                 );
-                self.status_text = format!("Cannot host {title}: {error}");
-                return Ok(());
+                return self
+                    .finish_network_host_start_failure(format!("Cannot host {title}: {error}"));
             }
         };
         let selected = staged.frontend.clone();
@@ -8242,6 +8242,37 @@ impl GameApp {
         self.activate_prepared_network_host(selected, SocketAddr::from(([0, 0, 0, 0], port)));
         if self.startup_network_connection.is_none() {
             self.staged_network_host_scenario = None;
+            // No transition was installed, so the activation reported why in
+            // `status_text` instead. That is the fatal error C4Game::Init
+            // accumulated; present it rather than leaving it as an overlay.
+            let message = std::mem::take(&mut self.status_text);
+            return self.finish_network_host_start_failure(message);
+        }
+        Ok(())
+    }
+
+    /// Ends a failed host start the way `C4Application::OpenGame` does.
+    ///
+    /// A failed `OpenGame` sets `Game.fQuitWithError` and calls `QuitGame`,
+    /// which reconstructs the remembered startup dialog whenever one is in use
+    /// and quits the application otherwise
+    /// (`src/C4Application.cpp:373-405,438-450`; `src/C4Game.cpp:3299`).
+    /// `C4Startup::Execute` then shows the accumulated fatal errors in an Error
+    /// Log box (`src/C4Startup.cpp:274-307`). Leaving the message in
+    /// `status_text` instead is a generic startup overlay, which every render
+    /// path reports as a fatal parity boundary — that is what terminated the
+    /// process on any host failure (clonk-org/clonk-rs#196).
+    fn finish_network_host_start_failure(&mut self, message: String) -> Result<(), EngineError> {
+        if self.failed_open_game_returns_to_startup() {
+            return self.finish_startup_network_failure(StartupNetworkPurpose::StagedHost, message);
+        }
+        // A console `/open` sets UseStartupDialog and returns to C4AS_Startup
+        // to wait for the next command (`src/C4Application.cpp:598-612`); an
+        // explicit command-line host has no startup generation to return to
+        // and quits.
+        self.status_text = message;
+        if !self.console_mode {
+            self.request_exit("a network game failed to start with no menu to return to");
         }
         Ok(())
     }

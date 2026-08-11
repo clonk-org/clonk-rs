@@ -2823,20 +2823,6 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     );
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.open_definition_selector(target)
-        .expect("open definition selector");
-    app.process_definition_selector_actions(vec![
-        clonk_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
-    ])
-    .expect("accepted definition list returns to network staging");
-    assert_eq!(
-        app.scenario_selector_mode,
-        ScenarioSelectorMode::NetworkHost
-    );
-    assert!(app.startup_network_connection.is_none());
-    assert!(app.network.is_none());
-    assert!(app.network_lobby.is_none());
-
     app.scensel_do_back()
         .expect("return from outer folder to root");
     assert_eq!(app.menu_state.stack.len(), 1);
@@ -2852,6 +2838,29 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         "remembered.example:11112"
     );
     assert!(app.startup_network_connection.is_none());
+
+    // Accepting the definition list stages the host. This pathless fixture
+    // cannot be staged, and a failed OpenGame returns through QuitGame to a
+    // freshly constructed host selector carrying the Error Log — never to a
+    // bound socket (src/C4Application.cpp:373-405,438-450).
+    app.process_network_dialog_actions(vec![
+        clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
+    ])
+    .expect("reopen network scenario selector");
+    app.open_definition_selector(target)
+        .expect("open definition selector");
+    app.process_definition_selector_actions(vec![
+        clonk_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
+    ])
+    .expect("accepted definition list returns to network staging");
+    assert_eq!(
+        app.scenario_selector_mode,
+        ScenarioSelectorMode::NetworkHost
+    );
+    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+    assert!(app.startup_network_connection.is_none());
+    assert!(app.network.is_none());
+    assert!(app.network_lobby.is_none());
 }
 
 #[test]
@@ -3144,6 +3153,62 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
                 &app,
                 "Network lobby unavailable: classic game-lobby model is unavailable: host connection completed without a staged scenario; refusing guessed lobby state",
             );
+    let mut frame = vec![0x4c; 800 * 600 * 4];
+    app.render(&mut frame)
+        .expect("render restored host selector and Error Log");
+    assert!(frame.iter().any(|byte| *byte != 0x4c));
+}
+
+#[test]
+fn failed_host_staging_returns_to_host_selector_with_error_log() {
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.open_network_game_dialog();
+    let scenario = FrontendScenario::fallback();
+    let title = scenario.title.clone();
+    let Err(staging_error) = app.prepare_network_host_scenario(
+        scenario.clone(),
+        ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: None,
+        },
+    ) else {
+        panic!("a pathless fixture cannot be staged for hosting");
+    };
+
+    app.stage_network_host_scenario(
+        scenario,
+        ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: None,
+        },
+    )
+    .expect("a failed host start returns to the remembered startup dialog");
+
+    // A failed OpenGame sets Game.fQuitWithError and calls QuitGame, which
+    // reconstructs the remembered startup dialog and shows the accumulated
+    // fatal errors in an Error Log (src/C4Application.cpp:373-405,438-450;
+    // src/C4Startup.cpp:274-307). It never terminates the application while a
+    // startup dialog is in use.
+    assert_eq!(app.mode, AppMode::Menu);
+    assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+    assert_eq!(
+        app.scenario_selector_mode,
+        ScenarioSelectorMode::NetworkHost
+    );
+    assert_eq!(
+        app.last_startup_dialog,
+        StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost)
+    );
+    assert!(app.staged_network_host_scenario.is_none());
+    assert!(app.startup_network_connection.is_none());
+    assert!(app.network.is_none());
+    assert!(app.network_mode.is_none());
+    assert_startup_error_log(&app, &format!("Cannot host {title}: {staging_error}"));
+    // The retained status overlay this used to leave behind is a parity
+    // boundary, and every render path treats one as fatal — which is how a
+    // failed host start terminated the process (clonk-org/clonk-rs#196).
+    app.preflight_startup_presentation()
+        .expect("no generic startup status overlay remains");
     let mut frame = vec![0x4c; 800 * 600 * 4];
     app.render(&mut frame)
         .expect("render restored host selector and Error Log");

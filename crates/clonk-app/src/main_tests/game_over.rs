@@ -637,10 +637,17 @@ fn host_round_restart_returns_to_network_lobby_staging() {
         app.restart_restore_infos.what, RESTART_RESTORE_PLAYER_TEAMS,
         "the lobby handoff retains the raw SetRestoreInfos mask"
     );
-    assert!(
-        app.status_text.starts_with("Cannot host"),
-        "the pathless sandbox fixture reaches host staging and fails there"
-    );
+    // The pathless sandbox fixture reaches host staging and fails there. A
+    // failed OpenGame returns through QuitGame to the remembered startup
+    // dialog and reports its fatal error in the Error Log instead of leaving a
+    // status overlay behind (src/C4Application.cpp:373-405,438-450).
+    assert!(app.status_text.is_empty());
+    assert_eq!(app.message_dialogs.len(), 1);
+    assert_eq!(app.message_dialogs[0].state.caption(), "Error Log");
+    assert!(app.message_dialogs[0]
+        .state
+        .message()
+        .starts_with("Cannot host"));
 }
 
 #[test]
