@@ -1073,7 +1073,7 @@ impl Engine {
                     base_graphics: snapshot.base_graphics.clone(),
                     graphics_overlays: snapshot.graphics_overlays.clone(),
                     draw_transform: snapshot.draw_transform,
-                    local_vars: snapshot.local_vars.clone(),
+                    local_vars: snapshot.local_vars.clone().into(),
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
                     solid_mask_override: persisted.solid_mask_override,
@@ -1534,7 +1534,12 @@ impl Engine {
         let previous_container = self.objects[idx].state.container;
         let global_view = self.global_effects.clone();
         let rng_state = self.rng.clone();
+        #[cfg(test)]
+        let world_started = std::time::Instant::now();
         let world = self.host_world_context_for_object(idx);
+        #[cfg(test)]
+        EFFECT_WORLD_CONTEXT_NANOS
+            .with(|elapsed| elapsed.set(elapsed.get() + world_started.elapsed().as_nanos() as u64));
         let (
             global_cmds,
             emitted_particles,
@@ -1582,6 +1587,8 @@ impl Engine {
                 self.audio_registry.clone(),
             )?
         };
+        #[cfg(test)]
+        let fold_started = std::time::Instant::now();
         let outermost = self.stage_host_solid_mask_operations(
             effect_solid_mask_operations,
             effect_host_raster_preview,
@@ -1644,7 +1651,11 @@ impl Engine {
             }
             Ok(())
         })();
-        self.finish_host_solid_mask_operations(outermost, fold_result)
+        let result = self.finish_host_solid_mask_operations(outermost, fold_result);
+        #[cfg(test)]
+        EFFECT_FOLD_NANOS
+            .with(|elapsed| elapsed.set(elapsed.get() + fold_started.elapsed().as_nanos() as u64));
+        result
     }
 
     pub(crate) fn run_effect_events_for_object(
@@ -1724,7 +1735,13 @@ impl Engine {
         let mut world = world;
         let mut pending_spawns: Vec<SpawnConfig> = Vec::new();
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
+        #[cfg(test)]
+        let snapshot_started = std::time::Instant::now();
         let mut state_snapshot = object.script_state_snapshot();
+        #[cfg(test)]
+        EFFECT_STATE_SNAPSHOT_NANOS.with(|elapsed| {
+            elapsed.set(elapsed.get() + snapshot_started.elapsed().as_nanos() as u64)
+        });
         let mut global_commands = Vec::new();
         let mut current_environment = *environment;
         let mut current_physics = physics;
@@ -2063,6 +2080,8 @@ impl Engine {
             // keeps mutations made before the error).
             let rng_backup = rng.clone();
             let audio_backup = current_audio.clone();
+            #[cfg(test)]
+            let callback_started = std::time::Instant::now();
             let call_result = match event.kind {
                 EffectEventKind::Started => dispatch_definition
                     .call_effect_start(
@@ -2257,6 +2276,10 @@ impl Engine {
                         (outcome, audio_state, new_rng)
                     }),
             };
+            #[cfg(test)]
+            EFFECT_CALLBACK_NANOS.with(|elapsed| {
+                elapsed.set(elapsed.get() + callback_started.elapsed().as_nanos() as u64)
+            });
             let (outcome, audio_state, new_rng) = match call_result {
                 Ok(value) => value,
                 Err(EngineError::Script {
@@ -2357,7 +2380,7 @@ impl Engine {
             // (C4Effect.cpp:129) — persist its local writes. VM finals
             // apply first; host-command updates below may override.
             if let Some(locals) = context_locals {
-                object.state.local_vars = locals;
+                object.state.local_vars = locals.into();
                 state_snapshot = object.script_state_snapshot();
             }
 

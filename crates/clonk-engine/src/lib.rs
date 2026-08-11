@@ -346,6 +346,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 std::thread_local! {
     static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_OBJECT_GET_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
@@ -353,6 +354,49 @@ std::thread_local! {
     static RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOLID_MASK_DEFINITION_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    static EXEC_LIST_MASTER_ORDER_SCANS: Cell<usize> = const { Cell::new(0) };
+    static HOST_SOLID_MASK_STATE_OBJECT_VISITS: Cell<usize> = const { Cell::new(0) };
+    static HOST_SOLID_MASK_BAKE_VECTOR_CLONES: Cell<usize> = const { Cell::new(0) };
+    static FIND_CONDITION_OBJECT_REFRESHES: Cell<usize> = const { Cell::new(0) };
+    static CONTENTS_SCOPE_GROWTH_VISITS: Cell<usize> = const { Cell::new(0) };
+    static CONTACT_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static NO_ATTACH_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static CONTAINED_CALL_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static PARTICLE_DEF_NAME_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    static SET_VERTEX_DEFINITION_METADATA_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static ACTION_TRANSITION_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static EFFECT_DEF_CORE_VALUE_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static COMMAND_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static SECTOR_FULL_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    static FORCE_LEGACY_SECTOR_REBUILD: Cell<bool> = const { Cell::new(false) };
+    static FORCE_LEGACY_FIND_FUNC_SCALAR_PREFIX: Cell<bool> = const { Cell::new(false) };
+    static FORCE_LEGACY_STIPPEL_FRAME_PATH: Cell<bool> = const { Cell::new(false) };
+    static FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+    static EFFECT_WORLD_CONTEXT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static EFFECT_STATE_SNAPSHOT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static EFFECT_CALLBACK_NANOS: Cell<u64> = const { Cell::new(0) };
+    static EFFECT_EXEC_NANOS: Cell<u64> = const { Cell::new(0) };
+    static EFFECT_FOLD_NANOS: Cell<u64> = const { Cell::new(0) };
+    static FIND_CRITERION_PARSE_NANOS: Cell<u64> = const { Cell::new(0) };
+    static FIND_CANDIDATE_ENUM_NANOS: Cell<u64> = const { Cell::new(0) };
+    static FIND_CANDIDATE_MATCH_NANOS: Cell<u64> = const { Cell::new(0) };
+    static MOBILE_MOVEMENT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static FRAME_SOLID_MASK_UPDATE_NANOS: Cell<u64> = const { Cell::new(0) };
+    static FRAME_SECTOR_UPDATE_NANOS: Cell<u64> = const { Cell::new(0) };
+    static ACTION_EXEC_NANOS: Cell<u64> = const { Cell::new(0) };
+    static ACTION_PHYSICS_NANOS: Cell<u64> = const { Cell::new(0) };
+    static REFRESH_OCF_NANOS: Cell<u64> = const { Cell::new(0) };
+    static EMPTY_COMMAND_QUEUE_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
+    static SYNTHETIC_COMMAND_FOLDS: Cell<usize> = const { Cell::new(0) };
+    static ACTION_CALLBACK_DRAIN_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static DEFINITION_METADATA_TABLE_READS: Cell<usize> = const { Cell::new(0) };
+    static SHAPE_CONTACT_HEAP_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static MOVEMENT_CALLBACK_SNAPSHOT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static MOVEMENT_CALLBACK_WORLD_NANOS: Cell<u64> = const { Cell::new(0) };
+    static MOVEMENT_CALLBACK_SCRIPT_NANOS: Cell<u64> = const { Cell::new(0) };
+    static MOVEMENT_CALLBACK_FOLD_NANOS: Cell<u64> = const { Cell::new(0) };
+    static COMMAND_EXEC_NANOS: Cell<u64> = const { Cell::new(0) };
 }
 
 use crate::math::{
@@ -7441,6 +7485,14 @@ struct SolidMaskStaging {
     deferred_host_raster_preview: Option<compat::HostRasterPreview>,
 }
 
+#[derive(Clone)]
+struct SolidMaskHostStateCache {
+    generation: u64,
+    bakes: Rc<Vec<(ObjectId, SolidMaskBake)>>,
+    instance_sequences: Rc<HashMap<ObjectId, u64>>,
+    next_instance_sequence: u64,
+}
+
 /// Queues the engine fills for the host to drain each frame, grouped out of Engine.
 struct HostRequestQueues {
     player_info_updates: Rc<RefCell<Vec<PlayerInfoUpdateRequest>>>,
@@ -7884,6 +7936,8 @@ pub struct Engine {
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
     team_state: TeamRuntime,
     solid_mask_staging: SolidMaskStaging,
+    solid_mask_host_state_generation: Cell<u64>,
+    solid_mask_host_state_cache: RefCell<Option<SolidMaskHostStateCache>>,
     host_requests: HostRequestQueues,
 }
 
@@ -8478,34 +8532,31 @@ fn layer_movement_bounds_from_split(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ContactVertexInfo {
-    friction: i32,
-}
-
 #[derive(Debug, Clone, Default)]
 struct ShapeContact {
     contact_cnat: u32,
-    vertices: Vec<ContactVertexInfo>,
+    contact_count: u8,
+    frictions: [i32; MAX_SHAPE_VERTICES],
     /// Per-shape-vertex C4Shape::VtxContactCNAT values. Entries for
     /// CNAT_NoCollision vertices remain zero and are ignored by the latch.
-    vertex_contacts: Vec<u32>,
+    vertex_contacts: [u32; MAX_SHAPE_VERTICES],
 }
 
 impl ShapeContact {
     fn count(&self) -> i32 {
-        self.vertices.len() as i32
+        i32::from(self.contact_count)
     }
 
     fn is_contact(&self) -> bool {
-        !self.vertices.is_empty()
+        self.contact_count != 0
     }
 
     fn first_friction(&self) -> i32 {
-        self.vertices
-            .first()
-            .map(|vertex| vertex.friction)
-            .unwrap_or(0)
+        if self.contact_count != 0 {
+            self.frictions[0]
+        } else {
+            0
+        }
     }
 }
 
@@ -8939,10 +8990,11 @@ fn shape_contact_check(
     excluded_solid_mask: Option<ObjectId>,
     contact_density: i32,
 ) -> ShapeContact {
-    let mut contact = ShapeContact {
-        vertex_contacts: vec![0; vertices.len()],
-        ..ShapeContact::default()
-    };
+    #[cfg(test)]
+    if FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS.with(Cell::get) {
+        drop(std::hint::black_box(vec![0u32; vertices.len()]));
+    }
+    let mut contact = ShapeContact::default();
     for (index, vertex) in vertices.iter().enumerate() {
         if vertex.cnat & CNAT_NO_COLLISION != 0 {
             continue;
@@ -9001,10 +9053,14 @@ fn shape_contact_check(
         {
             vertex_contact |= CNAT_RIGHT;
         }
-        contact.vertices.push(ContactVertexInfo {
-            friction: vertex.friction,
-        });
-        contact.vertex_contacts[index] = vertex_contact;
+        let contact_index = usize::from(contact.contact_count);
+        if contact_index < MAX_SHAPE_VERTICES {
+            contact.frictions[contact_index] = vertex.friction;
+            contact.contact_count += 1;
+        }
+        if let Some(slot) = contact.vertex_contacts.get_mut(index) {
+            *slot = vertex_contact;
+        }
     }
     contact
 }
@@ -9956,6 +10012,8 @@ impl Engine {
                 deferred_solid_mask_operations: Vec::new(),
                 deferred_host_raster_preview: None,
             },
+            solid_mask_host_state_generation: Cell::new(1),
+            solid_mask_host_state_cache: RefCell::new(None),
             rng: {
                 let mut rng = LcgRng::seed_from_u64(seed);
                 rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
@@ -10392,7 +10450,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         base_graphics: snapshot.base_graphics.clone(),
         graphics_overlays: snapshot.graphics_overlays.clone(),
         draw_transform: snapshot.draw_transform,
-        local_vars: snapshot.local_vars.clone(),
+        local_vars: snapshot.local_vars.clone().into(),
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
         solid_mask_override: None,

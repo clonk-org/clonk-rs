@@ -671,6 +671,12 @@ impl Engine {
     }
 
     pub(crate) fn active_solid_mask_indices(&self) -> Vec<usize> {
+        // Grid worlds bake masks into the landscape plane. Every caller of
+        // this candidate list eventually reaches `solid_masks_for_movement`,
+        // which already returns an empty rectangle overlay in this mode.
+        if self.solid_mask_grid_mode() {
+            return Vec::new();
+        }
         let definitions_have_solid_masks = self
             .definitions
             .values()
@@ -716,15 +722,24 @@ impl Engine {
     /// Build the live command view for an object inserted after the frame's
     /// bulk command snapshot. C++'s live ExecObjects iterator still runs
     /// ExecuteCommand for such newborn objects in the same frame.
-    pub(crate) fn live_command_snapshot(&self, index: usize) -> CommandObjectSnapshot {
+    pub(crate) fn live_command_snapshot(
+        &self,
+        index: usize,
+        master_list_order: Option<usize>,
+    ) -> CommandObjectSnapshot {
+        #[cfg(test)]
+        COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(count.get().saturating_add(1)));
         let physical = self.object_physical_without_fair_fill(index);
         let object = &self.objects[index];
-        let master_list_order = self
-            .exec_list
-            .iter()
-            .rev()
-            .position(|&id| id == object.id)
-            .unwrap_or_else(|| self.exec_list.len().saturating_add(index));
+        let master_list_order = master_list_order.unwrap_or_else(|| {
+            #[cfg(test)]
+            EXEC_LIST_MASTER_ORDER_SCANS.with(|count| count.set(count.get() + 1));
+            self.exec_list
+                .iter()
+                .rev()
+                .position(|&id| id == object.id)
+                .unwrap_or_else(|| self.exec_list.len().saturating_add(index))
+        });
         let (
             procedure,
             line_connect,
@@ -1000,7 +1015,7 @@ impl Engine {
         );
         for index in 0..self.objects.len() {
             let id = self.objects[index].id;
-            command_snapshots.insert(id, self.live_command_snapshot(index));
+            command_snapshots.insert(id, self.live_command_snapshot(index, None));
         }
         if let Some(snapshot) = command_snapshots.get_mut(&object_id) {
             match resume {

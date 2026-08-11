@@ -1,6 +1,7 @@
 use super::*;
 use crate::landscape::PixelGrid;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 #[test]
 fn pixel_less_landscape_does_not_invent_column_surface_contact() {
@@ -208,13 +209,659 @@ fn command_snapshot_keeps_definition_command_policies() {
         .expect("object spawns");
     let index = engine.find_object_index(object_id).expect("object exists");
 
-    let snapshot = engine.live_command_snapshot(index);
+    let snapshot = engine.live_command_snapshot(index, None);
 
     assert_eq!(snapshot.pathfinder, -4);
     assert_eq!(snapshot.no_transfer_zones, -3);
     assert_eq!(snapshot.no_push_enter, -2);
     assert!(snapshot.action_disabled);
     assert_eq!(snapshot.ocf & ocf::CREW_MEMBER, 0);
+}
+
+#[test]
+fn idle_objects_do_not_materialize_command_snapshots() {
+    // C4Object::ExecuteCommand returns without reading object or world state
+    // when Command is null (C4Object.cpp:3997-4009).
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("IDLE", "Idle", "")
+        .expect("definition registers");
+    for x in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("IDLE").with_position(Vector2::new(x, 10)))
+            .expect("idle object spawns");
+    }
+
+    COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+    engine.tick().expect("idle frame executes");
+
+    assert_eq!(
+        COMMAND_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "commandless objects do not need Rust's borrowed-world snapshot table"
+    );
+}
+
+#[test]
+fn commandless_objects_do_not_enter_the_command_queue_executor() {
+    // C4Object::ExecuteCommand returns immediately when Command is null
+    // (C4Object.cpp:3997-4009); no deferred command work exists to fold.
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("IDLE", "Idle", "")
+        .expect("definition registers");
+    for x in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("IDLE").with_position(Vector2::new(x, 10)))
+            .expect("idle object spawns");
+    }
+
+    EMPTY_COMMAND_QUEUE_EXECUTIONS.with(|count| count.set(0));
+    engine.tick().expect("idle frame executes");
+
+    assert_eq!(EMPTY_COMMAND_QUEUE_EXECUTIONS.with(Cell::get), 0);
+}
+
+#[test]
+fn ordinary_ticks_update_sectors_incrementally() {
+    // C++ adds, removes, and updates each object's sector links at those
+    // mutations; C4GameObjects::CrossCheck does no full rebuild
+    // (C4GameObjects.cpp:60-80,92-115,730-743).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(200, 200));
+    engine
+        .register_script_definition("IDLE", "Idle", "")
+        .expect("definition registers");
+    for x in 0..128 {
+        engine
+            .spawn_object(SpawnConfig::new("IDLE").with_position(Vector2::new(x, 50)))
+            .expect("idle object spawns");
+    }
+
+    SECTOR_FULL_REBUILDS.with(|count| count.set(0));
+    engine.tick().expect("idle frame executes");
+
+    assert_eq!(SECTOR_FULL_REBUILDS.with(Cell::get), 0);
+}
+
+#[test]
+fn dense_idle_tick_estimates_amortized_fps_under_one_second() {
+    const CALIBRATED_LEGACY_FPS: f64 = 18.075_519;
+    const OBJECTS: i32 = 1_000;
+    const ROUNDS: usize = 3;
+
+    fn dense_engine() -> Engine {
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(5_000, 500));
+        engine
+            .register_script_definition("IDLE", "Idle", "")
+            .expect("definition registers");
+        for index in 0..OBJECTS {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("IDLE").with_position(Vector2::new(20 + index * 4, 100)),
+                )
+                .expect("dense object spawns");
+        }
+        engine
+    }
+
+    let test_started = Instant::now();
+    let mut legacy = dense_engine();
+    let mut current = dense_engine();
+    let mut simulation_only = dense_engine();
+    let mut legacy_elapsed = Duration::ZERO;
+    let mut current_elapsed = Duration::ZERO;
+    let mut simulation_elapsed = Duration::ZERO;
+    let mut snapshot_elapsed = Duration::ZERO;
+    for _ in 0..ROUNDS {
+        FORCE_LEGACY_SECTOR_REBUILD.with(|force| force.set(true));
+        let started = Instant::now();
+        legacy.tick().expect("legacy dense tick succeeds");
+        legacy_elapsed += started.elapsed();
+        FORCE_LEGACY_SECTOR_REBUILD.with(|force| force.set(false));
+
+        let started = Instant::now();
+        current.tick().expect("current dense tick succeeds");
+        current_elapsed += started.elapsed();
+
+        let started = Instant::now();
+        simulation_only
+            .tick_without_snapshot()
+            .expect("snapshot-free dense tick succeeds");
+        simulation_elapsed += started.elapsed();
+
+        let started = Instant::now();
+        let _ = simulation_only.snapshot();
+        snapshot_elapsed += started.elapsed();
+        assert_eq!(legacy.snapshot(), current.snapshot());
+    }
+    let estimated_fps = CALIBRATED_LEGACY_FPS * legacy_elapsed.as_secs_f64()
+        / current_elapsed.as_secs_f64().max(f64::EPSILON);
+    let estimated_gain = estimated_fps - CALIBRATED_LEGACY_FPS;
+    println!(
+        "DENSE_TICK_AMORTIZED_ESTIMATE objects={OBJECTS} legacy_ms={:.3} current_ms={:.3} simulation_only_ms={:.3} snapshot_only_ms={:.3} estimated_simulation_fps={estimated_fps:.3} estimated_gain_fps={estimated_gain:.3}",
+        legacy_elapsed.as_secs_f64() * 1_000.0,
+        current_elapsed.as_secs_f64() * 1_000.0,
+        simulation_elapsed.as_secs_f64() * 1_000.0,
+        snapshot_elapsed.as_secs_f64() * 1_000.0,
+    );
+    assert!(
+        test_started.elapsed() < Duration::from_secs(1),
+        "amortized dense-tick estimator must stay below one second"
+    );
+}
+
+#[test]
+fn dense_stippel_frame_estimates_amortized_fps_under_one_second() {
+    // Calibrated against the latest self-terminating 1,000-Stippel
+    // play-profile run. The paired reference ratio removes machine load; the
+    // residual represents scenario systems this deliberately sub-second
+    // model does not execute, so the estimator cannot claim their time as a
+    // gain.
+    const CALIBRATED_SIMULATION_FPS: f64 = 19.258_354;
+    const CALIBRATED_MODEL_CURRENT_MS: f64 = 37.477;
+    const CALIBRATED_MODEL_RATIO: f64 = 37.477 / 52.228;
+    const CALIBRATED_ACTUAL_MOBILE_MOVEMENT_MS: f64 = 21.82;
+    const STIPPELS: i32 = 1_000;
+    // The saved Arso-Morf object section contains 1,041 non-Stippel objects;
+    // Initialize then raises the 20 saved Stippels to exactly 1,000. These
+    // active objects still pay the C4Object::Execute frame overhead and were
+    // the missing half of the first synthetic estimate.
+    const OTHER_OBJECTS: i32 = 1_041;
+    const ROUNDS: usize = 1;
+    const WIDTH: usize = 5_000;
+    const HEIGHT: usize = 240;
+
+    fn dense_engine() -> Engine {
+        let mut engine = Engine::with_seed(0);
+        let mut landscape =
+            Landscape::with_default_material(WIDTH as u32, vec![HEIGHT as i32; WIDTH], None)
+                .expect("dense landscape constructs");
+        landscape.set_world_height(HEIGHT as i32);
+        let mut pixels = vec![0; WIDTH * HEIGHT];
+        pixels[68 * WIDTH..].fill(1);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH as u32,
+            HEIGHT as u32,
+            pixels,
+            vec![0, 100, 100],
+            vec![None, Some("Earth".to_owned()), Some("Vehicle".to_owned())],
+            vec![None; 3],
+        ));
+        engine.set_landscape(landscape);
+
+        let source = r#"#strict
+                    local pregnancy, stuckTime;
+
+                    func FindDistance(int radius) {
+                        return [14, GetX(), GetY(), radius];
+                    }
+                    func FindHostile(int owner) { return [3, [50, 99]]; }
+                    func FindExclude() { return [5, this]; }
+                    func FindNoContainer() { return [1, [41]]; }
+                    func FindPathFree() { return [60, "Find_PathFreeCheck", this]; }
+                    func Find_PathFreeCheck(object origin) { return true; }
+                    func ContactBottom() { SetVertex(0, 2, 4); }
+
+                    func FxLifeCycleTimer(object target, int number, int time) {
+                        var speed = GetPhysical("Walk");
+                        speed += 500 - Random(1000);
+                        speed = BoundBy(speed, 5000, 15000);
+                        SetPhysical("Walk", speed, 2);
+                        SetPhysical("Scale", speed + 5000, 2);
+                        SetPhysical("Hangle", speed + 10000, 2);
+
+                        pregnancy++;
+                        var cocoons = ObjectCount2(Find_ID(CC5B), FindDistance(50));
+                        var nearby = FindObject2(FindHostile(GetOwner()), FindDistance(100));
+
+                        if (!Random(25) || !GetComDir()) SetComDir(Random(2));
+                        if (GetX() < 10) SetComDir(1);
+                        if (GetX() > LandscapeWidth() - 10) SetComDir(0);
+                        if (Stuck()) stuckTime++; else stuckTime = 0;
+
+                        var victim = FindObject2(
+                            FindExclude(), FindHostile(GetOwner()), FindNoContainer(),
+                            FindPathFree(), FindDistance(25 + Random(50)));
+                        return cocoons + !!nearby + !!victim;
+                    }
+                "#;
+        let mut definition =
+            Definition::from_script("STIP", "Stippel-shaped", source).expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_contact_function_calls(true);
+        definition.set_shape_rect(Some(DefinitionRect::new(-7, -7, 15, 15)));
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(0, -7).with_cnat(CNAT_TOP),
+            ObjectVertex::new(0, 7).with_cnat(CNAT_BOTTOM),
+            ObjectVertex::new(-7, 0).with_cnat(CNAT_LEFT),
+            ObjectVertex::new(7, 0).with_cnat(CNAT_RIGHT),
+        ]);
+        definition.set_category(CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([(
+                "Walk".to_owned(),
+                ActionSpec::for_procedure("WALK")
+                    .with_length(20)
+                    .with_delay(1)
+                    .with_attach(CNAT_BOTTOM)
+                    .with_next("Walk"),
+            )]),
+        );
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .register_script_definition("FILL", "Saved scenario object", "")
+            .expect("filler definition registers");
+        for index in 0..STIPPELS {
+            let object = engine
+                .spawn_object(SpawnConfig {
+                    action: Some(ActionState::new("Walk")),
+                    ..SpawnConfig::new("STIP")
+                        .with_position(Vector2::new(20 + index * 4, 60))
+                        .with_velocity(Vector2::ZERO)
+                        .with_mobile(true)
+                })
+                .expect("dense object spawns");
+            let mut effect = EffectState::new("LifeCycle")
+                .with_interval(25)
+                .with_timer(index % 25);
+            effect.number = 1;
+            effect.command_id = Some("STIP".to_owned());
+            effect.command_target = Some(object.as_u64() as i32);
+            let object_index = engine
+                .find_object_index(object)
+                .expect("dense object remains live");
+            engine.objects[object_index].state.effects.push(effect);
+        }
+        let filler_id = engine
+            .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(20, 40)))
+            .expect("saved scenario filler spawns");
+        let filler_index = engine
+            .find_object_index(filler_id)
+            .expect("filler remains live");
+        let filler_template = engine.objects[filler_index].clone();
+        for index in 1..OTHER_OBJECTS {
+            let mut filler = filler_template.clone();
+            let id = ObjectId::new(engine.next_object_id);
+            engine.next_object_id = engine.next_object_id.saturating_add(1);
+            filler.id = id;
+            filler.state.position = Vector2::new(20 + index % 1_000, 40);
+            filler.fixed_position =
+                FixedVec2::from_ints(filler.state.position.x, filler.state.position.y);
+            engine.objects.push(filler);
+            engine.exec_list.push(id);
+        }
+        engine.note_objects_changed();
+        engine.rebuild_sectors();
+        engine
+    }
+
+    let test_started = Instant::now();
+    let mut legacy = dense_engine();
+    let mut current = dense_engine();
+
+    let mut legacy_elapsed = Duration::ZERO;
+    let mut current_elapsed = Duration::ZERO;
+    let mut legacy_host_objects = 0;
+    let mut current_host_objects = 0;
+    let mut legacy_snapshots = 0;
+    let mut current_snapshots = 0;
+    for _ in 0..ROUNDS {
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+        FORCE_LEGACY_FIND_FUNC_SCALAR_PREFIX.with(|force| force.set(true));
+        FORCE_LEGACY_STIPPEL_FRAME_PATH.with(|force| force.set(true));
+        FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS.with(|force| force.set(true));
+        let started = Instant::now();
+        legacy
+            .tick_without_snapshot()
+            .expect("legacy representative tick succeeds");
+        legacy_elapsed += started.elapsed();
+        legacy_host_objects += HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get);
+        legacy_snapshots += SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get);
+        FORCE_LEGACY_FIND_FUNC_SCALAR_PREFIX.with(|force| force.set(false));
+        FORCE_LEGACY_STIPPEL_FRAME_PATH.with(|force| force.set(false));
+        FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS.with(|force| force.set(false));
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+        EFFECT_WORLD_CONTEXT_NANOS.with(|elapsed| elapsed.set(0));
+        EFFECT_STATE_SNAPSHOT_NANOS.with(|elapsed| elapsed.set(0));
+        EFFECT_CALLBACK_NANOS.with(|elapsed| elapsed.set(0));
+        EFFECT_EXEC_NANOS.with(|elapsed| elapsed.set(0));
+        EFFECT_FOLD_NANOS.with(|elapsed| elapsed.set(0));
+        FIND_CRITERION_PARSE_NANOS.with(|elapsed| elapsed.set(0));
+        FIND_CANDIDATE_ENUM_NANOS.with(|elapsed| elapsed.set(0));
+        FIND_CANDIDATE_MATCH_NANOS.with(|elapsed| elapsed.set(0));
+        let started = Instant::now();
+        current
+            .tick_without_snapshot()
+            .expect("current representative tick succeeds");
+        current_elapsed += started.elapsed();
+        current_host_objects += HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get);
+        current_snapshots += SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get);
+    }
+    for engine in [&mut legacy, &mut current] {
+        for (index, object) in engine.objects.iter_mut().enumerate() {
+            object.state.effects.clear();
+            if object.definition_id != "STIP" {
+                continue;
+            }
+            object.state.position = Vector2::new(20 + (index as i32 % 1_000) * 4, 50);
+            object.fixed_position =
+                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
+            object.fixed_velocity = FixedVec2::from_ints(0, 10);
+            object.refresh_velocity_from_fixed();
+            object.state.mobile = true;
+        }
+        engine.rebuild_sectors();
+    }
+    FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS.with(|force| force.set(true));
+    let legacy_movement_started = Instant::now();
+    for _ in 0..ROUNDS {
+        legacy
+            .tick_without_snapshot()
+            .expect("legacy falling-frame estimate succeeds");
+    }
+    let legacy_movement_elapsed = legacy_movement_started.elapsed();
+    FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS.with(|force| force.set(false));
+    MOBILE_MOVEMENT_NANOS.with(|elapsed| elapsed.set(0));
+    FRAME_SOLID_MASK_UPDATE_NANOS.with(|elapsed| elapsed.set(0));
+    FRAME_SECTOR_UPDATE_NANOS.with(|elapsed| elapsed.set(0));
+    ACTION_EXEC_NANOS.with(|elapsed| elapsed.set(0));
+    ACTION_PHYSICS_NANOS.with(|elapsed| elapsed.set(0));
+    REFRESH_OCF_NANOS.with(|elapsed| elapsed.set(0));
+    COMMAND_EXEC_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_SNAPSHOT_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_WORLD_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_SCRIPT_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_FOLD_NANOS.with(|elapsed| elapsed.set(0));
+    let movement_started = Instant::now();
+    for _ in 0..ROUNDS {
+        current
+            .tick_without_snapshot()
+            .expect("effect-free representative tick succeeds");
+    }
+    let movement_elapsed = movement_started.elapsed();
+    MOVEMENT_CALLBACK_SNAPSHOT_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_WORLD_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_SCRIPT_NANOS.with(|elapsed| elapsed.set(0));
+    MOVEMENT_CALLBACK_FOLD_NANOS.with(|elapsed| elapsed.set(0));
+    for index in 0..400 {
+        current
+            .dispatch_contact_callbacks(index, MovementContactDispatch::Direct(CNAT_BOTTOM))
+            .expect("representative ContactBottom succeeds");
+    }
+    let mobile_movement_ms = MOBILE_MOVEMENT_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let solid_mask_update_ms = FRAME_SOLID_MASK_UPDATE_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let sector_update_ms = FRAME_SECTOR_UPDATE_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let action_exec_ms = ACTION_EXEC_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let action_physics_ms = ACTION_PHYSICS_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let refresh_ocf_ms = REFRESH_OCF_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let command_exec_ms = COMMAND_EXEC_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let movement_callback_snapshot_ms =
+        MOVEMENT_CALLBACK_SNAPSHOT_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let movement_callback_world_ms =
+        MOVEMENT_CALLBACK_WORLD_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let movement_callback_script_ms =
+        MOVEMENT_CALLBACK_SCRIPT_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let movement_callback_fold_ms =
+        MOVEMENT_CALLBACK_FOLD_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let calibrated_actual_frame_ms = 1_000.0 / CALIBRATED_SIMULATION_FPS;
+    let calibrated_residual_ms = calibrated_actual_frame_ms - CALIBRATED_MODEL_CURRENT_MS;
+    let current_model_ratio =
+        current_elapsed.as_secs_f64() / legacy_elapsed.as_secs_f64().max(f64::EPSILON);
+    let normalized_model_ms =
+        CALIBRATED_MODEL_CURRENT_MS * current_model_ratio / CALIBRATED_MODEL_RATIO;
+    let movement_ratio =
+        movement_elapsed.as_secs_f64() / legacy_movement_elapsed.as_secs_f64().max(f64::EPSILON);
+    let estimated_frame_ms = calibrated_residual_ms
+        + normalized_model_ms
+        + CALIBRATED_ACTUAL_MOBILE_MOVEMENT_MS * (movement_ratio - 1.0);
+    let estimated_fps = 1_000.0 / estimated_frame_ms;
+    let estimated_gain_fps = estimated_fps - CALIBRATED_SIMULATION_FPS;
+    let effect_world_ms = EFFECT_WORLD_CONTEXT_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let effect_snapshot_ms = EFFECT_STATE_SNAPSHOT_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let effect_callback_ms = EFFECT_CALLBACK_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let effect_exec_ms = EFFECT_EXEC_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let effect_fold_ms = EFFECT_FOLD_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let find_parse_ms = FIND_CRITERION_PARSE_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let find_enum_ms = FIND_CANDIDATE_ENUM_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+    let find_match_ms = FIND_CANDIDATE_MATCH_NANOS.with(Cell::get) as f64 / 1_000_000.0;
+
+    println!(
+        "STIPPEL_FRAME_AMORTIZED_ESTIMATE stippels={STIPPELS} other_objects={OTHER_OBJECTS} rounds={ROUNDS} legacy_ms={:.3} current_ms={:.3} legacy_movement_ms={:.3} movement_ms={:.3} movement_ratio={movement_ratio:.3} command_exec_ms={command_exec_ms:.3} refresh_ocf_ms={refresh_ocf_ms:.3} action_exec_ms={action_exec_ms:.3} action_physics_ms={action_physics_ms:.3} mobile_movement_ms={mobile_movement_ms:.3} callback_probe_snapshot_ms={movement_callback_snapshot_ms:.3} callback_probe_world_ms={movement_callback_world_ms:.3} callback_probe_script_ms={movement_callback_script_ms:.3} callback_probe_fold_ms={movement_callback_fold_ms:.3} solid_mask_update_ms={solid_mask_update_ms:.3} sector_update_ms={sector_update_ms:.3} estimated_simulation_fps={estimated_fps:.3} estimated_gain_fps={estimated_gain_fps:.3} legacy_host_objects={legacy_host_objects} current_host_objects={current_host_objects} legacy_snapshots={legacy_snapshots} current_snapshots={current_snapshots} effect_world_ms={effect_world_ms:.3} effect_snapshot_ms={effect_snapshot_ms:.3} effect_callback_ms={effect_callback_ms:.3} effect_exec_ms={effect_exec_ms:.3} effect_fold_ms={effect_fold_ms:.3} find_parse_ms={find_parse_ms:.3} find_enum_ms={find_enum_ms:.3} find_match_ms={find_match_ms:.3}",
+        legacy_elapsed.as_secs_f64() * 1_000.0,
+        current_elapsed.as_secs_f64() * 1_000.0,
+        legacy_movement_elapsed.as_secs_f64() * 1_000.0,
+        movement_elapsed.as_secs_f64() * 1_000.0,
+    );
+    assert!(
+        test_started.elapsed() < Duration::from_secs(1),
+        "amortized Stippel-movement estimator must stay below one second"
+    );
+}
+
+#[test]
+fn real_content_without_step_skips_the_synthetic_command_fold() {
+    // C4Object::Execute has no per-definition Step callback or returned
+    // command batch (C4Object.cpp:1058-1127). That fold exists only for the
+    // Rust snapshot-fixture DSL and must stay out of real-content frames.
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("REAL", "Real content", "")
+        .expect("definition registers");
+    engine
+        .spawn_object(SpawnConfig::new("REAL"))
+        .expect("object spawns");
+
+    SYNTHETIC_COMMAND_FOLDS.with(|count| count.set(0));
+    engine
+        .tick_without_snapshot()
+        .expect("real-content frame succeeds");
+
+    assert_eq!(SYNTHETIC_COMMAND_FOLDS.with(Cell::get), 0);
+}
+
+#[test]
+fn unchanged_actions_skip_the_deferred_callback_drain() {
+    // Native SetAction dispatches Start/Abort/End synchronously and has no
+    // empty deferred-callback drain in C4Object::Execute (C4Object.cpp:
+    // 4160-4185,1058-1127).
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("IDLE", "Idle object", "")
+        .expect("definition registers");
+    engine
+        .spawn_object(SpawnConfig::new("IDLE"))
+        .expect("object spawns");
+
+    ACTION_CALLBACK_DRAIN_INVOCATIONS.with(|count| count.set(0));
+    engine
+        .tick_without_snapshot()
+        .expect("unchanged-action frame succeeds");
+
+    assert_eq!(ACTION_CALLBACK_DRAIN_INVOCATIONS.with(Cell::get), 0);
+}
+
+#[test]
+fn object_action_lookup_stays_on_the_definition_table() {
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("LOOK", "Lookup object", "")
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("LOOK"))
+        .expect("object spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("object remains live");
+
+    DEFINITION_METADATA_TABLE_READS.with(|count| count.set(0));
+    let _ = engine
+        .object_definition_context(index)
+        .expect("action context resolves");
+
+    assert_eq!(DEFINITION_METADATA_TABLE_READS.with(Cell::get), 0);
+}
+
+#[test]
+fn per_pixel_contact_probes_use_the_fixed_shape_buffer() {
+    // C4Shape owns C4D_MaxVertex fixed arrays; ContactCheck fills those
+    // arrays without allocating per traversed pixel (C4Shape.h:78-94;
+    // C4Movement.cpp:165-182).
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(100, 100));
+    let mut definition =
+        Definition::from_script("MOVE", "Moving object", "").expect("definition compiles");
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("MOVE")
+                .with_position(Vector2::new(20, 20))
+                .with_velocity(Vector2::new(1, 0))
+                .with_mobile(true),
+        )
+        .expect("moving object spawns");
+    let index = engine
+        .find_object_index(object)
+        .expect("object remains live");
+
+    SHAPE_CONTACT_HEAP_ALLOCATIONS.with(|count| count.set(0));
+    let _ = shape_contact_check(
+        &engine.objects[index].state.vertices,
+        Vector2::new(21, 20),
+        engine.landscape.as_ref().expect("landscape remains set"),
+        &engine.materials,
+        &[],
+        None,
+        engine.objects[index].state.contact_density,
+    );
+
+    assert_eq!(SHAPE_CONTACT_HEAP_ALLOCATIONS.with(Cell::get), 0);
+}
+
+#[test]
+fn coordinate_move_to_does_not_snapshot_unrelated_objects() {
+    // A targetless C4Command::MoveTo reads cObj plus terrain/pathfinder state;
+    // other objects enter only through Action.Target (C4Command.cpp:211-360).
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("FILL", "Filler", "")
+        .expect("filler registers");
+    let mut walker =
+        Definition::from_script("WALK", "Walker", "").expect("walker definition compiles");
+    walker.configure_actions(
+        Some("Walk".to_owned()),
+        HashMap::from([(
+            "Walk".to_owned(),
+            ActionSpec::default().with_procedure("WALK"),
+        )]),
+    );
+    engine
+        .register_definition(walker)
+        .expect("walker registers");
+    for x in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+            .expect("filler spawns");
+    }
+    let walker = engine
+        .spawn_object(
+            SpawnConfig::new("WALK")
+                .with_position(Vector2::new(10, 10))
+                .with_action(ActionState::new("Walk")),
+        )
+        .expect("walker spawns");
+    let walker_index = engine.find_object_index(walker).expect("walker exists");
+    engine.objects[walker_index]
+        .commands
+        .push_front(
+            CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(100))
+                .with_ty(Some(10))
+                .with_evaluated(true),
+        )
+        .expect("MoveTo queues");
+
+    COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+    engine.tick().expect("MoveTo frame executes");
+
+    assert!(
+        COMMAND_SNAPSHOT_MATERIALIZATIONS.with(Cell::get) <= 3,
+        "the actor may refresh around its command, but fillers stay unmaterialized"
+    );
+    assert_eq!(
+        engine.objects[walker_index].state.command_direction,
+        CommandDirection::Right
+    );
+}
+
+#[test]
+fn targeted_move_to_snapshots_only_its_explicit_dependencies() {
+    // C4Command::MoveTo dereferences Target during InitEvaluation and
+    // Action.Target for push/pull, never Game.Objects (C4Command.cpp:211-360).
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_script_definition("FILL", "Filler", "")
+        .expect("filler registers");
+    let mut walker =
+        Definition::from_script("WALK", "Walker", "").expect("walker definition compiles");
+    walker.configure_actions(
+        Some("Walk".to_owned()),
+        HashMap::from([(
+            "Walk".to_owned(),
+            ActionSpec::default().with_procedure("WALK"),
+        )]),
+    );
+    engine
+        .register_definition(walker)
+        .expect("walker registers");
+    let target = engine
+        .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(100, 10)))
+        .expect("target spawns");
+    for x in 0..63 {
+        engine
+            .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 20)))
+            .expect("unrelated filler spawns");
+    }
+    let walker = engine
+        .spawn_object(
+            SpawnConfig::new("WALK")
+                .with_position(Vector2::new(10, 10))
+                .with_action(ActionState::new("Walk")),
+        )
+        .expect("walker spawns");
+    let walker_index = engine.find_object_index(walker).expect("walker exists");
+    engine.objects[walker_index]
+        .commands
+        .push_front(
+            CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(target))
+                .with_tx(Some(0))
+                .with_ty(Some(0)),
+        )
+        .expect("targeted MoveTo queues");
+
+    COMMAND_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+    engine.tick().expect("MoveTo evaluation frame executes");
+    engine.tick().expect("MoveTo steering frame executes");
+
+    assert!(
+        COMMAND_SNAPSHOT_MATERIALIZATIONS.with(Cell::get) <= 10,
+        "the actor and explicit target may refresh, but unrelated fillers stay unmaterialized"
+    );
+    assert_eq!(
+        engine.objects[walker_index].state.command_direction,
+        CommandDirection::Right
+    );
 }
 
 #[test]
@@ -324,8 +971,8 @@ protected func QueryWorld()
     );
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
-        engine.objects.len(),
-        "enumeration fills one complete object view exactly once"
+        1,
+        "scalar ObjectCount enumeration retains only the executing-object snapshot"
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
@@ -580,6 +1227,455 @@ fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
 }
 
 #[test]
+fn legacy_object_count_filters_scalars_without_full_state_materialization() {
+    // FnObjectCount applies the fixed-parameter C4Game::FindObject predicates
+    // to live scalar fields while counting every match
+    // (oracle-src-pinned src/C4Script.cpp:2085-2111; src/C4Game.cpp:1337-1424).
+    let mut engine = Engine::with_seed(0);
+    for definition in [
+        Definition::from_script("TARG", "Target", "#strict\n").expect("target compiles"),
+        Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
+        Definition::from_script(
+            "SRCH",
+            "Searcher",
+            "#strict\nprotected func CountTargets() { return ObjectCount(TARG); }\n",
+        )
+        .expect("searcher compiles"),
+    ] {
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+    }
+    for _ in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("FILL"))
+            .expect("filler spawns");
+    }
+    for _ in 0..2 {
+        engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+    }
+    let searcher = engine
+        .spawn_object(SpawnConfig::new("SRCH"))
+        .expect("searcher spawns");
+    let searcher = engine.find_object_index(searcher).expect("searcher exists");
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(searcher, "CountTargets", Vec::new())
+            .expect("ObjectCount succeeds"),
+        Value::Int(2)
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "only the executing-object snapshot is materialized"
+    );
+}
+
+#[test]
+fn criterion_object_count_filters_scalars_without_full_state_materialization() {
+    // C4FindObject::Check reads ID and Distance directly from each live
+    // C4Object; scalar criterion trees do not copy object state while walking
+    // candidates (oracle-src-pinned src/C4FindObject.cpp:188-226, 566-611).
+    let mut engine = Engine::with_seed(0);
+    for definition in [
+        Definition::from_script("TARG", "Target", "#strict\n").expect("target compiles"),
+        Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
+        Definition::from_script(
+            "SRCH",
+            "Searcher",
+            "#strict\nprotected func CountTargets() { return ObjectCount2([20, TARG], [14, 0, 10, 50]); }\n",
+        )
+        .expect("searcher compiles"),
+    ] {
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+    }
+    for x in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+            .expect("filler spawns");
+    }
+    for x in [10, 20] {
+        engine
+            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(x, 10)))
+            .expect("target spawns");
+    }
+    let searcher = engine
+        .spawn_object(SpawnConfig::new("SRCH").with_position(Vector2::new(0, 10)))
+        .expect("searcher spawns");
+    let searcher = engine.find_object_index(searcher).expect("searcher exists");
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(searcher, "CountTargets", Vec::new())
+            .expect("ObjectCount2 succeeds"),
+        Value::Int(2)
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "only the executing-object snapshot is materialized"
+    );
+}
+
+#[test]
+fn criterion_find_object_filters_scalars_without_full_state_materialization() {
+    // C4FindObject::Find calls scalar Check predicates directly on each live
+    // C4Object and returns the first match; no candidate state is copied
+    // (oracle-src-pinned src/C4FindObject.cpp:180-199, 566-611).
+    let mut engine = Engine::with_seed(0);
+    for definition in [
+        Definition::from_script("TARG", "Target", "#strict\n").expect("target compiles"),
+        Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
+        Definition::from_script(
+            "SRCH",
+            "Searcher",
+            "#strict\nprotected func FindTarget() { return FindObject2([20, TARG], [14, 0, 10, 50]); }\n",
+        )
+        .expect("searcher compiles"),
+    ] {
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+    }
+    for x in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+            .expect("filler spawns");
+    }
+    let target = engine
+        .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(20, 10)))
+        .expect("target spawns");
+    let searcher = engine
+        .spawn_object(SpawnConfig::new("SRCH").with_position(Vector2::new(0, 10)))
+        .expect("searcher spawns");
+    let searcher = engine.find_object_index(searcher).expect("searcher exists");
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(searcher, "FindTarget", Vec::new())
+            .expect("FindObject2 succeeds"),
+        Value::Object(target.as_u64())
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "only the executing-object snapshot is materialized"
+    );
+}
+
+#[test]
+fn criterion_callback_tree_rejects_scalar_prefix_without_materialization() {
+    // C4FindObjectAnd::Check evaluates children in stored order and returns
+    // immediately when a scalar owner child fails, before the later Func
+    // child can run (oracle-src-pinned src/C4FindObject.cpp:390-410,
+    // 653-662). The driver reads that same live object; it need not project
+    // callback state for a predicate the scalar prefix already rejected.
+    let mut engine = Engine::with_seed(0);
+    for definition in [
+        Definition::from_script(
+            "TARG",
+            "Target",
+            "#strict\nprotected func Match() { return true; }\n",
+        )
+        .expect("target compiles"),
+        Definition::from_script(
+            "SRCH",
+            "Searcher",
+            "#strict\nprotected func FindTarget() { return FindObject2([50, -99], [60, \"Match\"]); }\n",
+        )
+        .expect("searcher compiles"),
+    ] {
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+    }
+    for _ in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("TARG").with_owner(0))
+            .expect("target spawns");
+    }
+    let searcher = engine
+        .spawn_object(SpawnConfig::new("SRCH").with_owner(0))
+        .expect("searcher spawns");
+    let searcher = engine.find_object_index(searcher).expect("searcher exists");
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(searcher, "FindTarget", Vec::new())
+            .expect("FindObject2 callback tree succeeds"),
+        Value::Nil
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "only the executing object is materialized"
+    );
+}
+
+#[test]
+fn contact_callbacks_reuse_the_definition_action_library() {
+    // C4Object::ContactCheck dispatches through the live C4Def and its ActMap
+    // pointer; it does not copy the definition table per contacted direction
+    // (oracle-src-pinned src/C4Movement.cpp:166-182).
+    let mut definition = Definition::from_script(
+        "CALL",
+        "Contact caller",
+        "#strict\nprotected func ContactBottom() { SetVertex(0, 2, 4); return 0; }\n",
+    )
+    .expect("definition compiles");
+    definition.set_contact_function_calls(true);
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("CALL"))
+        .expect("object spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+
+    CONTACT_ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
+    PARTICLE_DEF_NAME_REBUILDS.with(|count| count.set(0));
+    SET_VERTEX_DEFINITION_METADATA_DEEP_CLONES.with(|count| count.set(0));
+    engine
+        .dispatch_contact_callbacks(index, MovementContactDispatch::Direct(CNAT_BOTTOM))
+        .expect("contact callback runs");
+    assert_eq!(
+        CONTACT_ACTION_LIBRARY_DEEP_CLONES.with(Cell::get),
+        0,
+        "contact dispatch shares immutable definition metadata"
+    );
+    assert_eq!(
+        PARTICLE_DEF_NAME_REBUILDS.with(Cell::get),
+        0,
+        "contact dispatch shares the immutable particle definition names"
+    );
+    assert_eq!(
+        SET_VERTEX_DEFINITION_METADATA_DEEP_CLONES.with(Cell::get),
+        0,
+        "SetVertex reads only the definition shape fields it needs"
+    );
+}
+
+#[test]
+fn no_attach_action_reuses_the_definition_action_library() {
+    // C4Object::DoMovement retains its live C4Def/ActMap pointer while
+    // NoAttachAction runs (oracle-src-pinned src/C4Movement.cpp:463-470).
+    let mut definition =
+        Definition::from_script("WALK", "Walker", "#strict\n").expect("definition compiles");
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
+    definition.configure_actions(
+        Some("Walk".to_owned()),
+        HashMap::from([
+            (
+                "Walk".to_owned(),
+                ActionSpec::for_procedure("WALK").with_next("Walk"),
+            ),
+            (
+                "Jump".to_owned(),
+                ActionSpec::for_procedure("FLIGHT").with_next("Jump"),
+            ),
+        ]),
+    );
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(Landscape::flat(64, 60));
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("WALK")
+                .with_position(Vector2::new(20, 10))
+                .with_action(ActionState::new("Walk"))
+                .with_mobile(true),
+        )
+        .expect("walker spawns");
+    let index = engine.find_object_index(object).expect("walker exists");
+    engine.objects[index].frame_t_attach = CNAT_BOTTOM;
+    let definition_id = engine.objects[index].definition_id.clone();
+    let action_library = engine
+        .definitions
+        .get(&definition_id)
+        .expect("definition exists")
+        .action_library()
+        .clone();
+
+    NO_ATTACH_ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
+    CONTAINED_CALL_ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
+    SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
+    HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(|count| count.set(0));
+    engine
+        .exec_object_movement(index, &action_library, &definition_id, &[])
+        .expect("unattached movement succeeds");
+    assert_eq!(
+        NO_ATTACH_ACTION_LIBRARY_DEEP_CLONES.with(Cell::get),
+        0,
+        "NoAttachAction shares immutable definition metadata"
+    );
+    assert_eq!(
+        CONTAINED_CALL_ACTION_LIBRARY_DEEP_CLONES.with(Cell::get),
+        0,
+        "OnActionJump lookup shares immutable definition metadata"
+    );
+    assert_eq!(
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "a missing OnActionJump needs no callback state snapshot"
+    );
+    assert_eq!(
+        HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "a missing OnActionJump needs no callback host world"
+    );
+}
+
+#[test]
+fn contact_callbacks_borrow_their_cached_world_object() {
+    // C4Object::ContactCheck and the dispatched script callback both retain
+    // the same live C4Object; entering a callback does not copy object state
+    // (oracle-src-pinned src/C4Movement.cpp:166-182).
+    let mut definition = Definition::from_script(
+        "CALL",
+        "Contact caller",
+        "#strict\nprotected func ContactBottom() { return 0; }\n",
+    )
+    .expect("definition compiles");
+    definition.set_contact_function_calls(true);
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("CALL"))
+        .expect("object spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+
+    HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(0));
+    engine
+        .dispatch_contact_callbacks(index, MovementContactDispatch::Direct(CNAT_BOTTOM))
+        .expect("contact callback runs");
+    assert_eq!(
+        HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(Cell::get),
+        0,
+        "callback setup borrows the cached world object"
+    );
+}
+
+#[test]
+fn script_callback_snapshots_share_unchanged_local_variables() {
+    // C++ callbacks retain one C4Object::Local array; taking a callback-entry
+    // view does not copy every local before the VM mutates a cell
+    // (oracle-src-pinned src/C4AulExec.cpp:343-352).
+    let mut definition = Definition::from_script(
+        "CALL",
+        "Contact caller",
+        "#strict\nlocal value; protected func ContactBottom() { return value; }\n",
+    )
+    .expect("definition compiles");
+    definition.set_contact_function_calls(true);
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("CALL")
+                .with_local_vars(HashMap::from([("value".to_string(), Value::Int(7))])),
+        )
+        .expect("object spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+
+    SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES.with(|count| count.set(0));
+    engine
+        .dispatch_contact_callbacks(index, MovementContactDispatch::Direct(CNAT_BOTTOM))
+        .expect("contact callback runs");
+    assert_eq!(
+        SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES.with(Cell::get),
+        0,
+        "callback-entry snapshots share unchanged local storage"
+    );
+}
+
+#[test]
+fn action_transitions_reuse_the_definition_action_library() {
+    // C4Object::SetActionByName resolves and applies entries through the
+    // definition's live ActMap pointer, without copying that table
+    // (oracle-src-pinned src/C4Object.cpp:4144-4228).
+    let mut definition =
+        Definition::from_script("CALL", "Action caller", "#strict\n").expect("definition compiles");
+    definition.configure_actions(
+        Some("Walk".to_string()),
+        HashMap::from([("Walk".to_string(), ActionSpec::default())]),
+    );
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("CALL").with_action(ActionState::new("Walk")))
+        .expect("object spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+    let definition_id = engine.objects[index].definition_id.clone();
+
+    ACTION_TRANSITION_ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
+    assert!(engine
+        .action_with_calls(index, &definition_id, "Idle")
+        .expect("action transition succeeds"));
+    assert_eq!(
+        ACTION_TRANSITION_ACTION_LIBRARY_DEEP_CLONES.with(Cell::get),
+        0,
+        "action transition shares immutable definition metadata"
+    );
+}
+
+#[test]
+fn effect_timers_reuse_the_definition_reflection_table() {
+    // C4Effect::Execute resolves the live C4Def carried by its object and
+    // passes that pointer through the callback; it does not copy DefCore
+    // reflection data per timer (oracle-src-pinned src/C4Effect.cpp:342-345).
+    let mut definition = Definition::from_script(
+        "CALL",
+        "Effect caller",
+        "#strict\nfunc FxLoadTimer() { return 0; }\n",
+    )
+    .expect("definition compiles");
+    definition.set_c4_callback_convention(true);
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("CALL"))
+        .expect("object spawns");
+    let index = engine.find_object_index(object).expect("object exists");
+    let definition_id = engine.objects[index].definition_id.clone();
+    let mut effect = EffectState::new("Load")
+        .with_interval(1)
+        .with_command_id(Some("CALL"));
+    effect.number = 1;
+    effect.command_target = Some(object.as_u64() as i32);
+    engine.objects[index].state.effects.push(effect.clone());
+
+    EFFECT_DEF_CORE_VALUE_DEEP_CLONES.with(|count| count.set(0));
+    engine
+        .dispatch_object_effect_events(index, &definition_id, vec![EffectEvent::timer(effect)])
+        .expect("effect timer executes");
+    assert_eq!(
+        EFFECT_DEF_CORE_VALUE_DEEP_CLONES.with(Cell::get),
+        0,
+        "effect dispatch shares immutable DefCore reflection data"
+    );
+}
+
+#[test]
 fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
     use std::sync::Mutex;
 
@@ -737,8 +1833,8 @@ protected func ContactRight()
         .expect("contact movement executes");
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
-        engine.objects.len(),
-        "the first real Contact* call materializes one complete world"
+        1,
+        "Contact*'s scalar ObjectCount retains only the executing-object snapshot"
     );
     assert_eq!(
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
@@ -853,7 +1949,7 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
         .expect("rejected movement step executes");
 
     assert_eq!(
-        engine.live_command_snapshot(walker_index).contact & CNAT_LEFT,
+        engine.live_command_snapshot(walker_index, None).contact & CNAT_LEFT,
         CNAT_LEFT,
         "the rejected candidate step latches C4Object::t_contact"
     );
@@ -1557,8 +2653,8 @@ public func MoveAndFindOrdered()
     );
     assert_eq!(
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
-        3,
-        "only the caller and two returned candidates materialize; the first sector mutation clones the entry map instead of every object"
+        1,
+        "only the caller materializes; scalar returned candidates stay in the live engine view"
     );
 }
 

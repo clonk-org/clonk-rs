@@ -435,6 +435,8 @@ impl Engine {
     }
 
     pub(crate) fn rebuild_sectors(&mut self) {
+        #[cfg(test)]
+        SECTOR_FULL_REBUILDS.with(|count| count.set(count.get().saturating_add(1)));
         // C4LSectors::Add receives the main-list order. `exec_list` stores
         // that list reversed, so rebuild each sector front-to-back here;
         // SetObjectOrder's UpdatePosResort must change area traversal too

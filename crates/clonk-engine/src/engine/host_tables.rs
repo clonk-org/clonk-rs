@@ -9,6 +9,8 @@ impl Engine {
     pub(crate) fn definition_metadata_table(
         &self,
     ) -> Rc<HashMap<DefinitionId, DefinitionMetadata>> {
+        #[cfg(test)]
+        DEFINITION_METADATA_TABLE_READS.with(|count| count.set(count.get().saturating_add(1)));
         let mut cache = self.definition_metadata_cache.borrow_mut();
         if let Some(table) = cache.as_ref() {
             return Rc::clone(table);
@@ -70,7 +72,8 @@ impl Engine {
                             fire: compat::DefinitionFireMetadata {
                                 def_core_values: compat::DefCoreValueStore::from_definition(
                                     definition,
-                                ),
+                                )
+                                .into(),
                                 fire_top: definition.fire_top(),
                                 smoke_rate: definition.smoke_rate(),
                                 lift_top: definition.lift_top(),
@@ -293,6 +296,13 @@ impl Engine {
         object: &Object,
         state_snapshot: Rc<ObjectState>,
     ) -> HostWorldObject {
+        Self::host_world_object_projection(definitions, object).with_full_state(state_snapshot)
+    }
+
+    fn host_world_object_projection(
+        definitions: &HashMap<DefinitionId, Definition>,
+        object: &Object,
+    ) -> HostWorldObject {
         #[cfg(test)]
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let definition = definitions.get(&object.definition_id);
@@ -367,7 +377,6 @@ impl Engine {
         .with_ocf(ocf)
         .with_commands(object.commands.command_views())
         .with_command_stack(object.commands.snapshot())
-        .with_full_state(state_snapshot)
         .with_compiled_mass(object.compiled_mass)
         .with_material_contents(object.material_contents.clone())
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
@@ -441,6 +450,34 @@ impl Engine {
         let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
         let object = unsafe { &*objects.as_ptr().add(index) };
         (object.id == id).then(|| params.matches_engine_object(object))
+    }
+
+    /// Test a scalar C4FindObject criterion tree against the paused engine
+    /// object without cloning its callback state.
+    ///
+    /// # Safety
+    ///
+    /// The `lazy_host_world_object` contract applies. Callback-local seeds
+    /// are resolved before this provider is consulted.
+    unsafe fn lazy_host_world_find_condition_matches(
+        source: *const (),
+        id: ObjectId,
+        condition: &compat::FindCondition,
+    ) -> Option<bool> {
+        let engine = source.cast::<Self>();
+        // SAFETY: guaranteed by the provider contract above.
+        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
+        let index = cache.1.get(&id).copied()?;
+        drop(cache);
+        // SAFETY: object storage is frozen and callback-local seeds prevent
+        // this path from reading an outstanding exclusive object borrow.
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let object = unsafe { &*objects.as_ptr().add(index) };
+        if object.id != id {
+            return None;
+        }
+        let matches = condition.matches_engine_object(object)?;
+        Some(object.state.status.is_active() && matches)
     }
 
     /// Fill every not-yet-seeded object in storage order.
@@ -590,6 +627,44 @@ impl Engine {
             .collect()
     }
 
+    pub(crate) fn note_solid_mask_host_state_changed(&self) {
+        self.solid_mask_host_state_generation
+            .set(self.solid_mask_host_state_generation.get().wrapping_add(1));
+    }
+
+    fn host_solid_mask_state(&self) -> SolidMaskHostStateCache {
+        let generation = self.solid_mask_host_state_generation.get();
+        if let Some(cached) = self
+            .solid_mask_host_state_cache
+            .borrow()
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+        {
+            return cached.clone();
+        }
+
+        let mut bakes = Vec::new();
+        let mut instance_sequences = HashMap::new();
+        for object in &self.objects {
+            #[cfg(test)]
+            HOST_SOLID_MASK_STATE_OBJECT_VISITS.with(|count| count.set(count.get() + 1));
+            if let Some(bake) = &object.solid_mask_bake {
+                bakes.push((object.id, bake.clone()));
+            }
+            if let Some(sequence) = object.solid_mask_instance_sequence {
+                instance_sequences.insert(object.id, sequence);
+            }
+        }
+        let cached = SolidMaskHostStateCache {
+            generation,
+            bakes: Rc::new(bakes),
+            instance_sequences: Rc::new(instance_sequences),
+            next_instance_sequence: self.solid_mask_staging.next_solid_mask_instance_sequence,
+        };
+        *self.solid_mask_host_state_cache.borrow_mut() = Some(cached.clone());
+        cached
+    }
+
     /// Build the shared/static portion of a script host context without
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
@@ -607,6 +682,7 @@ impl Engine {
             |players| players.iter().copied().collect(),
         );
         let crew_selection = self.crew_selection_states();
+        let solid_mask_state = self.host_solid_mask_state();
         let sky_adjustment = self
             .sky
             .as_ref()
@@ -642,22 +718,10 @@ impl Engine {
         .with_construction_check_strings(Rc::clone(&self.construction_check_strings))
         .with_control_key_names(Rc::clone(&self.control_key_names))
         .with_solid_mask_metadata(solid_mask_metadata)
-        .with_solid_mask_bakes(
-            self.objects
-                .iter()
-                .filter_map(|object| object.solid_mask_bake.clone().map(|bake| (object.id, bake)))
-                .collect(),
-        )
+        .with_shared_solid_mask_bakes(Rc::clone(&solid_mask_state.bakes))
         .with_solid_mask_instance_sequences(
-            self.objects
-                .iter()
-                .filter_map(|object| {
-                    object
-                        .solid_mask_instance_sequence
-                        .map(|sequence| (object.id, sequence))
-                })
-                .collect(),
-            self.solid_mask_staging.next_solid_mask_instance_sequence,
+            solid_mask_state.instance_sequences.as_ref().clone(),
+            solid_mask_state.next_instance_sequence,
         )
         .with_scenario_sections(
             self.scenario_sections
@@ -683,9 +747,9 @@ impl Engine {
             self.base_auto_sell_enabled,
             self.host_crew_info_state(),
         )
-        .with_particle_defs(self.particle_system.def_names())
-        .with_particle_reloads(
-            self.particle_system.reloadable_def_names(),
+        .with_shared_particle_defs(self.particle_system.shared_def_names())
+        .with_shared_particle_reloads(
+            self.particle_system.shared_reloadable_def_names(),
             Rc::clone(&self.host_requests.particle_reload_requests),
         )
         .with_definition_reloads(
@@ -784,6 +848,7 @@ impl Engine {
             .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
             .with_sector_map_borrow(Self::lazy_host_world_sector_map_borrow)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
+            .with_find_condition(Self::lazy_host_world_find_condition_matches)
         };
         self.host_world_context_base()
             .with_lazy_world_provider(provider)
@@ -1331,5 +1396,53 @@ impl Engine {
             .and_then(Landscape::raster_state)
             .and_then(crate::landscape::LandscapeRasterState::map_creator)
             .map(map_creator_s2::MapCreatorS2State::callbacks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_host_contexts_reuse_unchanged_solid_mask_state() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        for _ in 0..2 {
+            engine
+                .spawn_object(SpawnConfig::new("Plain"))
+                .expect("plain object spawns");
+        }
+
+        HOST_SOLID_MASK_STATE_OBJECT_VISITS.with(|count| count.set(0));
+        let _ = engine.host_world_context();
+        let _ = engine.host_world_context();
+
+        assert_eq!(HOST_SOLID_MASK_STATE_OBJECT_VISITS.with(Cell::get), 2);
+    }
+
+    #[test]
+    fn callback_contexts_share_unchanged_solid_mask_bakes() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("Plain", "Plain", "func Noop() { return 0; }")
+            .expect("plain definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("Plain"))
+            .expect("plain object spawns");
+        let index = engine
+            .find_object_index(object)
+            .expect("plain object exists");
+
+        HOST_SOLID_MASK_BAKE_VECTOR_CLONES.with(|count| count.set(0));
+        engine
+            .call_object_function(index, "Noop", Vec::new())
+            .expect("first callback succeeds");
+        engine
+            .call_object_function(index, "Noop", Vec::new())
+            .expect("second callback succeeds");
+
+        assert_eq!(HOST_SOLID_MASK_BAKE_VECTOR_CLONES.with(Cell::get), 0);
     }
 }

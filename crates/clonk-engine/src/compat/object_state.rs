@@ -6382,10 +6382,18 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         // UpdateShape reads the live definition shape, so resolve it before
         // borrowing the scope.
-        let metadata = foreign
+        let (definition_vertices, line, stretch_growth, rotateable) = foreign
             .or(active)
             .and_then(|id| context.object_effective_definition_id(id))
-            .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+            .and_then(|definition_id| context.definition_metadata(&definition_id))
+            .map(|metadata| {
+                (
+                    metadata.vertices.clone(),
+                    metadata.line,
+                    metadata.stretch_growth,
+                    metadata.rotateable,
+                )
+            })
             .unwrap_or_default();
         let preview_target = foreign.or(active);
         let scope = match foreign {
@@ -6404,7 +6412,7 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let mut buffer = scope.shape_vertex_buffer();
         if own_vertex_mode != 0 && !scope.staged_own_vertices {
-            buffer.create_own_original_copy(&metadata.vertices);
+            buffer.create_own_original_copy(&definition_vertices);
             scope.staged_own_vertices = true;
         }
         let Some(vertex) = buffer.slot_mut(slot) else {
@@ -6427,10 +6435,15 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                 own_vertex_mode != VTX_SET_PERMANENT_UPD;
         }
         if own_vertex_mode == VTX_SET_PERMANENT_UPD {
-            if metadata.line == 0 {
+            if line == 0 {
                 scope.pending_update.shape_override = Some(None);
             }
-            scope.refresh_shape_preview(&metadata);
+            scope.refresh_shape_preview_from_parts(
+                &definition_vertices,
+                line,
+                stretch_growth,
+                rotateable,
+            );
             if let Some(target) = preview_target {
                 context.preview_live_object_sector(target);
             }

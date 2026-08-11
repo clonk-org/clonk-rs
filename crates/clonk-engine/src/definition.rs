@@ -165,7 +165,7 @@ pub struct Definition {
     pub(crate) has_construction: bool,
     pub(crate) has_initialize: bool,
     pub(crate) has_step: bool,
-    action_library: ActionLibrary,
+    action_library: SharedActionLibrary,
     /// Whether `C4DefScriptHost::AfterLink` populated action and TimerCall
     /// function pointers for the current linked script tree.
     callbacks_linked: bool,
@@ -508,7 +508,7 @@ impl Definition {
             has_construction,
             has_initialize,
             has_step,
-            action_library: ActionLibrary::default(),
+            action_library: ActionLibrary::default().into(),
             callbacks_linked: false,
             action_graphics: HashMap::new(),
             crew_member: false,
@@ -1223,7 +1223,7 @@ impl Definition {
         default_action: Option<String>,
         specs: HashMap<String, ActionSpec>,
     ) {
-        self.action_library = ActionLibrary::new(default_action, specs);
+        self.action_library = ActionLibrary::new(default_action, specs).into();
         self.mark_callbacks_unlinked();
     }
 
@@ -1250,11 +1250,15 @@ impl Definition {
         &self.action_library
     }
 
+    pub(crate) fn shared_action_library_handle(&self) -> SharedActionLibrary {
+        self.action_library.clone()
+    }
+
     fn shared_action_library(&self, world: &HostWorldContext) -> SharedActionLibrary {
         world
             .definition_metadata(self.id.as_str())
             .map(|metadata| metadata.action_library.clone())
-            .unwrap_or_else(|| self.action_library.clone().into())
+            .unwrap_or_else(|| self.action_library.clone())
     }
 
     pub fn action_graphics(&self) -> &HashMap<String, DefinitionActionGraphics> {
@@ -4581,6 +4585,8 @@ impl Definition {
                     })
                     .flatten()
             });
+        #[cfg(test)]
+        let exec_started = std::time::Instant::now();
         let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
             ambient.map(|(state, object_id)| {
                 let ambient_walk_rotation = ambient_metadata
@@ -4776,6 +4782,9 @@ impl Definition {
                 )
             },
         );
+        #[cfg(test)]
+        EFFECT_EXEC_NANOS
+            .with(|elapsed| elapsed.set(elapsed.get() + exec_started.elapsed().as_nanos() as u64));
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();

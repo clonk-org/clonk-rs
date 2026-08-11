@@ -485,7 +485,7 @@ impl Engine {
                 base_graphics,
                 graphics_overlays,
                 draw_transform,
-                local_vars,
+                local_vars: local_vars.into(),
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
                 solid_mask_override: solid_mask,

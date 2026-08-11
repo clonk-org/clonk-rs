@@ -1019,7 +1019,7 @@ impl Engine {
             if let Some(action_library) = self
                 .definitions
                 .get(&definition_id)
-                .map(|definition| definition.action_library().clone())
+                .map(Definition::shared_action_library_handle)
             {
                 self.apply_no_attach_action(
                     idx,

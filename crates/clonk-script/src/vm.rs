@@ -54,6 +54,19 @@ type HostCallArgs = SmallVec<[HostCallArg; MAX_CALL_PARAMETERS]>;
 type CallBindings = SmallVec<[Binding; MAX_CALL_PARAMETERS]>;
 type DiagnosticObjectFormatter = fn(u64) -> Option<(String, Option<String>)>;
 
+#[derive(Clone, Copy)]
+enum ResolvedHostFunction<'a> {
+    Value(&'a RegisteredHostFunction),
+    Reference(&'a HostReferenceFunction),
+}
+
+#[derive(Clone, Copy)]
+enum CompiledCallTarget<'a> {
+    Host(ResolvedHostFunction<'a>),
+    Script(ScriptFunctionTarget<'a>),
+    LegacyConstant,
+}
+
 /// Whether a C4Aul entry point treats a failed script-parameter conversion as
 /// an error. Scripted C4Effect callbacks request C++'s
 /// `nonStrict3WarnConversionOnly` behavior for pre-`#strict 3` functions.
@@ -82,9 +95,31 @@ thread_local! {
     #[cfg(test)]
     static COMPILED_FUNCTION_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
+    static COMPILED_BINDING_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static COMPILED_PREFLIGHT_NON_CALL_VISITS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static DIAGNOSTIC_OBJECT_FORMATTER_CALLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static DIAGNOSTIC_FRAME_STRING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static PARAMETER_SCOPE_HEAP_TABLES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
     static RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static EXTERNAL_ARGUMENT_PRE_SET_CLONES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static GENERIC_HOST_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static NATIVE_HOST_ARGUMENT_VALUE_CLONES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static DIRECT_BINDING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static NESTED_GENERIC_SCRIPT_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static FORCE_LEGACY_SCRIPT_CALL_FRAMES: Cell<bool> = const { Cell::new(false) };
+    #[cfg(test)]
+    static FORCE_LEGACY_COMPILED_EXECUTOR: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -105,6 +140,56 @@ fn compiled_function_execution_count() -> usize {
 }
 
 #[cfg(test)]
+fn reset_compiled_binding_heap_spills() {
+    COMPILED_BINDING_HEAP_SPILLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn compiled_binding_heap_spills() -> usize {
+    COMPILED_BINDING_HEAP_SPILLS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_compiled_preflight_non_call_visits() {
+    COMPILED_PREFLIGHT_NON_CALL_VISITS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn compiled_preflight_non_call_visits() -> usize {
+    COMPILED_PREFLIGHT_NON_CALL_VISITS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_diagnostic_object_formatter_calls() {
+    DIAGNOSTIC_OBJECT_FORMATTER_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn diagnostic_object_formatter_calls() -> usize {
+    DIAGNOSTIC_OBJECT_FORMATTER_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_diagnostic_frame_string_allocations() {
+    DIAGNOSTIC_FRAME_STRING_ALLOCATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn diagnostic_frame_string_allocations() -> usize {
+    DIAGNOSTIC_FRAME_STRING_ALLOCATIONS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_parameter_scope_heap_tables() {
+    PARAMETER_SCOPE_HEAP_TABLES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn parameter_scope_heap_tables() -> usize {
+    PARAMETER_SCOPE_HEAP_TABLES.with(Cell::get)
+}
+
+#[cfg(test)]
 fn reset_runtime_container_registration_traversals() {
     RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(|count| count.set(0));
 }
@@ -122,6 +207,78 @@ fn reset_external_argument_pre_set_clones() {
 #[cfg(test)]
 fn external_argument_pre_set_clones() -> usize {
     EXTERNAL_ARGUMENT_PRE_SET_CLONES.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_generic_host_resolutions() {
+    GENERIC_HOST_RESOLUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn generic_host_resolutions() -> usize {
+    GENERIC_HOST_RESOLUTIONS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_native_host_argument_value_clones() {
+    NATIVE_HOST_ARGUMENT_VALUE_CLONES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn native_host_argument_value_clones() -> usize {
+    NATIVE_HOST_ARGUMENT_VALUE_CLONES.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_direct_binding_allocations() {
+    DIRECT_BINDING_ALLOCATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn direct_binding_allocations() -> usize {
+    DIRECT_BINDING_ALLOCATIONS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_nested_generic_script_resolutions() {
+    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn nested_generic_script_resolutions() -> usize {
+    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(Cell::get)
+}
+
+#[cfg(test)]
+struct LegacyScriptCallFrameGuard {
+    call_frames: bool,
+    compiled_executor: bool,
+}
+
+#[cfg(test)]
+impl LegacyScriptCallFrameGuard {
+    fn enter() -> Self {
+        Self {
+            call_frames: FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(|flag| flag.replace(true)),
+            compiled_executor: FORCE_LEGACY_COMPILED_EXECUTOR.with(|flag| flag.replace(true)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LegacyScriptCallFrameGuard {
+    fn drop(&mut self) {
+        FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(|flag| flag.set(self.call_frames));
+        FORCE_LEGACY_COMPILED_EXECUTOR.with(|flag| flag.set(self.compiled_executor));
+    }
+}
+
+fn resolved_script_calls_enabled() -> bool {
+    #[cfg(test)]
+    if FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(Cell::get) {
+        return false;
+    }
+    true
 }
 
 struct ValueStackReservation {
@@ -272,7 +429,14 @@ pub type ValueCell = Rc<RefCell<Value>>;
 /// hasher changes nothing but the cost of a lookup.
 type SlotMap = Rc<RefCell<FxHashMap<i32, ValueCell>>>;
 type NamedLocalMap = Rc<RefCell<FxHashMap<String, ValueCell>>>;
-type FunctionVarMap = Rc<RefCell<FxHashMap<String, Binding>>>;
+
+#[derive(Default)]
+struct FrameLocals {
+    var_slots: RefCell<FxHashMap<i32, ValueCell>>,
+    function_vars: RefCell<FxHashMap<String, Binding>>,
+}
+
+type FrameLocalMap = Rc<FrameLocals>;
 
 pub fn value_cell(value: Value) -> ValueCell {
     Rc::new(RefCell::new(value))
@@ -385,16 +549,24 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
         .clone()
 }
 
+fn frame_slot_cell(frame: &FrameLocals, index: i32) -> ValueCell {
+    frame
+        .var_slots
+        .borrow_mut()
+        .entry(index.max(0))
+        .or_insert_with(|| value_cell(Value::Nil))
+        .clone()
+}
+
 /// The script frame immediately calling a native host function. C++ exposes
 /// all pieces through `cthr->Caller`: `NumVars` backs `Var(n)`, while native
 /// compatibility functions select either `Func->Owner->Strict` or
 /// `Func->pOrgScript->Strict` depending on their C++ implementation.
 #[derive(Clone)]
 pub(crate) struct ScriptCallerContext {
-    var_slots: SlotMap,
-    /// `cthr->Caller->Vars`, keyed by the caller function's `VarNamed`
-    /// table. Parameters and object locals deliberately do not appear here.
-    function_vars: FunctionVarMap,
+    /// `cthr->Caller->NumVars` and `cthr->Caller->Vars`. Parameters and
+    /// object locals deliberately do not appear in the named table.
+    frame_locals: FrameLocalMap,
     /// Caller-local lookup host: `Func->Owner` for an ordinary function and
     /// the declaring `Func->LinkedTo` host for an engine-global function.
     /// This is intentionally independent from `this`, whose definition may
@@ -459,13 +631,13 @@ struct ActiveDiagnosticFrame {
 enum DiagnosticFrameKind {
     Function {
         host_identity: Option<ScriptHostIdentity>,
-        function: String,
+        function: Arc<str>,
         arguments: CallValues,
         argument_reference_mask: u16,
-        object_context: Option<String>,
-        definition_context: Option<String>,
+        object_id: Option<u64>,
+        definition_context: Option<Arc<str>>,
         source_host_identity: Option<ScriptHostIdentity>,
-        source_name: Option<String>,
+        source_name: Option<Arc<str>>,
         source_line: usize,
     },
     DirectExec(DirectExecDiagnosticFrame),
@@ -575,6 +747,8 @@ pub fn with_diagnostic_object_formatter<R>(
 }
 
 fn diagnostic_object_display(id: u64) -> Option<(String, Option<String>)> {
+    #[cfg(test)]
+    DIAGNOSTIC_OBJECT_FORMATTER_CALLS.with(|count| count.set(count.get() + 1));
     DIAGNOSTIC_OBJECT_FORMATTER.with(|cell| cell.get().and_then(|formatter| formatter(id)))
 }
 
@@ -640,7 +814,7 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
                     function,
                     arguments,
                     argument_reference_mask,
-                    object_context,
+                    object_id,
                     definition_context,
                     source_host_identity,
                     source_name,
@@ -655,7 +829,7 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
                         argument_count -= 1;
                     }
                     RuntimeCallFrame::new(
-                        function.clone(),
+                        function.to_string(),
                         arguments[..argument_count]
                             .iter()
                             .enumerate()
@@ -668,10 +842,14 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
                             })
                             .collect::<Vec<_>>()
                             .join(","),
-                        object_context.clone(),
-                        definition_context.clone(),
+                        object_id.map(|id| {
+                            diagnostic_object_display(id)
+                                .map(|(display, _)| display)
+                                .unwrap_or_else(|| id.to_string())
+                        }),
+                        definition_context.as_deref().map(str::to_owned),
                         *source_host_identity,
-                        source_name.clone(),
+                        source_name.as_deref().map(str::to_owned),
                         *source_line,
                     )
                 }
@@ -808,13 +986,15 @@ struct ScriptDiagnosticGuard {
 }
 
 impl ScriptDiagnosticGuard {
+    #[allow(clippy::too_many_arguments)]
     fn enter(
-        name: &str,
+        name: Arc<str>,
         profile_host_identity: Option<ScriptHostIdentity>,
         args: CallValues,
         argument_reference_mask: u16,
         this_value: &Value,
-        owner_definition_name: Option<&str>,
+        definition_context: Option<Arc<str>>,
+        source_name: Option<Arc<str>>,
         function: &Function,
     ) -> Self {
         let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
@@ -837,27 +1017,21 @@ impl ScriptDiagnosticGuard {
                     Some(target) => profile_host_identity == Some(target),
                 })
                 .map(|_| Instant::now());
-            let object_context = match this_value {
+            let object_id = match this_value {
                 Value::Object(0) | Value::Nil => None,
-                Value::Object(id) => Some(
-                    diagnostic_object_display(*id)
-                        .map(|(display, _)| display)
-                        .unwrap_or_else(|| this_value.to_string()),
-                ),
+                Value::Object(id) => Some(*id),
                 _ => None,
             };
             diagnostics.frames.push(ActiveDiagnosticFrame {
                 kind: DiagnosticFrameKind::Function {
                     host_identity: profile_host_identity,
-                    function: name.to_string(),
+                    function: name,
                     arguments: args,
                     argument_reference_mask,
-                    object_context,
-                    definition_context: (function.access != AccessLevel::Global)
-                        .then(|| owner_definition_name.map(str::to_owned))
-                        .flatten(),
+                    object_id,
+                    definition_context,
                     source_host_identity: function.source_host_identity(),
-                    source_name: function.source_name().map(str::to_owned),
+                    source_name,
                     source_line: function.source_line(),
                 },
                 profile_started_at,
@@ -935,7 +1109,7 @@ fn exit_diagnostic_frame(returned: Option<&Value>, record_profile: bool) {
                         if let Some(started_at) = frame.profile_started_at {
                             if frame.kind.matches_profiler_target(run.target) {
                                 *run.elapsed
-                                    .entry((*host_identity, function.clone()))
+                                    .entry((*host_identity, function.to_string()))
                                     .or_default() += started_at.elapsed();
                             }
                         }
@@ -1046,22 +1220,22 @@ pub fn caller_var_slots() -> Option<CallerVarSlots> {
     HOST_CALLER_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|context| CallerVarSlots(context.var_slots.clone()))
+            .map(|context| CallerVarSlots(context.frame_locals.clone()))
     })
 }
 
 /// A live handle onto the caller's numbered var slots; writes go straight
 /// into the suspended call's storage like C++ reference assignment.
-pub struct CallerVarSlots(SlotMap);
+pub struct CallerVarSlots(FrameLocalMap);
 
 impl CallerVarSlots {
     /// C4ValueList::GetItem semantics: unset slots read nil.
     pub fn get(&self, index: i32) -> Value {
-        slot_cell(&self.0, index).borrow().clone()
+        frame_slot_cell(&self.0, index).borrow().clone()
     }
 
     pub fn set(&self, index: i32, value: Value) {
-        let cell = slot_cell(&self.0, index);
+        let cell = frame_slot_cell(&self.0, index);
         notify_legacy_path_pins_before_cell_write(&cell, None, false);
         *cell.borrow_mut() = value;
     }
@@ -1443,13 +1617,80 @@ fn c4_map_assign_property_set(map: &mut ValueMap, key: String, value: Value) {
 
 type RawIdentityCell = Rc<RefCell<Option<RawIdentity>>>;
 
-#[derive(Clone)]
+struct InlineBinding {
+    initial: TrackedValue,
+    promoted: std::cell::OnceCell<(ValueCell, RawIdentityCell)>,
+}
+
+impl InlineBinding {
+    fn new(initial: TrackedValue) -> Self {
+        Self {
+            initial,
+            promoted: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn cells(&self) -> &(ValueCell, RawIdentityCell) {
+        self.promoted.get_or_init(|| {
+            (
+                value_cell(self.initial.value.clone()),
+                Rc::new(RefCell::new(self.initial.identity.clone())),
+            )
+        })
+    }
+
+    fn read_tracked(&self) -> TrackedValue {
+        let Some((value, identity)) = self.promoted.get() else {
+            return self.initial.clone();
+        };
+        let identity = legacy_identity_for_value_copy(value, &[], identity.borrow().clone());
+        TrackedValue {
+            value: value.borrow().clone(),
+            identity,
+        }
+    }
+
+    fn lvalue(&self) -> LValueRef {
+        let (value, identity) = self.cells();
+        LValueRef::tracked_cell(value.clone(), identity.clone())
+    }
+}
+
+impl Clone for InlineBinding {
+    fn clone(&self) -> Self {
+        let cloned = Self::new(self.read_tracked());
+        if let Some((value, identity)) = self.promoted.get() {
+            cloned
+                .promoted
+                .set((value.clone(), identity.clone()))
+                .expect("fresh inline binding accepts promoted cells");
+        }
+        cloned
+    }
+}
+
 enum Binding {
     Direct {
         value: ValueCell,
         identity: RawIdentityCell,
     },
+    /// An unnamed C4Aul parameter slot. `Par()` and forwarded `...` can read
+    /// it, but no source-level name can take its address or assign it.
+    Inline(InlineBinding),
     Reference(LValueRef),
+}
+
+impl Clone for Binding {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Direct { value, identity } => Self::Direct {
+                value: value.clone(),
+                identity: identity.clone(),
+            },
+            Self::Inline(inline) => Self::Inline(inline.clone()),
+            Self::Reference(reference) => Self::Reference(reference.clone()),
+        }
+    }
 }
 
 impl Binding {
@@ -1458,6 +1699,8 @@ impl Binding {
     }
 
     fn tracked(tracked: TrackedValue) -> Self {
+        #[cfg(test)]
+        DIRECT_BINDING_ALLOCATIONS.with(|count| count.set(count.get() + 1));
         Binding::Direct {
             value: value_cell(tracked.value),
             identity: Rc::new(RefCell::new(tracked.identity)),
@@ -1474,6 +1717,7 @@ impl Binding {
                     identity,
                 })
             }
+            Binding::Inline(inline) => Ok(inline.read_tracked()),
             Binding::Reference(reference) => reference.read_tracked(),
         }
     }
@@ -1504,6 +1748,7 @@ impl Binding {
                 *identity.borrow_mut() = tracked.identity;
                 Ok(())
             }
+            Binding::Inline(inline) => inline.lvalue().write_tracked(tracked),
             Binding::Reference(reference) => reference.write_tracked(tracked),
         }
     }
@@ -1513,13 +1758,18 @@ impl Binding {
             Binding::Direct { value, identity } => {
                 LValueRef::tracked_cell(value.clone(), identity.clone())
             }
+            Binding::Inline(inline) => inline.lvalue(),
             Binding::Reference(reference) => reference.clone(),
         }
     }
 
     fn value_slot_is_same_zero_id(&self, value: &Value) -> bool {
         c4_set_copy_is_zero_id(value)
-            && matches!(self, Binding::Direct { value, .. } if c4_set_copy_is_zero_id(&value.borrow()))
+            && match self {
+                Binding::Direct { value, .. } => c4_set_copy_is_zero_id(&value.borrow()),
+                Binding::Inline(inline) => c4_set_copy_is_zero_id(&inline.read_tracked().value),
+                Binding::Reference(_) => false,
+            }
     }
 }
 
@@ -2673,9 +2923,19 @@ impl CallArg {
         self.read_tracked().map(|tracked| tracked.value)
     }
 
+    fn into_value(self) -> Result<Value, RuntimeError> {
+        match self {
+            CallArg::Value(tracked) => Ok(tracked.value),
+            CallArg::Reference(reference) => reference.read(),
+        }
+    }
+
+    fn value_slot_is_zero_id(&self) -> bool {
+        matches!(self, CallArg::Value(tracked) if c4_set_copy_is_zero_id(&tracked.value))
+    }
+
     fn value_slot_is_same_zero_id(&self, value: &Value) -> bool {
-        c4_set_copy_is_zero_id(value)
-            && matches!(self, CallArg::Value(tracked) if c4_set_copy_is_zero_id(&tracked.value))
+        c4_set_copy_is_zero_id(value) && self.value_slot_is_zero_id()
     }
 }
 
@@ -3007,7 +3267,7 @@ pub struct Vm<'a> {
     functions: &'a FxHashMap<String, Function>,
     host_identity: ScriptHostIdentity,
     /// Destination definition name for local-function diagnostics.
-    owner_definition_name: Option<&'a str>,
+    owner_definition_name: Option<Arc<str>>,
     /// `C4AulScript::ScriptName` of the DirectExec receiver. Temporary
     /// expression contexts derive their visible name from this host, never
     /// from an enclosing temporary script.
@@ -3178,7 +3438,7 @@ impl<'a> Vm<'a> {
     }
 
     pub(crate) fn with_owner_definition_name(mut self, name: Option<&'a str>) -> Self {
-        self.owner_definition_name = name;
+        self.owner_definition_name = name.map(Arc::from);
         self
     }
 
@@ -3387,6 +3647,34 @@ impl<'a> Vm<'a> {
             value,
             identity: tracked_identity,
         }
+    }
+
+    fn compiled_named_value(
+        &self,
+        name: &str,
+        env: &Environment,
+    ) -> Result<TrackedValue, RuntimeError> {
+        if let Some(value) = env.get_tracked(name)? {
+            return Ok(value);
+        }
+        if let Some(cell) = self.global_variable_cell(name) {
+            return Ok(self.read_tracked_named_cell(name, &cell));
+        }
+        if name == "this" {
+            return Ok(TrackedValue::runtime(self.this_value.clone()));
+        }
+        if let Some(cell) = self.global_constant_cell(name) {
+            return Ok(Self::fold_legacy_zero_tracked(
+                self.read_tracked_named_cell(name, &cell),
+                env.strict_level,
+            ));
+        }
+        self.constants
+            .and_then(|constants| constants.get(name).cloned())
+            .map(|value| {
+                Self::fold_legacy_zero_tracked(self.tracked_constant(name, value), env.strict_level)
+            })
+            .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))
     }
 
     /// Resolves a LocalN target cell: falsy targets and the executing
@@ -3999,6 +4287,10 @@ impl<'a> Vm<'a> {
 
         maybe_grow(|| {
             if let Some(function) = self.engine_script_function(name) {
+                #[cfg(test)]
+                if caller.is_some() {
+                    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+                }
                 let target = if self.global_functions.is_some() {
                     ScriptFunctionTarget::validated(function)
                 } else {
@@ -4021,6 +4313,8 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_functions.get(name) {
+                #[cfg(test)]
+                GENERIC_HOST_RESOLUTIONS.with(|count| count.set(count.get() + 1));
                 let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_function_call_args(name, function, args)
@@ -4029,6 +4323,8 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_reference_function(name) {
+                #[cfg(test)]
+                GENERIC_HOST_RESOLUTIONS.with(|count| count.set(count.get() + 1));
                 let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_reference_function(name, function, args)
@@ -4199,6 +4495,70 @@ impl<'a> Vm<'a> {
             .or_else(|| self.engine_global_script_function(name))
     }
 
+    fn resolved_script_function(
+        &self,
+        name: &str,
+        engine_scope: bool,
+    ) -> Option<ScriptFunctionTarget<'_>> {
+        if engine_scope {
+            return self.engine_script_function(name).map(|function| {
+                if self.global_functions.is_some() {
+                    ScriptFunctionTarget::validated(function)
+                } else {
+                    ScriptFunctionTarget::installed(function)
+                }
+            });
+        }
+        self.own_script_function(name)
+            .map(ScriptFunctionTarget::installed)
+            .or_else(|| {
+                self.global_functions
+                    .and_then(|functions| functions.get(name))
+                    .map(ScriptFunctionTarget::validated)
+            })
+    }
+
+    fn invoke_resolved_script_raw(
+        &self,
+        name: &str,
+        target: ScriptFunctionTarget<'_>,
+        args: CallArgs,
+        depth: usize,
+        object_state: ObjectState,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+        maybe_grow(|| self.invoke_script_function(name, target, args, depth, object_state, caller))
+    }
+
+    fn invoke_resolved_script_value(
+        &self,
+        name: &str,
+        target: ScriptFunctionTarget<'_>,
+        args: CallArgs,
+        depth: usize,
+        object_state: ObjectState,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_resolved_script_raw(name, target, args, depth, object_state, caller)?
+            .into_value_on_stack()
+    }
+
+    fn invoke_resolved_script_tracked_value(
+        &self,
+        name: &str,
+        target: ScriptFunctionTarget<'_>,
+        args: CallArgs,
+        depth: usize,
+        object_state: ObjectState,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<TrackedValue, RuntimeError> {
+        self.invoke_resolved_script_raw(name, target, args, depth, object_state, caller)?
+            .into_tracked_on_stack()
+    }
+
     fn invoke_reference(
         &self,
         name: &str,
@@ -4229,6 +4589,10 @@ impl<'a> Vm<'a> {
 
         maybe_grow(|| {
             if let Some(function) = self.own_script_function(name) {
+                #[cfg(test)]
+                if caller.is_some() {
+                    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+                }
                 return self.invoke_script_function(
                     name,
                     ScriptFunctionTarget::installed(function),
@@ -4247,6 +4611,10 @@ impl<'a> Vm<'a> {
                 .global_functions
                 .and_then(|functions| functions.get(name))
             {
+                #[cfg(test)]
+                if caller.is_some() {
+                    NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+                }
                 return self.invoke_script_function(
                     name,
                     ScriptFunctionTarget::validated(function),
@@ -4262,6 +4630,8 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_functions.get(name) {
+                #[cfg(test)]
+                GENERIC_HOST_RESOLUTIONS.with(|count| count.set(count.get() + 1));
                 // Host functions run under the CALLER's var-slot table
                 // (cthr->Caller->NumVars) for the FindConstructionSite
                 // write-back seam (C4Script.cpp:1966-1978).
@@ -4273,6 +4643,8 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_reference_function(name) {
+                #[cfg(test)]
+                GENERIC_HOST_RESOLUTIONS.with(|count| count.set(count.get() + 1));
                 let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_reference_function(name, function, args)
@@ -4349,10 +4721,18 @@ impl<'a> Vm<'a> {
             .fold(0_u16, |mask, (index, arg)| {
                 mask | (u16::from(matches!(arg, CallArg::Reference(_))) << index)
             });
-        let compiled = function
-            .compiled
-            .get_or_init(|| CompiledFunctionCache::new(function))
-            .validated(function, target.validate_compiled_source);
+        #[cfg(test)]
+        let force_legacy_compiled_executor = FORCE_LEGACY_COMPILED_EXECUTOR.with(Cell::get);
+        #[cfg(not(test))]
+        let force_legacy_compiled_executor = false;
+        let compiled = (!force_legacy_compiled_executor)
+            .then(|| {
+                function
+                    .compiled
+                    .get_or_init(|| CompiledFunctionCache::new(function))
+                    .validated(function, target.validate_compiled_source)
+            })
+            .flatten();
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -4401,7 +4781,7 @@ impl<'a> Vm<'a> {
         } else {
             hoist_function_vars(&function.body, &mut env);
         }
-        let function_var_count = env.function_vars.borrow().len();
+        let function_var_count = env.frame_locals.function_vars.borrow().len();
         value_stack.grow(function_var_count)?;
 
         let debug_args = self.call_args_to_values(&args[..debug_arg_count])?;
@@ -4412,15 +4792,39 @@ impl<'a> Vm<'a> {
         let debugger_args = debugger_callback.map(|_| debug_args.clone());
         let profile_host_identity =
             (function.access != AccessLevel::Global).then_some(self.host_identity);
+        let cached_diagnostic_strings = compiled.filter(|compiled| {
+            compiled.diagnostic_name.as_ref() == name
+                && compiled.diagnostic_source_name.as_deref() == function.source_name()
+        });
+        let (diagnostic_name, diagnostic_source_name, _diagnostic_string_allocations) =
+            match cached_diagnostic_strings {
+                Some(compiled) => (
+                    Arc::clone(&compiled.diagnostic_name),
+                    compiled.diagnostic_source_name.clone(),
+                    0,
+                ),
+                None => (
+                    Arc::from(name),
+                    function.source_name().map(Arc::from),
+                    1 + usize::from(function.source_name().is_some()),
+                ),
+            };
+        let diagnostic_definition_name = (function.access != AccessLevel::Global)
+            .then(|| self.owner_definition_name.clone())
+            .flatten();
         let mut diagnostic = ScriptDiagnosticGuard::enter(
-            name,
+            diagnostic_name,
             profile_host_identity,
             debug_args,
             debug_arg_reference_mask,
             &self.this_value,
-            self.owner_definition_name,
+            diagnostic_definition_name,
+            diagnostic_source_name,
             function,
         );
+        #[cfg(test)]
+        DIAGNOSTIC_FRAME_STRING_ALLOCATIONS
+            .with(|count| count.set(count.get() + _diagnostic_string_allocations));
         if let Some(callback) = debugger_callback {
             callback(
                 name,
@@ -4439,7 +4843,7 @@ impl<'a> Vm<'a> {
         }
 
         let result = if let Some(compiled) = compiled {
-            match compiled.execute(self, &env)? {
+            match compiled.execute(self, &env, depth)? {
                 Some(result) => {
                     #[cfg(test)]
                     COMPILED_FUNCTION_EXECUTIONS.with(|count| count.set(count.get() + 1));
@@ -4643,6 +5047,16 @@ impl<'a> Vm<'a> {
         Ok(values)
     }
 
+    fn call_args_into_values(&self, args: CallArgs) -> Result<CallValues, RuntimeError> {
+        let values: CallValues = args
+            .into_iter()
+            .map(CallArg::into_value)
+            .collect::<Result<_, _>>()?;
+        #[cfg(test)]
+        record_call_arg_heap_spill(values.spilled());
+        Ok(values)
+    }
+
     fn host_reference_function(&self, name: &str) -> Option<&HostReferenceFunction> {
         self.host_reference_functions
             .and_then(|functions| functions.get(name))
@@ -4650,6 +5064,67 @@ impl<'a> Vm<'a> {
 
     fn has_host_function(&self, name: &str) -> bool {
         self.host_functions.contains_key(name) || self.host_reference_function(name).is_some()
+    }
+
+    fn resolved_host_function(&self, name: &str) -> Option<ResolvedHostFunction<'_>> {
+        self.host_functions
+            .get(name)
+            .map(ResolvedHostFunction::Value)
+            .or_else(|| {
+                self.host_reference_function(name)
+                    .map(ResolvedHostFunction::Reference)
+            })
+    }
+
+    fn invoke_resolved_host_raw(
+        &self,
+        name: &str,
+        function: ResolvedHostFunction<'_>,
+        args: CallArgs,
+        depth: usize,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+
+        maybe_grow(|| {
+            let _guard = CallerContextGuard::enter(caller);
+            match function {
+                ResolvedHostFunction::Value(function) => self
+                    .invoke_host_function_call_args(name, function, args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value),
+                ResolvedHostFunction::Reference(function) => self
+                    .invoke_host_reference_function(name, function, args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value),
+            }
+        })
+    }
+
+    fn invoke_resolved_host_value(
+        &self,
+        name: &str,
+        function: ResolvedHostFunction<'_>,
+        args: CallArgs,
+        depth: usize,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_resolved_host_raw(name, function, args, depth, caller)?
+            .into_value_on_stack()
+    }
+
+    fn invoke_resolved_host_tracked_value(
+        &self,
+        name: &str,
+        function: ResolvedHostFunction<'_>,
+        args: CallArgs,
+        depth: usize,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<TrackedValue, RuntimeError> {
+        self.invoke_resolved_host_raw(name, function, args, depth, caller)?
+            .into_tracked_on_stack()
     }
 
     /// C++ `CheckConvertFunctionParameters` for engine/native functions.
@@ -4753,9 +5228,13 @@ impl<'a> Vm<'a> {
             take_call_parameter_slots(function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS));
         let _value_stack = ValueStackReservation::reserve(parameter_slots)?;
         let args = self.prepare_registered_host_call_args(name, function, args)?;
-        let values = self.call_args_to_values(&args)?;
+        let destination_is_zero_id = args.first().is_some_and(CallArg::value_slot_is_zero_id);
+        let values = self.call_args_into_values(args)?;
         let result = self.invoke_host_function_raw(name, function, &values)?;
-        Ok(materialize_internal_native_call_result(result, &args))
+        if matches!(caller_origin_strictness(), HostCallerStrictness::NoCaller) {
+            return Ok(result);
+        }
+        Ok(c4_set_copy_value_into(result, destination_is_zero_id))
     }
 
     /// Invoke the callback without applying its public script signature.
@@ -5462,11 +5941,9 @@ impl<'a> Vm<'a> {
                     // lvalue path (clonk-engine registers neither as a host function).
                     if let Expr::Variable(name) = callee.as_ref() {
                         if name == "this" {
-                            let function = if env.engine_scope {
-                                self.engine_script_function(name)
-                            } else {
-                                self.own_or_global_script_function(name)
-                            };
+                            let function_target =
+                                self.resolved_script_function(name, env.engine_scope);
+                            let function = function_target.map(|target| target.function);
                             // C4Aul resolves variables before the builtin
                             // context function. A bound `this()` therefore
                             // cannot escape to that function. Without a
@@ -5503,7 +5980,7 @@ impl<'a> Vm<'a> {
                                 return Ok(Value::Nil);
                             }
                             let cell = if name == "Var" {
-                                slot_cell(&env.var_slots, index)
+                                frame_slot_cell(&env.frame_locals, index)
                             } else {
                                 env.object_state.local_slot_cell(index)
                             };
@@ -5873,11 +6350,13 @@ impl<'a> Vm<'a> {
                                     return Ok(Self::fold_legacy_zero(value, env.strict_level));
                                 }
                             }
-                            let function = if env.engine_scope {
-                                self.engine_script_function(name)
-                            } else {
-                                self.own_or_global_script_function(name)
-                            };
+                            let function_target =
+                                self.resolved_script_function(name, env.engine_scope);
+                            let function = function_target.map(|target| target.function);
+                            let host_function = function
+                                .is_none()
+                                .then(|| self.resolved_host_function(name))
+                                .flatten();
                             let mut evaluated_args =
                                 self.build_call_args(Some(name), function, args, env, depth + 1)?;
                             if *forward_rest {
@@ -5886,6 +6365,27 @@ impl<'a> Vm<'a> {
                                     env,
                                     self.direct_call_parameter_limit(name, function),
                                 )?;
+                            }
+                            if let Some(function_target) =
+                                function_target.filter(|_| resolved_script_calls_enabled())
+                            {
+                                return self.invoke_resolved_script_value(
+                                    name,
+                                    function_target,
+                                    evaluated_args,
+                                    depth + 1,
+                                    env.object_state.clone(),
+                                    Some(env.caller_context()),
+                                );
+                            }
+                            if let Some(host_function) = host_function {
+                                return self.invoke_resolved_host_value(
+                                    name,
+                                    host_function,
+                                    evaluated_args,
+                                    depth + 1,
+                                    Some(env.caller_context()),
+                                );
                             }
                             if env.engine_scope {
                                 self.invoke_engine_value(
@@ -6198,27 +6698,27 @@ impl<'a> Vm<'a> {
                         .map(TrackedValue::runtime);
                 }
                 if let Expr::Variable(name) = callee.as_ref() {
-                    let function = if env.engine_scope {
-                        self.engine_script_function(name)
-                    } else {
-                        self.own_or_global_script_function(name)
-                    };
+                    let function_target = self.resolved_script_function(name, env.engine_scope);
+                    let function = function_target.map(|target| target.function);
+                    let host_function = function
+                        .is_none()
+                        .then(|| self.resolved_host_function(name))
+                        .flatten();
                     let bound_context_name = name == "this" && self.has_bound_this(env);
                     if name == "this"
-                        && (bound_context_name
-                            || function.is_none() && !self.has_host_function(name))
+                        && (bound_context_name || function.is_none() && host_function.is_none())
                     {
                         return self.evaluate(expr, env, depth).map(TrackedValue::runtime);
                     }
-                    if name == "SetLocal" && function.is_none() && !self.has_host_function(name) {
+                    if name == "SetLocal" && function.is_none() && host_function.is_none() {
                         return self.set_local_tracked(args, None, env, depth + 1, 3);
                     }
-                    if name == "SetGlobal" && function.is_none() && !self.has_host_function(name) {
+                    if name == "SetGlobal" && function.is_none() && host_function.is_none() {
                         return self.set_global_tracked(args, *forward_rest, env, depth + 1);
                     }
                     if env.strict_level.unwrap_or(0) < 2
                         && function.is_none()
-                        && !self.has_host_function(name)
+                        && host_function.is_none()
                         && args.is_empty()
                     {
                         if let Some(cell) = self.global_constant_cell(name) {
@@ -6247,12 +6747,12 @@ impl<'a> Vm<'a> {
                     if builtin_reference
                         && !null_implicit_local
                         && function.is_none()
-                        && !self.has_host_function(name)
+                        && host_function.is_none()
                     {
                         return self.expr_to_lvalue(expr, env, depth)?.read_tracked();
                     }
                     if !matches!(name.as_str(), "inherited" | "_inherited")
-                        && (function.is_some() || self.has_host_function(name))
+                        && (function.is_some() || host_function.is_some())
                     {
                         let mut evaluated_args =
                             self.build_call_args(Some(name), function, args, env, depth + 1)?;
@@ -6262,6 +6762,27 @@ impl<'a> Vm<'a> {
                                 env,
                                 self.direct_call_parameter_limit(name, function),
                             )?;
+                        }
+                        if let Some(function_target) =
+                            function_target.filter(|_| resolved_script_calls_enabled())
+                        {
+                            return self.invoke_resolved_script_tracked_value(
+                                name,
+                                function_target,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                                Some(env.caller_context()),
+                            );
+                        }
+                        if let Some(host_function) = host_function {
+                            return self.invoke_resolved_host_tracked_value(
+                                name,
+                                host_function,
+                                evaluated_args,
+                                depth + 1,
+                                Some(env.caller_context()),
+                            );
                         }
                         return if env.engine_scope {
                             self.invoke_engine_tracked_value(
@@ -7350,6 +7871,7 @@ impl<'a> Vm<'a> {
         Ok(
             match caller.and_then(|caller| {
                 caller
+                    .frame_locals
                     .function_vars
                     .borrow()
                     .get(&name)
@@ -7374,7 +7896,7 @@ impl<'a> Vm<'a> {
             "Var" => {
                 let index = self.global_builtin_int_arg(name, args, 0)?;
                 Ok(ReturnValue::Reference(
-                    self.tracked_cell(slot_cell(&env.var_slots, index)),
+                    self.tracked_cell(frame_slot_cell(&env.frame_locals, index)),
                 ))
             }
             "VarN" => {
@@ -8350,7 +8872,7 @@ impl<'a> Vm<'a> {
             AssignmentTarget::VarSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
                 let _parameter_slot = ValueStackReservation::reserve(1)?;
-                Ok(self.tracked_cell(slot_cell(&env.var_slots, index)))
+                Ok(self.tracked_cell(frame_slot_cell(&env.frame_locals, index)))
             }
             AssignmentTarget::EffectSlot(args) => {
                 let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
@@ -8924,7 +9446,7 @@ impl<'a> Vm<'a> {
             let cell = if name == "Local" {
                 env.object_state.local_slot_cell(index)
             } else {
-                slot_cell(&env.var_slots, index)
+                frame_slot_cell(&env.frame_locals, index)
             };
             return Ok(Some(ReturnValue::Reference(self.tracked_cell(cell))));
         }
@@ -9640,6 +10162,7 @@ enum CompiledPathSegment {
 enum CompiledInstruction {
     Literal(Literal),
     Load(usize),
+    LoadName(String),
     LoadPath {
         slot: usize,
         segments: Vec<CompiledPathSegment>,
@@ -9647,9 +10170,23 @@ enum CompiledInstruction {
     Store(usize),
     Unary(UnaryOp),
     Binary(BinaryOp),
+    CompoundStore {
+        slot: usize,
+        operation: BinaryOp,
+        operator: &'static str,
+    },
+    IncrementSlot {
+        slot: usize,
+        delta: i32,
+    },
+    Call {
+        site: usize,
+    },
     MakeArray(usize),
     MakeProplist(usize),
     Pop,
+    JumpAnd(usize),
+    JumpOr(usize),
     JumpIfFalse(usize),
     Jump(usize),
     Return,
@@ -9663,7 +10200,16 @@ pub(crate) struct CompiledFunction {
     slots: Vec<CompiledSlot>,
     function_vars: Vec<String>,
     instructions: Vec<CompiledInstruction>,
+    call_sites: Vec<CompiledCallSite>,
     max_stack: usize,
+    diagnostic_name: Arc<str>,
+    diagnostic_source_name: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompiledCallSite {
+    name: String,
+    argument_count: usize,
 }
 
 pub(crate) struct CompiledFunctionCache {
@@ -9702,8 +10248,10 @@ struct CompiledFunctionBuilder {
     function_var_slots: FxHashMap<String, usize>,
     function_vars: Vec<String>,
     instructions: Vec<CompiledInstruction>,
+    call_sites: Vec<CompiledCallSite>,
     stack_depth: usize,
     max_stack: usize,
+    strict_level: Option<u8>,
 }
 
 impl CompiledFunctionBuilder {
@@ -9718,8 +10266,10 @@ impl CompiledFunctionBuilder {
             function_var_slots: FxHashMap::default(),
             function_vars: Vec::new(),
             instructions: Vec::new(),
+            call_sites: Vec::new(),
             stack_depth: 0,
             max_stack: 0,
+            strict_level: function.strict_level,
         };
 
         for parameter in &function.params {
@@ -9749,6 +10299,19 @@ impl CompiledFunctionBuilder {
         }
 
         Some(builder)
+    }
+
+    fn bare_slot(&mut self, name: &str) -> usize {
+        if let Some(slot) = self.bare_slots.get(name) {
+            return *slot;
+        }
+        let slot = self.slots.len();
+        self.slots.push(CompiledSlot {
+            name: name.to_string(),
+            kind: CompiledSlotKind::Bare,
+        });
+        self.bare_slots.insert(name.to_string(), slot);
+        slot
     }
 
     fn push_instruction(&mut self, instruction: CompiledInstruction) {
@@ -9849,10 +10412,10 @@ impl CompiledFunctionBuilder {
             Expr::Literal(literal) => {
                 self.push_instruction(CompiledInstruction::Literal(literal.clone()));
             }
-            Expr::Variable(name) => {
-                let slot = *self.bare_slots.get(name)?;
-                self.push_instruction(CompiledInstruction::Load(slot));
-            }
+            Expr::Variable(name) => match self.bare_slots.get(name).copied() {
+                Some(slot) => self.push_instruction(CompiledInstruction::Load(slot)),
+                None => self.push_instruction(CompiledInstruction::LoadName(name.clone())),
+            },
             Expr::LegacyParameterList {
                 args,
                 forward_rest: false,
@@ -9864,23 +10427,56 @@ impl CompiledFunctionBuilder {
                 self.instructions
                     .push(CompiledInstruction::Unary(operation.clone()));
             }
+            Expr::Binary(left, operation @ (BinaryOp::And | BinaryOp::Or), right)
+                if self.strict_level.unwrap_or(0) >= 2 =>
+            {
+                self.compile_expression(left)?;
+                let short_circuit = self.instructions.len();
+                self.instructions.push(match operation {
+                    BinaryOp::And => CompiledInstruction::JumpAnd(usize::MAX),
+                    BinaryOp::Or => CompiledInstruction::JumpOr(usize::MAX),
+                    _ => unreachable!(),
+                });
+                self.stack_depth = self.stack_depth.checked_sub(1)?;
+                self.compile_expression(right)?;
+                let end = self.instructions.len();
+                self.instructions[short_circuit] = match operation {
+                    BinaryOp::And => CompiledInstruction::JumpAnd(end),
+                    BinaryOp::Or => CompiledInstruction::JumpOr(end),
+                    _ => unreachable!(),
+                };
+            }
             Expr::Binary(left, operation, right)
-                if !matches!(
-                    operation,
-                    BinaryOp::Concat
-                        | BinaryOp::Equal
-                        | BinaryOp::NotEqual
-                        | BinaryOp::And
-                        | BinaryOp::Or
-                        | BinaryOp::NilCoalescing
-                        | BinaryOp::StringEqual
-                        | BinaryOp::KeywordStringEqual
-                        | BinaryOp::KeywordStringNotEqual
-                ) =>
+                if !matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) =>
             {
                 self.compile_expression(left)?;
                 self.compile_expression(right)?;
                 self.binary_instruction(operation.clone())?;
+            }
+            Expr::Call {
+                callee,
+                args,
+                is_optional: false,
+                forward_rest: false,
+            } => {
+                let Expr::Variable(name) = callee.as_ref() else {
+                    return None;
+                };
+                if matches!(
+                    name.as_str(),
+                    "inherited" | "_inherited" | "this" | "Par" | "SetLocal" | "SetGlobal"
+                ) {
+                    return None;
+                }
+                for argument in args {
+                    self.compile_expression(argument)?;
+                }
+                let site = self.call_sites.len();
+                self.call_sites.push(CompiledCallSite {
+                    name: name.clone(),
+                    argument_count: args.len(),
+                });
+                self.collection_instruction(args.len(), CompiledInstruction::Call { site })?;
             }
             Expr::Array(elements) => {
                 for element in elements {
@@ -9922,7 +10518,7 @@ impl CompiledFunctionBuilder {
                     value,
                 } => {
                     self.compile_expression(value)?;
-                    let slot = *self.bare_slots.get(name)?;
+                    let slot = self.bare_slot(name);
                     self.pop_instruction(CompiledInstruction::Store(slot))?;
                 }
                 Stmt::Return(expression) => {
@@ -9932,10 +10528,44 @@ impl CompiledFunctionBuilder {
                     }
                     self.pop_instruction(CompiledInstruction::Return)?;
                 }
-                Stmt::Expr(expression) => {
-                    self.compile_expression(expression)?;
-                    self.pop_instruction(CompiledInstruction::Pop)?;
-                }
+                Stmt::Expr(expression) => match expression {
+                    Expr::CompoundAssignment {
+                        target: AssignmentTarget::Variable(name),
+                        operation,
+                        operator,
+                        value,
+                    } if !matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) => {
+                        self.compile_expression(value)?;
+                        let slot = self.bare_slot(name);
+                        self.pop_instruction(CompiledInstruction::CompoundStore {
+                            slot,
+                            operation: operation.clone(),
+                            operator,
+                        })?;
+                    }
+                    Expr::PreIncrement(value)
+                    | Expr::PostIncrement(value)
+                    | Expr::PreDecrement(value)
+                    | Expr::PostDecrement(value) => {
+                        let Expr::Variable(name) = value.as_ref() else {
+                            return None;
+                        };
+                        let delta =
+                            if matches!(expression, Expr::PreIncrement(_) | Expr::PostIncrement(_))
+                            {
+                                1
+                            } else {
+                                -1
+                            };
+                        let slot = self.bare_slot(name);
+                        self.instructions
+                            .push(CompiledInstruction::IncrementSlot { slot, delta });
+                    }
+                    _ => {
+                        self.compile_expression(expression)?;
+                        self.pop_instruction(CompiledInstruction::Pop)?;
+                    }
+                },
                 Stmt::If {
                     condition,
                     then_branch,
@@ -9979,8 +10609,8 @@ impl CompiledFunctionBuilder {
         Some(())
     }
 
-    fn finish(mut self, body: &[Stmt]) -> Option<CompiledFunction> {
-        self.compile_statements(body)?;
+    fn finish(mut self, function: &Function) -> Option<CompiledFunction> {
+        self.compile_statements(&function.body)?;
         if self.stack_depth != 0 {
             return None;
         }
@@ -9989,7 +10619,10 @@ impl CompiledFunctionBuilder {
             slots: self.slots,
             function_vars: self.function_vars,
             instructions: self.instructions,
+            call_sites: self.call_sites,
             max_stack: self.max_stack,
+            diagnostic_name: Arc::from(function.name.as_str()),
+            diagnostic_source_name: function.source_name().map(Arc::from),
         })
     }
 }
@@ -10026,6 +10659,18 @@ fn read_compiled_path(
                 env,
                 &value,
                 identity,
+                segments,
+                env.strict_level,
+                retained_operands,
+            )
+        }
+        Binding::Inline(inline) => {
+            let tracked = inline.read_tracked();
+            read_compiled_path_value(
+                vm,
+                env,
+                &tracked.value,
+                tracked.identity.clone(),
                 segments,
                 env.strict_level,
                 retained_operands,
@@ -10296,24 +10941,79 @@ fn read_compiled_index(
 
 impl CompiledFunction {
     fn compile(function: &Function) -> Option<Self> {
-        CompiledFunctionBuilder::new(function)?.finish(&function.body)
+        CompiledFunctionBuilder::new(function)?.finish(function)
     }
 
-    fn bindings(&self, env: &Environment) -> Option<Vec<Binding>> {
-        self.slots
+    fn bindings(&self, env: &Environment) -> Option<SmallVec<[Binding; 16]>> {
+        let bindings = self
+            .slots
             .iter()
             .map(|slot| match slot.kind {
                 CompiledSlotKind::Bare => env.binding(&slot.name),
                 CompiledSlotKind::FunctionVar => env.function_var_binding(&slot.name),
             })
-            .collect()
+            .collect::<Option<SmallVec<_>>>()?;
+        #[cfg(test)]
+        if bindings.spilled() {
+            COMPILED_BINDING_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
+        }
+        Some(bindings)
     }
 
-    fn execute(&self, vm: &Vm<'_>, env: &Environment) -> Result<Option<ControlFlow>, RuntimeError> {
+    fn execute(
+        &self,
+        vm: &Vm<'_>,
+        env: &Environment,
+        depth: usize,
+    ) -> Result<Option<ControlFlow>, RuntimeError> {
         let Some(bindings) = self.bindings(env) else {
             return Ok(None);
         };
         if ValueStackReservation::check(self.max_stack).is_err() {
+            return Ok(None);
+        }
+        let mut call_targets = SmallVec::<[CompiledCallTarget<'_>; 32]>::new();
+        for site in &self.call_sites {
+            let name = &site.name;
+            let argument_count = site.argument_count;
+            if let Some(target) = vm.resolved_script_function(name, env.engine_scope) {
+                if target
+                    .function
+                    .params
+                    .iter()
+                    .any(|param| param.is_reference)
+                {
+                    return Ok(None);
+                }
+                call_targets.push(CompiledCallTarget::Script(target));
+                continue;
+            }
+            if vm.host_reference_function(name).is_some()
+                || vm
+                    .host_function_parameter_types
+                    .and_then(|types| types.get(name))
+                    .is_some_and(|types| types.contains(&C4VType::Ref))
+                || (0..argument_count).any(|index| {
+                    vm.reference_parameter_probe
+                        .is_some_and(|probe| probe(name, index))
+                })
+            {
+                return Ok(None);
+            }
+            if let Some(target @ ResolvedHostFunction::Value(_)) = vm.resolved_host_function(name) {
+                call_targets.push(CompiledCallTarget::Host(target));
+                continue;
+            }
+            let legacy_constant = env.strict_level.unwrap_or(0) < 2
+                && argument_count == 0
+                && (vm.global_constant_cell(name).is_some()
+                    || vm
+                        .constants
+                        .is_some_and(|constants| constants.contains_key(name)));
+            if legacy_constant {
+                call_targets.push(CompiledCallTarget::LegacyConstant);
+                continue;
+            }
             return Ok(None);
         }
         let mut stack = Vec::with_capacity(self.max_stack);
@@ -10334,6 +11034,11 @@ impl CompiledFunction {
                         vm.register_runtime_value(&value.value);
                         registered_slots[*slot] = true;
                     }
+                    stack.push(value);
+                }
+                CompiledInstruction::LoadName(name) => {
+                    let value = vm.compiled_named_value(name, env)?;
+                    vm.register_runtime_value(&value.value);
                     stack.push(value);
                 }
                 CompiledInstruction::LoadPath { slot, segments } => {
@@ -10400,14 +11105,109 @@ impl CompiledFunction {
                     let left = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let value = match operation {
+                        BinaryOp::Equal | BinaryOp::NotEqual => {
+                            let equal = vm.values_equal(
+                                &left.value,
+                                &right.value,
+                                env.strict_level,
+                                left.identity.as_ref(),
+                                right.identity.as_ref(),
+                            );
+                            TrackedValue::runtime(Value::Bool(
+                                if matches!(operation, BinaryOp::Equal) {
+                                    equal
+                                } else {
+                                    !equal
+                                },
+                            ))
+                        }
+                        BinaryOp::And => TrackedValue::runtime(Value::Bool(
+                            left.value.as_bool() && right.value.as_bool(),
+                        )),
+                        BinaryOp::Or => TrackedValue::runtime(Value::Bool(
+                            left.value.as_bool() || right.value.as_bool(),
+                        )),
+                        _ => TrackedValue::runtime(vm.eval_binary(
+                            left.value,
+                            operation,
+                            right.value,
+                            env.strict_level,
+                            None,
+                        )?),
+                    }
+                    .set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(value);
+                }
+                CompiledInstruction::CompoundStore {
+                    slot,
+                    operation,
+                    operator,
+                } => {
+                    let right = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let reference = bindings[*slot].lvalue();
+                    let left = reference.read_tracked()?;
                     let value = TrackedValue::runtime(vm.eval_binary(
                         left.value,
                         operation,
                         right.value,
                         env.strict_level,
-                        None,
-                    )?)
-                    .set_copy();
+                        Some(operator),
+                    )?);
+                    reference.write_tracked(value)?;
+                    registered_slots[*slot] = true;
+                }
+                CompiledInstruction::IncrementSlot { slot, delta } => {
+                    let reference = bindings[*slot].lvalue();
+                    let operation = if *delta > 0 { "increment" } else { "decrement" };
+                    let old_value = Vm::counter_operand(reference.read()?, operation)?;
+                    reference.write(Value::Int(old_value.wrapping_add(*delta)))?;
+                    registered_slots[*slot] = true;
+                }
+                CompiledInstruction::Call { site } => {
+                    let call_site = &self.call_sites[*site];
+                    let name = &call_site.name;
+                    let argument_count = call_site.argument_count;
+                    let argument_start = stack
+                        .len()
+                        .checked_sub(argument_count)
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let _retained_stack = ValueStackReservation::reserve(argument_start)?;
+                    let arguments = stack
+                        .split_off(argument_start)
+                        .into_iter()
+                        .map(CallArg::Value)
+                        .collect::<CallArgs>();
+                    #[cfg(test)]
+                    record_call_arg_heap_spill(arguments.spilled());
+                    let target = call_targets[*site];
+                    let value = match target {
+                        CompiledCallTarget::Host(target) => {
+                            TrackedValue::runtime(vm.invoke_resolved_host_value(
+                                name,
+                                target,
+                                arguments,
+                                depth + 1,
+                                Some(env.caller_context()),
+                            )?)
+                        }
+                        CompiledCallTarget::Script(target) => vm
+                            .invoke_resolved_script_tracked_value(
+                                name,
+                                target,
+                                arguments,
+                                depth + 1,
+                                env.object_state.clone(),
+                                Some(env.caller_context()),
+                            )?,
+                        CompiledCallTarget::LegacyConstant => {
+                            debug_assert!(arguments.is_empty());
+                            vm.compiled_named_value(name, env)?
+                        }
+                    };
                     vm.register_runtime_value(&value.value);
                     stack.push(value);
                 }
@@ -10442,6 +11242,26 @@ impl CompiledFunction {
                     stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                }
+                CompiledInstruction::JumpAnd(target) => {
+                    let condition = stack
+                        .last()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    if !condition.value.as_bool() {
+                        instruction = *target;
+                        continue;
+                    }
+                    stack.pop();
+                }
+                CompiledInstruction::JumpOr(target) => {
+                    let condition = stack
+                        .last()
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    if condition.value.as_bool() {
+                        instruction = *target;
+                        continue;
+                    }
+                    stack.pop();
                 }
                 CompiledInstruction::JumpIfFalse(target) => {
                     let condition = stack
@@ -10556,11 +11376,12 @@ fn hoist_function_vars(body: &[Stmt], env: &mut Environment) {
 }
 
 struct Environment {
-    scopes: Vec<FxHashMap<String, Binding>>,
+    scopes: SmallVec<[FxHashMap<String, Binding>; 2]>,
+    named_parameters: SmallVec<[(String, Binding); 4]>,
     /// Per-invocation storage for `Func->VarNamed`/`cthr->Vars`. A separate
     /// table is required because parameters win bare-name lookup while VarN
     /// can still address a same-name function variable.
-    function_vars: FunctionVarMap,
+    frame_locals: FrameLocalMap,
     /// `#strict` level of the executing function, for level-correct `==`/`!=`.
     strict_level: Option<u8>,
     /// `cthr->Caller->Func->Owner->Strict` for native calls. Linked function
@@ -10574,12 +11395,11 @@ struct Environment {
     /// so a `Local(0) = x` inside a block stays visible after it. Unset reads as
     /// nil and the index is clamped to >= 0 (C4ValueList::GetItem). `var_slots`
     /// are per-call; `local_slots` round-trip through the object's `local_vars`.
-    var_slots: SlotMap,
     object_state: ObjectState,
     /// The full argument slots of the executing call: `Par(i)` reads them
     /// (C4AulExec.cpp:1127-1140) and `Callee(...)` forwards the slots past
     /// `named_param_count` (C4AulParse.cpp:2293-2306, ParNamed.iSize).
-    call_args: Rc<CallBindings>,
+    call_args: CallBindings,
     named_param_count: usize,
     /// The function the executing one overloaded — the `inherited(...)` /
     /// `_inherited(...)` target (C++ Fn->OwnerOverloaded,
@@ -10611,15 +11431,23 @@ impl Environment {
         let mut call_args = args
             .iter()
             .enumerate()
-            .map(|(index, arg)| match arg {
-                CallArg::Reference(reference)
-                    if params
-                        .get(index)
-                        .is_some_and(|parameter| parameter.is_reference) =>
-                {
-                    Ok(Binding::Reference(reference.clone()))
+            .map(|(index, arg)| {
+                #[cfg(test)]
+                let force_heap_binding = FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(Cell::get);
+                #[cfg(not(test))]
+                let force_heap_binding = false;
+                if index >= params.len() && !force_heap_binding {
+                    return arg
+                        .read_tracked()
+                        .map(InlineBinding::new)
+                        .map(Binding::Inline);
                 }
-                _ => Ok(Binding::tracked(arg.read_tracked()?)),
+                match arg {
+                    CallArg::Reference(reference) if params[index].is_reference => {
+                        Ok(Binding::Reference(reference.clone()))
+                    }
+                    _ => Ok(Binding::tracked(arg.read_tracked()?)),
+                }
             })
             .collect::<Result<CallBindings, RuntimeError>>()?;
         while call_args.len() < MAX_CALL_PARAMETERS {
@@ -10627,22 +11455,30 @@ impl Environment {
         }
         #[cfg(test)]
         record_call_arg_heap_spill(call_args.spilled());
-        let mut scopes = vec![FxHashMap::default()];
-        let base = scopes.last_mut().unwrap();
+        let mut scopes: SmallVec<[FxHashMap<String, Binding>; 2]> = SmallVec::new();
+        scopes.push(FxHashMap::default());
+        let mut named_parameters = SmallVec::<[(String, Binding); 4]>::new();
         for (param, binding) in params.iter().zip(call_args.iter()) {
-            base.insert(param.name.clone(), binding.clone());
+            if let Some((_, current)) = named_parameters
+                .iter_mut()
+                .find(|(name, _)| name == &param.name)
+            {
+                *current = binding.clone();
+            } else {
+                named_parameters.push((param.name.clone(), binding.clone()));
+            }
         }
         Ok(Self {
             scopes,
-            function_vars: Rc::new(RefCell::new(FxHashMap::default())),
+            named_parameters,
+            frame_locals: Rc::new(FrameLocals::default()),
             strict_level,
             caller_owner_strict_level: strict_level,
             // invoke_script_function stamps the owning VM before executing the
             // body; zero is only the construction sentinel.
             caller_host_identity: ScriptHostIdentity(0),
-            var_slots: Rc::new(RefCell::new(FxHashMap::default())),
             object_state,
-            call_args: Rc::new(call_args),
+            call_args,
             named_param_count: params.len(),
             inherited_target: None,
             function_name: String::new(),
@@ -10654,8 +11490,7 @@ impl Environment {
 
     fn caller_context(&self) -> ScriptCallerContext {
         ScriptCallerContext {
-            var_slots: self.var_slots.clone(),
-            function_vars: self.function_vars.clone(),
+            frame_locals: self.frame_locals.clone(),
             owner_host: self.caller_host_identity,
             engine_scope: self.engine_scope,
             definition_context: self.definition_context,
@@ -10667,7 +11502,12 @@ impl Environment {
 
     fn define_object_local(&mut self, name: &str, identity: RawIdentityCell) {
         let cell = self.object_state.named_local_cell(name);
-        if self.scopes.iter().any(|scope| scope.contains_key(name)) {
+        if self.scopes.iter().any(|scope| scope.contains_key(name))
+            || self
+                .named_parameters
+                .iter()
+                .any(|(parameter, _)| parameter == name)
+        {
             return;
         }
         if let Some(scope) = self.scopes.last_mut() {
@@ -10704,12 +11544,18 @@ impl Environment {
     /// the distinct function-var slot in the collision case.
     fn declare_hoisted(&mut self, name: &str) {
         let binding = self
+            .frame_locals
             .function_vars
             .borrow_mut()
             .entry(name.to_string())
             .or_insert_with(|| Binding::direct(Value::Nil))
             .clone();
-        if !self.scopes.iter().any(|scope| scope.contains_key(name)) {
+        if !self.scopes.iter().any(|scope| scope.contains_key(name))
+            && !self
+                .named_parameters
+                .iter()
+                .any(|(parameter, _)| parameter == name)
+        {
             self.scopes
                 .first_mut()
                 .expect("environment has a base scope")
@@ -10722,7 +11568,8 @@ impl Environment {
         name: &str,
         tracked: TrackedValue,
     ) -> Result<(), RuntimeError> {
-        self.function_vars
+        self.frame_locals
+            .function_vars
             .borrow()
             .get(name)
             .ok_or_else(|| RuntimeError::new(format!("undefined function variable '{name}'")))?
@@ -10730,7 +11577,11 @@ impl Environment {
     }
 
     fn function_var_lvalue(&self, name: &str) -> Option<LValueRef> {
-        self.function_vars.borrow().get(name).map(Binding::lvalue)
+        self.frame_locals
+            .function_vars
+            .borrow()
+            .get(name)
+            .map(Binding::lvalue)
     }
 
     fn get(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
@@ -10744,7 +11595,12 @@ impl Environment {
                 return value.read_tracked().map(Some);
             }
         }
-        Ok(None)
+        self.named_parameters
+            .iter()
+            .rev()
+            .find(|(parameter, _)| parameter == name)
+            .map(|(_, value)| value.read_tracked())
+            .transpose()
     }
 
     fn binding(&self, name: &str) -> Option<Binding> {
@@ -10752,10 +11608,17 @@ impl Environment {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+            .or_else(|| {
+                self.named_parameters
+                    .iter()
+                    .rev()
+                    .find(|(parameter, _)| parameter == name)
+                    .map(|(_, binding)| binding.clone())
+            })
     }
 
     fn function_var_binding(&self, name: &str) -> Option<Binding> {
-        self.function_vars.borrow().get(name).cloned()
+        self.frame_locals.function_vars.borrow().get(name).cloned()
     }
 
     fn lvalue(&self, name: &str) -> Option<LValueRef> {
@@ -10764,7 +11627,11 @@ impl Environment {
                 return Some(value.lvalue());
             }
         }
-        None
+        self.named_parameters
+            .iter()
+            .rev()
+            .find(|(parameter, _)| parameter == name)
+            .map(|(_, binding)| binding.lvalue())
     }
 }
 
@@ -10839,6 +11706,354 @@ mod tests {
 
         assert_eq!(result, Value::Int(379));
         assert_eq!(compiled_function_execution_count(), 1);
+    }
+
+    #[test]
+    fn direct_native_calls_keep_their_compiled_target() {
+        // C++ stores the resolved C4AulFunc pointer in AB_CALL and passes it
+        // straight to Call (C4AulExec.cpp:1250-1297).
+        reset_generic_host_resolutions();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("Native", |args| {
+            Ok(args.first().cloned().unwrap_or(Value::Nil))
+        });
+        engine
+            .load_script("#strict 2\nfunc Probe() { return Native(41); }")
+            .expect("script loads");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("native call succeeds"),
+            Value::Int(41)
+        );
+        assert_eq!(generic_host_resolutions(), 0);
+    }
+
+    #[test]
+    fn native_call_values_move_from_prepared_slots() {
+        // C++ passes AB_CALL's already-resident pPars slots directly to the
+        // native executor (C4AulExec.cpp:1217-1223, 1497-1501).
+        reset_native_host_argument_value_clones();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("ArrayLength", |args| {
+            Ok(Value::Int(match args.first() {
+                Some(Value::Array(values)) => values.len() as i32,
+                _ => -1,
+            }))
+        });
+        engine
+            .load_script("#strict 2\nfunc Probe() { return ArrayLength([1, 2, 3]); }")
+            .expect("script loads");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("native call succeeds"),
+            Value::Int(3)
+        );
+        assert_eq!(native_host_argument_value_clones(), 0);
+    }
+
+    #[test]
+    fn direct_native_calls_stay_in_the_compiled_executor() {
+        // C++ emits a resolved AB_CALL inside the surrounding bytecode rather
+        // than returning to an AST evaluator (C4AulExec.cpp:1217-1297).
+        reset_compiled_function_execution_count();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("Double", |args| {
+            Ok(Value::Int(
+                args.first().and_then(Value::as_c4_int).unwrap_or(0) * 2,
+            ))
+        });
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe(value) { var doubled = Double(value); return doubled + 1; }",
+            )
+            .expect("script loads");
+
+        assert_eq!(
+            engine
+                .call("Probe", &[Value::Int(20)])
+                .expect("native call succeeds"),
+            Value::Int(41)
+        );
+        assert_eq!(compiled_function_execution_count(), 1);
+    }
+
+    #[test]
+    fn typical_compiled_function_bindings_stay_inline() {
+        // C++ addresses parameters and function vars as offsets in the active
+        // C4AulExec value stack (C4AulExec.cpp:62-63,330-347), without a
+        // per-call heap table for a small ordinary frame.
+        reset_compiled_binding_heap_spills();
+        let result = execute_script(
+            "#strict 2\nfunc Probe(value) { var a = value + 1; var b = a + 1; return b; }",
+            "Probe",
+            &[Value::Int(39)],
+        )
+        .expect("compiled frame executes");
+
+        assert_eq!(result, Value::Int(41));
+        assert_eq!(compiled_binding_heap_spills(), 0);
+    }
+
+    #[test]
+    fn compiled_call_preflight_visits_only_call_sites() {
+        // C++ AB_CALL operands already hold their resolved C4AulFunc pointer;
+        // preflight has no reason to walk unrelated bytecode
+        // (C4AulExec.cpp:1217-1223,1250-1297).
+        reset_compiled_preflight_non_call_visits();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("Identity", |args| {
+            Ok(args.first().cloned().unwrap_or(Value::Nil))
+        });
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe(value) { var a = value + 1; var b = Identity(a); return b + 1; }",
+            )
+            .expect("script loads");
+
+        assert_eq!(
+            engine
+                .call("Probe", &[Value::Int(39)])
+                .expect("call succeeds"),
+            Value::Int(41)
+        );
+        assert_eq!(compiled_preflight_non_call_visits(), 0);
+    }
+
+    #[test]
+    fn successful_object_calls_defer_diagnostic_object_formatting() {
+        // C++ keeps the live C4Object pointer in the executor frame and only
+        // asks GetDataString while dumping an error stack (C4AulExec.cpp:
+        // 1328-1342), not on every successful function entry.
+        fn format_object(id: u64) -> Option<(String, Option<String>)> {
+            Some((format!("Object #{id}"), Some("CALL".to_owned())))
+        }
+
+        let script =
+            Parser::new("func Helper() { return 41; } func Probe() { return Helper() + 1; }")
+                .parse_script()
+                .expect("script parses");
+        let functions = script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect::<FxHashMap<_, _>>();
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        reset_diagnostic_object_formatter_calls();
+        let result = with_diagnostic_object_formatter(format_object, || {
+            Vm::new(&functions, &host_functions, &var_decls, None)
+                .with_this(Value::Object(7))
+                .call("Probe", &[])
+        })
+        .expect("nested object call succeeds");
+
+        assert_eq!(result, Value::Int(42));
+        assert_eq!(diagnostic_object_formatter_calls(), 0);
+    }
+
+    #[test]
+    fn compiled_diagnostic_frames_share_stable_function_strings() {
+        // C++ frames retain pointers to their C4AulFunc/C4AulScript metadata;
+        // stable function and source names are not copied per call
+        // (C4AulExec.cpp:62-63,1328-1342).
+        let script =
+            Parser::new("func Helper() { return 41; } func Probe() { return Helper() + 1; }")
+                .parse_script()
+                .expect("script parses");
+        let functions = script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect::<FxHashMap<_, _>>();
+        let host_functions = FxHashMap::default();
+        let var_decls = Vec::new();
+        reset_diagnostic_frame_string_allocations();
+        let result = Vm::new(&functions, &host_functions, &var_decls, None)
+            .call("Probe", &[])
+            .expect("nested compiled call succeeds");
+
+        assert_eq!(result, Value::Int(42));
+        assert_eq!(diagnostic_frame_string_allocations(), 0);
+    }
+
+    #[test]
+    fn small_named_parameter_frames_stay_inline() {
+        // C++ keeps named parameter slots in C4AulExec::Values; a one-argument
+        // helper does not allocate a hash table for its frame
+        // (C4AulExec.cpp:62-63,330-347).
+        reset_parameter_scope_heap_tables();
+        let result = execute_script(
+            "#strict 2\nfunc AddOne(value) { return value + 1; } func Probe() { return AddOne(41); }",
+            "Probe",
+            &[],
+        )
+        .expect("small parameter frame executes");
+
+        assert_eq!(result, Value::Int(42));
+        assert_eq!(parameter_scope_heap_tables(), 0);
+    }
+
+    #[test]
+    fn unnamed_nil_parameter_slots_do_not_allocate_bindings() {
+        // C++ keeps the ten AB_CALL parameter slots in C4AulExec::Values;
+        // unused trailing nils are stack values, not heap cells
+        // (C4AulExec.cpp:62-63, 1217-1223).
+        reset_direct_binding_allocations();
+        let result = execute_script(
+            "#strict 2\nfunc Leaf() { return 41; }\nfunc Probe() { return Leaf() + 1; }",
+            "Probe",
+            &[],
+        )
+        .expect("zero-argument calls succeed");
+
+        assert_eq!(result, Value::Int(42));
+        assert_eq!(direct_binding_allocations(), 0);
+    }
+
+    #[test]
+    fn nested_script_calls_keep_their_resolved_target() {
+        // C++ saves the resolved function pointer back into AB_CALL before
+        // invoking it (C4AulExec.cpp:1250-1297).
+        reset_nested_generic_script_resolutions();
+        let result = execute_script(
+            "#strict 2\nfunc Leaf() { return 41; }\nfunc Probe() { return Leaf() + 1; }",
+            "Probe",
+            &[],
+        )
+        .expect("nested call succeeds");
+
+        assert_eq!(result, Value::Int(42));
+        assert_eq!(nested_generic_script_resolutions(), 0);
+    }
+
+    #[test]
+    fn stippel_scalar_call_chain_uses_compiled_executor() {
+        // C++ lowers ordinary locals, calls and branches into one bytecode
+        // stream (C4AulParse.cpp:2789-3088; C4AulExec.cpp:330-1297).
+        reset_compiled_function_execution_count();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_constant("DIR_Left", Value::Int(0));
+        engine
+            .load_script(
+                r#"#strict
+                    local counter;
+                    func Action() { return "Walk"; }
+                    func Probe() {
+                        counter++;
+                        var speed = 10;
+                        speed += 5;
+                        if ((Action() eq "Walk") && (DIR_Left() == 0)) speed = speed + 1;
+                        return speed + counter;
+                    }
+                "#,
+            )
+            .expect("Stippel-shaped scalar script loads");
+
+        let (result, locals) = engine
+            .call_with_locals("Probe", &[], &HashMap::new())
+            .expect("Stippel-shaped scalar chain runs");
+
+        assert_eq!(result, Value::Int(17));
+        assert_eq!(locals.get("counter"), Some(&Value::Int(1)));
+        assert_eq!(compiled_function_execution_count(), 2);
+    }
+
+    #[test]
+    fn dense_stippel_hot_frame_estimates_amortized_fps_under_one_second() {
+        // Paired legacy/current timing removes machine speed from the ratio.
+        // The scale is the self-terminating 1,000-Stippel play-profile run
+        // recorded for this branch before call-frame allocation was removed.
+        const CALIBRATED_LEGACY_FPS: f64 = 18.075_519;
+        const CALIBRATED_FIXED_FRAME_MS: f64 = 15.3;
+        const ROUNDS: usize = 4;
+        const FRAMES_PER_ROUND: usize = 256;
+
+        fn measure(engine: &crate::engine::Engine, legacy: bool) -> Duration {
+            let _legacy = legacy.then(LegacyScriptCallFrameGuard::enter);
+            let started = Instant::now();
+            let mut checksum = 0_i32;
+            for _ in 0..FRAMES_PER_ROUND {
+                let value = std::hint::black_box(
+                    engine
+                        .call("HotFrame", &[])
+                        .expect("amortized frame succeeds"),
+                );
+                checksum = checksum.wrapping_add(value.as_c4_int().unwrap_or_default());
+            }
+            assert_eq!(checksum, FRAMES_PER_ROUND as i32);
+            started.elapsed()
+        }
+
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("Int", |args| {
+            Ok(args.first().cloned().unwrap_or(Value::Int(0)))
+        });
+        engine.register_host_function("Text", |_| Ok(Value::String("Walk".into())));
+        engine.register_host_function("Ping", |_| Ok(Value::Nil));
+        engine
+            .load_script(
+                r#"#strict
+                    local counter, lastAct;
+                    func PhysicalVariation() {
+                        var speed = Int(10000);
+                        speed += 500 - Int(1000);
+                        speed = Int(speed);
+                        Int(speed); Int(speed + 5000); Int(speed + 10000);
+                    }
+                    func HeaderControl() {
+                        if ((Text() eq "Scale") && (Int(0) == 5)) Ping();
+                        else Ping();
+                    }
+                    func Movement() {
+                        if (!Int(1) || !Int(1)) {
+                            var comDir = Int(7);
+                            if (Text() ne "Scale") comDir = Int(comDir);
+                            HeaderControl();
+                        }
+                        if (Int(50) < 10) Ping();
+                        if (Int(50) > Int(5000) - 10) Ping();
+                        if (!Int(1) && (Text() ne "FLIGHT") && !Int(0)) Ping();
+                        if (Int(0)) counter++; else counter = 0;
+                    }
+                    func Attack() {
+                        if ((Text() eq "FLIGHT") || Int(0)) return;
+                        var a0 = Int(0), a1 = Int(1), a2 = Int(2);
+                        var a3 = Int(3), a4 = Int(4), a5 = Int(5);
+                        var victim = Int(a0 + a1 + a2 + a3 + a4 + a5 - 15);
+                        if (victim) Ping();
+                    }
+                    func HotFrame() {
+                        PhysicalVariation(); Movement(); Attack();
+                        return 1;
+                    }
+                "#,
+            )
+            .expect("hot-frame fixture loads");
+        for _ in 0..32 {
+            std::hint::black_box(engine.call("HotFrame", &[]).expect("warmup succeeds"));
+        }
+
+        let mut legacy = Duration::ZERO;
+        let mut current = Duration::ZERO;
+        for _ in 0..ROUNDS {
+            legacy += measure(&engine, true);
+            current += measure(&engine, false);
+        }
+        let calibrated_frame_ms = 1_000.0 / CALIBRATED_LEGACY_FPS;
+        let calibrated_script_ms = (calibrated_frame_ms - CALIBRATED_FIXED_FRAME_MS).max(0.0);
+        let estimated_frame_ms = CALIBRATED_FIXED_FRAME_MS
+            + calibrated_script_ms * current.as_secs_f64() / legacy.as_secs_f64().max(f64::EPSILON);
+        let estimated_fps = 1_000.0 / estimated_frame_ms.max(f64::EPSILON);
+        let estimated_gain = estimated_fps - CALIBRATED_LEGACY_FPS;
+        println!(
+            "STIPPEL_AMORTIZED_ESTIMATE legacy_ms={:.3} current_ms={:.3} estimated_simulation_fps={estimated_fps:.3} estimated_gain_fps={estimated_gain:.3}",
+            legacy.as_secs_f64() * 1_000.0,
+            current.as_secs_f64() * 1_000.0,
+        );
+        assert!(
+            legacy + current < Duration::from_secs(1),
+            "amortized estimator must stay below one second"
+        );
     }
 
     #[test]
