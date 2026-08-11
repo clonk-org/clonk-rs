@@ -1029,6 +1029,10 @@ impl AudioMixer {
         self.mix_into_channels(output, 2);
     }
 
+    pub fn mix_u16(&self, output: &mut [u16]) {
+        self.mix_into_channels(output, 2);
+    }
+
     #[cfg(test)]
     fn reset_channel_slot_probe_count(&self) {
         self.channel_slot_probe_count.store(0, Ordering::Relaxed);

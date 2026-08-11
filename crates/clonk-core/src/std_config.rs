@@ -268,6 +268,10 @@ impl Config {
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
     }
 
+    pub fn get_i32(&self, key: &str) -> Option<i32> {
+        self.get(key)?.parse().ok()
+    }
+
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.set_in(None, key, value);
     }

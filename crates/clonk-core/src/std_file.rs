@@ -2,7 +2,10 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 
 #[cfg(target_os = "windows")]
 const DIRECTORY_SEPARATOR: char = '\\';
@@ -197,6 +200,23 @@ pub fn item_identical(one: impl AsRef<Path>, two: impl AsRef<Path>) -> io::Resul
     let meta_one = fs::metadata(one)?;
     let meta_two = fs::metadata(two)?;
     Ok(meta_one.len() == meta_two.len() && meta_one.modified()? == meta_two.modified()?)
+}
+
+pub fn make_temp_filename(prefix: &str) -> io::Result<PathBuf> {
+    let mut temp = env::temp_dir();
+    let unique = format!(
+        "{}-{:x}-{:x}",
+        prefix,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        SmallRng::try_from_rng(&mut rand::rngs::SysRng)
+            .map_err(io::Error::other)?
+            .next_u64()
+    );
+    temp.push(unique);
+    Ok(temp)
 }
 
 pub fn read_file_line(file: &mut BufReader<File>, buffer: &mut String) -> io::Result<bool> {
