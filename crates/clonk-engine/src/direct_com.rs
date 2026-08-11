@@ -5691,13 +5691,16 @@ impl Engine {
         args: &[Value],
     ) -> Result<Value, EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
-        let Some(library) = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.action_library().clone())
-        else {
+        let Some(definition) = self.definitions.get(&definition_id) else {
             return Ok(Value::Nil);
         };
+        // C4Object::Call receives an already linked C4AulFunc pointer. A
+        // missing failsafe callback returns nil before C4AulExec allocates a
+        // context (C4AulExec.cpp:1318-1342; C4ObjectCom.cpp:48-61).
+        if !definition.script.has_function(function) {
+            return Ok(Value::Nil);
+        }
+        let library = definition.shared_action_library_handle();
         let object_id = self.objects[index].id;
         Ok(tolerate_script_error(self.call_movement_object_function(
             index,

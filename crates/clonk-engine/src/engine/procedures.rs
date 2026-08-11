@@ -107,7 +107,7 @@ impl Engine {
                     if let Some(action_library) = self
                         .definitions
                         .get(&callback_definition_id)
-                        .map(|definition| definition.action_library().clone())
+                        .map(Definition::shared_action_library_handle)
                     {
                         let _ = tolerate_script_error(self.call_movement_object_function(
                             target_idx,
@@ -149,7 +149,7 @@ impl Engine {
                 if let Some(action_library) = self
                     .definitions
                     .get(&definition_id)
-                    .map(|definition| definition.action_library().clone())
+                    .map(Definition::shared_action_library_handle)
                 {
                     let _ = tolerate_script_error(self.call_movement_object_function(
                         lifter_idx,
@@ -1116,7 +1116,7 @@ impl Engine {
         let library = self
             .definitions
             .get(definition_id)
-            .map(|definition| definition.action_library().clone())
+            .map(Definition::shared_action_library_handle)
             .unwrap_or_default();
         let default_action = library.default_action().to_string();
         let previous = self.objects[idx].state.action.clone();
@@ -1672,7 +1672,7 @@ impl Engine {
         let Some(library) = self
             .definitions
             .get(definition_id)
-            .map(|definition| definition.action_library().clone())
+            .map(Definition::shared_action_library_handle)
         else {
             return Ok(false);
         };
@@ -1801,7 +1801,7 @@ impl Engine {
         let Some(definition) = self.definitions.get(&live_definition_id) else {
             return Ok(());
         };
-        let library = definition.action_library().clone();
+        let library = definition.shared_action_library_handle();
         let action = self.objects[idx].state.action.clone();
         let action_name = action.name.clone();
         if library.is_idle_state(&action) {
@@ -2378,7 +2378,7 @@ impl Engine {
         if let Some(object) = self.objects.get(idx) {
             contact.contact_cnat = object.frame_shape_contact_cnat;
             if object.frame_shape_contact_count == 0 {
-                contact.vertices.clear();
+                contact.contact_count = 0;
             }
         }
         Ok(Some(contact))
@@ -2425,7 +2425,7 @@ impl Engine {
                         .map(|definition| {
                             (
                                 object.definition_id.clone(),
-                                definition.action_library().clone(),
+                                definition.shared_action_library_handle(),
                                 definition.has_function(function_name),
                             )
                         })
@@ -4082,7 +4082,7 @@ impl Engine {
         let Some(library) = self
             .definitions
             .get(&definition_id)
-            .map(|definition| definition.action_library().clone())
+            .map(Definition::shared_action_library_handle)
         else {
             return;
         };

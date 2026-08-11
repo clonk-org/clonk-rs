@@ -2385,7 +2385,9 @@ impl Engine {
     ) -> Result<(DefinitionId, SharedActionLibrary), EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
         let action_library = self
-            .shared_action_library_for(&definition_id)
+            .definitions
+            .get(&definition_id)
+            .map(Definition::shared_action_library_handle)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         Ok((definition_id, action_library))
     }

@@ -90,6 +90,7 @@ impl Engine {
             self.objects[index].solid_mask_instance_sequence = None;
             return;
         };
+        self.note_solid_mask_host_state_changed();
         let instance_sequence = match self.objects[index].solid_mask_instance_sequence {
             Some(sequence) => {
                 self.solid_mask_staging.next_solid_mask_instance_sequence = self
@@ -127,6 +128,7 @@ impl Engine {
         position: Vector2,
         instance_sequence: u64,
     ) {
+        self.note_solid_mask_host_state_changed();
         if index >= self.objects.len()
             || self.objects[index].solid_mask_bake.is_some()
             || self.objects[index].solid_mask_empty_put
@@ -375,6 +377,12 @@ impl Engine {
     ) -> Option<SolidMaskAttachmentBackup> {
         if index >= self.objects.len() {
             return None;
+        }
+        if self.objects[index].solid_mask_bake.is_some()
+            || self.objects[index].solid_mask_empty_put
+            || self.objects[index].solid_mask_instance_sequence.is_some()
+        {
+            self.note_solid_mask_host_state_changed();
         }
         let Some(landscape) = self.landscape.as_mut() else {
             self.objects[index].solid_mask_bake.take();
@@ -629,7 +637,7 @@ impl Engine {
         let indices: Vec<usize> = (0..self.objects.len()).collect();
         let masks = self.solid_masks_for_movement(&indices);
         let contact_density = object.state.contact_density;
-        !shape_contact_check(
+        shape_contact_check(
             &object.state.vertices,
             position,
             landscape,
@@ -638,8 +646,7 @@ impl Engine {
             Some(object.id),
             contact_density,
         )
-        .vertices
-        .is_empty()
+        .is_contact()
     }
 
     fn object_contacts_solid_mask_bake(object: &Object, bake: &SolidMaskBake, vehicle: u8) -> bool {
@@ -787,6 +794,14 @@ impl Engine {
     pub fn update_solid_mask(&mut self, index: usize) {
         if self.solid_mask_staging.defer_solid_mask_updates {
             return;
+        }
+        if self.objects.get(index).is_some_and(|object| {
+            object.solid_mask_bake.is_some()
+                || object.solid_mask_empty_put
+                || object.solid_mask_instance_sequence.is_some()
+        }) || self.solid_mask_spec(index).is_some()
+        {
+            self.note_solid_mask_host_state_changed();
         }
         self.remove_solid_mask(index);
         self.put_solid_mask(index);
@@ -2893,6 +2908,39 @@ mod tests {
             1,
             "the rect overlay still reports the masked object"
         );
+    }
+
+    #[test]
+    fn grid_worlds_do_not_scan_rect_solid_mask_candidates() {
+        let mut landscape = Landscape::new(2, vec![0; 2]).expect("landscape builds");
+        landscape.set_world_height(2);
+        landscape.set_pixel_grid(landscape::PixelGrid::new(
+            2,
+            2,
+            vec![0; 4],
+            vec![0, 100],
+            vec![None, Some("Vehicle".into())],
+            vec![None; 2],
+        ));
+
+        let mut definition =
+            Definition::from_script("Mask", "Mask", "").expect("definition compiles");
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut engine = Engine::new();
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Mask"))
+            .expect("mask object spawns");
+
+        // C4SolidMask::Put bakes grid-world masks into the landscape plane;
+        // movement never needs a second rectangle overlay (C4SolidMask.cpp:24-107).
+        SOLID_MASK_DEFINITION_LOOKUPS.with(|count| count.set(0));
+        assert!(engine.active_solid_mask_indices().is_empty());
+        assert_eq!(SOLID_MASK_DEFINITION_LOOKUPS.with(Cell::get), 0);
     }
 
     #[test]

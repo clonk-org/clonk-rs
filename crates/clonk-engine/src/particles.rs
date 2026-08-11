@@ -13,6 +13,8 @@ use crate::math::{fixtof, C4Fixed};
 use crate::{ObjectId, ParticleLayer};
 use clonk_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::rc::Rc;
 use thiserror::Error;
 
 /// Engine state read by the particle exec procs: GravAccel,
@@ -342,6 +344,8 @@ pub struct Particle {
 pub struct ParticleSystem {
     /// Insertion-ordered def list (C++ keeps a linked list, pDef0..pDefL).
     defs: Vec<ParticleDef>,
+    def_names: Rc<HashSet<String>>,
+    reloadable_def_names: Rc<HashSet<String>>,
     particles: Vec<Particle>,
     pub safe_rng: SafeRng,
     /// Local `Config.Graphics.SmokeLevel` (default 200, C4Config.cpp:452).
@@ -359,6 +363,8 @@ impl Default for ParticleSystem {
     fn default() -> Self {
         Self {
             defs: Vec::new(),
+            def_names: Rc::new(HashSet::new()),
+            reloadable_def_names: Rc::new(HashSet::new()),
             particles: Vec::new(),
             safe_rng: SafeRng::default(),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
@@ -409,6 +415,17 @@ pub struct ObjectFireEmission {
 }
 
 impl ParticleSystem {
+    fn refresh_def_name_caches(&mut self) {
+        self.def_names = Rc::new(self.defs.iter().map(|def| def.core.name.clone()).collect());
+        self.reloadable_def_names = Rc::new(
+            self.defs
+                .iter()
+                .filter(|def| def.source_path.is_some())
+                .map(|def| def.core.name.clone())
+                .collect(),
+        );
+    }
+
     /// `C4ParticleSystem::GetDef` (C4Particles.cpp:465-473).
     pub fn get_def(&self, name: &str) -> Option<&ParticleDef> {
         self.defs.iter().find(|def| def.core.name == name)
@@ -498,6 +515,7 @@ impl ParticleSystem {
             graphics,
             count: 0,
         });
+        self.refresh_def_name_caches();
         Ok(())
     }
 
@@ -588,7 +606,11 @@ impl ParticleSystem {
     pub fn remove_def(&mut self, name: &str) -> bool {
         let before = self.defs.len();
         self.defs.retain(|def| def.core.name != name);
-        self.defs.len() != before
+        let removed = self.defs.len() != before;
+        if removed {
+            self.refresh_def_name_caches();
+        }
+        removed
     }
 
     pub fn particles(&self) -> &[Particle] {
@@ -597,7 +619,13 @@ impl ParticleSystem {
 
     /// Names of all loaded defs, for the host-function GetDef checks.
     pub fn def_names(&self) -> std::collections::HashSet<String> {
-        self.defs.iter().map(|def| def.core.name.clone()).collect()
+        #[cfg(test)]
+        crate::PARTICLE_DEF_NAME_REBUILDS.with(|count| count.set(count.get() + 1));
+        self.def_names.as_ref().clone()
+    }
+
+    pub(crate) fn shared_def_names(&self) -> Rc<HashSet<String>> {
+        Rc::clone(&self.def_names)
     }
 
     /// Attach the group a definition was loaded from after the fact.
@@ -606,13 +634,17 @@ impl ParticleSystem {
     /// (`register_resource_from`); this exists for callers that build a
     /// definition first and learn its group second.
     pub fn set_def_source_path(&mut self, name: &str, path: Option<std::path::PathBuf>) -> bool {
-        match self.defs.iter_mut().find(|def| def.core.name == name) {
+        let found = match self.defs.iter_mut().find(|def| def.core.name == name) {
             Some(def) => {
                 def.source_path = path;
                 true
             }
             None => false,
+        };
+        if found {
+            self.refresh_def_name_caches();
         }
+        found
     }
 
     /// The definitions a reload could actually re-open — those carrying a
@@ -620,11 +652,11 @@ impl ParticleSystem {
     /// (`C4Particles.cpp:197`), so a manually registered simulation-only def
     /// can never reload however it is named.
     pub fn reloadable_def_names(&self) -> std::collections::HashSet<String> {
-        self.defs
-            .iter()
-            .filter(|def| def.source_path.is_some())
-            .map(|def| def.core.name.clone())
-            .collect()
+        self.reloadable_def_names.as_ref().clone()
+    }
+
+    pub(crate) fn shared_reloadable_def_names(&self) -> Rc<HashSet<String>> {
+        Rc::clone(&self.reloadable_def_names)
     }
 
     /// `C4ParticleList::Remove` via FnClearParticles (C4Script.cpp:4925-4944):
