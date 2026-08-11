@@ -1781,8 +1781,7 @@ impl GameApp {
                 self.start_scenario_with_definition_load(scenario, definition_load)
             }
             ScenarioSelectorMode::NetworkHost => {
-                self.stage_network_host_scenario(scenario, definition_load);
-                Ok(())
+                self.stage_network_host_scenario(scenario, definition_load)
             }
         }
     }
