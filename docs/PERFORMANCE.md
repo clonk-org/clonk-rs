@@ -1044,6 +1044,27 @@ acceptance target. The candidate must still satisfy every native-cadence,
 therefore also run from an interactive visible desktop; it does not make a
 headless automation session valid presentation evidence.
 
+### 4K fogged-landscape renderer microbenchmark
+
+Run the retained renderer against prebuilt 3840x2160 fog workloads:
+
+```sh
+cargo bench -p clonk-app-render --features bench \
+  --bench landscape_render --locked
+```
+
+The normal arm samples a retained 4096x4096 landscape backing through 2,040
+source-aligned 64-pixel fog chunks. The `NoBoxFades` arm represents each chunk
+as its two flat-shaded triangles, for 4,080 ordered landscape commands. Both
+arms require one scene draw and two total draws, including the fixed final
+presentation pass; a count mismatch fails before Criterion records samples.
+
+The reported wall time covers retained-renderer processing of the prebuilt
+scene, command encoding, queue submission, and waiting for device completion.
+It excludes frontend fog capture and scene construction, and it is not a
+GPU-only duration. Stage-separated CPU measurements and timestamp-query GPU
+pass timing remain tracked by clonk-org/clonk-rs#267.
+
 ### Deep Sea retained-GPU presentation benchmark
 
 Build once, then run the real Deep Sea scenario through the windowed GPU path:

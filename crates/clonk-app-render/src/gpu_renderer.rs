@@ -2695,16 +2695,20 @@ impl RetainedGpuRenderer {
                         );
                     }
                     let end = vertex_count(vertices)?;
-                    calls.push(DrawCall {
-                        vertices: start..end,
-                        scissor: projection.scissor,
-                        blend: GpuBlend::Normal,
-                        kind: DrawKind::Landscape(LandscapeBindingKey {
-                            base: *base,
-                            mask: *liquid_mask,
-                            liquid: *liquid,
-                        }),
-                    });
+                    DrawCall::push_compatible_quad(
+                        calls,
+                        layer_call_start,
+                        DrawCall {
+                            vertices: start..end,
+                            scissor: projection.scissor,
+                            blend: GpuBlend::Normal,
+                            kind: DrawKind::Landscape(LandscapeBindingKey {
+                                base: *base,
+                                mask: *liquid_mask,
+                                liquid: *liquid,
+                            }),
+                        },
+                    );
                 }
                 GpuCommand::Solid {
                     vertices: solid,
@@ -7210,6 +7214,458 @@ mod tests {
     }
 
     #[test]
+    fn compatible_fogged_landscape_chunks_share_one_painter_order_draw_call() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping landscape draw-call coalescing check");
+            return;
+        };
+        let shared_base = GpuTextureId::fresh();
+        let split_first_base = GpuTextureId::fresh();
+        let split_second_base = GpuTextureId::fresh();
+        let clip = Some(Rect::new(1, 0, 1, 1));
+        let chunk = |base, modulation| GpuCommand::Landscape {
+            base,
+            liquid_mask: None,
+            liquid: None,
+            vertices: quad(0.0, 0.0, 3.0, 1.0, 1.0, modulation),
+            clip,
+            phase: [0.0; 3],
+            gamma: false,
+        };
+        let scene = |textures, commands| GpuScene {
+            logical_extent: [3, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures,
+            commands,
+        };
+        let coalesced = scene(
+            vec![rgba_resource(shared_base, [255; 4])],
+            vec![
+                chunk(shared_base, [1.0, 0.0, 0.0, 127.0 / 255.0]),
+                chunk(shared_base, [0.0, 1.0, 0.0, 127.0 / 255.0]),
+            ],
+        );
+        let forced_split = scene(
+            vec![
+                rgba_resource(split_first_base, [255; 4]),
+                rgba_resource(split_second_base, [255; 4]),
+            ],
+            vec![
+                chunk(split_first_base, [1.0, 0.0, 0.0, 127.0 / 255.0]),
+                chunk(split_second_base, [0.0, 1.0, 0.0, 127.0 / 255.0]),
+            ],
+        );
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let coalesced_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(3, 1),
+        );
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+        let split_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &forced_split,
+            &GpuPresentation::identity(3, 1),
+        );
+
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+        assert_eq!(coalesced_frame, split_frame);
+        assert_eq!(
+            coalesced_frame.rgba,
+            vec![0, 0, 0, 0, 64, 128, 0, 192, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn landscape_coalescing_keeps_binding_clip_and_layer_boundaries() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping landscape boundary check");
+            return;
+        };
+        let base_a = GpuTextureId::fresh();
+        let base_b = GpuTextureId::fresh();
+        let mask_a = GpuTextureId::fresh();
+        let mask_b = GpuTextureId::fresh();
+        let liquid_a = GpuTextureId::fresh();
+        let liquid_b = GpuTextureId::fresh();
+        let command = |base, liquid_mask, liquid, clip| GpuCommand::Landscape {
+            base,
+            liquid_mask,
+            liquid,
+            vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, [1.0, 1.0, 1.0, 0.0]),
+            clip,
+            phase: [0.0; 3],
+            gamma: false,
+        };
+        let resources = vec![
+            rgba_resource(base_a, [255, 0, 0, 255]),
+            rgba_resource(base_b, [0, 255, 0, 255]),
+            r8_resource(mask_a, 0),
+            r8_resource(mask_b, 0),
+            rgba_resource(liquid_a, [128, 128, 128, 255]),
+            rgba_resource(liquid_b, [128, 128, 128, 255]),
+        ];
+        let scene = GpuScene {
+            logical_extent: [2, 2],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: resources.clone(),
+            commands: vec![
+                command(base_a, None, None, None),
+                command(base_a, None, None, None),
+                command(base_b, None, None, None),
+                command(base_a, None, None, None),
+                command(base_a, Some(mask_a), Some(liquid_a), None),
+                command(base_a, Some(mask_a), Some(liquid_a), None),
+                command(base_a, Some(mask_b), Some(liquid_a), None),
+                command(base_a, Some(mask_b), Some(liquid_b), None),
+                command(
+                    base_a,
+                    Some(mask_b),
+                    Some(liquid_b),
+                    Some(Rect::new(0, 0, 1, 1)),
+                ),
+            ],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let _ = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(2, 2),
+        );
+        assert_eq!(renderer.last_stats().draw_calls, 7);
+
+        let one_command_scene = GpuScene {
+            commands: vec![command(base_a, None, None, None)],
+            textures: resources,
+            ..scene
+        };
+        let presentation = GpuPresentation::identity(2, 2);
+        let layers = [
+            GpuSceneLayer::new(&one_command_scene, presentation),
+            GpuSceneLayer::new(&one_command_scene, presentation),
+        ];
+        let _ = render_layers_readback(&mut renderer, &device, &queue, &layers);
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+    }
+
+    #[test]
+    fn no_box_fades_landscape_triangles_keep_flat_colors_when_coalesced() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping NoBoxFades landscape parity check");
+            return;
+        };
+        let shared_base = GpuTextureId::fresh();
+        let split_first_base = GpuTextureId::fresh();
+        let split_second_base = GpuTextureId::fresh();
+        // LegacyClonk 7d43b47b7d789b533f32d005e64596e0a07019cd uses GL_FLAT
+        // and each strip triangle's provoking vertex colour for NoBoxFades
+        // (src/StdGL.cpp:667,710-763).
+        let corners = quad(0.0, 0.0, 4.0, 4.0, 1.0, [1.0; 4]);
+        let triangle = |base, indices: [usize; 4], modulation| GpuCommand::Landscape {
+            base,
+            liquid_mask: None,
+            liquid: None,
+            vertices: std::array::from_fn(|slot| {
+                let corner = corners[indices[slot]];
+                GpuVertex::new(corner.position, corner.uv, modulation)
+            }),
+            clip: None,
+            phase: [0.0; 3],
+            gamma: false,
+        };
+        let scene = |textures, commands| GpuScene {
+            logical_extent: [4, 4],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures,
+            commands,
+        };
+        let coalesced = scene(
+            vec![rgba_resource(shared_base, [255; 4])],
+            vec![
+                triangle(shared_base, [0, 1, 2, 2], [1.0, 0.0, 0.0, 0.0]),
+                triangle(shared_base, [2, 1, 3, 3], [0.0, 1.0, 0.0, 0.0]),
+            ],
+        );
+        let forced_split = scene(
+            vec![
+                rgba_resource(split_first_base, [255; 4]),
+                rgba_resource(split_second_base, [255; 4]),
+            ],
+            vec![
+                triangle(split_first_base, [0, 1, 2, 2], [1.0, 0.0, 0.0, 0.0]),
+                triangle(split_second_base, [2, 1, 3, 3], [0.0, 1.0, 0.0, 0.0]),
+            ],
+        );
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let coalesced_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(4, 4),
+        );
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+        let split_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &forced_split,
+            &GpuPresentation::identity(4, 4),
+        );
+
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+        assert_eq!(coalesced_frame, split_frame);
+        assert!(coalesced_frame
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(coalesced_frame
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn liquid_phase_and_fragment_gamma_remain_per_chunk_when_coalesced() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping liquid landscape parity check");
+            return;
+        };
+        let shared = [
+            GpuTextureId::fresh(),
+            GpuTextureId::fresh(),
+            GpuTextureId::fresh(),
+        ];
+        let split_first = [
+            GpuTextureId::fresh(),
+            GpuTextureId::fresh(),
+            GpuTextureId::fresh(),
+        ];
+        let split_second = [
+            GpuTextureId::fresh(),
+            GpuTextureId::fresh(),
+            GpuTextureId::fresh(),
+        ];
+        let command =
+            |ids: [GpuTextureId; 3], left, right, modulation, phase, gamma| GpuCommand::Landscape {
+                base: ids[0],
+                liquid_mask: Some(ids[1]),
+                liquid: Some(ids[2]),
+                vertices: quad(left, 0.0, right, 1.0, 1.0, modulation),
+                clip: None,
+                phase,
+                gamma,
+            };
+        let resources = |ids: [GpuTextureId; 3]| {
+            vec![
+                rgba_resource(ids[0], [100, 140, 220, 255]),
+                r8_resource(ids[1], 255),
+                rgba_resource(ids[2], [220, 96, 48, 255]),
+            ]
+        };
+        let first = |ids| {
+            command(
+                ids,
+                0.0,
+                1.0,
+                [0.75, 1.0, 0.5, 31.0 / 255.0],
+                [0.3, -0.2, 0.1],
+                false,
+            )
+        };
+        let second = |ids| {
+            command(
+                ids,
+                1.0,
+                2.0,
+                [1.0, 0.5, 0.75, 63.0 / 255.0],
+                [-0.1, 0.4, 0.2],
+                true,
+            )
+        };
+        let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
+            0x102030, 0x708090, 0xd0e0f0,
+        ]));
+        let scene = |textures, commands| GpuScene {
+            logical_extent: [2, 1],
+            clear: Color::new(11, 19, 31, 47),
+            gamma: gamma.clone(),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures,
+            commands,
+        };
+        let coalesced = scene(resources(shared), vec![first(shared), second(shared)]);
+        let forced_split = scene(
+            resources(split_first)
+                .into_iter()
+                .chain(resources(split_second))
+                .collect(),
+            vec![first(split_first), second(split_second)],
+        );
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let coalesced_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(2, 1),
+        );
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+        let split_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &forced_split,
+            &GpuPresentation::identity(2, 1),
+        );
+
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+        assert_eq!(coalesced_frame, split_frame);
+        assert_ne!(
+            readback_pixel(&coalesced_frame, 0, 0),
+            readback_pixel(&coalesced_frame, 1, 0)
+        );
+    }
+
+    #[test]
+    fn adjacent_multi_tile_landscape_runs_keep_order_without_regrouping() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping multi-tile landscape parity check");
+            return;
+        };
+        let tile_a = GpuTextureId::fresh();
+        let tile_a_split = GpuTextureId::fresh();
+        let tile_b = GpuTextureId::fresh();
+        let chunk = |base, left, right| GpuCommand::Landscape {
+            base,
+            liquid_mask: None,
+            liquid: None,
+            vertices: quad(left, 0.0, right, 1.0, 1.0, [1.0, 1.0, 1.0, 0.0]),
+            clip: None,
+            phase: [0.0; 3],
+            gamma: false,
+        };
+        let scene = |commands| GpuScene {
+            logical_extent: [3, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![
+                rgba_resource(tile_a, [220, 32, 48, 255]),
+                rgba_resource(tile_a_split, [220, 32, 48, 255]),
+                rgba_resource(tile_b, [24, 216, 72, 255]),
+            ],
+            commands,
+        };
+        let coalesced = scene(vec![
+            chunk(tile_a, 0.0, 1.0),
+            chunk(tile_a, 1.0, 2.0),
+            chunk(tile_b, 2.0, 3.0),
+        ]);
+        let forced_split = scene(vec![
+            chunk(tile_a, 0.0, 1.0),
+            chunk(tile_a_split, 1.0, 2.0),
+            chunk(tile_b, 2.0, 3.0),
+        ]);
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let coalesced_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &coalesced,
+            &GpuPresentation::identity(3, 1),
+        );
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+        let split_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &forced_split,
+            &GpuPresentation::identity(3, 1),
+        );
+
+        assert_eq!(renderer.last_stats().draw_calls, 3);
+        assert_eq!(coalesced_frame, split_frame);
+        assert_eq!(
+            coalesced_frame.rgba,
+            vec![220, 32, 48, 255, 220, 32, 48, 255, 24, 216, 72, 255,]
+        );
+    }
+
+    #[test]
+    fn clipped_landscape_noop_does_not_split_a_compatible_run() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping clipped landscape run check");
+            return;
+        };
+        let visible_base = GpuTextureId::fresh();
+        let clipped_base = GpuTextureId::fresh();
+        let chunk = |base, modulation, clip| GpuCommand::Landscape {
+            base,
+            liquid_mask: None,
+            liquid: None,
+            vertices: quad(0.0, 0.0, 1.0, 1.0, 1.0, modulation),
+            clip,
+            phase: [0.0; 3],
+            gamma: false,
+        };
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![
+                rgba_resource(visible_base, [255; 4]),
+                rgba_resource(clipped_base, [255; 4]),
+            ],
+            commands: vec![
+                chunk(visible_base, [1.0, 0.0, 0.0, 127.0 / 255.0], None),
+                chunk(
+                    clipped_base,
+                    [0.0, 0.0, 1.0, 0.0],
+                    Some(Rect::new(2, 0, 1, 1)),
+                ),
+                chunk(visible_base, [0.0, 1.0, 0.0, 127.0 / 255.0], None),
+            ],
+        };
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &scene,
+            &GpuPresentation::identity(1, 1),
+        );
+
+        assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
+        assert_eq!(renderer.last_stats().draw_calls, 1);
+    }
+
+    #[test]
     fn compatible_quad_before_sprite_batch_keeps_every_painter_order_instance() {
         let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
             eprintln!("no wgpu adapter; skipping mixed particle batch check");
@@ -9588,6 +10044,18 @@ mod tests {
             base_revision: None,
             format: GpuTextureFormat::Rgba8,
             pixels: Arc::from(pixel),
+            dirty: Vec::new(),
+        }
+    }
+
+    fn r8_resource(id: GpuTextureId, pixel: u8) -> GpuTextureResource {
+        GpuTextureResource {
+            id,
+            extent: [1, 1],
+            revision: 0,
+            base_revision: None,
+            format: GpuTextureFormat::R8,
+            pixels: Arc::from([pixel]),
             dirty: Vec::new(),
         }
     }

@@ -43,3 +43,8 @@ required-features = ["bench"]
 name = "object_sprite_render"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "landscape_render"
+harness = false
+required-features = ["bench"]
