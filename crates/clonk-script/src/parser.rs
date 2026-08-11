@@ -103,56 +103,6 @@ impl<'a> Parser<'a> {
         self.parse_expression()
     }
 
-    #[allow(dead_code)]
-    pub fn parse_script(&mut self) -> Result<Script, ParseError> {
-        // Parse directives, variable declarations, and functions
-        // Directives and variable declarations can be interspersed
-        let mut includes = Vec::new();
-        let mut appends = Vec::new();
-        let mut strict_level = None;
-        let mut functions = Vec::new();
-
-        while !self.is_eof()? {
-            let declaration_token = self.peek()?.clone();
-            // Check for directives
-            if let Some(directive) = self.try_parse_directive()? {
-                self.parse_script_directive(
-                    &directive,
-                    declaration_token.line,
-                    declaration_token.column,
-                    &mut includes,
-                    &mut appends,
-                    &mut strict_level,
-                )?;
-            } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
-                // Parse local variable declarations
-                self.consume()?; // consume 'local'
-                self.parse_var_decl_list(VarDeclKind::Local)?;
-            } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
-                // Parse static variable declarations
-                self.consume()?; // consume 'static'
-                                 // Check for 'const' after 'static'
-                if self.consume_if_keyword(Keyword::Const)?.is_some() {
-                    self.parse_var_decl_list(VarDeclKind::StaticConst)?;
-                } else {
-                    self.parse_var_decl_list(VarDeclKind::Static)?;
-                }
-            } else {
-                // Must be a function
-                functions.push(self.parse_function()?);
-            }
-        }
-
-        Ok(Script::with_directives(
-            functions,
-            std::mem::take(&mut self.script_var_decls),
-            self.lexer.take_string_literals(),
-            includes,
-            appends,
-            strict_level,
-        ))
-    }
-
     /// C4Aul preparses each top-level declaration independently and later
     /// compiles each function independently (C4AulParse.cpp:1434-1561,
     /// 3549-3577). Return the partial script plus diagnostics instead of
@@ -253,58 +203,11 @@ impl<'a> Parser<'a> {
         )
     }
 
-    #[allow(dead_code)]
-    fn parse_function(&mut self) -> Result<Function, ParseError> {
-        // Parse optional access modifier (private/protected/public/global)
-        // Default is public if no modifier specified
-        let access = if self.consume_if_keyword(Keyword::Private)?.is_some() {
-            AccessLevel::Private
-        } else if self.consume_if_keyword(Keyword::Protected)?.is_some() {
-            AccessLevel::Protected
-        } else if self.consume_if_keyword(Keyword::Public)?.is_some() {
-            AccessLevel::Public
-        } else if self.consume_if_keyword(Keyword::Global)?.is_some() {
-            AccessLevel::Global
-        } else {
-            AccessLevel::Public // Default access level
-        };
-
-        if !self.check_keyword(Keyword::Func)? {
-            return self.parse_old_style_function(access);
-        }
-        self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
-        // Check for optional & indicating reference return type
-        let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
-        let (name, name_token) = self.expect_identifier("expected function name")?;
-        self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
-        let params = self.parse_parameter_list()?;
-        self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
-        self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
-        let description = self.parse_function_description()?;
-        let body = self.parse_block_statements()?;
-        self.expect_symbol(Symbol::RBrace, "expected '}' after function body")?;
-
-        Ok(Function {
-            name,
-            params,
-            body,
-            access,
-            returns_reference,
-            description,
-            // Stamped with the script's #strict level in Script::from_ast.
-            strict_level: None,
-            // C4Aul's SGetLine counts preceding newlines, while lexer
-            // diagnostics use conventional one-based lines.
-            source_line: name_token.line.saturating_sub(1),
-            source_host: None,
-            source_name: None,
-            // Bound to the destination ScriptEngine when the script is added.
-            global_link_host: None,
-            // Linked when a later script or an #include overload collides.
-            overloaded: None,
-            hard_inherited_line: self.hard_inherited_line.take(),
-            compiled: std::sync::OnceLock::new(),
-        })
+    /// Test-only entry point for sources expected to have no diagnostics.
+    #[cfg(test)]
+    pub(crate) fn parse_script_strict(&mut self) -> Result<Script, ParseError> {
+        let (script, diagnostics) = self.parse_script_recovering();
+        diagnostics.into_iter().next().map_or(Ok(script), Err)
     }
 
     fn parse_function_recovering(&mut self) -> Result<(Function, Option<ParseError>), ParseError> {
@@ -377,48 +280,6 @@ impl<'a> Parser<'a> {
             },
             error,
         ))
-    }
-
-    fn parse_old_style_function(&mut self, access: AccessLevel) -> Result<Function, ParseError> {
-        let (name, name_token) = self.expect_identifier("expected function declaration")?;
-        if self.strict_level >= 2 {
-            return Err(ParseError::new(
-                format!("declaration expected, but found identifier '{name}'"),
-                name_token.line,
-                name_token.column,
-            ));
-        }
-        self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
-        let description = self.parse_function_description()?;
-
-        let previous_old_style = self.parsing_old_style_function;
-        self.parsing_old_style_function = true;
-        let body = (|| {
-            let mut body = Vec::new();
-            while !self.is_eof()? && !self.is_old_style_function_boundary()? {
-                body.push(self.parse_statement()?);
-            }
-            Ok(body)
-        })();
-        self.parsing_old_style_function = previous_old_style;
-        let body = body?;
-
-        Ok(Function {
-            name,
-            params: Vec::new(),
-            body,
-            access,
-            returns_reference: false,
-            description,
-            strict_level: None,
-            source_line: name_token.line.saturating_sub(1),
-            source_host: None,
-            source_name: None,
-            global_link_host: None,
-            overloaded: None,
-            hard_inherited_line: self.hard_inherited_line.take(),
-            compiled: std::sync::OnceLock::new(),
-        })
     }
 
     fn parse_old_style_function_recovering(
@@ -2827,7 +2688,7 @@ mod tests {
     use super::*;
 
     fn parse_script(source: &str) -> Result<Script, ParseError> {
-        Parser::new(source).parse_script()
+        Parser::new(source).parse_script_strict()
     }
 
     fn parse_expression_at_strict(source: &str, strict_level: u8) -> Result<Expr, ParseError> {
@@ -3018,9 +2879,10 @@ func Ok() { return 1; }
         }
 
         for (source, function_name) in [("#strict 2:", "2"), ("#strict 0x2:", "0x2")] {
-            let direct = parse_script(source).expect("colon begins a legacy function");
+            let (direct, diagnostics) = Parser::new(source).parse_script_recovering();
             assert_eq!(direct.strict_level, Some(1), "source: {source}");
             assert_eq!(direct.functions[0].name, function_name, "source: {source}");
+            assert!(!diagnostics.is_empty(), "source: {source}");
             let recovered = crate::Script::compile(source).expect("legacy function compiles");
             assert_eq!(recovered.strict_level(), Some(1), "source: {source}");
             assert!(recovered.functions().contains_key(function_name));
@@ -3144,7 +3006,7 @@ func Ok() { return 1; }
             let mut parser =
                 Parser::with_strict_level("func Echo(nil) { return nil; }", Some(strict_level));
             let script = parser
-                .parse_script()
+                .parse_script_strict()
                 .expect("nil is legal as a bound parameter below strict three");
             assert_eq!(script.functions[0].params[0].name, "nil");
             assert!(matches!(
@@ -3165,7 +3027,7 @@ func Ok() { return 1; }
         for source in ["func nil() {}", "func Echo(nil) { return nil; }"] {
             let mut parser = Parser::with_strict_level(source, Some(3));
             assert!(
-                parser.parse_script().is_err(),
+                parser.parse_script_strict().is_err(),
                 "strict-three nil must stay reserved in {source:?}"
             );
         }
@@ -3659,9 +3521,9 @@ func Ok() { return 1; }
 
     #[test]
     fn statement_map_probe_discards_lookahead_string_operands() {
-        let mut parser = Parser::new("#strict 3\nfunc Broken() { { var = \"\\q\"; } }");
+        let mut parser = Parser::with_strict_level("{ var = \"\\q\"; }", Some(3));
         let error = parser
-            .parse_script()
+            .parse_statement()
             .expect_err("the malformed declaration must stop before its string operand");
 
         assert_eq!(error.message(), "expected variable name");
@@ -3676,9 +3538,9 @@ func Ok() { return 1; }
 
     #[test]
     fn statement_map_probe_lexer_error_keeps_cpp_cursor_progress() {
-        let mut parser = Parser::new("#strict 3\nfunc Broken() { { key = \"discarded\" @ }; }");
+        let mut parser = Parser::with_strict_level("{ key = \"discarded\" @ }; }", Some(3));
         let error = parser
-            .parse_script()
+            .parse_statement()
             .expect_err("invalid lookahead character must abort the statement probe");
 
         assert_eq!(error.message(), "unexpected character '@'");

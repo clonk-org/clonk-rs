@@ -11573,7 +11573,7 @@ mod tests {
         args: &[Value],
     ) -> Result<Value, RuntimeError> {
         let script = Parser::new(source)
-            .parse_script()
+            .parse_script_strict()
             .expect("parse should succeed");
         let functions: FxHashMap<String, Function> = script
             .functions
@@ -11743,7 +11743,7 @@ mod tests {
 
         let script =
             Parser::new("func Helper() { return 41; } func Probe() { return Helper() + 1; }")
-                .parse_script()
+                .parse_script_strict()
                 .expect("script parses");
         let functions = script
             .functions
@@ -11771,7 +11771,7 @@ mod tests {
         // (C4AulExec.cpp:62-63,1328-1342).
         let script =
             Parser::new("func Helper() { return 41; } func Probe() { return Helper() + 1; }")
-                .parse_script()
+                .parse_script_strict()
                 .expect("script parses");
         let functions = script
             .functions
@@ -11857,7 +11857,7 @@ mod tests {
     #[test]
     fn cloned_function_does_not_reuse_a_plan_for_mutated_source() {
         let script = Parser::new("func Probe() { return 1; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("first source parses");
         let functions: FxHashMap<String, Function> = script
             .functions
@@ -11871,7 +11871,7 @@ mod tests {
             .expect("original function warms its plan");
 
         let replacement = Parser::new("func Probe() { return 2; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("replacement source parses")
             .functions
             .into_iter()
@@ -11890,7 +11890,7 @@ mod tests {
     #[test]
     fn warmed_function_does_not_reuse_a_plan_after_in_place_mutation() {
         let script = Parser::new("func Probe() { return 1; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("first source parses");
         let mut functions: FxHashMap<String, Function> = script
             .functions
@@ -11904,7 +11904,7 @@ mod tests {
             .expect("original function warms its plan");
 
         let replacement = Parser::new("func Probe() { return 2; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("replacement source parses")
             .functions
             .into_iter()
@@ -11924,14 +11924,14 @@ mod tests {
     #[test]
     fn inherited_function_does_not_reuse_a_plan_after_in_place_mutation() {
         let inherited = Parser::new("func Probe() { return 1; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("inherited source parses")
             .functions
             .into_iter()
             .next()
             .expect("inherited function exists");
         let mut function = Parser::new("#strict 2\nfunc Probe() { return inherited(); }")
-            .parse_script()
+            .parse_script_strict()
             .expect("overriding source parses")
             .functions
             .into_iter()
@@ -11946,7 +11946,7 @@ mod tests {
             .expect("inherited function warms its plan");
 
         let replacement = Parser::new("func Probe() { return 2; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("replacement source parses")
             .functions
             .into_iter()
@@ -11972,7 +11972,7 @@ mod tests {
     #[test]
     fn global_function_does_not_reuse_a_plan_after_in_place_mutation() {
         let global = Parser::new("global func Probe() { return 1; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("global source parses")
             .functions
             .into_iter()
@@ -11988,7 +11988,7 @@ mod tests {
             .expect("global function warms its plan");
 
         let replacement = Parser::new("global func Probe() { return 2; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("replacement source parses")
             .functions
             .into_iter()
@@ -12009,7 +12009,7 @@ mod tests {
     #[test]
     fn linked_function_does_not_reuse_a_caller_warmed_plan() {
         let mut function = Parser::new("global func Probe() { return 1; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("linked source parses")
             .functions
             .into_iter()
@@ -12023,7 +12023,7 @@ mod tests {
             .expect("caller-owned function warms its plan");
 
         let replacement = Parser::new("global func Probe() { return 2; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("replacement source parses")
             .functions
             .into_iter()
@@ -12045,7 +12045,7 @@ mod tests {
     #[test]
     fn function_debug_omits_the_derived_compilation_cache() {
         let function = Parser::new("func Probe() { return 1; }")
-            .parse_script()
+            .parse_script_strict()
             .expect("source parses")
             .functions
             .into_iter()
@@ -12092,7 +12092,9 @@ mod tests {
     #[test]
     fn compiled_indexed_path_preserves_ast_string_registration_order() {
         fn run(source: &str) -> (Value, Vec<Vec<u8>>, usize) {
-            let script = Parser::new(source).parse_script().expect("source parses");
+            let script = Parser::new(source)
+                .parse_script_strict()
+                .expect("source parses");
             let functions: FxHashMap<String, Function> = script
                 .functions
                 .into_iter()
@@ -12127,7 +12129,9 @@ mod tests {
     #[test]
     fn compiled_stack_overflow_falls_back_before_observable_execution() {
         fn run(source: &str) -> (String, Vec<Vec<u8>>) {
-            let script = Parser::new(source).parse_script().expect("source parses");
+            let script = Parser::new(source)
+                .parse_script_strict()
+                .expect("source parses");
             let functions: FxHashMap<String, Function> = script
                 .functions
                 .into_iter()
@@ -12169,7 +12173,9 @@ mod tests {
     #[test]
     fn compiled_object_path_hook_observes_the_ast_value_stack_depth() {
         fn run(source: &str) -> (Value, usize, usize) {
-            let script = Parser::new(source).parse_script().expect("source parses");
+            let script = Parser::new(source)
+                .parse_script_strict()
+                .expect("source parses");
             let functions: FxHashMap<String, Function> = script
                 .functions
                 .into_iter()
@@ -12332,7 +12338,7 @@ mod tests {
                 func Test() { return AddLightCone(); }
             "#,
         )
-        .parse_script()
+        .parse_script_strict()
         .expect("object script parses");
         let object_functions: FxHashMap<String, Function> = object_script
             .functions
@@ -12345,7 +12351,7 @@ mod tests {
                 global func AddLightCone() { return CreateLight(); }
             "#,
         )
-        .parse_script()
+        .parse_script_strict()
         .expect("global script parses");
         let global_functions: FxHashMap<String, Function> = global_script
             .functions
@@ -12376,7 +12382,7 @@ mod tests {
             }
         "#;
         let script = Parser::new(source)
-            .parse_script()
+            .parse_script_strict()
             .expect("parse should succeed");
         let functions: FxHashMap<String, Function> = script
             .functions
@@ -12436,7 +12442,7 @@ mod tests {
                 }
             "#,
         )
-        .parse_script()
+        .parse_script_strict()
         .expect("script parses");
         let var_decls = script.var_decls.clone();
         let functions: FxHashMap<String, Function> = script
@@ -12479,7 +12485,7 @@ mod tests {
                 }
             "#,
         )
-        .parse_script()
+        .parse_script_strict()
         .expect("script parses");
         let var_decls = script.var_decls.clone();
         let functions: FxHashMap<String, Function> = script
