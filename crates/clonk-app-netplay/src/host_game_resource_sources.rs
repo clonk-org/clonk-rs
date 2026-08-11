@@ -180,6 +180,42 @@ fn folder_local_lookup_names(
         .collect()
 }
 
+/// The ordered `NRT_Material` groups a host publishes for `scenario_path`:
+/// every registered parent folder's `Material.c4g`, innermost folder first,
+/// then the installed one (C4GameParameters.cpp:214-222).
+///
+/// Inputs that carry no chain — a scenario outside every install root, an
+/// installation without `Material.c4g` — resolve to the shorter chain they
+/// produce rather than to an error. `resolve_host_game_resource_sources`
+/// remains the authority that rejects them, so reading this chain never
+/// changes which failure a host bootstrap reports first.
+pub fn resolve_host_material_groups(
+    scenario_path: &Path,
+    install_roots: &[PathBuf],
+) -> Result<Vec<Group>, GroupError> {
+    let mut groups = scenario_install_root(scenario_path, install_roots)
+        .ok()
+        .map(|(scenario_root, scenario_relative)| {
+            folder_material_groups(scenario_root, scenario_relative)
+        })
+        .transpose()
+        .map_err(|(_, source)| source)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|folder| folder.material)
+        .collect::<Vec<_>>();
+    match open_installed_group(
+        HostGameResourceSourceKind::Material,
+        "Material.c4g",
+        install_roots,
+    ) {
+        Ok((_, installed)) => groups.push(installed),
+        Err(HostGameResourceSourceError::ResourceGroup { source, .. }) => return Err(source),
+        Err(_) => {}
+    }
+    Ok(groups)
+}
+
 /// Resolves the C4GameRes sources without consulting process-global app state.
 pub fn resolve_host_game_resource_sources(
     scenario_path: impl AsRef<Path>,
@@ -271,6 +307,25 @@ fn scenario_install_root<'a>(
         )
 }
 
+/// The first install root holding `logical_name`, opened as a group.
+fn open_installed_group(
+    kind: HostGameResourceSourceKind,
+    normalized_name: &str,
+    install_roots: &[PathBuf],
+) -> Result<(PathBuf, Group), HostGameResourceSourceError> {
+    let path = install_roots
+        .iter()
+        .map(|root| root.join(normalized_name))
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| HostGameResourceSourceError::ResourceMissing {
+            kind,
+            wire_name: normalized_name.to_owned(),
+        })?;
+    let group =
+        open_group_path(&path).map_err(|source| group_source_error(kind, path.clone(), source))?;
+    Ok((path, group))
+}
+
 fn resolve_installed_group(
     kind: HostGameResourceSourceKind,
     logical_name: &str,
@@ -279,16 +334,7 @@ fn resolve_installed_group(
 ) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
     let normalized_name = logical_name.replace('\\', "/");
     let logical_path = Path::new(&normalized_name);
-    let path = install_roots
-        .iter()
-        .map(|root| root.join(logical_path))
-        .find(|candidate| candidate.exists())
-        .ok_or_else(|| HostGameResourceSourceError::ResourceMissing {
-            kind,
-            wire_name: normalized_name.clone(),
-        })?;
-    let group =
-        open_group_path(&path).map_err(|source| group_source_error(kind, path.clone(), source))?;
+    let (path, group) = open_installed_group(kind, &normalized_name, install_roots)?;
     let lookup_name = clonk_script::c4_string_bytes(&normalized_name);
     let opened_name = opened_group_name(group.root(), &lookup_name, executable_root);
     let resource = source_from_names(
@@ -301,11 +347,22 @@ fn resolve_installed_group(
     validate_open_group_resource_source(kind, resource, group)
 }
 
-fn folder_materials(
+/// One registered parent folder's `Material.c4g`, kept beside the folder group
+/// whose spelling `C4GameParameters::Load` passes to `AddByFile`.
+struct FolderMaterialGroup {
+    folder: Group,
+    material: Group,
+    material_path: PathBuf,
+}
+
+/// Every registered parent folder's `Material.c4g`, innermost folder first, in
+/// the order `C4GameParameters::Load` publishes them as `NRT_Material`
+/// (C4GameParameters.cpp:214-220). A failure carries the path it happened at
+/// so both callers can name it in their own error type.
+fn folder_material_groups(
     scenario_root: &Path,
     scenario_relative: &Path,
-    executable_root: &Path,
-) -> Result<Vec<HostInitialResourceSource>, HostGameResourceSourceError> {
+) -> Result<Vec<FolderMaterialGroup>, (PathBuf, GroupError)> {
     let mut relative = PathBuf::new();
     let mut folder_prefixes = Vec::new();
     for component in scenario_relative
@@ -324,55 +381,71 @@ fn folder_materials(
         .take_while(|relative| has_extension(relative, "c4f"))
     {
         let folder_path = scenario_root.join(&relative);
-        let group = open_group_path(&folder_path).map_err(|source| {
-            HostGameResourceSourceError::ResourceGroup {
-                kind: HostGameResourceSourceKind::Material,
-                path: folder_path.clone(),
-                source,
-            }
-        })?;
-        let material_entry = group
+        let folder =
+            open_group_path(&folder_path).map_err(|source| (folder_path.clone(), source))?;
+        let material_entry = folder
             .entries()
-            .map_err(|source| HostGameResourceSourceError::ResourceGroup {
-                kind: HostGameResourceSourceKind::Material,
-                path: folder_path.clone(),
-                source,
-            })?
+            .map_err(|source| (folder_path.clone(), source))?
             .into_iter()
             .find(|entry| matches_ascii_name(&entry.relative_path, b"Material.c4g"));
         let Some(material_entry) = material_entry else {
             continue;
         };
         let material_path = folder_path.join(&material_entry.relative_path);
-        let material_group = group
+        let material = folder
             .open_child_entry_exact(&material_entry)
-            .map_err(|source| HostGameResourceSourceError::ResourceGroup {
-                kind: HostGameResourceSourceKind::Material,
-                path: material_path.clone(),
-                source,
-            })?;
-        // C4GameParameters passes the already-opened parent group's full name
-        // plus the literal child name to AddByFile. SetByFile freezes
-        // AtExeRelativePath of that lookup spelling before C4Group corrects
-        // the retained opened filename used only for later reuse searches.
-        let lookup_path = group.root().join("Material.c4g");
-        let lookup_name = path_wire_bytes(&lookup_path);
-        let opened_name = opened_group_name(material_group.root(), &lookup_name, executable_root);
-        let wire_name = executable_relative_wire_name(lookup_name.clone(), executable_root);
-        let resource = source_from_names(
+            .map_err(|source| (material_path.clone(), source))?;
+        materials.push(FolderMaterialGroup {
+            folder,
+            material,
             material_path,
-            lookup_name,
-            opened_name,
-            wire_name,
-            &lookup_path,
-        )?;
-        materials.push(validate_open_group_resource_source(
-            HostGameResourceSourceKind::Material,
-            resource,
-            material_group,
-        )?);
+        });
     }
     Ok(materials)
+}
+
+fn folder_material_group_error(
+    (path, source): (PathBuf, GroupError),
+) -> HostGameResourceSourceError {
+    HostGameResourceSourceError::ResourceGroup {
+        kind: HostGameResourceSourceKind::Material,
+        path,
+        source,
+    }
+}
+
+fn folder_materials(
+    scenario_root: &Path,
+    scenario_relative: &Path,
+    executable_root: &Path,
+) -> Result<Vec<HostInitialResourceSource>, HostGameResourceSourceError> {
+    folder_material_groups(scenario_root, scenario_relative)
+        .map_err(folder_material_group_error)?
+        .into_iter()
+        .map(|folder| {
+            // C4GameParameters passes the already-opened parent group's full
+            // name plus the literal child name to AddByFile. SetByFile freezes
+            // AtExeRelativePath of that lookup spelling before C4Group corrects
+            // the retained opened filename used only for later reuse searches.
+            let lookup_path = folder.folder.root().join("Material.c4g");
+            let lookup_name = path_wire_bytes(&lookup_path);
+            let opened_name =
+                opened_group_name(folder.material.root(), &lookup_name, executable_root);
+            let wire_name = executable_relative_wire_name(lookup_name.clone(), executable_root);
+            let resource = source_from_names(
+                folder.material_path,
+                lookup_name,
+                opened_name,
+                wire_name,
+                &lookup_path,
+            )?;
+            validate_open_group_resource_source(
+                HostGameResourceSourceKind::Material,
+                resource,
+                folder.material,
+            )
+        })
+        .collect()
 }
 
 /// Validates an initial group source and freezes a standalone packed image
