@@ -3985,7 +3985,9 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
     let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    app.engine
+    // Disabling never owes the repeller rebuild.
+    let _ = app
+        .engine
         .player_mut(owner)
         .expect("sandbox player")
         .set_fog_of_war(false);
