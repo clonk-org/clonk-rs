@@ -35,6 +35,12 @@ const PACKED_SPRITE_INSTANCE_STRIDE: u64 =
     (8 * std::mem::size_of::<f32>() + 2 * std::mem::size_of::<u32>()) as u64;
 const PACKED_OBJECT_SPRITE_INSTANCE_STRIDE: u64 =
     (17 * std::mem::size_of::<f32>() + 5 * std::mem::size_of::<u32>()) as u64;
+const PACKED_SOLID_RECT_INSTANCE_STRIDE: u64 =
+    (8 * std::mem::size_of::<f32>() + std::mem::size_of::<u32>()) as u64;
+/// A covered physical pixel may not cost more than this to describe. The
+/// triangle-pair lowering it replaces spent 432 bytes on the same one pixel.
+const SOLID_RECT_INSTANCE_BYTE_BUDGET: u64 = 40;
+const SOLID_RECT_FLAG_GAMMA: u32 = 1;
 const INITIAL_VERTEX_BUFFER_SIZE: u64 = 4096;
 const SOURCE_TEXTURE_CACHE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 const SOURCE_TEXTURE_CACHE_MAX_ENTRIES: usize = 4096;
@@ -2743,7 +2749,7 @@ impl RetainedGpuRenderer {
                                     fragment_gamma_flag(scene.gamma_mode, style.gamma),
                                     &projection,
                                 )? {
-                                    vertices.extend(point);
+                                    vertices.extend(expanded_rect_vertices(point));
                                 }
                             }
                         }
@@ -3204,6 +3210,24 @@ struct PackedSpriteInstance {
     flags: u32,
 }
 
+/// One axis-aligned physical rectangle of flat color.
+///
+/// Aliased points and line fragments are whole physical pixels, so a rectangle
+/// and its color say everything the rasterizer needs. The corners are stored
+/// already projected to clip space, which keeps the exact `f32` values the
+/// triangle-pair lowering fed to the vertex stage.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PackedSolidRectInstance {
+    clip_rect: [f32; 4],
+    color: [f32; 4],
+    flags: u32,
+}
+
+const _: () = {
+    assert!(PACKED_SOLID_RECT_INSTANCE_STRIDE <= SOLID_RECT_INSTANCE_BYTE_BUDGET);
+};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct PackedObjectSpriteInstance {
@@ -3448,7 +3472,7 @@ fn packed_point_rect(
     point: GpuSolidVertex,
     gamma: bool,
     projection: &DrawProjection,
-) -> Result<Option<[PackedVertex; 6]>, GpuRendererError> {
+) -> Result<Option<PackedSolidRectInstance>, GpuRendererError> {
     let [logical_x, logical_y, logical_w] = point.position;
     if logical_w == 0.0 {
         return Err(GpuRendererError::NonFiniteCoordinate);
@@ -3511,22 +3535,12 @@ fn packed_point_rect(
     {
         return Ok(None);
     }
-    let positions = [
-        [left as f64, top as f64],
-        [right as f64, top as f64],
-        [left as f64, bottom as f64],
-        [left as f64, bottom as f64],
-        [right as f64, top as f64],
-        [right as f64, bottom as f64],
-    ];
-    Ok(Some([
-        packed_solid_physical_vertex(positions[0], point.color, gamma, projection)?,
-        packed_solid_physical_vertex(positions[1], point.color, gamma, projection)?,
-        packed_solid_physical_vertex(positions[2], point.color, gamma, projection)?,
-        packed_solid_physical_vertex(positions[3], point.color, gamma, projection)?,
-        packed_solid_physical_vertex(positions[4], point.color, gamma, projection)?,
-        packed_solid_physical_vertex(positions[5], point.color, gamma, projection)?,
-    ]))
+    Ok(Some(packed_solid_rect_instance(
+        [left as f64, top as f64, right as f64, bottom as f64],
+        point.color,
+        gamma,
+        projection,
+    )?))
 }
 
 fn next_down(value: f64) -> f64 {
@@ -3798,39 +3812,101 @@ fn walk_aliased_line_fragments(
     Ok(fragment_count)
 }
 
-fn packed_line_fragments(
+/// Project one physical rectangle into a compact clip-space instance.
+///
+/// The corners route through [`packed_solid_physical_vertex`] so the clip
+/// coordinates stay the exact `f32` values a triangle pair would have carried.
+fn packed_solid_rect_instance(
+    physical: [f64; 4],
+    color: [f32; 4],
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<PackedSolidRectInstance, GpuRendererError> {
+    let [left, top, right, bottom] = physical;
+    let top_left = packed_solid_physical_vertex([left, top], color, gamma, projection)?;
+    let bottom_right = packed_solid_physical_vertex([right, bottom], color, gamma, projection)?;
+    Ok(PackedSolidRectInstance {
+        clip_rect: [
+            top_left.clip[0],
+            top_left.clip[1],
+            bottom_right.clip[0],
+            bottom_right.clip[1],
+        ],
+        color,
+        // Point and line fragments never carry the gradient dither; only the
+        // interpolated triangle path asks for it.
+        flags: if gamma { SOLID_RECT_FLAG_GAMMA } else { 0 },
+    })
+}
+
+/// Lower one physical rectangle to the triangle pair the solid pipeline draws.
+///
+/// The corner order matches the shared unit-quad index buffer, so the same two
+/// triangles cover the rectangle whichever path issues them.
+fn expanded_rect_vertices(instance: PackedSolidRectInstance) -> [PackedVertex; 6] {
+    let [left, top, right, bottom] = instance.clip_rect;
+    let corner = |x: f32, y: f32| PackedVertex {
+        clip: [x, y, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        data0: instance.color,
+        data1: [
+            flag(instance.flags & SOLID_RECT_FLAG_GAMMA != 0),
+            0.0,
+            0.0,
+            0.0,
+        ],
+        data2: [0.0; 4],
+    };
+    [
+        corner(left, top),
+        corner(right, top),
+        corner(left, bottom),
+        corner(left, bottom),
+        corner(right, top),
+        corner(right, bottom),
+    ]
+}
+
+fn append_line_fragment_instances(
+    instances: &mut Vec<PackedSolidRectInstance>,
     start: GpuSolidVertex,
     end: GpuSolidVertex,
     gamma: bool,
     projection: &DrawProjection,
-) -> Result<Vec<PackedVertex>, GpuRendererError> {
+) -> Result<u64, GpuRendererError> {
     // OpenGL 2.1 section 3.4 rasterizes an aliased x-major line into at
     // most one fragment per physical column (one per row for y-major), omits
     // the directed final fragment, and implements a wide line by replicating
     // that base fragment in the minor direction. An oriented rectangle is
     // observably wrong: it is direction-invariant and can cover two pixels in
     // one major column on a diagonal. Generate the exact half-open fragment
-    // stream, then lower each physical fragment to a 1x1 triangle pair.
-    let mut packed = Vec::new();
+    // stream, then emit one one-pixel rectangle per selected fragment.
     walk_aliased_line_fragments(start, end, projection, |x, y, t| {
         let color = line_color_at_parameter(start, end, t)?;
         let left = x as f64;
         let top = y as f64;
-        for position in [
-            [left, top],
-            [left + 1.0, top],
-            [left, top + 1.0],
-            [left, top + 1.0],
-            [left + 1.0, top],
-            [left + 1.0, top + 1.0],
-        ] {
-            packed.push(packed_solid_physical_vertex(
-                position, color, gamma, projection,
-            )?);
-        }
+        instances.push(packed_solid_rect_instance(
+            [left, top, left + 1.0, top + 1.0],
+            color,
+            gamma,
+            projection,
+        )?);
         Ok(())
-    })?;
-    Ok(packed)
+    })
+}
+
+fn packed_line_fragments(
+    start: GpuSolidVertex,
+    end: GpuSolidVertex,
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<Vec<PackedVertex>, GpuRendererError> {
+    let mut instances = Vec::new();
+    append_line_fragment_instances(&mut instances, start, end, gamma, projection)?;
+    Ok(instances
+        .into_iter()
+        .flat_map(expanded_rect_vertices)
+        .collect())
 }
 
 fn projected_physical_position(
@@ -6377,6 +6453,56 @@ mod tests {
         assert_eq!(collect(0.5, 5.5), vec![(2, 1)]);
         assert_eq!(collect(5.5, 0.5), vec![(3, 1), (2, 1)]);
         assert!(collect(0.5, 2.0).is_empty(), "clip-point degeneracy");
+    }
+
+    fn physical_rect_origin(
+        instance: PackedSolidRectInstance,
+        projection: &DrawProjection,
+    ) -> [f64; 2] {
+        let width = f64::from(projection.physical_extent[0]);
+        let height = f64::from(projection.physical_extent[1]);
+        [
+            ((f64::from(instance.clip_rect[0]) + 1.0) * width / 2.0).round(),
+            ((1.0 - f64::from(instance.clip_rect[1])) * height / 2.0).round(),
+        ]
+    }
+
+    #[test]
+    fn line_fragments_pack_one_compact_instance_per_covered_pixel() {
+        // Every selected physical pixel is a one-pixel rectangle, so it needs
+        // its rectangle and its interpolated color and nothing else. Lowering
+        // one to a triangle pair spent six 72-byte vertices restating both.
+        let presentation = GpuPresentation {
+            physical_extent: [12, 8],
+            scale: 2.0,
+            crop_top: 0,
+        };
+        let projection = draw_projection(None, [6, 4], &presentation)
+            .expect("valid line presentation")
+            .expect("line clip intersects the framebuffer");
+        let color = [1.0, 0.0, 0.0, 1.0];
+        let mut instances = Vec::new();
+        append_line_fragment_instances(
+            &mut instances,
+            solid_vertex(1.5, 1.5, color),
+            solid_vertex(4.5, 1.5, color),
+            false,
+            &projection,
+        )
+        .expect("expand line pair");
+
+        let mut origins = instances
+            .iter()
+            .map(|instance| physical_rect_origin(*instance, &projection))
+            .collect::<Vec<_>>();
+        origins.sort_by(|left, right| left.partial_cmp(right).expect("finite physical origin"));
+        let mut expected = (2..8)
+            .flat_map(|x| (2..4).map(move |y| [f64::from(x), f64::from(y)]))
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.partial_cmp(right).expect("finite expected origin"));
+        assert_eq!(origins, expected);
+        assert_eq!(instances.len(), 6 * 2);
+        assert!(instances.iter().all(|instance| instance.color == color));
     }
 
     #[test]
