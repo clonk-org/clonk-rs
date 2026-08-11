@@ -3050,58 +3050,6 @@ fn home_base_id_by_index(
         .map(|(definition_id, _)| definition_id.clone())
 }
 
-fn adjust_id_count(
-    map: &mut HashMap<DefinitionId, u32>,
-    definition_id: &DefinitionId,
-    delta: i32,
-    max: Option<u32>,
-) -> u32 {
-    match map.entry(definition_id.clone()) {
-        Entry::Occupied(mut occupied) => {
-            if delta >= 0 {
-                let mut new_value = occupied.get().saturating_add(delta as u32);
-                if let Some(limit) = max {
-                    new_value = new_value.min(limit);
-                }
-                if new_value == 0 {
-                    occupied.remove();
-                    0
-                } else {
-                    occupied.insert(new_value);
-                    new_value
-                }
-            } else {
-                let current = *occupied.get();
-                let decrease = delta.saturating_abs() as u32;
-                if current <= decrease {
-                    occupied.remove();
-                    0
-                } else {
-                    let new_value = current - decrease;
-                    occupied.insert(new_value);
-                    new_value
-                }
-            }
-        }
-        Entry::Vacant(vacant) => {
-            if delta <= 0 {
-                0
-            } else {
-                let mut new_value = delta as u32;
-                if let Some(limit) = max {
-                    new_value = new_value.min(limit);
-                }
-                if new_value == 0 {
-                    0
-                } else {
-                    vacant.insert(new_value);
-                    new_value
-                }
-            }
-        }
-    }
-}
-
 const CFG_MAX_STRING: usize = 1024;
 
 pub(crate) fn mission_access_contains(list: &str, password: &str) -> bool {

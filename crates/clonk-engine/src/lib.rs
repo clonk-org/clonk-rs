@@ -6114,43 +6114,6 @@ impl DefinitionPictureImage {
         }
     }
 
-    fn from_sprite_rect(sprite: &DefinitionSpriteImage, rect: DefinitionRect) -> Option<Self> {
-        let x = u32::try_from(rect.x).ok()?;
-        let y = u32::try_from(rect.y).ok()?;
-        let width = u32::try_from(rect.width).ok()?;
-        let height = u32::try_from(rect.height).ok()?;
-        if width == 0
-            || height == 0
-            || x.checked_add(width)? > sprite.width
-            || y.checked_add(height)? > sprite.height
-        {
-            return None;
-        }
-
-        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-        for row in y..y + height {
-            let start = ((row * sprite.width + x) * 4) as usize;
-            let end = start + width as usize * 4;
-            pixels.extend_from_slice(sprite.pixels.get(start..end)?);
-        }
-        let color_mask = sprite.color_mask.as_ref().and_then(|mask| {
-            let channels = definition_color_mask_channels(mask, sprite.width, sprite.height)?;
-            let mut cropped = Vec::with_capacity(width as usize * height as usize * channels);
-            for row in y..y + height {
-                let start = (row * sprite.width + x) as usize * channels;
-                let end = start + width as usize * channels;
-                cropped.extend_from_slice(mask.get(start..end)?);
-            }
-            Some(Arc::from(cropped.into_boxed_slice()))
-        });
-        Some(Self {
-            width,
-            height,
-            pixels: Arc::from(pixels.into_boxed_slice()),
-            color_mask,
-        })
-    }
-
     /// Builds a facet-sized image while clipping source coordinates to the
     /// bitmap. C4Facet permits source rectangles outside the surface; the
     /// renderer clips those pixels rather than rejecting the facet or using
@@ -7945,17 +7908,6 @@ pub struct Engine {
     host_requests: HostRequestQueues,
 }
 
-const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
 fn clamp_fixed_to_limit(value: C4Fixed, limit: i32) -> C4Fixed {
     if limit <= 0 {
         C4Fixed::ZERO
@@ -8458,10 +8410,6 @@ struct MovementStepOutcome {
 pub struct ExecMovementOutcome {
     #[doc(hidden)]
     pub alive: bool,
-    /// Whether the positional integration reached C4Object::DoMotion.
-    /// Only that path removes the solid mask with attachment backup;
-    /// rotation-only updates use UpdateSolidMask(false) in C++.
-    did_motion: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8513,29 +8461,6 @@ fn movement_live_config_for(
     }
 }
 
-fn layer_movement_bounds_from_split(
-    object: &Object,
-    objects_before: &[Object],
-    objects_after: &[Object],
-    definitions: &HashMap<DefinitionId, Definition>,
-) -> Option<LayerMovementBounds> {
-    let layer_id = object.state.layer?;
-    let layer = if object.id == layer_id {
-        object
-    } else {
-        objects_before
-            .iter()
-            .chain(objects_after)
-            .find(|candidate| candidate.id == layer_id)?
-    };
-    let definition = definitions.get(&layer.definition_id)?;
-    Some(LayerMovementBounds {
-        position: layer.position_pixels(),
-        shape_rect: layer.current_shape_rect()?,
-        border_bound: definition.border_bound(),
-    })
-}
-
 #[derive(Debug, Clone, Default)]
 struct ShapeContact {
     contact_cnat: u32,
@@ -8566,12 +8491,6 @@ impl ShapeContact {
 
 fn sign_i32(value: i32) -> i32 {
     value.signum()
-}
-
-/// LC_COACHDBG forensics gate (diagnostic only) — cached so the movement
-/// contact loops don't pay an env lookup per abort.
-fn coach_debug_enabled() -> bool {
-    coach_debug_id().is_some()
 }
 
 /// TEMP stage probe for the traced object.

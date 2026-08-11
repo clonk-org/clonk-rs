@@ -1576,34 +1576,6 @@ impl Engine {
         Ok(())
     }
 
-    fn complete_command(
-        &mut self,
-        object_id: ObjectId,
-        command: CommandId,
-    ) -> Result<(), EngineError> {
-        let Some(index) = self.find_object_index(object_id) else {
-            return Err(EngineError::UnknownObject(object_id));
-        };
-        let object = self
-            .objects
-            .get_mut(index)
-            .ok_or(EngineError::UnknownObject(object_id))?;
-        object.commands.complete_front_if(command);
-        Ok(())
-    }
-
-    fn fail_command(&mut self, object_id: ObjectId, command: CommandId) -> Result<(), EngineError> {
-        let Some(index) = self.find_object_index(object_id) else {
-            return Err(EngineError::UnknownObject(object_id));
-        };
-        let object = self
-            .objects
-            .get_mut(index)
-            .ok_or(EngineError::UnknownObject(object_id))?;
-        object.commands.fail_front_if(command);
-        Ok(())
-    }
-
     pub(crate) fn set_acquire_script_result(
         &mut self,
         object_id: ObjectId,

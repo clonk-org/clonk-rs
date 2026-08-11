@@ -920,10 +920,7 @@ impl Engine {
         // remove(no backup)+put cycle; after motion it re-puts at the final
         // position and translates the riders captured by the first removal.
         let Some(idx) = self.find_object_index(object_id) else {
-            return Ok(ExecMovementOutcome {
-                alive: false,
-                did_motion,
-            });
+            return Ok(ExecMovementOutcome { alive: false });
         };
         self.update_solid_mask(idx);
         self.restore_solid_mask_attachments(idx, did_motion.then_some(mask_attachments).flatten());
@@ -987,10 +984,7 @@ impl Engine {
         // script calls (C4Movement.cpp:463-478).
         if movement_outcome.any_contact {
             let Some(idx) = self.find_object_index(object_id) else {
-                return Ok(ExecMovementOutcome {
-                    alive: false,
-                    did_motion,
-                });
+                return Ok(ExecMovementOutcome { alive: false });
             };
             // The most recent rotation/contact probe remains visible through
             // UpdateSolidMask and InLiquid/Splash. C++ restores accumulated
@@ -1002,10 +996,7 @@ impl Engine {
         }
         if movement_outcome.no_attach {
             let Some(idx) = self.find_object_index(object_id) else {
-                return Ok(ExecMovementOutcome {
-                    alive: false,
-                    did_motion,
-                });
+                return Ok(ExecMovementOutcome { alive: false });
             };
             let definition_id = self.objects[idx].definition_id.clone();
             if let Some(action_library) = self
@@ -1045,7 +1036,7 @@ impl Engine {
             !self.objects[idx].destroyed
                 && !matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
         });
-        Ok(ExecMovementOutcome { alive, did_motion })
+        Ok(ExecMovementOutcome { alive })
     }
 
     /// `DoGravity(this)` as used by the ExecAction idle and insufficient

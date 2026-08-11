@@ -2765,14 +2765,6 @@ fn call_world_object_function_from_arrow(
     call_world_object_function_with(target, function, args, true, true, None, true)
 }
 
-fn call_world_object_reference(
-    target: ObjectId,
-    function: &str,
-    args: &[Value],
-) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
-    call_world_object_reference_with(target, function, args, true, None, false)
-}
-
 fn call_world_object_reference_from_arrow(
     target: ObjectId,
     function: &str,
@@ -2791,33 +2783,6 @@ pub(crate) fn call_world_object_function_in_scope(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with(target, function, args, false, false, Some(script), false)
-}
-
-fn call_world_object_function_in_scope_from_arrow(
-    target: ObjectId,
-    script: Arc<ScriptEngine>,
-    function: &str,
-    args: &[Value],
-) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false, false, Some(script), true)
-}
-
-fn call_world_object_reference_in_scope(
-    target: ObjectId,
-    script: Arc<ScriptEngine>,
-    function: &str,
-    args: &[Value],
-) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
-    call_world_object_reference_with(target, function, args, false, Some(script), false)
-}
-
-fn call_world_object_reference_in_scope_from_arrow(
-    target: ObjectId,
-    script: Arc<ScriptEngine>,
-    function: &str,
-    args: &[Value],
-) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
-    call_world_object_reference_with(target, function, args, false, Some(script), true)
 }
 
 fn call_world_object_reference_with(

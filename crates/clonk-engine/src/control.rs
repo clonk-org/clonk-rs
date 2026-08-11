@@ -3516,20 +3516,6 @@ fn parse_network_resource_core(
     })
 }
 
-#[allow(dead_code)]
-fn parse_int_field(fields: &HashMap<String, String>, name: &str) -> Result<i32, ControlParseError> {
-    let Some(raw) = fields.get(name) else {
-        return Err(ControlParseError::MissingField {
-            field: name.to_string(),
-        });
-    };
-    raw.parse::<i32>()
-        .map_err(|_| ControlParseError::InvalidIntegerField {
-            field: name.to_string(),
-            value: raw.clone(),
-        })
-}
-
 fn legacy_string_bytes(value: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(value.len());
     for character in value.chars() {

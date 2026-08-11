@@ -3700,10 +3700,6 @@ impl Scenario {
         !self.initial_spawns.is_empty()
     }
 
-    pub(crate) fn scenario_sections(&self) -> &[ScenarioSectionSpec] {
-        &self.scenario_sections
-    }
-
     pub fn objectives(&self) -> &ScenarioObjectives {
         &self.objectives
     }

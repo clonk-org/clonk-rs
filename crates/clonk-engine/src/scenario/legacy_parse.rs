@@ -1056,10 +1056,6 @@ pub(crate) fn push_raw_string(
     }
 }
 
-fn push_i32_bool(fields: &mut LegacyIniFields, key: &'static str, value: bool, default: bool) {
-    push_value(fields, key, i32::from(value), i32::from(default));
-}
-
 fn push_i32_array(fields: &mut LegacyIniFields, key: &'static str, values: &[i32], default: i32) {
     let count = values
         .iter()

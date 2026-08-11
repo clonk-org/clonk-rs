@@ -623,15 +623,6 @@ pub(in crate::scenario) fn parse_c4fixed(value: &str) -> Result<crate::math::C4F
     }
 }
 
-fn parse_u64(value: &str) -> Result<u64, String> {
-    let parsed = parse_i64(value).map_err(|err| err.to_string())?;
-    if parsed < 0 {
-        Err("value must be >= 0".to_string())
-    } else {
-        Ok(parsed as u64)
-    }
-}
-
 pub(crate) fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "y" | "on" => Some(true),
@@ -652,76 +643,6 @@ pub(in crate::scenario) fn owner_index_from_section(section: &str) -> Option<i32
     } else {
         Some(owner)
     }
-}
-
-fn parse_player_position(value: &str) -> Option<Vector2> {
-    let mut parts = value
-        .split(',')
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty());
-    let x = parts.next()?.parse::<i32>().ok()?;
-    let y = parts.next()?.parse::<i32>().ok()?;
-    Some(Vector2::new(x, y))
-}
-
-fn parse_crew_entries(value: &str) -> Vec<(String, i32)> {
-    value
-        .split(';')
-        .filter_map(|segment| {
-            let trimmed = segment.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let mut parts = trimmed
-                .split('=')
-                .map(|part| part.trim())
-                .filter(|part| !part.is_empty());
-            let token = parts.next()?.to_string();
-            if token.is_empty() {
-                return None;
-            }
-            let count = parts
-                .next_back()
-                .and_then(|raw| raw.parse::<i32>().ok())
-                .filter(|count| *count > 0)
-                .unwrap_or(1);
-            Some((token, count))
-        })
-        .collect()
-}
-
-pub(in crate::scenario) fn find_definition_by_token<'a>(
-    definitions: &'a [ScenarioDefinition],
-    token: &str,
-) -> Option<&'a ScenarioDefinition> {
-    if token.is_empty() {
-        return None;
-    }
-    let trimmed = token.trim();
-    if trimmed.len() == 4
-        && trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
-        let upper = trimmed.to_ascii_uppercase();
-        if let Some(definition) = definitions
-            .iter()
-            .find(|definition| definition.id.eq_ignore_ascii_case(&upper))
-        {
-            return Some(definition);
-        }
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-    definitions.iter().find(|definition| {
-        if definition.id.eq_ignore_ascii_case(trimmed) {
-            return true;
-        }
-        match definition.name.as_ref() {
-            Some(name) => name.eq_ignore_ascii_case(trimmed) || name.to_ascii_lowercase() == lower,
-            None => false,
-        }
-    })
 }
 
 pub(in crate::scenario) fn is_missing_group_error(error: &GroupError) -> bool {
