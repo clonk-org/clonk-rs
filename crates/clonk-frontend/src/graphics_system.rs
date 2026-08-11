@@ -1264,6 +1264,19 @@ impl GraphicsSystem {
 
     #[cfg(feature = "bench")]
     #[doc(hidden)]
+    pub fn capture_old_style_pxs_for_benchmark(
+        &mut self,
+        particles: &[ParticleSnapshot],
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> clonk_graphics::GpuScene {
+        self.begin_gpu_scene_capture();
+        self.draw_pxs(particles, 1.0, None);
+        self.finish_gpu_scene_capture(gamma)
+            .expect("benchmark capture was started")
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
     pub fn capture_st5b_objects_for_benchmark(
         &mut self,
         objects: &[ObjectSnapshot],
@@ -5202,12 +5215,26 @@ impl GraphicsSystem {
         }
     }
 
-    pub(crate) fn draw_pxs(
+    pub(crate) fn draw_pxs<'a>(
         &mut self,
-        particles: &[ParticleSnapshot],
+        particles: &'a [ParticleSnapshot],
         lighting: f32,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        // Folding a definition id into a C4 material key allocates, and a
+        // storm is thousands of particles over a handful of materials. Fold
+        // each distinct id once per frame instead of once per particle.
+        let materials = Arc::clone(&self.material_render_info);
+        let mut resolved: HashMap<&str, Option<&MaterialRenderInfo>> = HashMap::new();
+        let mut resolve = |definition_id: &'a str| {
+            *resolved.entry(definition_id).or_insert_with(|| {
+                definition_id
+                    .strip_prefix("material/pxs/")
+                    .map(clonk_resources::material::c4_name_key)
+                    .and_then(|key| materials.get(&key))
+            })
+        };
+
         // C4PXSSystem::Draw is deliberately two-pass: every old-style
         // pixel/velocity line first, then every material sprite. Thus a
         // graphical PXS overlays every old-style PXS regardless of slot
@@ -5216,38 +5243,26 @@ impl GraphicsSystem {
             if !self.pxs_visible(particle) {
                 continue;
             }
-            let Some(material_name) = particle
-                .definition_id
-                .strip_prefix("material/pxs/")
-                .map(clonk_resources::material::c4_name_key)
-            else {
-                continue;
-            };
-            let Some(material) = self.material_render_info.get(&material_name) else {
+            let Some(material) = resolve(&particle.definition_id) else {
                 continue;
             };
             if self.pxs_graphics(material).is_some() {
                 continue;
             }
-            let material = material.clone();
-            self.draw_old_style_pxs(particle, &material, lighting, gamma);
+            self.draw_old_style_pxs(particle, material, lighting, gamma);
         }
 
         let mut compacted_slot = 0u32;
         for particle in particles {
-            let Some(material_name) = particle
-                .definition_id
-                .strip_prefix("material/pxs/")
-                .map(clonk_resources::material::c4_name_key)
-            else {
+            if !particle.definition_id.starts_with("material/pxs/") {
                 continue;
-            };
+            }
             let fallback_slot = compacted_slot;
             compacted_slot = compacted_slot.wrapping_add(1);
             if !self.pxs_visible(particle) {
                 continue;
             }
-            let Some(material) = self.material_render_info.get(&material_name).cloned() else {
+            let Some(material) = resolve(&particle.definition_id).cloned() else {
                 continue;
             };
             let Some((texture, rect)) = self
