@@ -1352,6 +1352,52 @@ impl GpuSceneRecorder {
         });
     }
 
+    /// Append both endpoints of one line primitive to the open solid run.
+    ///
+    /// A moving PXS produces a line every frame, so handing the recorder a
+    /// fresh two-element `Vec` per particle would allocate once per particle
+    /// only to copy it into the run and drop it. The pair is appended as a
+    /// unit: half a line list is not a line list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_solid_vertex_pair(
+        &mut self,
+        start: GpuSolidVertex,
+        end: GpuSolidVertex,
+        topology: GpuPrimitiveTopology,
+        alpha_mode: GpuSolidAlphaMode,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        style: GpuSolidStyle,
+    ) {
+        if let Some(GpuCommand::Solid {
+            vertices,
+            topology: previous_topology,
+            alpha_mode: previous_alpha_mode,
+            clip: previous_clip,
+            blend: previous_blend,
+            style: previous_style,
+        }) = self.commands.last_mut()
+        {
+            if *previous_topology == topology
+                && *previous_alpha_mode == alpha_mode
+                && *previous_clip == clip
+                && *previous_blend == blend
+                && *previous_style == style
+            {
+                vertices.extend([start, end]);
+                return;
+            }
+        }
+        self.commands.push(GpuCommand::Solid {
+            vertices: vec![start, end],
+            topology,
+            alpha_mode,
+            clip,
+            blend,
+            style,
+        });
+    }
+
     /// Apply one active C++ blit modulation to all retained draws atomically.
     ///
     /// Every float that must be converted back to packed C4 is validated
@@ -2080,6 +2126,53 @@ mod tests {
             })
         ));
         assert_eq!(recorder.commands, before);
+    }
+
+    #[test]
+    fn recorder_keeps_line_endpoint_pairs_whole_inside_one_run() {
+        // A moving PXS appends its two endpoints to the open run rather than
+        // handing over a fresh two-element `Vec` per particle. A pair may never
+        // straddle a run boundary: an odd endpoint count is not a line list.
+        let endpoint = |x: f32| GpuSolidVertex {
+            position: [x, 0.5, 1.0],
+            color: [1.0; 4],
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let mut recorder = GpuSceneRecorder::default();
+        let push = |recorder: &mut GpuSceneRecorder, first: f32, style| {
+            recorder.push_solid_vertex_pair(
+                endpoint(first),
+                endpoint(first + 1.0),
+                GpuPrimitiveTopology::LineList,
+                GpuSolidAlphaMode::SourceOver,
+                None,
+                GpuBlend::Normal,
+                style,
+            );
+        };
+        push(&mut recorder, 0.5, GpuSolidStyle::NONE);
+        push(&mut recorder, 2.5, GpuSolidStyle::NONE);
+        push(&mut recorder, 4.5, GpuSolidStyle::with_gamma(true));
+
+        let [GpuCommand::Solid {
+            vertices: run,
+            topology,
+            ..
+        }, GpuCommand::Solid {
+            vertices: gamma_run,
+            ..
+        }] = recorder.commands.as_slice()
+        else {
+            panic!("endpoint pairs did not group by fragment style");
+        };
+        assert_eq!(*topology, GpuPrimitiveTopology::LineList);
+        assert_eq!(
+            run.iter()
+                .map(|vertex| vertex.position[0])
+                .collect::<Vec<_>>(),
+            vec![0.5, 1.5, 2.5, 3.5]
+        );
+        assert_eq!(gamma_run.len(), 2, "a new run still starts with both ends");
     }
 
     #[test]

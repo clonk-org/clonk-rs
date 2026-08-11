@@ -718,18 +718,19 @@ pub(crate) fn draw_pxs_pixel(
     }
     let color = fog.map_or(color, |fog| fog.color_at_point(color, x, y));
     if surface.is_gpu_scene_capture_active() {
-        surface.push_gpu_command(GpuCommand::Solid {
-            vertices: vec![GpuSolidVertex {
+        let clip = surface.clip();
+        surface.push_gpu_solid_vertex(
+            GpuSolidVertex {
                 position: [x + 0.5, y + 0.5, 1.0],
                 color: gpu_rgba(color),
                 outer_modulation: GpuSolidOuterModulation::PackedC4,
-            }],
-            topology: GpuPrimitiveTopology::PointList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip: surface.clip(),
-            blend: GpuBlend::Normal,
-            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
-        });
+            },
+            GpuPrimitiveTopology::PointList,
+            GpuSolidAlphaMode::SourceOver,
+            clip,
+            GpuBlend::Normal,
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+        );
         return;
     }
     // At application scale one, DrawPixInt's `(tx + 0.5, ty + 0.5)` point
@@ -779,19 +780,18 @@ pub(crate) fn draw_pxs_line(
         // responsible for selecting pixels after the viewport transform.
         let start = (start.0 + 0.5, start.1 + 0.5);
         let end = (end.0 + 0.5, end.1 + 0.5);
-        surface.push_gpu_command(GpuCommand::Solid {
-            // A coincident GL_LINES pair is a fragmentless primitive, not a
-            // point. Keeping both vertices preserves that final-end exclusion.
-            vertices: vec![
-                gpu_solid_vertex(start, start_color, SpriteBlitState::normal()),
-                gpu_solid_vertex(end, end_color, SpriteBlitState::normal()),
-            ],
-            topology: GpuPrimitiveTopology::LineList,
-            alpha_mode: GpuSolidAlphaMode::SourceOver,
-            clip: surface.clip(),
-            blend: GpuBlend::Normal,
-            style: GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
-        });
+        let clip = surface.clip();
+        // A coincident GL_LINES pair is a fragmentless primitive, not a point.
+        // Keeping both vertices preserves that final-end exclusion.
+        surface.push_gpu_solid_vertex_pair(
+            gpu_solid_vertex(start, start_color, SpriteBlitState::normal()),
+            gpu_solid_vertex(end, end_color, SpriteBlitState::normal()),
+            GpuPrimitiveTopology::LineList,
+            GpuSolidAlphaMode::SourceOver,
+            clip,
+            GpuBlend::Normal,
+            GpuSolidStyle::with_gamma(gamma.is_some_and(|gamma| !gamma.is_passthrough())),
+        );
         return;
     }
     let Some((start, end)) = clip_pxs_line(surface, start, end) else {

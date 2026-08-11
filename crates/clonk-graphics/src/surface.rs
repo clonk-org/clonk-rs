@@ -752,7 +752,7 @@ impl Surface {
         true
     }
 
-    fn push_gpu_solid_vertex(
+    pub fn push_gpu_solid_vertex(
         &mut self,
         vertex: GpuSolidVertex,
         topology: GpuPrimitiveTopology,
@@ -765,6 +765,25 @@ impl Surface {
             return false;
         };
         scene.push_solid_vertex(vertex, topology, alpha_mode, clip, blend, style);
+        true
+    }
+
+    /// Append one line primitive's endpoints to the open retained solid run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_gpu_solid_vertex_pair(
+        &mut self,
+        start: GpuSolidVertex,
+        end: GpuSolidVertex,
+        topology: GpuPrimitiveTopology,
+        alpha_mode: GpuSolidAlphaMode,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        style: GpuSolidStyle,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.push_solid_vertex_pair(start, end, topology, alpha_mode, clip, blend, style);
         true
     }
 
