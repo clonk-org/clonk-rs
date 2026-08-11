@@ -26,6 +26,38 @@ impl LegacyDefinitionResolver for ContentResolver {
             .map(|group| vec![group])
             .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound { path: relative })
     }
+
+    /// C4GameParameters::Load publishes every registered parent folder's
+    /// Material.c4g as NRT_Material ahead of the installed one, and
+    /// C4Game::InitMaterialTexture walks exactly that chain. Scenario folders
+    /// such as `ClonkMars.c4f` ship the textures their Landscape.txt names, so
+    /// a chain that skips them renders an empty map
+    /// (C4GameParameters.cpp:214-222; C4Game.cpp:901-977).
+    fn resolve_material_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        let mut groups = scenario
+            .root()
+            .ancestors()
+            .skip(1)
+            .take_while(|folder| {
+                folder
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+            })
+            .map(|folder| folder.join("Material.c4g"))
+            .filter(|candidate| candidate.exists())
+            .map(Group::open)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ScenarioError::Resources)?;
+        groups.extend(
+            self.resolve_definition_groups(scenario, "Material.c4g")
+                .or_else(|error| match error {
+                    ScenarioError::LegacyDefinitionNotFound { .. } => Ok(Vec::new()),
+                    error => Err(error),
+                })?,
+        );
+        Ok(groups)
+    }
 }
 
 pub fn repository_root() -> PathBuf {

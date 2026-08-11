@@ -106,6 +106,7 @@ shard_modules!(
     literal_zero_strictness,
     manifest_definitions,
     mars_base_order_menu,
+    mars_folder_material_landscape,
     mars_menu_override_drift,
     mars_base_research_exit,
     mars_material_unit_entrance,
