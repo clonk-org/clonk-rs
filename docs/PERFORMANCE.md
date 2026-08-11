@@ -970,6 +970,80 @@ For an A/B comparison, reuse identical serialized fixture bytes, config, seed,
 window size, and hardware, and add only the measurement instrumentation to the
 baseline app.
 
+Two deterministic microbenchmarks isolate object capture and renderer upload
+from the windowed network run:
+
+```sh
+cargo bench -p clonk-frontend --features bench --bench object_capture --locked
+cargo bench -p clonk-app-render --features bench --bench object_sprite_render --locked
+```
+
+Both use 1,000 ST5B-shaped faces (15x15, 20 phases, alternating transforms and
+sampling, unique modulation). `object_capture` runs unfogged and with an exact
+64-pixel fog-chunk crossing through an explicit reverse painter order. Its
+scoped counting allocator compares one object with 1,000 after warming the same
+retained ordering maps, sets, phase lists and capture storage; equality is the
+gate, so allocations may remain per frame/resource run but cannot scale per
+representable object. The scope starts after `ObjectSnapshot` and render-order
+construction: engine snapshot cloning intentionally remains outside this
+presentation-only claim. The raw line reports both one/1,000 allocation
+calls/bytes, compact instance/upload bytes, captured commands, generic fallback
+count, and fog-expanded instances.
+
+`object_sprite_render` submits the same ordered source once through the compact
+path and once as generic quads, waits for each GPU completion, and reports both
+`GpuRendererStats` records. Structural gates require an 88-byte object instance
+(below the 96-byte budget), one compact resource-run command/scene draw and
+88,000 instance-upload bytes, versus 1,000 alternating-sampler generic scene
+draws and 232,000 generic instance-upload bytes. Including the fixed final
+presentation pass, the raw GPU draw totals are 2 and 1,001 respectively. These
+are representation counts, not a substitute for the real presentation cadence
+below.
+
+The runner can enforce and retain that paired comparison while leaving the
+single-binary invocation above unchanged. Build an instrumented `origin/main`
+app in a separate worktree, then pass both exact executables and a new artifact
+directory:
+
+```sh
+scripts/run_arso_morf_stippel_gpu_benchmark.py 20 \
+  --baseline-app-binary /path/to/origin-main/target/release/clonk-app \
+  --baseline-source-root /path/to/origin-main \
+  --candidate-app-binary target/release/clonk-app \
+  --paired-artifact-dir /path/to/new/st5b-ab-artifacts
+```
+
+`--baseline-source-root` may be omitted when the binary still lives below its
+Git worktree and the runner can discover it. The candidate source root defaults
+to the current workspace and can be overridden with `--candidate-source-root`.
+
+Paired mode generates the fixture and one canonical config inside the artifact
+directory, then runs the baseline followed by the candidate against the same
+fixture and byte-identical per-arm config copies. (The app normally saves its
+config at shutdown, so sharing one writable copy would contaminate the second
+arm.) The runner hashes every fixture file and the canonical config after
+generation, verifies that combined fingerprint before and after each arm, and
+verifies each writable copy against it immediately before launch. Canonical or
+fixture byte drift fails the run; post-run config hashes record normal app
+writes. The artifact directory must not already exist and is never removed.
+
+`manifest.json` records the source and content revisions and dirty-input hashes,
+Cargo lock and runner inputs, fixture-builder and app binary sizes and hashes,
+Rust/Cargo/Python versions, machine, display, power, window, ports, environment,
+commands, exact census evidence, and the A/B metric summary. The generated
+fixture, `config.ini`, input fingerprint, fixture-builder logs, and each arm's
+writable config, verbatim `stdout.log`, `stderr.log`, and parsed `report.json`
+remain beside it. The reports and manifest preserve the complete
+`graphics_pass_samples_ns` arrays rather than only percentiles.
+
+Both arms must produce a real nonzero presentation plus valid network, player,
+and at-least-99%-retained ST5B evidence. A baseline budget miss is recorded and
+does not prevent the candidate run—the old renderer is the control, not the
+acceptance target. The candidate must still satisfy every native-cadence,
+28-ms-average, zero-auto-skip, and process-result assertion. Paired mode must
+therefore also run from an interactive visible desktop; it does not make a
+headless automation session valid presentation evidence.
+
 ### Deep Sea retained-GPU presentation benchmark
 
 Build once, then run the real Deep Sea scenario through the windowed GPU path:

@@ -67,3 +67,8 @@ required-features = ["dev-feedback-render"]
 name = "particle_capture"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "object_capture"
+harness = false
+required-features = ["bench"]

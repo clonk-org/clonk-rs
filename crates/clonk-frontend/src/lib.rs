@@ -77,11 +77,12 @@ use clonk_engine::{
     VIS_ALLIES, VIS_ENEMIES, VIS_GOD, VIS_LAYER_TOGGLE, VIS_LOCAL, VIS_OVERLAY_ONLY, VIS_OWNER,
 };
 use clonk_graphics::{
-    stdgl_blit_sampling, BlitSampling, Color, GpuBlend, GpuCommand, GpuOuterModulation,
-    GpuPrimitiveTopology, GpuSampler, GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle,
-    GpuSolidVertex, GpuSpriteQuad, GpuTextureId, GpuTextureResource, GpuVertex, PixelFormat,
-    Point as SurfacePoint, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
-    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont, Transform as GraphicsTransform,
+    stdgl_blit_sampling, BlitSampling, Color, GpuBlend, GpuCommand, GpuObjectSprite,
+    GpuOuterModulation, GpuPrimitiveTopology, GpuSampler, GpuSolidAlphaMode,
+    GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuSpriteQuad, GpuTextureId,
+    GpuTextureResource, GpuVertex, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect,
+    Surface, SurfaceDrawTarget, SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
+    Transform as GraphicsTransform,
 };
 use clonk_gui::{Rect as GuiRect, Size as GuiSize};
 use rayon::prelude::*;
@@ -3058,6 +3059,193 @@ mod tests {
         ));
 
         assert_eq!(gpu_sprite_batch_fallbacks(), 0);
+    }
+
+    #[test]
+    fn st5b_shaped_object_faces_form_one_compact_resource_run() {
+        let image = ImageData::new(300, 110, vec![255; 300 * 110 * 4]);
+        let mut surface = Surface::new(300, 15, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        for phase in 0..20_u32 {
+            assert!(capture_gpu_object_sprite(
+                &mut surface,
+                (phase as f32 * 15.0, 0.0, 15.0, 15.0),
+                (phase as f32 * 15.0, 0.0, 15.0, 15.0),
+                &GraphicsTransform::identity(),
+                &image,
+                None,
+                FloatSourceRect {
+                    x: phase as f32 * 15.0,
+                    y: 0.0,
+                    width: 15.0,
+                    height: 15.0,
+                },
+                phase % 2 != 0,
+                None,
+                SpriteBlitState {
+                    modulation: Some(0x0001_0101_u32.saturating_mul(phase + 1)),
+                    ..SpriteBlitState::normal()
+                },
+                None,
+                None,
+                if phase % 2 == 0 {
+                    GpuSampler::Nearest
+                } else {
+                    GpuSampler::Linear
+                },
+                false,
+            ));
+        }
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene(
+                [300, 15],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
+            panic!("representable object faces did not form one compact resource run");
+        };
+        assert_eq!(sprites.len(), 20);
+        assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
+        assert_eq!(sprites[1].sampler(), GpuSampler::Linear);
+        assert!(sprites
+            .windows(2)
+            .all(|pair| pair[0].modulation != pair[1].modulation));
+    }
+
+    #[test]
+    fn fogged_st5b_phase_crossing_a_64px_boundary_stays_compact() {
+        let image = ImageData::new(300, 110, vec![255; 300 * 110 * 4]);
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 8,
+                resolution_y: 8,
+                width: 4,
+                height: 4,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: (0..16)
+                    .map(|index| (index as u32 + 1) * 0x0008_0402)
+                    .collect(),
+            }),
+            zoom: 1.0,
+        };
+        let mut surface = Surface::new(15, 15, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_object_sprite(
+            &mut surface,
+            (0.0, 0.0, 15.0, 15.0),
+            (0.0, 0.0, 15.0, 15.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 60.0,
+                y: 0.0,
+                width: 15.0,
+                height: 15.0,
+            },
+            false,
+            None,
+            SpriteBlitState {
+                modulation: Some(0x00c0_8040),
+                ..SpriteBlitState::normal()
+            },
+            None,
+            Some(&fog),
+            GpuSampler::Linear,
+            false,
+        ));
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene(
+                [15, 15],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
+            panic!("fogged ST5B phase entered the generic quad fallback");
+        };
+        assert_eq!(sprites.len(), 2, "source phase crosses the 64px chunk edge");
+        assert_eq!(sprites[0].uv[2], 64.0 / 300.0);
+        assert_eq!(sprites[1].uv[0], 64.0 / 300.0);
+        assert!(sprites
+            .iter()
+            .all(|sprite| sprite.sampler() == GpuSampler::Linear));
+
+        let mut generic_surface = Surface::new(15, 15, PixelFormat::Rgba8888);
+        generic_surface.begin_gpu_scene_capture();
+        assert!(capture_gpu_sprite(
+            &mut generic_surface,
+            (0.0, 0.0, 15.0, 15.0),
+            (0.0, 0.0, 15.0, 15.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 60.0,
+                y: 0.0,
+                width: 15.0,
+                height: 15.0,
+            },
+            false,
+            None,
+            SpriteBlitState {
+                modulation: Some(0x00c0_8040),
+                ..SpriteBlitState::normal()
+            },
+            None,
+            Some(&fog),
+            GpuSampler::Linear,
+            false,
+        ));
+        let generic = generic_surface
+            .take_gpu_scene_capture()
+            .expect("generic GPU capture remains active")
+            .into_scene(
+                [15, 15],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        assert_eq!(generic.commands.len(), sprites.len());
+        for (sprite, command) in sprites.iter().zip(&generic.commands) {
+            let GpuCommand::Quad {
+                vertices,
+                base_mod2,
+                sampler,
+                ..
+            } = command
+            else {
+                panic!("generic fog reference did not retain one quad per chunk");
+            };
+            let expected_uv = [
+                [sprite.uv[0], sprite.uv[1]],
+                [sprite.uv[2], sprite.uv[1]],
+                [sprite.uv[0], sprite.uv[3]],
+                [sprite.uv[2], sprite.uv[3]],
+            ];
+            assert_eq!(vertices.map(|vertex| vertex.position), sprite.positions);
+            assert_eq!(vertices.map(|vertex| vertex.uv), expected_uv);
+            assert_eq!(
+                vertices.map(|vertex| {
+                    let [red, green, blue, transparency] = vertex
+                        .modulation
+                        .map(|channel| (channel * 255.0).round() as u32);
+                    (transparency << 24) | (red << 16) | (green << 8) | blue
+                }),
+                sprite.modulation,
+            );
+            assert_eq!(*base_mod2, sprite.mod2());
+            assert_eq!(*sampler, sprite.sampler());
+        }
     }
 
     #[test]
@@ -7457,21 +7645,32 @@ mod tests {
                 .commands
                 .iter()
                 .find_map(|command| match command {
-                    clonk_graphics::GpuCommand::Quad {
-                        vertices, sampler, ..
-                    } => Some((*vertices, *sampler)),
+                    clonk_graphics::GpuCommand::ObjectBatch { sprites, .. } => {
+                        sprites.first().map(|sprite| {
+                            (
+                                sprite.positions,
+                                [
+                                    [sprite.uv[0], sprite.uv[1]],
+                                    [sprite.uv[2], sprite.uv[1]],
+                                    [sprite.uv[0], sprite.uv[3]],
+                                    [sprite.uv[2], sprite.uv[3]],
+                                ],
+                                sprite.sampler(),
+                            )
+                        })
+                    }
                     _ => None,
                 })
-                .expect("the face blit retains a textured quad");
+                .expect("the face blit retains a compact object sprite");
             (extent, quad)
         };
 
-        let (extent, (vertices, sampler)) = capture(3.0, true);
+        let (extent, (positions, uv, sampler)) = capture(3.0, true);
         assert_eq!(sampler, clonk_graphics::GpuSampler::Nearest);
 
         // Source: the UV span covers exactly the 48x66 authored texels.
         let span = |axis: usize| {
-            let values = vertices.iter().map(|vertex| vertex.uv[axis]);
+            let values = uv.iter().map(|uv| uv[axis]);
             let max = values.clone().fold(f32::MIN, f32::max);
             let min = values.fold(f32::MAX, f32::min);
             (max - min) * extent[axis] as f32
@@ -7480,7 +7679,7 @@ mod tests {
 
         // Destination: the retained vertices are logical game units.
         let logical = |axis: usize| {
-            let values = vertices.iter().map(|vertex| vertex.position[axis]);
+            let values = positions.iter().map(|position| position[axis]);
             let max = values.clone().fold(f32::MIN, f32::max);
             let min = values.fold(f32::MAX, f32::min);
             max - min
@@ -7505,10 +7704,10 @@ mod tests {
 
         // Without the opt-in the same blit takes C++'s half-texel correction
         // and a linear filter, which is what softens the art today.
-        let (_, (corrected, sampling)) = capture(3.0, false);
+        let (_, (_, corrected, sampling)) = capture(3.0, false);
         assert_eq!(sampling, clonk_graphics::GpuSampler::Linear);
         assert_ne!(
-            corrected[0].uv, vertices[0].uv,
+            corrected[0], uv[0],
             "the correction must move the sampled origin"
         );
     }
@@ -18143,6 +18342,287 @@ mod tests {
         assert_eq!(object_visibility_evaluations(), OBJECTS);
     }
 
+    /// `C4Viewport::Draw` walks each category list at its painter-order site,
+    /// while the retained presentation plan replaces those four support-list
+    /// rebuilds with one canonical walk (`src/C4Viewport.cpp:1051-1088`).
+    #[test]
+    fn viewport_prepares_object_phase_partitions_and_visibility_once() {
+        let mut snapshot = make_snapshot();
+        let template = snapshot.objects.remove(0);
+        snapshot.objects = [
+            0,
+            CATEGORY_BACKGROUND_FLAG,
+            CATEGORY_FOREGROUND_FLAG,
+            CATEGORY_FOREGROUND_FLAG | CATEGORY_PARALLAX_FLAG,
+            CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, category_flags)| {
+            let mut object = template.clone();
+            object.id = ObjectId::new(index as u64 + 1);
+            object.category = (object.category
+                & !(CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG | CATEGORY_PARALLAX_FLAG))
+                | category_flags;
+            object
+        })
+        .collect();
+        snapshot.render_order = snapshot.objects.iter().map(|object| object.id).collect();
+        let mut graphics = test_graphics(160, 120, 120, "retained object phase plan");
+
+        reset_object_render_plan_evaluations();
+        reset_object_visibility_evaluations();
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::ownerless(Vector2::new(80, 60), 1.0)],
+        );
+
+        assert_eq!(object_render_plan_evaluations(), snapshot.objects.len());
+        assert_eq!(object_visibility_evaluations(), snapshot.objects.len());
+    }
+
+    #[test]
+    fn thousand_st5b_faces_capture_as_one_ordered_compact_run() {
+        const OBJECTS: usize = 1_000;
+        let mut template = make_snapshot().objects.remove(0);
+        template.definition_id = "ST5B".to_string();
+        template.crew_member = false;
+        template.action = clonk_engine::ActionState::new("Walk");
+        let objects = (0..OBJECTS)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index as u64 + 1);
+                object.position =
+                    Vector2::new(20 + (index % 40) as i32 * 15, 20 + (index / 40) as i32 * 15);
+                object.action.phase = (index % 20) as i32;
+                object.direction = if index % 2 == 0 {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
+                object.draw_transform =
+                    (index % 2 != 0).then(|| DrawTransform::from_components(-1.0, 1.0, 0.0, 0.0));
+                object.color_modulation = 0x0040_0000 | (index as u32 + 1);
+                object
+            })
+            .collect::<Vec<_>>();
+        let walk = DefinitionActionGraphics {
+            facet: Some(clonk_engine::DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 15,
+                height: 15,
+                target_x: 0,
+                target_y: 0,
+            }),
+            directions: 2,
+            flip_dir: Some(1),
+            length: Some(20),
+            ..DefinitionActionGraphics::default()
+        };
+        let sprite = DefinitionSprite {
+            image: ImageData::new(300, 110, vec![255; 300 * 110 * 4]),
+            actions: HashMap::from([("Walk".to_string(), walk)]),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: true,
+            top_face: None,
+            picture: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            640,
+            420,
+            420,
+            "ST5B compact capture",
+            test_font(),
+            Arc::new(HashMap::from([("ST5B".to_string(), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = clonk_graphics::GammaRamp::standard();
+        graphics.begin_gpu_scene_capture();
+
+        graphics.draw_objects(
+            &objects,
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        let scene = graphics
+            .finish_gpu_scene_capture(&gamma)
+            .expect("GPU capture was started");
+        let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
+            panic!("representable ST5B faces entered the generic capture path");
+        };
+        assert_eq!(sprites.len(), OBJECTS);
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| sprite.modulation[0])
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            OBJECTS,
+            "each benchmark object needs a distinct color modulation"
+        );
+        assert_eq!(sprites[0].modulation[0], 0x0040_0001);
+        assert_eq!(sprites[1].modulation[0], 0x0040_0002);
+        assert_eq!(sprites[0].sampler(), GpuSampler::Nearest);
+        assert_eq!(sprites[1].sampler(), GpuSampler::Linear);
+    }
+
+    #[test]
+    fn compact_object_capture_keeps_every_base_before_every_top_face() {
+        // C4ObjectList::Draw completes its base loop before starting the
+        // TopFace loop (src/C4ObjectList.cpp:390-396).
+        let mut template = make_snapshot().objects.remove(0);
+        template.definition_id = "Layered".to_owned();
+        template.crew_member = false;
+        template.ocf = 0;
+        let objects = (0..2)
+            .map(|index| {
+                let mut object = template.clone();
+                object.id = ObjectId::new(index + 1);
+                object.position = Vector2::new(16 + index as i32 * 4, 16);
+                object.color_modulation = 0x0010_1010 * (index as u32 + 1);
+                object
+            })
+            .collect::<Vec<_>>();
+        let sprite = DefinitionSprite {
+            image: ImageData::new(30, 15, vec![255; 30 * 15 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(15, 0, 15, 15, 0, 0)),
+            picture: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            48,
+            32,
+            32,
+            "compact base and top ordering",
+            test_font(),
+            Arc::new(HashMap::from([("Layered".to_owned(), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = clonk_graphics::GammaRamp::standard();
+        graphics.begin_gpu_scene_capture();
+
+        graphics.draw_objects(
+            &objects,
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        let scene = graphics
+            .finish_gpu_scene_capture(&gamma)
+            .expect("GPU capture was started");
+        let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
+            panic!("base and TopFace sprites split out of their ordered resource run");
+        };
+        assert_eq!(sprites.len(), 4);
+        assert!(sprites[..2]
+            .iter()
+            .all(|sprite| (sprite.uv[0] - 0.0).abs() < f32::EPSILON));
+        assert!(sprites[2..]
+            .iter()
+            .all(|sprite| (sprite.uv[0] - 0.5).abs() < f32::EPSILON));
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| sprite.modulation[0])
+                .collect::<Vec<_>>(),
+            vec![0x0010_1010, 0x0020_2020, 0x0010_1010, 0x0020_2020]
+        );
+    }
+
+    #[test]
+    fn construction_sign_remains_a_generic_ordered_fallback() {
+        // The construction facet is a global-resource draw at the start of
+        // C4Object::DrawTopFace (src/C4Object.cpp:2617-2638).
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "Building".to_owned();
+        object.crew_member = false;
+        object.position = Vector2::new(16, 16);
+        object.construction = FULL_CON / 2;
+        object.ocf = clonk_engine::ocf::CONSTRUCT;
+        let sprite = DefinitionSprite {
+            image: ImageData::new(15, 15, vec![255; 15 * 15 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let construction = ImageData::new(16, 16, vec![255; 16 * 16 * 4]);
+        let mut graphics = GraphicsSystem::new(
+            32,
+            32,
+            32,
+            "construction fallback",
+            test_font(),
+            Arc::new(HashMap::from([("Building".to_owned(), sprite)])),
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                construction: Some(construction),
+                ..HudGraphics::default()
+            }),
+        );
+        let gamma = clonk_graphics::GammaRamp::standard();
+        graphics.begin_gpu_scene_capture();
+
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        let scene = graphics
+            .finish_gpu_scene_capture(&gamma)
+            .expect("GPU capture was started");
+        assert!(matches!(
+            scene.commands.first(),
+            Some(GpuCommand::ObjectBatch { .. })
+        ));
+        assert!(matches!(
+            scene.commands.get(1),
+            Some(GpuCommand::Quad { .. })
+        ));
+        assert_eq!(scene.commands.len(), 2);
+    }
+
     #[test]
     fn normal_object_draw_borrows_default_sprite_keys() {
         let sprite = DefinitionSprite {
@@ -18227,6 +18707,100 @@ mod tests {
         );
 
         assert_eq!(top_face_draw_setups(), 0);
+    }
+
+    #[test]
+    fn objects_without_overlays_skip_recursive_ancestry_setup() {
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![255; 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let snapshot = make_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            120,
+            "absent overlays",
+            test_font(),
+            Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        reset_object_overlay_ancestry_setups();
+        graphics.draw_objects(
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.definition_lines,
+            &snapshot.players,
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(object_overlay_ancestry_setups(), 0);
+    }
+
+    #[test]
+    fn representable_object_output_reach_is_evaluated_once() {
+        // C4Object::Draw has one output-boundary return before overlays and
+        // selection graphics (src/C4Object.cpp:2266-2283).
+        let sprite = DefinitionSprite {
+            image: ImageData::new(15, 15, vec![255; 15 * 15 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: true,
+            top_face: None,
+            picture: None,
+        };
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].need_energy = true;
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            120,
+            "single output reach",
+            test_font(),
+            Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                energy: Some(ImageData::new(1, 1, vec![255; 4])),
+                ..HudGraphics::default()
+            }),
+        );
+
+        reset_object_output_reach_evaluations();
+        graphics.draw_objects_at_frame(
+            13,
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.definition_lines,
+            &[],
+            &snapshot.players,
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(object_output_reach_evaluations(), 1);
     }
 
     /// The landscape cache re-anchors to the byte plane the frame presented so

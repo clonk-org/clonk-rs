@@ -27,6 +27,15 @@ fn normalized_c4_modulation(modulation: u32) -> [f32; 4] {
     split_c4_color(modulation).map(|channel| f32::from(channel) / 255.0)
 }
 
+fn packed_c4_modulation(modulation: [f32; 4]) -> u32 {
+    let [red, green, blue, transparency] =
+        modulation.map(|channel| (channel * 255.0).round() as u8);
+    (u32::from(transparency) << 24)
+        | (u32::from(red) << 16)
+        | (u32::from(green) << 8)
+        | u32::from(blue)
+}
+
 fn captured_sprite_modulation(
     modulation: u32,
     fog_modulation: Option<[u32; 4]>,
@@ -67,6 +76,182 @@ fn captured_sprite_position(transform: &GraphicsTransform, x: f32, y: f32) -> Op
         .iter()
         .all(|value| value.is_finite())
         .then_some(position)
+}
+
+fn compact_fog_axis_ranges(
+    origin: f32,
+    extent: f32,
+    chunk_size: f32,
+    flipped: bool,
+) -> Option<([(f32, f32); 2], usize)> {
+    if !origin.is_finite()
+        || !extent.is_finite()
+        || !chunk_size.is_finite()
+        || extent <= 0.0
+        || extent > chunk_size
+        || chunk_size <= 0.0
+    {
+        return None;
+    }
+    let end = origin + extent;
+    if !end.is_finite() || end <= origin {
+        return None;
+    }
+    let boundary = ((origin / chunk_size).floor() + 1.0) * chunk_size;
+    let mut ranges = [(0.0, extent), (0.0, 0.0)];
+    let count = if boundary > origin && boundary < end {
+        ranges = [(0.0, boundary - origin), (boundary - origin, extent)];
+        2
+    } else {
+        1
+    };
+    if flipped {
+        for range in ranges.iter_mut().take(count) {
+            *range = (extent - range.1, extent - range.0);
+        }
+        if count == 2 && ranges[0].0 > ranges[1].0 {
+            ranges.swap(0, 1);
+        }
+    }
+    Some((ranges, count))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_compact_fogged_object_sprite(
+    surface: &mut Surface,
+    dest: (f32, f32, f32, f32),
+    fog_dest: (f32, f32, f32, f32),
+    transform: &GraphicsTransform,
+    image: &ImageData,
+    source: FloatSourceRect,
+    flip_x: bool,
+    blit: SpriteBlitState,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+    fog: &FogDrawContext,
+    sampler: GpuSampler,
+) -> bool {
+    if blit.fog_modulation.is_some()
+        || blit.renderer_config.texture_indent() != 0.0
+        || blit.renderer_config.no_box_fades
+    {
+        return false;
+    }
+    let chunk_size = cpp_tex_size(image.width(), image.height()).min(64) as f32;
+    let Some((x_ranges, x_count)) =
+        compact_fog_axis_ranges(source.x, source.width, chunk_size, flip_x)
+    else {
+        return false;
+    };
+    let Some((y_ranges, y_count)) =
+        compact_fog_axis_ranges(source.y, source.height, chunk_size, false)
+    else {
+        return false;
+    };
+    let (dest_x, dest_y, dest_width, dest_height) = dest;
+    let (fog_x, fog_y, fog_width, fog_height) = fog_dest;
+    if ![
+        fog_x,
+        fog_y,
+        fog_width,
+        fog_height,
+        dest_x,
+        dest_y,
+        dest_width,
+        dest_height,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || fog_width <= 0.0
+        || fog_height <= 0.0
+    {
+        return false;
+    }
+
+    let tile_size = cpp_tex_size(image.width(), image.height()) as f32;
+    let mut captured = [None; 4];
+    let mut captured_count = 0;
+    for &(top, bottom) in y_ranges.iter().take(y_count) {
+        for &(left, right) in x_ranges.iter().take(x_count) {
+            let local = [(left, top), (right, top), (left, bottom), (right, bottom)];
+            let mut positions = [[0.0; 3]; 4];
+            let mut uv = [[0.0; 2]; 4];
+            let mut fog_modulation = [0; 4];
+            for (index, (local_x, local_y)) in local.into_iter().enumerate() {
+                let normalized_x = local_x / source.width;
+                let normalized_y = local_y / source.height;
+                let Some(position) = captured_sprite_position(
+                    transform,
+                    dest_x + normalized_x * dest_width,
+                    dest_y + normalized_y * dest_height,
+                ) else {
+                    return false;
+                };
+                positions[index] = position;
+                let sample_x = if flip_x {
+                    source.x + (1.0 - normalized_x) * source.width
+                } else {
+                    source.x + normalized_x * source.width
+                };
+                let sample_y = source.y + normalized_y * source.height;
+                uv[index] = [
+                    sample_x / image.width() as f32,
+                    sample_y / image.height() as f32,
+                ];
+                let (fog_sample_x, fog_sample_y) = transform.transform_point(
+                    fog_x + normalized_x * fog_width,
+                    fog_y + normalized_y * fog_height,
+                );
+                if !fog_sample_x.is_finite() || !fog_sample_y.is_finite() {
+                    return false;
+                }
+                fog_modulation[index] = fog.modulation_at_point(fog_sample_x, fog_sample_y);
+            }
+            if positions
+                .iter()
+                .any(|position| position[2].is_sign_positive())
+                && positions
+                    .iter()
+                    .any(|position| position[2].is_sign_negative())
+            {
+                return false;
+            }
+            let (modulation, mod2) = captured_sprite_modulation(
+                blit.modulation.unwrap_or(0x00ff_ffff),
+                Some(fog_modulation),
+                blit.mode & C4GFXBLIT_MOD2 != 0,
+                blit.renderer_config,
+            );
+            captured[captured_count] = Some(GpuObjectSprite::new(
+                positions,
+                [uv[0][0], uv[0][1], uv[3][0], uv[3][1]],
+                modulation.map(packed_c4_modulation),
+                sampler,
+                if sampler == GpuSampler::Linear {
+                    tile_size
+                } else {
+                    0.0
+                },
+                mod2,
+                GpuOuterModulation::Combine,
+            ));
+            captured_count += 1;
+        }
+    }
+
+    let resource = image.gpu_texture_resource();
+    let texture = resource.id;
+    let clip = surface.clip();
+    let blend = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+        GpuBlend::Additive
+    } else {
+        GpuBlend::Normal
+    };
+    let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
+    let _ = surface.add_gpu_texture(resource);
+    for sprite in captured.into_iter().take(captured_count).flatten() {
+        let _ = surface.push_gpu_object_sprite(texture, sprite, clip, blend, gamma);
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,6 +308,82 @@ pub(crate) fn capture_gpu_sprite_with_resource(
     inclusive_source_end: bool,
     retained_resource: Option<GpuTextureResource>,
 ) -> bool {
+    capture_gpu_sprite_impl(
+        surface,
+        dest,
+        fog_dest,
+        transform,
+        image,
+        mask,
+        source,
+        flip_x,
+        owner_color,
+        blit,
+        gamma,
+        fog,
+        sampler,
+        inclusive_source_end,
+        retained_resource,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn capture_gpu_object_sprite(
+    surface: &mut Surface,
+    dest: (f32, f32, f32, f32),
+    fog_dest: (f32, f32, f32, f32),
+    transform: &GraphicsTransform,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: FloatSourceRect,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
+    sampler: GpuSampler,
+    inclusive_source_end: bool,
+) -> bool {
+    capture_gpu_sprite_impl(
+        surface,
+        dest,
+        fog_dest,
+        transform,
+        image,
+        mask,
+        source,
+        flip_x,
+        owner_color,
+        blit,
+        gamma,
+        fog,
+        sampler,
+        inclusive_source_end,
+        None,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_gpu_sprite_impl(
+    surface: &mut Surface,
+    dest: (f32, f32, f32, f32),
+    fog_dest: (f32, f32, f32, f32),
+    transform: &GraphicsTransform,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: FloatSourceRect,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
+    sampler: GpuSampler,
+    inclusive_source_end: bool,
+    retained_resource: Option<GpuTextureResource>,
+    compact_object: bool,
+) -> bool {
     if !surface.is_gpu_scene_capture_active() {
         return false;
     }
@@ -157,6 +418,20 @@ pub(crate) fn capture_gpu_sprite_with_resource(
         })
     {
         return false;
+    }
+
+    if compact_object
+        && mask.is_none()
+        && retained_resource.is_none()
+        && !inclusive_source_end
+        && fog.is_some_and(|fog| {
+            capture_compact_fogged_object_sprite(
+                surface, dest, fog_dest, transform, image, source, flip_x, blit, gamma, fog,
+                sampler,
+            )
+        })
+    {
+        return true;
     }
 
     let fog_sampler = match fog {
@@ -245,6 +520,38 @@ pub(crate) fn capture_gpu_sprite_with_resource(
         } else {
             GpuOuterModulation::Inherit
         };
+        let base_resource = retained_resource.unwrap_or_else(|| image.gpu_texture_resource());
+        let blend = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+            GpuBlend::Additive
+        } else {
+            GpuBlend::Normal
+        };
+        let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
+        if compact_object {
+            let texture = base_resource.id;
+            let clip = surface.clip();
+            let _ = surface.add_gpu_texture(base_resource);
+            let _ = surface.push_gpu_object_sprite(
+                texture,
+                GpuObjectSprite::new(
+                    positions,
+                    [uv[0][0], uv[0][1], uv[3][0], uv[3][1]],
+                    modulation.map(packed_c4_modulation),
+                    sampler,
+                    if sampler == GpuSampler::Linear {
+                        tile_size
+                    } else {
+                        0.0
+                    },
+                    mod2,
+                    outer_modulation,
+                ),
+                clip,
+                blend,
+                gamma,
+            );
+            return true;
+        }
         let sample_tile = (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size]);
         let vertices = std::array::from_fn(|index| {
             let vertex = GpuVertex::new(positions[index], uv[index], modulation[index])
@@ -252,21 +559,16 @@ pub(crate) fn capture_gpu_sprite_with_resource(
                 .with_owner_outer_modulation(outer_modulation);
             sample_tile.map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
         });
-        let base_resource = retained_resource.unwrap_or_else(|| image.gpu_texture_resource());
         let command = GpuCommand::Quad {
             texture: base_resource.id,
             owner_mask: None,
             vertices,
             clip: surface.clip(),
-            blend: if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
-                GpuBlend::Additive
-            } else {
-                GpuBlend::Normal
-            },
+            blend,
             base_mod2: mod2,
             owner_mod2: false,
             sampler,
-            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+            gamma,
         };
         let _ = surface.add_gpu_texture(base_resource);
         let _ = surface.push_gpu_command(command);
@@ -571,6 +873,57 @@ pub(crate) fn gpu_sampler_for_blit(sampling: BlitSampling) -> GpuSampler {
         BlitSampling::Nearest => GpuSampler::Nearest,
         BlitSampling::Linear => GpuSampler::Linear,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_object_image_region_transformed_float_source(
+    surface: &mut Surface,
+    dest: (f32, f32, f32, f32),
+    transform: &GraphicsTransform,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &FloatSourceRect,
+    sampling: BlitSampling,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
+) {
+    let offset = blit.renderer_config.destination_offset();
+    let captured_dest = (dest.0 + offset, dest.1 + offset, dest.2, dest.3);
+    if capture_gpu_object_sprite(
+        surface,
+        captured_dest,
+        captured_dest,
+        transform,
+        image,
+        mask,
+        *source,
+        flip_x,
+        owner_color,
+        blit,
+        gamma,
+        fog,
+        gpu_sampler_for_blit(sampling),
+        false,
+    ) {
+        return;
+    }
+    draw_image_region_transformed_float_source(
+        surface,
+        dest,
+        transform,
+        image,
+        mask,
+        source,
+        sampling,
+        flip_x,
+        owner_color,
+        blit,
+        gamma,
+        fog,
+    );
 }
 
 /// Sprite blit through a full projective matrix. This is the CPU equivalent
@@ -1032,6 +1385,82 @@ pub(crate) fn draw_image_region_float_source(
             );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_object_image_region_float_source(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &FloatSourceRect,
+    sampling: BlitSampling,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
+) {
+    let adjusted = blit.renderer_config.has_adjusted_quad_geometry();
+    let offset = blit.renderer_config.destination_offset();
+    let dest_width = rect.size.width.max(1.0).round();
+    let dest_height = rect.size.height.max(1.0).round();
+    let dest = if adjusted {
+        (
+            rect.origin.x + offset,
+            rect.origin.y + offset,
+            rect.size.width,
+            rect.size.height,
+        )
+    } else {
+        (
+            rect.origin.x.round(),
+            rect.origin.y.round(),
+            dest_width,
+            dest_height,
+        )
+    };
+    let fog_dest = if adjusted {
+        dest
+    } else {
+        (
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
+    };
+    if capture_gpu_object_sprite(
+        surface,
+        dest,
+        fog_dest,
+        &GraphicsTransform::identity(),
+        image,
+        mask,
+        *source,
+        flip_x,
+        owner_color,
+        blit,
+        gamma,
+        fog,
+        gpu_sampler_for_blit(sampling),
+        false,
+    ) {
+        return;
+    }
+    draw_image_region_float_source(
+        surface,
+        rect,
+        image,
+        mask,
+        source,
+        sampling,
+        flip_x,
+        owner_color,
+        blit,
+        gamma,
+        fog,
+    );
 }
 
 /// Rasterize the CStdGL quad when BlitOffset and/or TexIndent makes its

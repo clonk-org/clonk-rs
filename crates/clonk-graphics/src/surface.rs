@@ -1,9 +1,9 @@
 use crate::clonk_font::CapturedClonkText;
 use crate::color::Color;
 use crate::gpu_scene::{
-    GpuBlend, GpuCommand, GpuPrimitiveTopology, GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode,
-    GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuTextureId, GpuTextureResource,
-    GpuVertex,
+    GpuBlend, GpuCommand, GpuObjectRunCapacityHints, GpuObjectSprite, GpuPrimitiveTopology,
+    GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle,
+    GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex,
 };
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use std::cell::{Cell, OnceCell};
@@ -596,6 +596,9 @@ pub struct Surface {
     gpu_published_revision: Cell<u64>,
     gpu_dirty: Cell<Option<Rect>>,
     gpu_scene: Option<GpuSceneRecorder>,
+    gpu_scene_command_capacity: usize,
+    gpu_scene_texture_capacity: usize,
+    gpu_scene_object_run_capacities: GpuObjectRunCapacityHints,
 }
 
 impl Clone for Surface {
@@ -621,6 +624,9 @@ impl Clone for Surface {
             // A command stream belongs to one render target invocation, not
             // to the pixel resource cloned from it.
             gpu_scene: None,
+            gpu_scene_command_capacity: 0,
+            gpu_scene_texture_capacity: 0,
+            gpu_scene_object_run_capacities: GpuObjectRunCapacityHints::default(),
         }
     }
 }
@@ -642,6 +648,9 @@ impl Surface {
             gpu_published_revision: Cell::new(0),
             gpu_dirty: Cell::new(None),
             gpu_scene: None,
+            gpu_scene_command_capacity: 0,
+            gpu_scene_texture_capacity: 0,
+            gpu_scene_object_run_capacities: GpuObjectRunCapacityHints::default(),
         }
     }
 
@@ -672,6 +681,9 @@ impl Surface {
             gpu_published_revision: Cell::new(0),
             gpu_dirty: Cell::new(None),
             gpu_scene: None,
+            gpu_scene_command_capacity: 0,
+            gpu_scene_texture_capacity: 0,
+            gpu_scene_object_run_capacities: GpuObjectRunCapacityHints::default(),
         })
     }
 
@@ -679,7 +691,12 @@ impl Surface {
     /// scratch work, but capture-aware primitives append commands and avoid
     /// rasterizing their covered pixels.
     pub fn begin_gpu_scene_capture(&mut self) {
-        self.gpu_scene = Some(GpuSceneRecorder::default());
+        let _ = self.take_gpu_scene_capture();
+        self.gpu_scene = Some(GpuSceneRecorder::with_capacities(
+            self.gpu_scene_command_capacity,
+            self.gpu_scene_texture_capacity,
+            std::mem::take(&mut self.gpu_scene_object_run_capacities),
+        ));
     }
 
     pub fn is_gpu_scene_capture_active(&self) -> bool {
@@ -687,6 +704,16 @@ impl Surface {
     }
 
     pub fn take_gpu_scene_capture(&mut self) -> Option<GpuSceneRecorder> {
+        if let Some(recorder) = self.gpu_scene.as_mut() {
+            self.gpu_scene_command_capacity = self
+                .gpu_scene_command_capacity
+                .max(recorder.command_count());
+            self.gpu_scene_texture_capacity = self
+                .gpu_scene_texture_capacity
+                .max(recorder.texture_count());
+            recorder.retain_object_run_capacities();
+            self.gpu_scene_object_run_capacities = recorder.take_object_run_capacity_hints();
+        }
         self.gpu_scene.take()
     }
 
@@ -707,6 +734,21 @@ impl Surface {
             return false;
         };
         scene.push(command);
+        true
+    }
+
+    pub fn push_gpu_object_sprite(
+        &mut self,
+        texture: GpuTextureId,
+        sprite: GpuObjectSprite,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.push_object_sprite(texture, sprite, clip, blend, gamma);
         true
     }
 
@@ -1949,6 +1991,7 @@ mod tests {
     use super::*;
     use crate::clonk_font::{CapturedFontImage, ClonkFontRole, TextAlign};
     use crate::color::Color;
+    use crate::GpuOuterModulation;
     use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     fn captured_text(clip: Option<Rect>) -> CapturedClonkText {
@@ -2037,6 +2080,101 @@ mod tests {
             "capture-armed surface allocated a pixel plane no primitive writes"
         );
         assert!(!finish_gpu_scene(&mut destination).commands.is_empty());
+    }
+
+    #[test]
+    fn gpu_capture_reserves_a_warmed_object_resource_run_before_appending() {
+        const OBJECTS: usize = 1_000;
+        let texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [
+                [0.0, 0.0, 1.0],
+                [15.0, 0.0, 1.0],
+                [0.0, 15.0, 1.0],
+                [15.0, 15.0, 1.0],
+            ],
+            [0.0, 0.0, 0.05, 15.0 / 110.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        );
+        let mut destination = Surface::new(800, 600, PixelFormat::Rgba8888);
+
+        destination.begin_gpu_scene_capture();
+        for _ in 0..OBJECTS {
+            assert!(destination.push_gpu_object_sprite(
+                texture,
+                sprite,
+                None,
+                GpuBlend::Normal,
+                false,
+            ));
+        }
+        let _ = destination.take_gpu_scene_capture().expect("warm capture");
+
+        destination.begin_gpu_scene_capture();
+        assert!(destination.push_gpu_object_sprite(texture, sprite, None, GpuBlend::Normal, false,));
+        assert!(
+            destination
+                .gpu_scene_capture()
+                .expect("second capture")
+                .first_object_run_capacity()
+                .is_some_and(|capacity| capacity >= OBJECTS),
+            "the second capture grew its object instance vector inside the object walk"
+        );
+    }
+
+    #[test]
+    fn changed_object_run_topology_does_not_inherit_an_unrelated_large_hint() {
+        const OBJECTS: usize = 1_000;
+        let large_texture = GpuTextureId::fresh();
+        let unrelated_texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        );
+        let mut destination = Surface::new(800, 600, PixelFormat::Rgba8888);
+
+        destination.begin_gpu_scene_capture();
+        for _ in 0..OBJECTS {
+            assert!(destination.push_gpu_object_sprite(
+                large_texture,
+                sprite,
+                None,
+                GpuBlend::Normal,
+                false,
+            ));
+        }
+        let _ = destination.take_gpu_scene_capture().expect("warm capture");
+
+        for _ in 0..2 {
+            destination.begin_gpu_scene_capture();
+            assert!(destination.push_gpu_object_sprite(
+                unrelated_texture,
+                sprite,
+                None,
+                GpuBlend::Normal,
+                false,
+            ));
+            assert!(
+                destination
+                    .gpu_scene_capture()
+                    .expect("changed capture")
+                    .first_object_run_capacity()
+                    .is_some_and(|capacity| capacity < OBJECTS),
+                "a large ordinal capacity migrated onto an unrelated resource run"
+            );
+            let _ = destination
+                .take_gpu_scene_capture()
+                .expect("changed capture remains active");
+        }
     }
 
     /// The deferred plane must be indistinguishable from an eagerly zeroed

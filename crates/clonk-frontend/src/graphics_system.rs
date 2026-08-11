@@ -394,6 +394,144 @@ impl ParticleLayerIndex {
     }
 }
 
+/// Painter-ordered object indices partitioned for the four native viewport
+/// draw sites. The vectors and lookup tables survive between viewports, so an
+/// unchanged steady-state object count does not rebuild heap backing storage.
+#[derive(Default)]
+struct PreparedObjectRenderPlan {
+    phases: [Vec<usize>; 4],
+    by_id: HashMap<ObjectId, usize>,
+    seen: HashSet<ObjectId>,
+}
+
+impl PreparedObjectRenderPlan {
+    const ALL_PHASES: u8 = (1 << 4) - 1;
+
+    const fn phase_index(pass: ObjectRenderPass) -> usize {
+        match pass {
+            ObjectRenderPass::Background => 0,
+            ObjectRenderPass::Normal => 1,
+            ObjectRenderPass::ForegroundNonParallax => 2,
+            ObjectRenderPass::ForegroundParallax => 3,
+        }
+    }
+
+    const fn phase_bit(pass: ObjectRenderPass) -> u8 {
+        1 << Self::phase_index(pass)
+    }
+
+    fn object_phase_mask(object: &ObjectSnapshot) -> u8 {
+        let mut mask = 0;
+        if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
+            mask |= Self::phase_bit(ObjectRenderPass::Background);
+        }
+        if object.category & (CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG) == 0 {
+            mask |= Self::phase_bit(ObjectRenderPass::Normal);
+        }
+        if object.category & CATEGORY_FOREGROUND_FLAG != 0 {
+            mask |= if object.category & CATEGORY_PARALLAX_FLAG == 0 {
+                Self::phase_bit(ObjectRenderPass::ForegroundNonParallax)
+            } else {
+                Self::phase_bit(ObjectRenderPass::ForegroundParallax)
+            };
+        }
+        mask
+    }
+
+    fn rebuild(
+        &mut self,
+        objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
+        players: &[PlayerState],
+        for_player: i32,
+        requested_phases: u8,
+    ) {
+        self.phases.iter_mut().for_each(Vec::clear);
+        self.by_id.clear();
+        self.seen.clear();
+
+        if render_order.is_empty() {
+            for (index, object) in objects.iter().enumerate() {
+                self.classify_object(
+                    index,
+                    objects,
+                    players,
+                    object,
+                    for_player,
+                    requested_phases,
+                );
+            }
+            return;
+        }
+
+        self.by_id.extend(
+            objects
+                .iter()
+                .enumerate()
+                .map(|(index, object)| (object.id, index)),
+        );
+        for id in render_order {
+            if self.seen.insert(*id) {
+                if let Some(index) = self.by_id.get(id).copied() {
+                    self.classify_object(
+                        index,
+                        objects,
+                        players,
+                        &objects[index],
+                        for_player,
+                        requested_phases,
+                    );
+                }
+            }
+        }
+        for (index, object) in objects.iter().enumerate() {
+            if self.seen.insert(object.id) {
+                self.classify_object(
+                    index,
+                    objects,
+                    players,
+                    object,
+                    for_player,
+                    requested_phases,
+                );
+            }
+        }
+    }
+
+    fn classify_object(
+        &mut self,
+        index: usize,
+        objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        object: &ObjectSnapshot,
+        for_player: i32,
+        requested_phases: u8,
+    ) {
+        #[cfg(test)]
+        OBJECT_RENDER_PLAN_EVALUATIONS.with(|evaluations| {
+            evaluations.set(evaluations.get().saturating_add(1));
+        });
+        if object.status != ObjectStatus::Normal {
+            return;
+        }
+        let phases = Self::object_phase_mask(object) & requested_phases;
+        if phases == 0
+            || !GraphicsSystem::object_is_visible(objects, players, object, for_player, false)
+        {
+            return;
+        }
+        for (phase, selected) in self.phases.iter_mut().enumerate() {
+            if phases & (1 << phase) != 0 {
+                selected.push(index);
+            }
+        }
+    }
+
+    fn objects_for(&self, pass: ObjectRenderPass) -> &[usize] {
+        &self.phases[Self::phase_index(pass)]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ParticleSpriteBatchKey {
     texture: GpuTextureId,
@@ -441,8 +579,14 @@ std::thread_local! {
     static PARTICLE_LAYER_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Calls into C4Object::IsVisible from the presentation object walk.
     static OBJECT_VISIBILITY_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Canonically ordered objects examined while preparing viewport phase partitions.
+    static OBJECT_RENDER_PLAN_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Objects entering the construction-sign/TopFace drawing body.
     static TOP_FACE_DRAW_SETUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Object overlay ancestry sets allocated for recursive MODE_Object guards.
+    static OBJECT_OVERLAY_ANCESTRY_SETUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Exact sprite/shape output-reach evaluations in the base object walk.
+    static OBJECT_OUTPUT_REACH_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -466,6 +610,16 @@ pub(crate) fn object_visibility_evaluations() -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn reset_object_render_plan_evaluations() {
+    OBJECT_RENDER_PLAN_EVALUATIONS.with(|evaluations| evaluations.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn object_render_plan_evaluations() -> usize {
+    OBJECT_RENDER_PLAN_EVALUATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 pub(crate) fn reset_top_face_draw_setups() {
     TOP_FACE_DRAW_SETUPS.with(|setups| setups.set(0));
 }
@@ -473,6 +627,26 @@ pub(crate) fn reset_top_face_draw_setups() {
 #[cfg(test)]
 pub(crate) fn top_face_draw_setups() -> usize {
     TOP_FACE_DRAW_SETUPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_object_overlay_ancestry_setups() {
+    OBJECT_OVERLAY_ANCESTRY_SETUPS.with(|setups| setups.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn object_overlay_ancestry_setups() -> usize {
+    OBJECT_OVERLAY_ANCESTRY_SETUPS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_object_output_reach_evaluations() {
+    OBJECT_OUTPUT_REACH_EVALUATIONS.with(|evaluations| evaluations.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn object_output_reach_evaluations() -> usize {
+    OBJECT_OUTPUT_REACH_EVALUATIONS.with(std::cell::Cell::get)
 }
 
 pub struct GraphicsSystem {
@@ -594,6 +768,8 @@ pub struct GraphicsSystem {
     /// the reused draw order one layer walk copies out of it.
     particle_layer_index: ParticleLayerIndex,
     particle_draw_order: Vec<u32>,
+    /// Reusable backing storage for one viewport's painter-ordered phase plan.
+    object_render_plan_scratch: PreparedObjectRenderPlan,
     /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
@@ -716,6 +892,7 @@ impl GraphicsSystem {
             pending_viewport_foregrounds: Vec::new(),
             particle_layer_index: ParticleLayerIndex::default(),
             particle_draw_order: Vec::new(),
+            object_render_plan_scratch: PreparedObjectRenderPlan::default(),
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             retained_lit_sky: None,
@@ -1083,6 +1260,58 @@ impl GraphicsSystem {
         self.draw_definition_particles(particles, &ParticleLayer::Global, None, None);
         self.finish_gpu_scene_capture(gamma)
             .expect("benchmark capture was started")
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn capture_st5b_objects_for_benchmark(
+        &mut self,
+        objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
+        fogged: bool,
+        gamma: &clonk_graphics::GammaRamp,
+    ) -> clonk_graphics::GpuScene {
+        let saved_fog_map = self.active_fog_map.take();
+        self.active_fog_map = fogged.then(|| {
+            let mut map = ClrModMap::reset(
+                64,
+                64,
+                self.surface_width as i32,
+                self.surface_height as i32,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            .expect("positive benchmark fog extent");
+            for (index, modulation) in map.cells.iter_mut().enumerate() {
+                let red = 128 + (index * 17 % 128) as u32;
+                let green = 128 + (index * 29 % 128) as u32;
+                let blue = 128 + (index * 43 % 128) as u32;
+                *modulation = (red << 16) | (green << 8) | blue;
+            }
+            Arc::new(map)
+        });
+        self.begin_gpu_scene_capture();
+        self.draw_objects_at_frame(
+            0,
+            objects,
+            render_order,
+            &HashMap::new(),
+            &[],
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(gamma),
+        );
+        let scene = self
+            .finish_gpu_scene_capture(gamma)
+            .expect("benchmark capture was started");
+        self.active_fog_map = saved_fog_map;
+        scene
     }
 
     pub(crate) fn fog_draw_context(&self) -> Option<FogDrawContext> {
@@ -3225,6 +3454,13 @@ impl GraphicsSystem {
         let environment = &snapshot.environment;
         let events = &snapshot.weather_events;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
+        let object_render_plan = self.prepare_object_render_plan(
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.players,
+            input.owner,
+            PreparedObjectRenderPlan::ALL_PHASES,
+        );
 
         self.draw_sky(
             snapshot.sky.as_ref(),
@@ -3237,16 +3473,16 @@ impl GraphicsSystem {
         );
         // C4D_Background objects live in Game.BackObjects and draw between
         // sky and landscape (C4Viewport.cpp:1051-1063).
-        self.draw_objects_at_frame(
+        self.draw_prepared_objects_at_frame(
             snapshot.frame,
             &snapshot.objects,
-            &snapshot.render_order,
             &snapshot.definition_lines,
             &snapshot.particles,
             &snapshot.players,
             input.owner,
             lighting,
             owner_colors,
+            &object_render_plan,
             ObjectRenderPass::Background,
             gamma,
         );
@@ -3274,30 +3510,30 @@ impl GraphicsSystem {
         // simulation creates rain/snow PXS; there is no procedural viewport
         // rain layer (C4Viewport.cpp:1056-1078; C4PXS.cpp:242-307).
         self.draw_pxs(&snapshot.particles, lighting, gamma);
-        self.draw_objects_at_frame(
+        self.draw_prepared_objects_at_frame(
             snapshot.frame,
             &snapshot.objects,
-            &snapshot.render_order,
             &snapshot.definition_lines,
             &snapshot.particles,
             &snapshot.players,
             input.owner,
             lighting,
             owner_colors,
+            &object_render_plan,
             ObjectRenderPass::Normal,
             gamma,
         );
         self.draw_definition_particles(&snapshot.particles, &ParticleLayer::Global, None, gamma);
-        self.draw_objects_at_frame(
+        self.draw_prepared_objects_at_frame(
             snapshot.frame,
             &snapshot.objects,
-            &snapshot.render_order,
             &snapshot.definition_lines,
             &snapshot.particles,
             &snapshot.players,
             input.owner,
             lighting,
             owner_colors,
+            &object_render_plan,
             ObjectRenderPass::ForegroundNonParallax,
             gamma,
         );
@@ -3330,16 +3566,16 @@ impl GraphicsSystem {
             let mut foreground = Surface::new(content_width.max(1), content_height.max(1), format);
             foreground.begin_clonk_text_capture();
             let base_surface = std::mem::replace(&mut self.surface, foreground);
-            self.draw_objects_at_frame(
+            self.draw_prepared_objects_at_frame(
                 snapshot.frame,
                 &snapshot.objects,
-                &snapshot.render_order,
                 &snapshot.definition_lines,
                 &snapshot.particles,
                 &snapshot.players,
                 input.owner,
                 lighting,
                 owner_colors,
+                &object_render_plan,
                 ObjectRenderPass::ForegroundParallax,
                 gamma,
             );
@@ -3349,21 +3585,22 @@ impl GraphicsSystem {
                 destination: SurfacePoint::new(rect.x + offset_x, rect.y + offset_y),
             })
         } else {
-            self.draw_objects_at_frame(
+            self.draw_prepared_objects_at_frame(
                 snapshot.frame,
                 &snapshot.objects,
-                &snapshot.render_order,
                 &snapshot.definition_lines,
                 &snapshot.particles,
                 &snapshot.players,
                 input.owner,
                 lighting,
                 owner_colors,
+                &object_render_plan,
                 ObjectRenderPass::ForegroundParallax,
                 gamma,
             );
             None
         };
+        self.object_render_plan_scratch = object_render_plan;
 
         let mut content_surface = std::mem::replace(&mut self.surface, main_surface);
 
@@ -6237,6 +6474,19 @@ impl GraphicsSystem {
             || screen_y > self.surface_height as f32 + 10.0
     }
 
+    fn prepare_object_render_plan(
+        &mut self,
+        objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
+        players: &[PlayerState],
+        for_player: i32,
+        requested_phases: u8,
+    ) -> PreparedObjectRenderPlan {
+        let mut plan = std::mem::take(&mut self.object_render_plan_scratch);
+        plan.rebuild(objects, render_order, players, for_player, requested_phases);
+        plan
+    }
+
     #[cfg(test)]
     pub(crate) fn draw_objects(
         &mut self,
@@ -6279,6 +6529,43 @@ impl GraphicsSystem {
         pass: ObjectRenderPass,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        let plan = self.prepare_object_render_plan(
+            objects,
+            render_order,
+            players,
+            for_player,
+            PreparedObjectRenderPlan::phase_bit(pass),
+        );
+        self.draw_prepared_objects_at_frame(
+            frame,
+            objects,
+            definition_lines,
+            particles,
+            players,
+            for_player,
+            lighting,
+            owner_colors,
+            &plan,
+            pass,
+            gamma,
+        );
+        self.object_render_plan_scratch = plan;
+    }
+
+    fn draw_prepared_objects_at_frame(
+        &mut self,
+        frame: u64,
+        objects: &[ObjectSnapshot],
+        definition_lines: &HashMap<DefinitionId, DefinitionLineMetadata>,
+        particles: &[ParticleSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
+        lighting: f32,
+        owner_colors: &HashMap<i32, Color>,
+        plan: &PreparedObjectRenderPlan,
+        pass: ObjectRenderPass,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
         let saved_current_audibility_facet = self.current_audibility_facet;
         self.current_audibility_facet = self.audibility_facet_for_pass(pass);
         // Group the particle slice by layer once instead of letting every
@@ -6286,55 +6573,10 @@ impl GraphicsSystem {
         let mut particle_layer_index = std::mem::take(&mut self.particle_layer_index);
         particle_layer_index.rebuild(particles);
         self.particle_layer_index = particle_layer_index;
+        let selected = plan.objects_for(pass);
 
-        // Engine snapshots keep object payloads in canonical ID order, while
-        // C4ObjectList draws Last -> Prev in its mutable master-list order
-        // (src/C4ObjectList.cpp:387-396). Empty is the legacy snapshot
-        // fallback; a partial sidecar appends omitted objects canonically.
-        let mut ordered = Vec::with_capacity(objects.len());
-        let mut seen = HashSet::with_capacity(objects.len());
-        if render_order.is_empty() {
-            ordered.extend(objects);
-        } else {
-            let by_id: HashMap<_, _> = objects.iter().map(|object| (object.id, object)).collect();
-            ordered.extend(
-                render_order
-                    .iter()
-                    .filter(|id| seen.insert(**id))
-                    .filter_map(|id| by_id.get(id).copied()),
-            );
-            ordered.extend(objects.iter().filter(|object| seen.insert(object.id)));
-        }
-        let mut selected = Vec::new();
-
-        for object in ordered {
-            if object.status != ObjectStatus::Normal {
-                continue;
-            }
-            let selected_for_pass = match pass {
-                ObjectRenderPass::Background => object.category & CATEGORY_BACKGROUND_FLAG != 0,
-                ObjectRenderPass::Normal => {
-                    object.category & (CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG) == 0
-                }
-                ObjectRenderPass::ForegroundNonParallax => {
-                    object.category & CATEGORY_FOREGROUND_FLAG != 0
-                        && object.category & CATEGORY_PARALLAX_FLAG == 0
-                }
-                ObjectRenderPass::ForegroundParallax => {
-                    object.category & CATEGORY_FOREGROUND_FLAG != 0
-                        && object.category & CATEGORY_PARALLAX_FLAG != 0
-                }
-            };
-            if !selected_for_pass {
-                continue;
-            }
-            if !Self::object_is_visible(objects, players, object, for_player, false) {
-                continue;
-            }
-            selected.push(object);
-        }
-
-        for object in &selected {
+        for &index in selected {
+            let object = &objects[index];
             let line = definition_lines
                 .get(&object.definition_id)
                 .map(|metadata| metadata.line)
@@ -6392,6 +6634,7 @@ impl GraphicsSystem {
                 lighting,
                 owner_colors,
                 line,
+                true,
                 gamma,
             );
             if line == 0 && reaches_post_face_draw {
@@ -6402,7 +6645,8 @@ impl GraphicsSystem {
                 self.fog_suppression_depth -= 1;
             }
         }
-        for object in &selected {
+        for &index in selected {
+            let object = &objects[index];
             if !definition_lines
                 .get(&object.definition_id)
                 .is_some_and(|metadata| metadata.line != 0)
@@ -7001,7 +7245,8 @@ impl GraphicsSystem {
     /// face/overlays and before the list-wide TopFace pass. It is centered on
     /// the live Con-scaled definition Shape. The facet itself ignores object
     /// blit state, owner tint, rotation, and draw transforms
-    /// (src/C4Object.cpp:2518-2524).
+    /// (src/C4Object.cpp:2518-2524). The object-list caller has already passed
+    /// the single output-boundary gate before this helper is reached.
     fn paint_need_energy_bolt(
         &mut self,
         object: &ObjectSnapshot,
@@ -7018,9 +7263,6 @@ impl GraphicsSystem {
             return;
         };
         let shape = self.live_object_shape(definition_sprite, object);
-        if !self.object_reaches_post_face_draw(object, definition_sprite, shape) {
-            return;
-        }
         let width = energy.width() as i32;
         let height = energy.height() as i32;
         let x = object.position.x + shape.x + shape.width / 2 - width / 2;
@@ -7062,6 +7304,10 @@ impl GraphicsSystem {
         definition_sprite: &DefinitionSprite,
         shape: DefinitionRect,
     ) -> bool {
+        #[cfg(test)]
+        OBJECT_OUTPUT_REACH_EVALUATIONS.with(|evaluations| {
+            evaluations.set(evaluations.get().saturating_add(1));
+        });
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let output_width = ((self.surface_width as f32 / zoom).ceil() as i32).max(1);
         let output_height = ((self.surface_height as f32 / zoom).ceil() as i32).max(1);
@@ -7337,6 +7583,7 @@ impl GraphicsSystem {
             lighting,
             owner_colors,
             line,
+            false,
             gamma,
         )
     }
@@ -7352,6 +7599,7 @@ impl GraphicsSystem {
         lighting: f32,
         _owner_colors: &HashMap<i32, Color>,
         line: i32,
+        output_reach_prechecked: bool,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
         // C4Object::Draw dispatches every nonzero Def->Line before bounds,
@@ -7396,7 +7644,9 @@ impl GraphicsSystem {
         if let Some(geometry_sprite) = geometry_sprite {
             let target_position = (target_x, target_y);
             let shape = self.live_object_shape(geometry_sprite, object);
-            if !self.object_reaches_post_face_draw(object, geometry_sprite, shape) {
+            if !output_reach_prechecked
+                && !self.object_reaches_post_face_draw(object, geometry_sprite, shape)
+            {
                 self.draw_definition_particles(
                     particles,
                     &ParticleLayer::ObjectFront(object.id),
@@ -7463,10 +7713,11 @@ impl GraphicsSystem {
             return true;
         }
 
-        if screen_x < -10.0
-            || screen_y < -10.0
-            || screen_x > content_width + 10.0
-            || screen_y > content_height + 10.0
+        if !output_reach_prechecked
+            && (screen_x < -10.0
+                || screen_y < -10.0
+                || screen_x > content_width + 10.0
+                || screen_y > content_height + 10.0)
         {
             self.draw_definition_particles(
                 particles,
@@ -8118,7 +8369,7 @@ impl GraphicsSystem {
                 GuiPoint::new((dest_x - viewport_x) * zoom, (dest_y - viewport_y) * zoom),
                 GuiSize::new(dest_w * zoom, dest_h * zoom),
             );
-            draw_image_region_float_source(
+            draw_object_image_region_float_source(
                 &mut self.surface,
                 &rect,
                 &sprite.image,
@@ -8151,7 +8402,7 @@ impl GraphicsSystem {
             ));
             // Rotation is composed into this matrix too, so rotated object
             // faces retain the same fractional source rectangle.
-            draw_image_region_transformed_float_source(
+            draw_object_image_region_transformed_float_source(
                 &mut self.surface,
                 (dest_x, dest_y, dest_w, dest_h),
                 &matrix,
@@ -8354,6 +8605,11 @@ impl GraphicsSystem {
         base_transform: Option<DrawTransform>,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
+        if object.graphics_overlays.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        OBJECT_OVERLAY_ANCESTRY_SETUPS.with(|setups| setups.set(setups.get().saturating_add(1)));
         let mut object_ancestry = HashSet::from([object.id]);
         self.draw_object_overlays_inner(
             object,

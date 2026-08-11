@@ -266,6 +266,101 @@ pub struct GpuSpriteQuad {
     pub modulation: u32,
 }
 
+/// One compact object face in retained painter order.
+///
+/// Positions retain homogeneous logical `[x, y, w]` coordinates so rotated,
+/// mirrored and projective object transforms do not need the generic
+/// [`GpuVertex`] layout. UVs are the axis-aligned source edges
+/// `[left, top, right, bottom]`; a reversed edge represents a source flip.
+/// Packed per-corner modulation preserves the exact byte-domain fog and
+/// `ModulateClr` result. `sample_tile_size` is zero for nearest sampling and
+/// the native `C4TexRef` tile size for linear sampling.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuObjectSprite {
+    pub positions: [[f32; 3]; 4],
+    pub uv: [f32; 4],
+    pub modulation: [u32; 4],
+    pub sample_tile_size: f32,
+    flags: u32,
+}
+
+impl GpuObjectSprite {
+    pub const FLAG_MOD2: u32 = 1 << 0;
+    pub const FLAG_LINEAR: u32 = 1 << 1;
+    const OUTER_MODULATION_SHIFT: u32 = 2;
+    const OUTER_MODULATION_MASK: u32 = 0b11 << Self::OUTER_MODULATION_SHIFT;
+    const DEFINED_FLAGS_MASK: u32 =
+        Self::FLAG_MOD2 | Self::FLAG_LINEAR | Self::OUTER_MODULATION_MASK;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        positions: [[f32; 3]; 4],
+        uv: [f32; 4],
+        modulation: [u32; 4],
+        sampler: GpuSampler,
+        sample_tile_size: f32,
+        mod2: bool,
+        outer_modulation: GpuOuterModulation,
+    ) -> Self {
+        let sampler_flag = match sampler {
+            GpuSampler::Nearest => 0,
+            GpuSampler::Linear => Self::FLAG_LINEAR,
+        };
+        let mod2_flag = u32::from(mod2) * Self::FLAG_MOD2;
+        let outer_modulation_flag = match outer_modulation {
+            GpuOuterModulation::Inherit => 0,
+            GpuOuterModulation::Combine => 1,
+            GpuOuterModulation::Ignore => 2,
+        } << Self::OUTER_MODULATION_SHIFT;
+        Self {
+            positions,
+            uv,
+            modulation,
+            sample_tile_size,
+            flags: sampler_flag | mod2_flag | outer_modulation_flag,
+        }
+    }
+
+    pub const fn sampler(self) -> GpuSampler {
+        if self.flags & Self::FLAG_LINEAR == 0 {
+            GpuSampler::Nearest
+        } else {
+            GpuSampler::Linear
+        }
+    }
+
+    pub const fn mod2(self) -> bool {
+        self.flags & Self::FLAG_MOD2 != 0
+    }
+
+    /// Packed renderer transport bits produced by the safe constructor.
+    pub const fn packed_flags(self) -> u32 {
+        self.flags
+    }
+
+    /// Whether the transport word contains only defined flags and policies.
+    pub const fn has_valid_packed_flags(self) -> bool {
+        self.flags & !Self::DEFINED_FLAGS_MASK == 0
+            && self.flags & Self::OUTER_MODULATION_MASK != Self::OUTER_MODULATION_MASK
+    }
+
+    pub const fn outer_modulation(self) -> GpuOuterModulation {
+        match (self.flags & Self::OUTER_MODULATION_MASK) >> Self::OUTER_MODULATION_SHIFT {
+            0 => GpuOuterModulation::Inherit,
+            1 => GpuOuterModulation::Combine,
+            _ => GpuOuterModulation::Ignore,
+        }
+    }
+
+    fn translate(&mut self, x: f32, y: f32) {
+        self.positions.iter_mut().for_each(|position| {
+            position[0] += x * position[2];
+            position[1] += y * position[2];
+        });
+    }
+}
+
 impl GpuVertex {
     pub fn new(position: [f32; 3], uv: [f32; 2], modulation: [f32; 4]) -> Self {
         // Identity is the native "no active modulation" sentinel. Any
@@ -347,6 +442,13 @@ pub enum GpuCommand {
         gamma: bool,
         outer_modulation: GpuOuterModulation,
     },
+    ObjectBatch {
+        texture: GpuTextureId,
+        sprites: Vec<GpuObjectSprite>,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    },
     Landscape {
         base: GpuTextureId,
         liquid_mask: Option<GpuTextureId>,
@@ -425,6 +527,10 @@ pub enum GpuSceneModulationError {
         channel_set: &'static str,
     },
     #[error(
+        "replacement object command {command} mixes outer-modulation blend classes at sprite {sprite}"
+    )]
+    MixedReplaceObjectOuterModulation { command: usize, sprite: usize },
+    #[error(
         "solid command {command}, vertex {vertex}, color channel {channel} is not an exact normalized byte"
     )]
     AmbiguousSolidColor {
@@ -452,6 +558,10 @@ impl GpuCommand {
                 }
                 translate_clip(clip, x, y);
             }
+            Self::ObjectBatch { sprites, clip, .. } => {
+                sprites.iter_mut().for_each(|sprite| sprite.translate(x, y));
+                translate_clip(clip, x, y);
+            }
             Self::Solid { vertices, clip, .. } => {
                 vertices
                     .iter_mut()
@@ -465,6 +575,7 @@ impl GpuCommand {
         let clip = match self {
             Self::Quad { clip, .. }
             | Self::SpriteBatch { clip, .. }
+            | Self::ObjectBatch { clip, .. }
             | Self::Landscape { clip, .. }
             | Self::Solid { clip, .. } => clip,
         };
@@ -528,6 +639,39 @@ impl GpuCommand {
                             command,
                             vertex: quad_index,
                             channel_set: "sprite modulation",
+                        });
+                    }
+                }
+            }
+            Self::ObjectBatch { sprites, blend, .. } => {
+                if *blend == GpuBlend::Replace {
+                    if let Some(first) = sprites.first() {
+                        let first_outer_applies =
+                            first.outer_modulation() != GpuOuterModulation::Ignore;
+                        if let Some((sprite, _)) = sprites.iter().enumerate().find(|(_, sprite)| {
+                            (sprite.outer_modulation() != GpuOuterModulation::Ignore)
+                                != first_outer_applies
+                        }) {
+                            return Err(
+                                GpuSceneModulationError::MixedReplaceObjectOuterModulation {
+                                    command,
+                                    sprite,
+                                },
+                            );
+                        }
+                    }
+                }
+                for (sprite_index, sprite) in sprites.iter().enumerate() {
+                    if sprite.outer_modulation() == GpuOuterModulation::Inherit
+                        && sprite
+                            .modulation
+                            .iter()
+                            .any(|&modulation| modulation != 0x00ff_ffff)
+                    {
+                        return Err(GpuSceneModulationError::NonIdentityInheritedColor {
+                            command,
+                            vertex: sprite_index,
+                            channel_set: "object sprite modulation",
                         });
                     }
                 }
@@ -605,6 +749,22 @@ impl GpuCommand {
                         }
                         GpuOuterModulation::Ignore => quad.modulation,
                     };
+                }
+                promote_transparent_replace_blend(blend, modulation, outer_applies);
+            }
+            Self::ObjectBatch { sprites, blend, .. } => {
+                let outer_applies = sprites
+                    .iter()
+                    .any(|sprite| sprite.outer_modulation() != GpuOuterModulation::Ignore);
+                for sprite in sprites {
+                    let outer_modulation = sprite.outer_modulation();
+                    for color in &mut sprite.modulation {
+                        *color = match outer_modulation {
+                            GpuOuterModulation::Inherit => modulation,
+                            GpuOuterModulation::Combine => modulate_packed_c4(*color, modulation),
+                            GpuOuterModulation::Ignore => *color,
+                        };
+                    }
                 }
                 promote_transparent_replace_blend(blend, modulation, outer_applies);
             }
@@ -834,15 +994,224 @@ pub struct GpuScene {
     pub commands: Vec<GpuCommand>,
 }
 
+/// State that makes two compact object batches one adjacent resource run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObjectBatchKey {
+    texture: GpuTextureId,
+    clip: Option<Rect>,
+    blend: GpuBlend,
+    gamma: bool,
+    /// Replacement draws must not mix sprites that keep replacement
+    /// semantics with sprites whose outer transparency promotes alpha blend.
+    replace_outer_applies: Option<bool>,
+}
+
+impl ObjectBatchKey {
+    fn new(
+        texture: GpuTextureId,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+        sprite: GpuObjectSprite,
+    ) -> Self {
+        Self {
+            texture,
+            clip,
+            blend,
+            gamma,
+            replace_outer_applies: (blend == GpuBlend::Replace)
+                .then(|| sprite.outer_modulation() != GpuOuterModulation::Ignore),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObjectRunCapacityHint {
+    key: ObjectBatchKey,
+    capacity: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GpuObjectRunCapacityHints(Vec<ObjectRunCapacityHint>);
+
 /// Mutable command sink carried by recording surfaces and flattened when a
 /// CPU scratch surface is presented into its parent.
 #[derive(Clone, Debug, Default)]
 pub struct GpuSceneRecorder {
     textures: HashMap<GpuTextureId, GpuTextureResource>,
     commands: Vec<GpuCommand>,
+    object_run_capacity_hints: GpuObjectRunCapacityHints,
+    next_object_run_hint: usize,
 }
 
 impl GpuSceneRecorder {
+    pub(crate) fn with_capacities(
+        command_capacity: usize,
+        texture_capacity: usize,
+        object_run_capacity_hints: GpuObjectRunCapacityHints,
+    ) -> Self {
+        Self {
+            textures: HashMap::with_capacity(texture_capacity),
+            commands: Vec::with_capacity(command_capacity),
+            object_run_capacity_hints,
+            next_object_run_hint: 0,
+        }
+    }
+
+    pub(crate) fn command_count(&self) -> usize {
+        self.commands.len()
+    }
+
+    pub(crate) fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
+    pub(crate) fn retain_object_run_capacities(&mut self) {
+        let mut retained = std::mem::take(&mut self.object_run_capacity_hints.0);
+        retained.clear();
+        for command in &self.commands {
+            let GpuCommand::ObjectBatch {
+                texture,
+                sprites,
+                clip,
+                blend,
+                gamma,
+            } = command
+            else {
+                continue;
+            };
+            let Some(sprite) = sprites.first().copied() else {
+                continue;
+            };
+            retained.push(ObjectRunCapacityHint {
+                key: ObjectBatchKey::new(*texture, *clip, *blend, *gamma, sprite),
+                capacity: sprites.capacity().max(sprites.len()).max(1),
+            });
+        }
+        self.object_run_capacity_hints.0 = retained;
+    }
+
+    pub(crate) fn take_object_run_capacity_hints(&mut self) -> GpuObjectRunCapacityHints {
+        std::mem::take(&mut self.object_run_capacity_hints)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_object_run_capacity(&self) -> Option<usize> {
+        self.commands.iter().find_map(|command| match command {
+            GpuCommand::ObjectBatch { sprites, .. } => Some(sprites.capacity()),
+            _ => None,
+        })
+    }
+
+    fn next_object_run_capacity(&mut self, key: ObjectBatchKey) -> usize {
+        let capacity = self
+            .object_run_capacity_hints
+            .0
+            .get(self.next_object_run_hint)
+            .filter(|hint| hint.key == key)
+            .map(|hint| hint.capacity)
+            .unwrap_or(1)
+            .max(1);
+        self.next_object_run_hint = self.next_object_run_hint.saturating_add(1);
+        capacity
+    }
+
+    fn last_object_batch_matches(&self, key: ObjectBatchKey) -> bool {
+        self.commands.last().is_some_and(|command| {
+            let GpuCommand::ObjectBatch {
+                texture,
+                sprites,
+                clip,
+                blend,
+                gamma,
+            } = command
+            else {
+                return false;
+            };
+            sprites.first().copied().is_some_and(|sprite| {
+                ObjectBatchKey::new(*texture, *clip, *blend, *gamma, sprite) == key
+            })
+        })
+    }
+
+    fn push_object_batch_run(
+        &mut self,
+        texture: GpuTextureId,
+        mut sprites: Vec<GpuObjectSprite>,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) {
+        let Some(first) = sprites.first().copied() else {
+            return;
+        };
+        let key = ObjectBatchKey::new(texture, clip, blend, gamma, first);
+        debug_assert!(sprites
+            .iter()
+            .copied()
+            .all(|sprite| ObjectBatchKey::new(texture, clip, blend, gamma, sprite) == key));
+
+        if self.last_object_batch_matches(key) {
+            let Some(GpuCommand::ObjectBatch {
+                sprites: previous, ..
+            }) = self.commands.last_mut()
+            else {
+                unreachable!("the compatible command was an object batch");
+            };
+            previous.extend(sprites);
+            return;
+        }
+
+        let hinted_capacity = self.next_object_run_capacity(key);
+        if sprites.capacity() < hinted_capacity {
+            sprites.reserve(hinted_capacity.saturating_sub(sprites.len()));
+        }
+        self.commands.push(GpuCommand::ObjectBatch {
+            texture,
+            sprites,
+            clip,
+            blend,
+            gamma,
+        });
+    }
+
+    fn push_object_batch(
+        &mut self,
+        texture: GpuTextureId,
+        sprites: Vec<GpuObjectSprite>,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) {
+        let Some(first) = sprites.first().copied() else {
+            return;
+        };
+        if blend != GpuBlend::Replace {
+            self.push_object_batch_run(texture, sprites, clip, blend, gamma);
+            return;
+        }
+
+        let first_outer_applies = first.outer_modulation() != GpuOuterModulation::Ignore;
+        if sprites.iter().all(|sprite| {
+            (sprite.outer_modulation() != GpuOuterModulation::Ignore) == first_outer_applies
+        }) {
+            self.push_object_batch_run(texture, sprites, clip, blend, gamma);
+            return;
+        }
+
+        let mut run = Vec::new();
+        let mut run_outer_applies = first_outer_applies;
+        for sprite in sprites {
+            let outer_applies = sprite.outer_modulation() != GpuOuterModulation::Ignore;
+            if !run.is_empty() && outer_applies != run_outer_applies {
+                self.push_object_batch_run(texture, std::mem::take(&mut run), clip, blend, gamma);
+                run_outer_applies = outer_applies;
+            }
+            run.push(sprite);
+        }
+        self.push_object_batch_run(texture, run, clip, blend, gamma);
+    }
+
     pub fn add_texture(&mut self, resource: GpuTextureResource) {
         match self.textures.entry(resource.id) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -861,7 +1230,20 @@ impl GpuSceneRecorder {
     }
 
     pub fn push(&mut self, command: GpuCommand) {
-        if matches!(&command, GpuCommand::SpriteBatch { quads, .. } if quads.is_empty()) {
+        if matches!(&command, GpuCommand::SpriteBatch { quads, .. } if quads.is_empty())
+            || matches!(&command, GpuCommand::ObjectBatch { sprites, .. } if sprites.is_empty())
+        {
+            return;
+        }
+        if let GpuCommand::ObjectBatch {
+            texture,
+            sprites,
+            clip,
+            blend,
+            gamma,
+        } = command
+        {
+            self.push_object_batch(texture, sprites, clip, blend, gamma);
             return;
         }
         if let GpuCommand::Solid {
@@ -903,6 +1285,33 @@ impl GpuSceneRecorder {
             return;
         }
         self.commands.push(command);
+    }
+
+    pub fn push_object_sprite(
+        &mut self,
+        texture: GpuTextureId,
+        sprite: GpuObjectSprite,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) {
+        let key = ObjectBatchKey::new(texture, clip, blend, gamma, sprite);
+        if self.last_object_batch_matches(key) {
+            let Some(GpuCommand::ObjectBatch { sprites, .. }) = self.commands.last_mut() else {
+                unreachable!("the compatible command was an object batch");
+            };
+            sprites.push(sprite);
+            return;
+        }
+        let mut sprites = Vec::with_capacity(self.next_object_run_capacity(key));
+        sprites.push(sprite);
+        self.commands.push(GpuCommand::ObjectBatch {
+            texture,
+            sprites,
+            clip,
+            blend,
+            gamma,
+        });
     }
 
     pub fn push_solid_vertex(
@@ -982,7 +1391,7 @@ impl GpuSceneRecorder {
             if destination_clip.is_some_and(|clip| !command.clip_to(clip)) {
                 continue;
             }
-            self.commands.push(command);
+            self.push(command);
         }
     }
 
@@ -990,6 +1399,7 @@ impl GpuSceneRecorder {
         let Self {
             mut textures,
             commands,
+            ..
         } = self;
         let mut referenced = HashSet::new();
         for command in &commands {
@@ -1008,6 +1418,12 @@ impl GpuSceneRecorder {
                     referenced.insert(*texture);
                 }
                 GpuCommand::SpriteBatch { .. } => {}
+                GpuCommand::ObjectBatch {
+                    texture, sprites, ..
+                } if !sprites.is_empty() => {
+                    referenced.insert(*texture);
+                }
+                GpuCommand::ObjectBatch { .. } => {}
                 GpuCommand::Landscape {
                     base,
                     liquid_mask,
@@ -1050,6 +1466,18 @@ mod tests {
         packed_c4_to_normalized(packed)
     }
 
+    fn object_sprite(outer_modulation: GpuOuterModulation) -> GpuObjectSprite {
+        GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            outer_modulation,
+        )
+    }
+
     fn textured_command_with_policies(
         base: u32,
         owner: u32,
@@ -1089,6 +1517,184 @@ mod tests {
         let mut vertex = GpuVertex::new([20.0, 30.0, 2.0], [0.0, 0.0], [1.0, 1.0, 1.0, 0.0]);
         vertex.translate(5.0, 7.0);
         assert_eq!(vertex.position, [30.0, 44.0, 2.0]);
+    }
+
+    #[test]
+    fn object_sprite_instance_fits_the_compact_capture_budget() {
+        assert_eq!(std::mem::size_of::<GpuObjectSprite>(), 88);
+    }
+
+    #[test]
+    fn object_sprite_rejects_reserved_packed_flags() {
+        let valid = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Inherit,
+        );
+        let reserved_bit = GpuObjectSprite {
+            flags: valid.packed_flags() | (1 << 4),
+            ..valid
+        };
+        let reserved_outer_policy = GpuObjectSprite {
+            flags: valid.packed_flags() | GpuObjectSprite::OUTER_MODULATION_MASK,
+            ..valid
+        };
+
+        assert!(valid.has_valid_packed_flags());
+        assert!(!reserved_bit.has_valid_packed_flags());
+        assert!(!reserved_outer_policy.has_valid_packed_flags());
+    }
+
+    #[test]
+    fn adjacent_object_sprites_share_one_ordered_resource_run() {
+        let texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_0000; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        );
+        let mut recorder = GpuSceneRecorder::default();
+
+        recorder.push_object_sprite(texture, sprite, None, GpuBlend::Normal, false);
+        recorder.push_object_sprite(
+            texture,
+            GpuObjectSprite {
+                modulation: [0x0000_ff00; 4],
+                ..sprite
+            },
+            None,
+            GpuBlend::Normal,
+            false,
+        );
+
+        let [GpuCommand::ObjectBatch { sprites, .. }] = recorder.commands.as_slice() else {
+            panic!("adjacent object sprites did not form one resource run");
+        };
+        assert_eq!(sprites.len(), 2);
+        assert_eq!(sprites[0].modulation, [0x00ff_0000; 4]);
+        assert_eq!(sprites[1].modulation, [0x0000_ff00; 4]);
+    }
+
+    #[test]
+    fn pushed_object_batches_coalesce_at_the_surface_command_boundary() {
+        let texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Inherit,
+        );
+        let batch = |sprite| GpuCommand::ObjectBatch {
+            texture,
+            sprites: vec![sprite],
+            clip: None,
+            blend: GpuBlend::Normal,
+            gamma: false,
+        };
+        let mut recorder = GpuSceneRecorder::default();
+
+        recorder.push(batch(sprite));
+        recorder.push(batch(sprite));
+
+        let [GpuCommand::ObjectBatch { sprites, .. }] = recorder.commands.as_slice() else {
+            panic!("surface-pushed object faces did not coalesce");
+        };
+        assert_eq!(sprites.len(), 2);
+    }
+
+    #[test]
+    fn appended_object_batch_coalesces_without_consuming_an_extra_run_hint() {
+        let clip = Rect::new(0, 0, 16, 16);
+        let shared_texture = GpuTextureId::fresh();
+        let following_texture = GpuTextureId::fresh();
+        let sprite = object_sprite(GpuOuterModulation::Inherit);
+        let mut parent = GpuSceneRecorder::default();
+        parent.push_object_sprite(shared_texture, sprite, Some(clip), GpuBlend::Normal, false);
+        let mut child = GpuSceneRecorder::default();
+        child.push_object_sprite(shared_texture, sprite, None, GpuBlend::Normal, false);
+
+        parent.append_translated(child, 0, 0, clip, None);
+        assert_eq!(parent.next_object_run_hint, 1);
+        parent.push_object_sprite(
+            following_texture,
+            sprite,
+            Some(clip),
+            GpuBlend::Normal,
+            false,
+        );
+
+        let [GpuCommand::ObjectBatch {
+            sprites: shared, ..
+        }, GpuCommand::ObjectBatch {
+            sprites: following, ..
+        }] = parent.commands.as_slice()
+        else {
+            panic!("appended adjacent object batches did not retain two resource runs");
+        };
+        assert_eq!(shared.len(), 2);
+        assert_eq!(following.len(), 1);
+        assert_eq!(parent.next_object_run_hint, 2);
+    }
+
+    #[test]
+    fn replace_object_batch_splits_outer_modulation_blend_classes() {
+        let mixed = GpuCommand::ObjectBatch {
+            texture: GpuTextureId::fresh(),
+            sprites: vec![
+                object_sprite(GpuOuterModulation::Ignore),
+                object_sprite(GpuOuterModulation::Combine),
+            ],
+            clip: None,
+            blend: GpuBlend::Replace,
+            gamma: false,
+        };
+        let mut direct = mixed.clone();
+        assert!(matches!(
+            direct.apply_packed_c4_modulation(0x80ff_ffff),
+            Err(GpuSceneModulationError::MixedReplaceObjectOuterModulation {
+                command: 0,
+                sprite: 1,
+            })
+        ));
+        assert_eq!(direct, mixed, "failed validation must be atomic");
+
+        let mut recorder = GpuSceneRecorder::default();
+        recorder.push(mixed);
+
+        recorder
+            .apply_packed_c4_modulation(0x80ff_ffff)
+            .expect("object sprite colors are exact packed C4 values");
+
+        let [GpuCommand::ObjectBatch {
+            sprites: ignored,
+            blend: GpuBlend::Replace,
+            ..
+        }, GpuCommand::ObjectBatch {
+            sprites: combined,
+            blend: GpuBlend::Normal,
+            ..
+        }] = recorder.commands.as_slice()
+        else {
+            panic!("replace object sprites with different blend semantics stayed mixed");
+        };
+        assert_eq!(ignored[0].modulation, [0x00ff_ffff; 4]);
+        assert_eq!(combined[0].modulation, [0x80fe_fefe; 4]);
     }
 
     #[test]

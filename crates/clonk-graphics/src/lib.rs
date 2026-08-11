@@ -14,8 +14,8 @@ pub use color::Color;
 pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontError};
 pub use gamma::GammaRamp;
 pub use gpu_scene::{
-    GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuOuterModulation, GpuOwnerMask,
-    GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder,
+    GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuObjectSprite, GpuOuterModulation,
+    GpuOwnerMask, GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder,
     GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidStyle, GpuSolidVertex, GpuSpriteQuad,
     GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, ShaderLandscapePlan,
 };

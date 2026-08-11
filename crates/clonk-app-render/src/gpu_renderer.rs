@@ -14,9 +14,9 @@
 //! also the screenshot and deterministic-test readback source.
 
 use clonk_graphics::{
-    ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuPresentation, GpuPrimitiveTopology,
-    GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuSpriteQuad, GpuTextureFormat,
-    GpuTextureId, GpuTextureResource, GpuVertex, Rect,
+    ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuObjectSprite, GpuPresentation,
+    GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuSpriteQuad,
+    GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
 };
 use pixels::wgpu;
 use pixels::wgpu::util::DeviceExt;
@@ -33,6 +33,8 @@ const PACKED_QUAD_INSTANCE_STRIDE: u64 =
     (PACKED_QUAD_INSTANCE_FLOATS * std::mem::size_of::<f32>()) as u64;
 const PACKED_SPRITE_INSTANCE_STRIDE: u64 =
     (8 * std::mem::size_of::<f32>() + 2 * std::mem::size_of::<u32>()) as u64;
+const PACKED_OBJECT_SPRITE_INSTANCE_STRIDE: u64 =
+    (17 * std::mem::size_of::<f32>() + 5 * std::mem::size_of::<u32>()) as u64;
 const INITIAL_VERTEX_BUFFER_SIZE: u64 = 4096;
 const SOURCE_TEXTURE_CACHE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 const SOURCE_TEXTURE_CACHE_MAX_ENTRIES: usize = 4096;
@@ -163,6 +165,49 @@ const PACKED_SPRITE_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
         format: wgpu::VertexFormat::Uint32,
         offset: 36,
         shader_location: 3,
+    },
+];
+
+const PACKED_OBJECT_SPRITE_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 12,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 24,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 36,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 48,
+        shader_location: 4,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32x4,
+        offset: 64,
+        shader_location: 5,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 80,
+        shader_location: 6,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 84,
+        shader_location: 7,
     },
 ];
 
@@ -381,6 +426,134 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         alpha = clamp(alpha - input.modulation.a, 0.0, 1.0);
     }
     if input.flags.y > 0.5 {
+        rgb = apply_gamma(rgb);
+    }
+    return vec4<f32>(rgb, alpha);
+}
+"#;
+
+const OBJECT_SPRITE_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) clip_position_0: vec3<f32>,
+    @location(1) clip_position_1: vec3<f32>,
+    @location(2) clip_position_2: vec3<f32>,
+    @location(3) clip_position_3: vec3<f32>,
+    @location(4) uv_rect: vec4<f32>,
+    @location(5) packed_modulation: vec4<u32>,
+    @location(6) sample_tile_size: f32,
+    @location(7) packed_flags: u32,
+    @builtin(vertex_index) vertex_index: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) modulation: vec4<f32>,
+    @location(2) @interpolate(flat) sample_tile_size: f32,
+    @location(3) @interpolate(flat) packed_flags: u32,
+};
+
+@group(0) @binding(0) var gamma_lut: texture_2d<u32>;
+@group(1) @binding(0) var image: texture_2d<f32>;
+@group(1) @binding(1) var image_sampler: sampler;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    let positions = array<vec3<f32>, 4>(
+        input.clip_position_0,
+        input.clip_position_1,
+        input.clip_position_2,
+        input.clip_position_3,
+    );
+    let right = input.vertex_index == 1u || input.vertex_index == 3u;
+    let bottom = input.vertex_index >= 2u;
+    let packed = input.packed_modulation[input.vertex_index];
+    let red = f32((packed >> 16u) & 255u) / 255.0;
+    let green = f32((packed >> 8u) & 255u) / 255.0;
+    let blue = f32(packed & 255u) / 255.0;
+    let transparency = f32(packed >> 24u) / 255.0;
+    let position = positions[input.vertex_index];
+    var output: VertexOutput;
+    output.position = vec4<f32>(position.xy, 0.0, position.z);
+    output.uv = vec2<f32>(
+        select(input.uv_rect.x, input.uv_rect.z, right),
+        select(input.uv_rect.y, input.uv_rect.w, bottom),
+    );
+    output.modulation = vec4<f32>(red, green, blue, transparency);
+    output.sample_tile_size = input.sample_tile_size;
+    output.packed_flags = input.packed_flags;
+    return output;
+}
+
+fn tiled_texel(image_size: vec2<i32>, tile_origin: vec2<f32>, tile_size: f32, relative: vec2<i32>) -> vec4<f32> {
+    let size = max(i32(tile_size), 1);
+    let local = clamp(relative, vec2<i32>(0), vec2<i32>(size - 1));
+    let position = vec2<i32>(tile_origin) + local;
+    if any(position < vec2<i32>(0)) || any(position >= image_size) {
+        return vec4<f32>(1.0, 1.0, 1.0, 0.0);
+    }
+    return textureLoad(image, position, 0);
+}
+
+fn sample_native_tile(uv: vec2<f32>, tile_size: f32) -> vec4<f32> {
+    let image_size = vec2<i32>(textureDimensions(image));
+    let size = max(tile_size, 1.0);
+    let source_edge = uv * vec2<f32>(image_size);
+    let tile_origin = floor(source_edge / vec2<f32>(size)) * size;
+    let source = source_edge - vec2<f32>(0.5) - tile_origin;
+    let base = vec2<i32>(floor(source));
+    let fraction = fract(source);
+    let top = mix(
+        tiled_texel(image_size, tile_origin, size, base),
+        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(1, 0)),
+        fraction.x,
+    );
+    let bottom = mix(
+        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(0, 1)),
+        tiled_texel(image_size, tile_origin, size, base + vec2<i32>(1, 1)),
+        fraction.x,
+    );
+    return mix(top, bottom, fraction.y);
+}
+
+fn sample_nearest(uv: vec2<f32>) -> vec4<f32> {
+    let image_size = vec2<i32>(textureDimensions(image));
+    let source = vec2<i32>(floor(uv * vec2<f32>(image_size)));
+    return textureLoad(image, clamp(source, vec2<i32>(0), image_size - vec2<i32>(1)), 0);
+}
+
+fn gamma_channel(channel: u32, value: f32) -> f32 {
+    let index = min(u32(clamp(value, 0.0, 1.0) * 256.0), 255u);
+    let sample = textureLoad(gamma_lut, vec2<i32>(i32(index), i32(channel)), 0).r;
+    return f32(sample) / 65535.0;
+}
+
+fn apply_gamma(color: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        gamma_channel(0u, color.r),
+        gamma_channel(1u, color.g),
+        gamma_channel(2u, color.b),
+    );
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let linear = (input.packed_flags & 2u) != 0u;
+    var source: vec4<f32>;
+    if linear {
+        source = sample_native_tile(input.uv, input.sample_tile_size);
+    } else {
+        source = sample_nearest(input.uv);
+    }
+    var rgb = source.rgb;
+    var alpha = source.a;
+    if (input.packed_flags & 1u) != 0u {
+        rgb = clamp((rgb + input.modulation.rgb) * 2.0 - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else {
+        rgb = clamp(rgb * input.modulation.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        alpha = clamp(alpha - input.modulation.a, 0.0, 1.0);
+    }
+    if (input.packed_flags & 16u) != 0u {
         rgb = apply_gamma(rgb);
     }
     return vec4<f32>(rgb, alpha);
@@ -813,6 +986,13 @@ pub enum GpuRendererError {
     },
     #[error("non-finite GPU vertex or presentation coordinate")]
     NonFiniteCoordinate,
+    #[error("compact {sampler:?} object sprite uses invalid native tile size {sample_tile_size}")]
+    InvalidObjectSpriteSampleTile {
+        sampler: GpuSampler,
+        sample_tile_size: f32,
+    },
+    #[error("compact object sprite uses reserved packed flags {flags:#x}")]
+    InvalidObjectSpriteFlags { flags: u32 },
     #[error("GPU vertex stream exceeds wgpu's u32 draw range")]
     VertexRangeOverflow,
     #[error("GPU readback size overflow")]
@@ -864,7 +1044,14 @@ pub struct GpuRendererStats {
     pub created_source_textures: usize,
     pub full_upload_bytes: u64,
     pub dirty_upload_bytes: u64,
+    /// Painter-ordered scene draws, excluding fixed post-processing and presentation passes.
     pub draw_calls: usize,
+    /// All GPU draw calls, including monitor-gamma and final presentation passes.
+    pub total_draw_calls: usize,
+    pub quad_instances: usize,
+    pub object_sprite_instances: usize,
+    pub quad_instance_upload_bytes: usize,
+    pub object_sprite_upload_bytes: usize,
     pub composition_recreated: bool,
 }
 
@@ -932,6 +1119,19 @@ fn quad_run_key(command: &GpuCommand) -> Option<QuadRunKey> {
             blend: *blend,
         }),
         GpuCommand::SpriteBatch {
+            texture,
+            clip,
+            blend,
+            ..
+        } => Some(QuadRunKey {
+            binding: QuadBindingKey {
+                texture: *texture,
+                sampler: sampler_key(GpuSampler::Nearest),
+            },
+            clip: *clip,
+            blend: *blend,
+        }),
+        GpuCommand::ObjectBatch {
             texture,
             clip,
             blend,
@@ -1020,6 +1220,7 @@ impl SpriteProjection {
 enum DrawKind {
     Quad(QuadBindingKey),
     Sprite(QuadBindingKey),
+    ObjectSprite(QuadBindingKey),
     Landscape(LandscapeBindingKey),
     Solid { alpha_mode: GpuSolidAlphaMode },
 }
@@ -1036,6 +1237,7 @@ struct BuiltDrawStream {
     vertices: Vec<PackedVertex>,
     quad_instances: Vec<PackedQuadInstance>,
     sprite_instances: Vec<PackedSpriteInstance>,
+    object_sprite_instances: Vec<PackedObjectSpriteInstance>,
     calls: Vec<DrawCall>,
 }
 
@@ -1154,6 +1356,9 @@ pub struct RetainedGpuRenderer {
     sprite_replace_pipeline: wgpu::RenderPipeline,
     sprite_normal_pipeline: wgpu::RenderPipeline,
     sprite_additive_pipeline: wgpu::RenderPipeline,
+    object_sprite_replace_pipeline: wgpu::RenderPipeline,
+    object_sprite_normal_pipeline: wgpu::RenderPipeline,
+    object_sprite_additive_pipeline: wgpu::RenderPipeline,
     landscape_pipeline: wgpu::RenderPipeline,
     solid_replace_pipeline: wgpu::RenderPipeline,
     solid_over_normal_pipeline: wgpu::RenderPipeline,
@@ -1189,10 +1394,13 @@ pub struct RetainedGpuRenderer {
     quad_instance_buffer_size: u64,
     sprite_instance_buffer: wgpu::Buffer,
     sprite_instance_buffer_size: u64,
+    object_sprite_instance_buffer: wgpu::Buffer,
+    object_sprite_instance_buffer_size: u64,
     quad_index_buffer: wgpu::Buffer,
     vertex_scratch: Vec<PackedVertex>,
     quad_instance_scratch: Vec<PackedQuadInstance>,
     sprite_instance_scratch: Vec<PackedSpriteInstance>,
+    object_sprite_instance_scratch: Vec<PackedObjectSpriteInstance>,
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
@@ -1287,6 +1495,8 @@ impl RetainedGpuRenderer {
             });
         let quad_shader = shader(device, "lc_gpu_quad_shader", QUAD_SHADER);
         let sprite_shader = shader(device, "lc_gpu_sprite_shader", SPRITE_SHADER);
+        let object_sprite_shader =
+            shader(device, "lc_gpu_object_sprite_shader", OBJECT_SPRITE_SHADER);
         let landscape_shader = shader(device, "lc_gpu_landscape_shader", LANDSCAPE_SHADER);
         let solid_shader = shader(device, "lc_gpu_solid_shader", SOLID_SHADER);
         let present_shader = shader(device, "lc_gpu_present_shader", PRESENT_SHADER);
@@ -1373,6 +1583,27 @@ impl RetainedGpuRenderer {
             "lc_gpu_sprite_additive",
             &quad_pipeline_layout,
             &sprite_shader,
+            GpuBlend::Additive,
+        );
+        let object_sprite_replace_pipeline = object_sprite_scene_pipeline(
+            device,
+            "lc_gpu_object_sprite_replace",
+            &quad_pipeline_layout,
+            &object_sprite_shader,
+            GpuBlend::Replace,
+        );
+        let object_sprite_normal_pipeline = object_sprite_scene_pipeline(
+            device,
+            "lc_gpu_object_sprite_normal",
+            &quad_pipeline_layout,
+            &object_sprite_shader,
+            GpuBlend::Normal,
+        );
+        let object_sprite_additive_pipeline = object_sprite_scene_pipeline(
+            device,
+            "lc_gpu_object_sprite_additive",
+            &quad_pipeline_layout,
+            &object_sprite_shader,
             GpuBlend::Additive,
         );
         let landscape_pipeline = scene_pipeline(
@@ -1521,6 +1752,12 @@ impl RetainedGpuRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let object_sprite_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_object_sprite_instances"),
+            size: INITIAL_VERTEX_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let quad_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lc_gpu_quad_indices"),
             contents: &[0, 0, 1, 0, 2, 0, 2, 0, 1, 0, 3, 0],
@@ -1548,6 +1785,9 @@ impl RetainedGpuRenderer {
             sprite_replace_pipeline,
             sprite_normal_pipeline,
             sprite_additive_pipeline,
+            object_sprite_replace_pipeline,
+            object_sprite_normal_pipeline,
+            object_sprite_additive_pipeline,
             landscape_pipeline,
             solid_replace_pipeline,
             solid_over_normal_pipeline,
@@ -1576,10 +1816,13 @@ impl RetainedGpuRenderer {
             quad_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             sprite_instance_buffer,
             sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
+            object_sprite_instance_buffer,
+            object_sprite_instance_buffer_size: INITIAL_VERTEX_BUFFER_SIZE,
             quad_index_buffer,
             vertex_scratch: Vec::new(),
             quad_instance_scratch: Vec::new(),
             sprite_instance_scratch: Vec::new(),
+            object_sprite_instance_scratch: Vec::new(),
             draw_call_scratch: Vec::new(),
             composition: None,
             last_presented_monitor_gamma: None,
@@ -1764,17 +2007,20 @@ impl RetainedGpuRenderer {
             vertices,
             quad_instances,
             sprite_instances,
+            object_sprite_instances,
             calls,
         } = self.build_layered_draw_stream(layers)?;
         let vertex_bytes = packed_vertex_bytes(&vertices);
         let quad_instance_bytes = packed_quad_instance_bytes(&quad_instances);
         let sprite_instance_bytes = packed_sprite_instance_bytes(&sprite_instances);
+        let object_sprite_instance_bytes =
+            packed_object_sprite_instance_bytes(&object_sprite_instances);
         self.ensure_bind_groups(device, &calls)?;
         let mut used_quad_bindings = HashSet::new();
         let mut used_landscape_bindings = HashSet::new();
         for call in &calls {
             match call.kind {
-                DrawKind::Quad(key) | DrawKind::Sprite(key) => {
+                DrawKind::Quad(key) | DrawKind::Sprite(key) | DrawKind::ObjectSprite(key) => {
                     used_quad_bindings.insert(key);
                 }
                 DrawKind::Landscape(key) => {
@@ -1803,7 +2049,21 @@ impl RetainedGpuRenderer {
         if !sprite_instance_bytes.is_empty() {
             queue.write_buffer(&self.sprite_instance_buffer, 0, sprite_instance_bytes);
         }
+        self.ensure_object_sprite_instance_buffer(device, object_sprite_instance_bytes.len())?;
+        if !object_sprite_instance_bytes.is_empty() {
+            queue.write_buffer(
+                &self.object_sprite_instance_buffer,
+                0,
+                object_sprite_instance_bytes,
+            );
+        }
         self.last_stats.draw_calls = calls.len();
+        self.last_stats.total_draw_calls =
+            calls.len() + 1 + usize::from(scene.gamma_mode.monitor_postpass());
+        self.last_stats.quad_instances = quad_instances.len();
+        self.last_stats.object_sprite_instances = object_sprite_instances.len();
+        self.last_stats.quad_instance_upload_bytes = quad_instance_bytes.len();
+        self.last_stats.object_sprite_upload_bytes = object_sprite_instance_bytes.len();
         self.last_stats.resident_source_textures = self.textures.len();
 
         self.ensure_composition(device, base.presentation.physical_extent);
@@ -1901,6 +2161,7 @@ impl RetainedGpuRenderer {
         self.vertex_scratch = vertices;
         self.quad_instance_scratch = quad_instances;
         self.sprite_instance_scratch = sprite_instances;
+        self.object_sprite_instance_scratch = object_sprite_instances;
         self.draw_call_scratch = calls;
         self.check_health()?;
         Ok(readback)
@@ -2221,10 +2482,12 @@ impl RetainedGpuRenderer {
         let mut vertices = std::mem::take(&mut self.vertex_scratch);
         let mut quad_instances = std::mem::take(&mut self.quad_instance_scratch);
         let mut sprite_instances = std::mem::take(&mut self.sprite_instance_scratch);
+        let mut object_sprite_instances = std::mem::take(&mut self.object_sprite_instance_scratch);
         let mut calls = std::mem::take(&mut self.draw_call_scratch);
         vertices.clear();
         quad_instances.clear();
         sprite_instances.clear();
+        object_sprite_instances.clear();
         calls.clear();
         calls.reserve(layers.iter().map(|layer| layer.scene.commands.len()).sum());
         for layer in layers {
@@ -2235,6 +2498,7 @@ impl RetainedGpuRenderer {
                 &mut vertices,
                 &mut quad_instances,
                 &mut sprite_instances,
+                &mut object_sprite_instances,
                 &mut calls,
                 layer_call_start,
             )?;
@@ -2243,6 +2507,7 @@ impl RetainedGpuRenderer {
             vertices,
             quad_instances,
             sprite_instances,
+            object_sprite_instances,
             calls,
         })
     }
@@ -2256,6 +2521,7 @@ impl RetainedGpuRenderer {
         vertices: &mut Vec<PackedVertex>,
         quad_instances: &mut Vec<PackedQuadInstance>,
         sprite_instances: &mut Vec<PackedSpriteInstance>,
+        object_sprite_instances: &mut Vec<PackedObjectSpriteInstance>,
         calls: &mut Vec<DrawCall>,
         layer_call_start: usize,
     ) -> Result<(), GpuRendererError> {
@@ -2339,6 +2605,38 @@ impl RetainedGpuRenderer {
                             scissor: projection.scissor,
                             blend: run.blend,
                             kind: DrawKind::Sprite(run.binding),
+                        },
+                    );
+                }
+                GpuCommand::ObjectBatch { sprites, gamma, .. } => {
+                    if sprites.is_empty() {
+                        continue;
+                    }
+                    let run = quad_run_key(command)
+                        .expect("object batches always have a textured run key");
+                    self.require_format(run.binding.texture, GpuTextureFormat::Rgba8)?;
+                    let Some(projection) =
+                        draw_projection(run.clip, scene.logical_extent, presentation)?
+                    else {
+                        continue;
+                    };
+                    let start = object_sprite_instance_count(object_sprite_instances)?;
+                    let gamma = fragment_gamma_flag(scene.gamma_mode, *gamma);
+                    for sprite in sprites {
+                        object_sprite_instances.push(packed_object_sprite_instance(
+                            *sprite,
+                            gamma,
+                            &projection,
+                        )?);
+                    }
+                    DrawCall::push_compatible_quad(
+                        calls,
+                        layer_call_start,
+                        DrawCall {
+                            vertices: start..object_sprite_instance_count(object_sprite_instances)?,
+                            scissor: projection.scissor,
+                            blend: run.blend,
+                            kind: DrawKind::ObjectSprite(run.binding),
                         },
                     );
                 }
@@ -2513,7 +2811,7 @@ impl RetainedGpuRenderer {
     ) -> Result<(), GpuRendererError> {
         for call in calls {
             match call.kind {
-                DrawKind::Quad(key) | DrawKind::Sprite(key)
+                DrawKind::Quad(key) | DrawKind::Sprite(key) | DrawKind::ObjectSprite(key)
                     if !self.quad_bind_groups.contains_key(&key) =>
                 {
                     let texture = self
@@ -2676,6 +2974,30 @@ impl RetainedGpuRenderer {
         Ok(())
     }
 
+    fn ensure_object_sprite_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        required: usize,
+    ) -> Result<(), GpuRendererError> {
+        let required =
+            u64::try_from(required).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        if required <= self.object_sprite_instance_buffer_size {
+            return Ok(());
+        }
+        let size = required
+            .checked_next_power_of_two()
+            .ok_or(GpuRendererError::VertexRangeOverflow)?
+            .max(INITIAL_VERTEX_BUFFER_SIZE);
+        self.object_sprite_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lc_gpu_object_sprite_instances"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.object_sprite_instance_buffer_size = size;
+        Ok(())
+    }
+
     fn ensure_composition(&mut self, device: &wgpu::Device, extent: [u32; 2]) {
         if self
             .composition
@@ -2807,6 +3129,26 @@ impl RetainedGpuRenderer {
                     );
                     pass.draw_indexed(0..6, 0, call.vertices.clone());
                 }
+                DrawKind::ObjectSprite(key) => {
+                    pass.set_vertex_buffer(0, self.object_sprite_instance_buffer.slice(..));
+                    pass.set_index_buffer(
+                        self.quad_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint16,
+                    );
+                    pass.set_pipeline(match call.blend {
+                        GpuBlend::Replace => &self.object_sprite_replace_pipeline,
+                        GpuBlend::Normal => &self.object_sprite_normal_pipeline,
+                        GpuBlend::Additive => &self.object_sprite_additive_pipeline,
+                    });
+                    pass.set_bind_group(
+                        1,
+                        self.quad_bind_groups
+                            .get(&key)
+                            .expect("object sprite binding was prepared"),
+                        &[],
+                    );
+                    pass.draw_indexed(0..6, 0, call.vertices.clone());
+                }
                 DrawKind::Landscape(key) => {
                     pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_pipeline(&self.landscape_pipeline);
@@ -2858,6 +3200,16 @@ struct PackedSpriteInstance {
     flags: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct PackedObjectSpriteInstance {
+    clip: [[f32; 3]; 4],
+    uv_rect: [f32; 4],
+    modulation: [u32; 4],
+    sample_tile_size: f32,
+    flags: u32,
+}
+
 fn packed_quad_instance(
     quad: [GpuVertex; 4],
     mod2: bool,
@@ -2904,6 +3256,63 @@ fn packed_sprite_instance(
         modulation: quad.modulation,
         flags: u32::from(mod2) | (u32::from(gamma) << 1),
     })
+}
+
+fn packed_object_sprite_instance(
+    sprite: GpuObjectSprite,
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<PackedObjectSpriteInstance, GpuRendererError> {
+    if !sprite
+        .uv
+        .iter()
+        .chain(std::iter::once(&sprite.sample_tile_size))
+        .all(|value| value.is_finite())
+    {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    validate_object_sprite_flags(sprite)?;
+    validate_object_sprite_sample_tile(sprite)?;
+    let mut clip = [[0.0; 3]; 4];
+    for (destination, position) in clip.iter_mut().zip(sprite.positions) {
+        let [x, y, _, w] = clip_position(position, projection)?;
+        *destination = [x, y, w];
+    }
+    Ok(PackedObjectSpriteInstance {
+        clip,
+        uv_rect: sprite.uv,
+        modulation: sprite.modulation,
+        sample_tile_size: sprite.sample_tile_size,
+        flags: sprite.packed_flags() | (u32::from(gamma) << 4),
+    })
+}
+
+fn validate_object_sprite_flags(sprite: GpuObjectSprite) -> Result<(), GpuRendererError> {
+    sprite.has_valid_packed_flags().then_some(()).ok_or(
+        GpuRendererError::InvalidObjectSpriteFlags {
+            flags: sprite.packed_flags(),
+        },
+    )
+}
+
+fn validate_object_sprite_sample_tile(sprite: GpuObjectSprite) -> Result<(), GpuRendererError> {
+    let valid = match sprite.sampler() {
+        GpuSampler::Nearest => sprite.sample_tile_size == 0.0,
+        GpuSampler::Linear => {
+            // C4Surface::CreateTextures produces integral power-of-two tiles
+            // from 2 through its 4096 maximum (C4Surface.cpp:166-189).
+            let size = sprite.sample_tile_size as u32;
+            (2..=4096).contains(&size)
+                && size.is_power_of_two()
+                && sprite.sample_tile_size == size as f32
+        }
+    };
+    valid
+        .then_some(())
+        .ok_or(GpuRendererError::InvalidObjectSpriteSampleTile {
+            sampler: sprite.sampler(),
+            sample_tile_size: sprite.sample_tile_size,
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3657,6 +4066,42 @@ fn validate_scene(
                         .saturating_mul(6),
                 );
             }
+            GpuCommand::ObjectBatch {
+                texture,
+                sprites,
+                clip,
+                ..
+            } => {
+                if sprites.is_empty() {
+                    continue;
+                }
+                require_declared_format(&resources, *texture, GpuTextureFormat::Rgba8)?;
+                let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
+                for sprite in sprites {
+                    if !sprite
+                        .positions
+                        .iter()
+                        .flatten()
+                        .chain(sprite.uv.iter())
+                        .chain(std::iter::once(&sprite.sample_tile_size))
+                        .all(|value| value.is_finite())
+                    {
+                        return Err(GpuRendererError::NonFiniteCoordinate);
+                    }
+                    validate_object_sprite_flags(*sprite)?;
+                    validate_object_sprite_sample_tile(*sprite)?;
+                    if let Some(projection) = projection.as_ref() {
+                        for position in sprite.positions {
+                            let _ = clip_position(position, projection)?;
+                        }
+                    }
+                }
+                packed_vertices = packed_vertices.saturating_add(
+                    u64::try_from(sprites.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(6),
+                );
+            }
             GpuCommand::Landscape {
                 base,
                 liquid_mask,
@@ -4061,6 +4506,12 @@ fn sprite_instance_count(instances: &[PackedSpriteInstance]) -> Result<u32, GpuR
     u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
 }
 
+fn object_sprite_instance_count(
+    instances: &[PackedObjectSpriteInstance],
+) -> Result<u32, GpuRendererError> {
+    u32::try_from(instances.len()).map_err(|_| GpuRendererError::VertexRangeOverflow)
+}
+
 fn append_vertex(vertices: &mut Vec<PackedVertex>, vertex: PackedVertex) {
     vertices.push(vertex);
 }
@@ -4102,6 +4553,25 @@ fn packed_sprite_instance_bytes(instances: &[PackedSpriteInstance]) -> &[u8] {
     }
     // SAFETY: `PackedSpriteInstance` is `repr(C)`, contains only contiguous
     // `f32` and `u32` fields, and the size assertion above excludes padding.
+    unsafe {
+        std::slice::from_raw_parts(
+            instances.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(instances),
+        )
+    }
+}
+
+fn packed_object_sprite_instance_bytes(instances: &[PackedObjectSpriteInstance]) -> &[u8] {
+    const {
+        assert!(
+            std::mem::size_of::<PackedObjectSpriteInstance>()
+                == PACKED_OBJECT_SPRITE_INSTANCE_STRIDE as usize
+        );
+        assert!(std::mem::size_of::<PackedObjectSpriteInstance>() <= 96);
+    }
+    // SAFETY: `PackedObjectSpriteInstance` is `repr(C)`, contains only
+    // contiguous `f32` and `u32` arrays, and the size assertion above excludes
+    // padding. Reading an initialized object representation as bytes is valid.
     unsafe {
         std::slice::from_raw_parts(
             instances.as_ptr().cast::<u8>(),
@@ -4495,6 +4965,14 @@ fn packed_sprite_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+fn packed_object_sprite_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: PACKED_OBJECT_SPRITE_INSTANCE_STRIDE,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &PACKED_OBJECT_SPRITE_INSTANCE_ATTRIBUTES,
+    }
+}
+
 fn quad_scene_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -4532,6 +5010,26 @@ fn sprite_scene_pipeline(
         blend,
         GpuSolidAlphaMode::SourceOver,
         packed_sprite_instance_layout(),
+        "vs_main",
+    )
+}
+
+fn object_sprite_scene_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    blend: GpuBlend,
+) -> wgpu::RenderPipeline {
+    scene_pipeline_with_vertex_layout(
+        device,
+        label,
+        layout,
+        shader,
+        wgpu::PrimitiveTopology::TriangleList,
+        blend,
+        GpuSolidAlphaMode::SourceOver,
+        packed_object_sprite_instance_layout(),
         "vs_main",
     )
 }
@@ -5280,8 +5778,8 @@ fn shader_landscape_slot_bytes(slots: &[ShaderLandscapeSlot]) -> &[u8] {
 mod tests {
     use super::*;
     use clonk_graphics::{
-        Color, GammaRamp, GpuGammaLut, GpuSolidStyle, GpuSolidVertex, GpuTextureResource,
-        PixelFormat, Surface,
+        Color, GammaRamp, GpuGammaLut, GpuObjectSprite, GpuOuterModulation, GpuSolidStyle,
+        GpuSolidVertex, GpuTextureResource, PixelFormat, Surface,
     };
     use clonk_gui::{ImageData, Rect as GuiRect};
     use std::sync::Arc;
@@ -5952,6 +6450,610 @@ mod tests {
         assert_eq!(compact.uv_rect, sprite.uv);
         assert_eq!(compact.modulation, sprite.modulation);
         assert_eq!(compact.flags, 3);
+    }
+
+    #[test]
+    fn compact_object_shader_selects_exactly_one_sampling_path() {
+        let fragment = OBJECT_SPRITE_SHADER
+            .split_once("@fragment")
+            .expect("object shader has a fragment stage")
+            .1;
+        assert!(fragment.contains(
+            "var source: vec4<f32>;\n    if linear {\n        source = sample_native_tile(input.uv, input.sample_tile_size);\n    } else {\n        source = sample_nearest(input.uv);\n    }"
+        ));
+        assert_eq!(fragment.matches("sample_native_tile(").count(), 1);
+        assert_eq!(fragment.matches("sample_nearest(").count(), 1);
+        assert!(!fragment.contains("select("));
+    }
+
+    #[test]
+    fn compact_object_validation_rejects_invalid_tile_sizes() {
+        let texture = GpuTextureId::fresh();
+        let scene = |sampler, sample_tile_size| GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands: vec![GpuCommand::ObjectBatch {
+                texture,
+                sprites: vec![GpuObjectSprite::new(
+                    [[0.0, 0.0, 1.0]; 4],
+                    [0.0, 0.0, 1.0, 1.0],
+                    [0x00ff_ffff; 4],
+                    sampler,
+                    sample_tile_size,
+                    false,
+                    GpuOuterModulation::Inherit,
+                )],
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        };
+        let presentation = GpuPresentation::identity(1, 1);
+
+        for invalid in [0.0, -1.0, 3.0, 8_192.0, f32::MAX] {
+            assert!(
+                matches!(
+                    RetainedGpuRenderer::validate_scene(
+                        &scene(GpuSampler::Linear, invalid),
+                        &presentation
+                    ),
+                    Err(GpuRendererError::InvalidObjectSpriteSampleTile {
+                        sampler: GpuSampler::Linear,
+                        sample_tile_size,
+                    }) if sample_tile_size == invalid
+                ),
+                "linear tile size {invalid} was accepted"
+            );
+        }
+        for valid in [2.0, 4_096.0] {
+            assert!(RetainedGpuRenderer::validate_scene(
+                &scene(GpuSampler::Linear, valid),
+                &presentation
+            )
+            .is_ok());
+        }
+        assert!(RetainedGpuRenderer::validate_scene(
+            &scene(GpuSampler::Nearest, 0.0),
+            &presentation
+        )
+        .is_ok());
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene(GpuSampler::Nearest, 2.0), &presentation),
+            Err(GpuRendererError::InvalidObjectSpriteSampleTile {
+                sampler: GpuSampler::Nearest,
+                sample_tile_size: 2.0,
+            })
+        ));
+    }
+
+    #[test]
+    fn compact_object_validation_rejects_reserved_packed_flags() {
+        let texture = GpuTextureId::fresh();
+        let sprite = GpuObjectSprite::new(
+            [[0.0, 0.0, 1.0]; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Inherit,
+        );
+        #[repr(C)]
+        struct RawObjectSprite {
+            positions: [[f32; 3]; 4],
+            uv: [f32; 4],
+            modulation: [u32; 4],
+            sample_tile_size: f32,
+            flags: u32,
+        }
+        let raw = RawObjectSprite {
+            positions: sprite.positions,
+            uv: sprite.uv,
+            modulation: sprite.modulation,
+            sample_tile_size: sprite.sample_tile_size,
+            flags: sprite.packed_flags() | (1 << 4),
+        };
+        // SAFETY: both `repr(C)` types have the same fields in the same order;
+        // every `u32` flag bit pattern is valid memory even when semantically rejected.
+        let sprite = unsafe { std::mem::transmute::<RawObjectSprite, GpuObjectSprite>(raw) };
+        let scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![rgba_resource(texture, [255; 4])],
+            commands: vec![GpuCommand::ObjectBatch {
+                texture,
+                sprites: vec![sprite],
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        };
+
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(1, 1)),
+            Err(GpuRendererError::InvalidObjectSpriteFlags { flags }) if flags == 1 << 4
+        ));
+    }
+
+    #[test]
+    fn compact_object_sprite_preserves_projective_corners_and_sampling_state() {
+        let presentation = GpuPresentation {
+            physical_extent: [17, 11],
+            scale: 1.5,
+            crop_top: 2,
+        };
+        let projection = draw_projection(Some(Rect::new(1, 2, 6, 4)), [9, 8], &presentation)
+            .expect("valid fractional presentation")
+            .expect("clip intersects the framebuffer");
+        let positions = [
+            [1.25, 2.5, 1.0],
+            [13.5, 5.0, 2.0],
+            [3.75, 17.625, 3.0],
+            [27.0, 23.5, 4.0],
+        ];
+        let modulation = [0x0011_2233, 0x4044_5566, 0x8077_8899, 0xc0aa_bbcc];
+        let sprite = GpuObjectSprite::new(
+            positions,
+            [0.875, 0.25, 0.125, 0.75],
+            modulation,
+            GpuSampler::Linear,
+            128.0,
+            true,
+            GpuOuterModulation::Combine,
+        );
+
+        let packed = packed_object_sprite_instance(sprite, true, &projection)
+            .expect("pack compact object sprite");
+        let expected_clip = positions.map(|position| {
+            let clip = clip_position(position, &projection).expect("project object corner");
+            [clip[0], clip[1], clip[3]]
+        });
+
+        assert_eq!(packed.clip, expected_clip);
+        assert_eq!(packed.uv_rect, sprite.uv);
+        assert_eq!(packed.modulation, modulation);
+        assert_eq!(packed.sample_tile_size, 128.0);
+        assert_eq!(packed.flags, sprite.packed_flags() | (1 << 4));
+        assert!(std::mem::size_of::<PackedObjectSpriteInstance>() <= 96);
+    }
+
+    #[test]
+    fn mixed_object_sampling_uses_one_ordered_draw_without_generic_instances() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact object sampling check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let positions = [
+            [0.0, 0.0, 1.0],
+            [4.0, 0.0, 1.0],
+            [0.0, 2.0, 1.0],
+            [4.0, 2.0, 1.0],
+        ];
+        let nearest = GpuObjectSprite::new(
+            positions,
+            [0.0, 0.0, 1.0, 1.0],
+            [0x00ff_ffff; 4],
+            GpuSampler::Nearest,
+            0.0,
+            false,
+            GpuOuterModulation::Combine,
+        );
+        let linear = GpuObjectSprite::new(
+            positions,
+            [1.0, 0.0, 0.0, 1.0],
+            [0x4000_ffff, 0x40ff_00ff, 0x4000_ff00, 0x40ff_ffff],
+            GpuSampler::Linear,
+            2.0,
+            false,
+            GpuOuterModulation::Combine,
+        );
+        let generic_vertices = |sprite: GpuObjectSprite| {
+            let uv = [
+                [sprite.uv[0], sprite.uv[1]],
+                [sprite.uv[2], sprite.uv[1]],
+                [sprite.uv[0], sprite.uv[3]],
+                [sprite.uv[2], sprite.uv[3]],
+            ];
+            std::array::from_fn(|index| {
+                let packed = sprite.modulation[index];
+                let modulation = [
+                    ((packed >> 16) & 0xff) as f32 / 255.0,
+                    ((packed >> 8) & 0xff) as f32 / 255.0,
+                    (packed & 0xff) as f32 / 255.0,
+                    (packed >> 24) as f32 / 255.0,
+                ];
+                let vertex = GpuVertex::new(sprite.positions[index], uv[index], modulation);
+                if sprite.sampler() == GpuSampler::Linear {
+                    vertex.with_sample_tile(0.0, 0.0, sprite.sample_tile_size)
+                } else {
+                    vertex
+                }
+            })
+        };
+        let resource = rgba_resource_2x1(texture, [255, 48, 16, 255], [16, 64, 255, 255]);
+        let scene = |commands| GpuScene {
+            logical_extent: [4, 2],
+            clear: Color::new(11, 19, 31, 255),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![resource.clone()],
+            commands,
+        };
+        let compact = scene(vec![GpuCommand::ObjectBatch {
+            texture,
+            sprites: vec![nearest, linear],
+            clip: None,
+            blend: GpuBlend::Normal,
+            gamma: false,
+        }]);
+        let expanded = scene(vec![
+            GpuCommand::Quad {
+                texture,
+                owner_mask: None,
+                vertices: generic_vertices(nearest),
+                clip: None,
+                blend: GpuBlend::Normal,
+                base_mod2: nearest.mod2(),
+                owner_mod2: false,
+                sampler: nearest.sampler(),
+                gamma: false,
+            },
+            GpuCommand::Quad {
+                texture,
+                owner_mask: None,
+                vertices: generic_vertices(linear),
+                clip: None,
+                blend: GpuBlend::Normal,
+                base_mod2: linear.mod2(),
+                owner_mod2: false,
+                sampler: linear.sampler(),
+                gamma: false,
+            },
+        ]);
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let compact_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &compact,
+            &GpuPresentation::identity(4, 2),
+        );
+        let compact_stats = renderer.last_stats();
+        let expanded_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &expanded,
+            &GpuPresentation::identity(4, 2),
+        );
+
+        assert_eq!(compact_frame, expanded_frame);
+        assert_eq!(compact_stats.draw_calls, 1);
+        assert_eq!(compact_stats.object_sprite_instances, 2);
+        assert_eq!(compact_stats.quad_instances, 0);
+        assert_eq!(renderer.last_stats().draw_calls, 2);
+    }
+
+    #[test]
+    fn compact_fog_chunks_match_generic_pixels_through_both_axis_flips() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact fog-chunk parity check");
+            return;
+        };
+        let texture = GpuTextureId::fresh();
+        let mut pixels = Vec::with_capacity(128 * 128 * 4);
+        for y in 0..128_u8 {
+            for x in 0..128_u8 {
+                pixels.extend_from_slice(&[x.wrapping_mul(3), y.wrapping_mul(5), x ^ y, 223]);
+            }
+        }
+        let resource = GpuTextureResource::immutable_rgba(texture, 128, 128, pixels.into());
+        let normalized = |packed: u32| {
+            [
+                ((packed >> 16) & 0xff) as f32 / 255.0,
+                ((packed >> 8) & 0xff) as f32 / 255.0,
+                (packed & 0xff) as f32 / 255.0,
+                (packed >> 24) as f32 / 255.0,
+            ]
+        };
+        let gamma = GpuGammaLut::from_ramp(&GammaRamp::from_control_points([
+            0x102030, 0x708090, 0xd0e0f0,
+        ]));
+
+        for flip_x in [false, true] {
+            for flip_y in [false, true] {
+                let map_x = |local: f32| {
+                    if flip_x {
+                        30.0 - local * 2.0
+                    } else {
+                        local * 2.0
+                    }
+                };
+                let map_y = |local: f32| {
+                    if flip_y {
+                        30.0 - local * 2.0
+                    } else {
+                        local * 2.0
+                    }
+                };
+                let mut sprites = Vec::new();
+                let mut generic = Vec::new();
+                for (chunk_index, ((left, right), (top, bottom))) in [
+                    ((0.0, 4.0), (0.0, 7.0)),
+                    ((4.0, 15.0), (0.0, 7.0)),
+                    ((0.0, 4.0), (7.0, 15.0)),
+                    ((4.0, 15.0), (7.0, 15.0)),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let positions = [
+                        [map_x(left), map_y(top), 1.0],
+                        [map_x(right), map_y(top), 1.0],
+                        [map_x(left), map_y(bottom), 1.0],
+                        [map_x(right), map_y(bottom), 1.0],
+                    ];
+                    let uv = [
+                        (60.0 + left) / 128.0,
+                        (57.0 + top) / 128.0,
+                        (60.0 + right) / 128.0,
+                        (57.0 + bottom) / 128.0,
+                    ];
+                    let base = (chunk_index as u32 + 1) * 0x0011_0b07;
+                    let modulation = [
+                        base,
+                        base.saturating_add(0x1017_130d),
+                        base.saturating_add(0x2029_1d11),
+                        base.saturating_add(0x303b_2715),
+                    ];
+                    let mod2 = chunk_index % 2 != 0;
+                    sprites.push(GpuObjectSprite::new(
+                        positions,
+                        uv,
+                        modulation,
+                        GpuSampler::Linear,
+                        128.0,
+                        mod2,
+                        GpuOuterModulation::Combine,
+                    ));
+                    let source_uv = [
+                        [uv[0], uv[1]],
+                        [uv[2], uv[1]],
+                        [uv[0], uv[3]],
+                        [uv[2], uv[3]],
+                    ];
+                    let vertices = std::array::from_fn(|index| {
+                        GpuVertex::new(
+                            positions[index],
+                            source_uv[index],
+                            normalized(modulation[index]),
+                        )
+                        .with_sample_tile(0.0, 0.0, 128.0)
+                    });
+                    generic.push(GpuCommand::Quad {
+                        texture,
+                        owner_mask: None,
+                        vertices,
+                        clip: None,
+                        blend: GpuBlend::Normal,
+                        base_mod2: mod2,
+                        owner_mod2: false,
+                        sampler: GpuSampler::Linear,
+                        gamma: true,
+                    });
+                }
+                let scene = |commands| GpuScene {
+                    logical_extent: [30, 30],
+                    clear: Color::new(17, 29, 43, 113),
+                    gamma: gamma.clone(),
+                    gamma_mode: GpuGammaMode::Fragment,
+                    textures: vec![resource.clone()],
+                    commands,
+                };
+                let compact = scene(vec![GpuCommand::ObjectBatch {
+                    texture,
+                    sprites,
+                    clip: None,
+                    blend: GpuBlend::Normal,
+                    gamma: true,
+                }]);
+                let expanded = scene(generic);
+                let mut renderer =
+                    RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+                let compact_frame = render_readback(
+                    &mut renderer,
+                    &device,
+                    &queue,
+                    &compact,
+                    &GpuPresentation::identity(30, 30),
+                );
+                let compact_stats = renderer.last_stats();
+                let expanded_frame = render_readback(
+                    &mut renderer,
+                    &device,
+                    &queue,
+                    &expanded,
+                    &GpuPresentation::identity(30, 30),
+                );
+
+                assert_eq!(
+                    compact_frame, expanded_frame,
+                    "flip_x={flip_x}, flip_y={flip_y}"
+                );
+                assert_eq!(compact_stats.draw_calls, 1);
+                assert_eq!(compact_stats.object_sprite_instances, 4);
+                assert_eq!(compact_stats.object_sprite_upload_bytes, 4 * 88);
+                assert_eq!(compact_stats.quad_instance_upload_bytes, 0);
+                assert_eq!(renderer.last_stats().quad_instance_upload_bytes, 4 * 232);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_top_faces_and_generic_construction_fallback_match_expanded_pixels() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping compact TopFace/fallback parity check");
+            return;
+        };
+        let object_texture = GpuTextureId::fresh();
+        let construction_texture = GpuTextureId::fresh();
+        let object_resource = GpuTextureResource::immutable_rgba(
+            object_texture,
+            4,
+            1,
+            Arc::from(
+                [
+                    220, 32, 48, 192, 220, 32, 48, 192, 24, 216, 72, 176, 24, 216, 72, 176,
+                ]
+                .as_slice(),
+            ),
+        );
+        let construction_resource = GpuTextureResource::immutable_rgba(
+            construction_texture,
+            1,
+            1,
+            Arc::from([32, 72, 232, 255].as_slice()),
+        );
+        let positions = |left: f32, top: f32, right: f32, bottom: f32| {
+            [
+                [left, top, 1.0],
+                [right, top, 1.0],
+                [left, bottom, 1.0],
+                [right, bottom, 1.0],
+            ]
+        };
+        let sprite = |positions, uv, modulation| {
+            GpuObjectSprite::new(
+                positions,
+                uv,
+                [modulation; 4],
+                GpuSampler::Nearest,
+                0.0,
+                false,
+                GpuOuterModulation::Combine,
+            )
+        };
+        // This is the native list-wide order: every object base precedes every
+        // TopFace, and the global construction facet remains a generic barrier.
+        let object_sprites = vec![
+            sprite(
+                positions(0.0, 0.0, 4.0, 4.0),
+                [0.0, 0.0, 0.5, 1.0],
+                0x00ff_ffff,
+            ),
+            sprite(
+                positions(1.0, 0.0, 5.0, 4.0),
+                [0.0, 0.0, 0.5, 1.0],
+                0x00d0_ffff,
+            ),
+            sprite(
+                positions(1.0, 1.0, 4.0, 4.0),
+                [0.5, 0.0, 1.0, 1.0],
+                0x00ff_d0ff,
+            ),
+            sprite(
+                positions(2.0, 1.0, 5.0, 4.0),
+                [0.5, 0.0, 1.0, 1.0],
+                0x00ff_ffff,
+            ),
+        ];
+        let construction = sprite(
+            positions(0.0, 2.0, 3.0, 5.0),
+            [0.0, 0.0, 1.0, 1.0],
+            0x00ff_ffff,
+        );
+        let normalized_modulation = |packed: u32| {
+            [
+                ((packed >> 16) & 0xff) as f32 / 255.0,
+                ((packed >> 8) & 0xff) as f32 / 255.0,
+                (packed & 0xff) as f32 / 255.0,
+                (packed >> 24) as f32 / 255.0,
+            ]
+        };
+        let generic_vertices = |sprite: GpuObjectSprite| {
+            let uv = [
+                [sprite.uv[0], sprite.uv[1]],
+                [sprite.uv[2], sprite.uv[1]],
+                [sprite.uv[0], sprite.uv[3]],
+                [sprite.uv[2], sprite.uv[3]],
+            ];
+            std::array::from_fn(|index| {
+                GpuVertex::new(
+                    sprite.positions[index],
+                    uv[index],
+                    normalized_modulation(sprite.modulation[index]),
+                )
+                .with_outer_modulation(GpuOuterModulation::Combine)
+            })
+        };
+        let generic_quad = |texture, sprite: GpuObjectSprite| GpuCommand::Quad {
+            texture,
+            owner_mask: None,
+            vertices: generic_vertices(sprite),
+            clip: None,
+            blend: GpuBlend::Normal,
+            base_mod2: false,
+            owner_mod2: false,
+            sampler: GpuSampler::Nearest,
+            gamma: false,
+        };
+        let scene = |commands| GpuScene {
+            logical_extent: [5, 5],
+            clear: Color::opaque(8, 12, 24),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: vec![object_resource.clone(), construction_resource.clone()],
+            commands,
+        };
+        let compact = scene(vec![
+            GpuCommand::ObjectBatch {
+                texture: object_texture,
+                sprites: object_sprites.clone(),
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            },
+            generic_quad(construction_texture, construction),
+        ]);
+        let mut expanded_commands = object_sprites
+            .iter()
+            .copied()
+            .map(|sprite| generic_quad(object_texture, sprite))
+            .collect::<Vec<_>>();
+        expanded_commands.push(generic_quad(construction_texture, construction));
+        let expanded = scene(expanded_commands);
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        let compact_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &compact,
+            &GpuPresentation::identity(5, 5),
+        );
+        let expanded_frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &expanded,
+            &GpuPresentation::identity(5, 5),
+        );
+
+        assert_eq!(compact_frame, expanded_frame);
+        assert!(compact_frame
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel == [32, 72, 232, 255]));
     }
 
     #[test]
@@ -7634,6 +8736,11 @@ mod tests {
         assert_eq!(
             monitor.rgba, expected_monitor,
             "monitor gamma must resolve the complete composition before readback",
+        );
+        assert_eq!(
+            renderer.last_stats().total_draw_calls,
+            renderer.last_stats().draw_calls + 2,
+            "raw draw evidence includes monitor-gamma and presentation passes",
         );
         assert_eq!(
             readback_last_presentation(&renderer, &device, &queue),
