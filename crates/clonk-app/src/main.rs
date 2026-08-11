@@ -32,6 +32,7 @@ mod developer_host;
 mod developer_toolbox;
 mod developer_tools_page;
 mod developer_windows;
+mod display_backend;
 mod display_sleep_inhibitor;
 mod dock_icon;
 use clonk_app_render::draw_commands;
@@ -722,7 +723,16 @@ fn run() -> Result<()> {
         })?;
     }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
-    let event_loop = EventLoop::<NetworkEventWake>::with_user_event()
+    let mut event_loop_builder = EventLoop::<NetworkEventWake>::with_user_event();
+    display_backend::apply_display_backend(
+        &mut event_loop_builder,
+        display_backend::select_display_backend(
+            cli.display_server,
+            &display_backend::DisplayServerEnvironment::from_env(),
+            display_backend::steam_input_pad_present(),
+        ),
+    );
+    let event_loop = event_loop_builder
         .build()
         .context("failed to create application event loop")?;
     // winit's macOS proxy is Send but not Sync. The network sender can be
