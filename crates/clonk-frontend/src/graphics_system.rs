@@ -1357,19 +1357,6 @@ impl GraphicsSystem {
         Some((fog, sampler))
     }
 
-    fn draw_world_color_pixel(
-        &mut self,
-        x: u32,
-        y: u32,
-        color: Color,
-        gamma: Option<&clonk_graphics::GammaRamp>,
-    ) {
-        let color = self
-            .fog_draw_context()
-            .map_or(color, |fog| fog.color_at(color, x as i32, y as i32));
-        self.draw_prepared_world_color_pixel(x, y, color, gamma);
-    }
-
     fn draw_prepared_world_color_pixel(
         &mut self,
         x: u32,
@@ -3094,6 +3081,7 @@ impl GraphicsSystem {
 
     /// Internal seam for C++ per-fragment gamma rendering and exact isolated
     /// fragment tests. Public rendering drives its active/pending lifecycle.
+    #[cfg(test)]
     pub(crate) fn render_frame_with_gamma(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -4094,6 +4082,7 @@ impl GraphicsSystem {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn fill_vertical_gradient(
         &mut self,
         top: Color,
@@ -4344,6 +4333,7 @@ impl GraphicsSystem {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn blit_sky_tile(
         &mut self,
         image: &ImageData,
@@ -4373,6 +4363,7 @@ impl GraphicsSystem {
         );
     }
 
+    #[cfg(test)]
     fn blit_sky_tile_with_parallel_rows(
         &mut self,
         image: &ImageData,
@@ -6515,6 +6506,7 @@ impl GraphicsSystem {
         );
     }
 
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn draw_objects_at_frame(
         &mut self,
         frame: u64,
@@ -7563,6 +7555,7 @@ impl GraphicsSystem {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn paint_object(
         &mut self,
         object: &ObjectSnapshot,
@@ -8559,6 +8552,7 @@ impl GraphicsSystem {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn draw_object_overlays(
         &mut self,
         object: &ObjectSnapshot,

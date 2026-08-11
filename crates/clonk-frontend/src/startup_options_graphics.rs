@@ -727,10 +727,6 @@ fn grid_cell(
     rect
 }
 
-fn centered_grid_row(area: IntRect, row: i32, row_count: i32, height: i32) -> IntRect {
-    grid_cell(area, 0, 0, 0, 1, row, row_count, -1, height, true, 1, 1)
-}
-
 fn centered_grid_row_with_margins(
     area: IntRect,
     margin_x: i32,

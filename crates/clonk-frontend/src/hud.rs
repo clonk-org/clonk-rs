@@ -2815,6 +2815,7 @@ pub(crate) fn draw_message_board_with_gamma(
 /// `C4LogBuffer::AppendLines` wraps each message to `LBWidth` before adding
 /// its physical lines to message-board history. Continuations use the
 /// buffer's two-space indent (src/C4LogBuf.cpp:174-254).
+#[cfg(test)]
 fn message_board_tail_line(font: &HudFont<'_>, line: &str, width: i32) -> String {
     message_board_physical_lines(font, line, width)
         .pop()

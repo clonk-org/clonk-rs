@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(
     clippy::manual_clamp,
     clippy::op_ref,

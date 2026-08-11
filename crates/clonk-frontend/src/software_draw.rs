@@ -418,30 +418,6 @@ fn draw_image_bilinear_source_impl(
     draw_image_bilinear_source_cpu(surface, rect, image, source, gamma, blend_mode, modulation);
 }
 
-fn draw_image_bilinear_cpu<T: SurfaceDrawTarget + ?Sized>(
-    surface: &mut T,
-    rect: &GuiRect,
-    image: &ImageData,
-    gamma: Option<&clonk_graphics::GammaRamp>,
-    blend_mode: BilinearBlend,
-    modulation: Option<u32>,
-) {
-    draw_image_bilinear_source_cpu(
-        surface,
-        rect,
-        image,
-        FloatSourceRect {
-            x: 0.0,
-            y: 0.0,
-            width: image.width() as f32,
-            height: image.height() as f32,
-        },
-        gamma,
-        blend_mode,
-        modulation,
-    );
-}
-
 fn draw_image_bilinear_impl(
     surface: &mut Surface,
     rect: &GuiRect,
@@ -967,16 +943,7 @@ pub fn draw_image_x_float(
     );
 }
 
-pub(crate) fn draw_image_bilinear_target<T: SurfaceDrawTarget + ?Sized>(
-    surface: &mut T,
-    rect: &GuiRect,
-    image: &ImageData,
-    gamma: Option<&clonk_graphics::GammaRamp>,
-) {
-    draw_image_bilinear_cpu(surface, rect, image, gamma, BilinearBlend::AlphaOver, None);
-}
-
-/// Scale-native font counterpart of [`draw_image_bilinear_target`] with the
+/// Scale-native font counterpart of the complete-image bilinear path with the
 /// centered horizontal shear installed by `CStdFont::DrawText` markup. The
 /// coefficient is already projected into destination coordinates. Texture
 /// filtering precedes font RGB/alpha modulation, matching the blit shader.
