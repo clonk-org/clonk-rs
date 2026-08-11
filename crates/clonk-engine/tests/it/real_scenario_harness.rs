@@ -10,10 +10,10 @@ use crate::support::real_scenario::{
 };
 use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{
-    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, EngineError,
-    JoinPlayerConfig, Landscape, ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, TeamInfo,
-    Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL,
-    COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
+    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, Engine, EngineError,
+    JoinPlayerConfig, Landscape, ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate,
+    PlayerStatus, SpawnConfig, TeamInfo, Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT,
+    COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
 };
 use clonk_script::Value;
 
@@ -3510,8 +3510,233 @@ fn drachenfels_real_scenario_subcases_batch_3() {
     ]);
 }
 
+#[test]
+fn drachenfels_real_scenario_subcases_batch_4() {
+    run_drachenfels_batch(&[(
+        "shadow_generators_darken_the_mountain_until_a_clonk_walks_in",
+        dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in,
+    )]);
+}
+
 fn run_drachenfels_batch(subcases: &[PreparedScenarioSubcase]) {
     run_prepared_scenario_batch("Drachenfels", "Fantasy.c4f/Drachenfels.c4s", subcases);
+}
+
+/// The four saved `_FOW` shadow volumes, as `Objects.txt` ships them:
+/// object number, position and the `PlrViewRange` its own
+/// `SetPlrViewRange(Min((w+h)/-2+40, -1))` produced
+/// (Drachenfels.c4s/FoWGenerator.c4d/Script.c:74,95).
+const DRACHENFELS_SHADOWS: [(u64, i32, i32, i32); 4] = [
+    (2779, 1472, 1303, -235),
+    (2781, 2058, 1393, -356),
+    (3835, 1968, 923, -257),
+    (3905, 2092, 742, -247),
+];
+
+/// Dragon Rock is the only shipped content that uses a negative
+/// `PlrViewRange` as a persistent, map-authored shadow volume. Four `_FOW`
+/// generators darken the mountain — negative ranges are applied after every
+/// repeller so they override it (`C4Player::FoWGenerators2Map`,
+/// C4Player.cpp:1949-1957) — and hold 181 objects in `C4OS_INACTIVE` between
+/// them. Each one's `Active` row wraps on `NextAction=Active` every 20 ticks,
+/// and C++ re-issues `StartCall` for that self-chain (C4Object.cpp:5480-5485),
+/// which is what polls `CheckClonk`. Walking a crew member into the authored
+/// search rect is therefore the whole reveal mechanism
+/// (FoWGenerator.c4d/{ActMap.txt,Script.c:104-124}).
+fn dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock fog reveal parity", 1);
+
+    // Choose normal difficulty and the initially selected KNIG so ordinary
+    // crew control resumes (Drachenfels.c4s/Script.c:86-128,150-178).
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("choose normal difficulty");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("choose KNIG");
+    let knight = engine
+        .crew_cursor(owner)
+        .expect("Dragon Rock character choice leaves a cursor");
+
+    // InitializePlayer schedules SetFoW one tick out (Drachenfels.c4s/
+    // Script.c:70; planet/System.c4g/Helpers.c:110-132).
+    engine
+        .tick_without_snapshot()
+        .expect("the real IntSchedule callback evaluates SetFoW");
+    assert!(engine
+        .player(owner)
+        .expect("joined player remains live")
+        .fog_of_war());
+
+    let snapshot = engine.snapshot();
+    let mut shadows = snapshot
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "_FOW" && object.status.is_active())
+        .map(|object| {
+            (
+                object.id.as_u64(),
+                object.position.x,
+                object.position.y,
+                object.plr_view_range,
+            )
+        })
+        .collect::<Vec<_>>();
+    shadows.sort_unstable();
+    assert_eq!(
+        shadows,
+        DRACHENFELS_SHADOWS.to_vec(),
+        "the shipped Objects.txt generators must load with their saved ranges"
+    );
+
+    // `Initialize` calls `SetOwner(-1)`, so `C4Object::PlrFoWActualize` adds
+    // each generator to *every* player's FoW list (C4Object.cpp:5546-5567).
+    let view_objects = snapshot
+        .fow_players
+        .get(&owner)
+        .map(|frame| frame.view_objects.clone())
+        .expect("a fog-of-war player projects its runtime FoWViewObjs");
+    for (number, ..) in DRACHENFELS_SHADOWS {
+        assert!(
+            view_objects.contains(&ObjectId::new(number)),
+            "ownerless generator #{number} must repel fog for every player"
+        );
+    }
+
+    // The same four generators deactivated 181 objects before the map was
+    // saved; `Status=2` restores them as `C4OS_INACTIVE`.
+    assert_eq!(
+        snapshot
+            .objects
+            .iter()
+            .filter(|object| object.status == ObjectStatus::Inactive)
+            .count(),
+        181,
+        "the shipped Objects.txt keeps the hidden mountain interior inactive"
+    );
+
+    // Generator 2779 is centred at (1472,1303) with `search=(-320,-160,600,280)`,
+    // i.e. world rect [1152,1752] x [1143,1423] once `Find_InRect` adds
+    // `GetX()/GetY()` (planet/System.c4g/FindObject.c:37).
+    let shadow = ObjectId::new(2779);
+    let hidden = drachenfels_hidden_objects(
+        &engine
+            .object_snapshot(shadow)
+            .expect("generator #2779 loads"),
+    );
+    assert_eq!(hidden.len(), 24, "generator #2779 saved iHiddenObjCnt=24");
+
+    // 343px above the centre: outside the authored rect and outside the
+    // widened circle (235 dark radius + 100 margin = 335), and far enough
+    // from the other three generators that none of them can answer for it.
+    // The crew member is re-placed every tick so gravity cannot walk it into
+    // range and pass this probe for the wrong reason.
+    assert_eq!(
+        drachenfels_ticks_until_dispelled(&mut engine, knight, shadow, Vector2::new(1472, 960), 40),
+        None,
+        "a Clonk outside both the authored rect and the reveal circle must not dispel the shadow"
+    );
+
+    // One pixel above the rect's top edge — 161px up, which C++ answers `no`
+    // to (`C4FindObjectInRect::Check` is a plain point-in-rect on the object
+    // centre) while already 74px inside the fully-black disc. The reveal
+    // circle is what dispels it here, within one 20-tick poll, and
+    // `Deactivate` restores every object it was hiding (Script.c:96-112).
+    assert!(
+        drachenfels_ticks_until_dispelled(
+            &mut engine,
+            knight,
+            shadow,
+            Vector2::new(1472, 1142),
+            20
+        )
+        .is_some(),
+        "the reveal circle dispels a shadow the Clonk has reached the edge of"
+    );
+    for object in hidden {
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .map(|object| object.status)
+                .unwrap_or(ObjectStatus::Deleted),
+            ObjectStatus::Normal,
+            "Deactivate must return hidden object {object} to C4OS_NORMAL"
+        );
+    }
+    assert!(
+        !engine
+            .snapshot()
+            .fow_players
+            .get(&owner)
+            .expect("the player still has fog of war")
+            .view_objects
+            .contains(&shadow),
+        "a removed generator leaves every player's FoWViewObjs"
+    );
+
+    // The authored rect is still an independent arm of the union, not a
+    // subset of the circle: #2781's top-left corner sits 488px from its
+    // centre, outside its own 456px reveal circle, and the C++ rect answers
+    // for it there exactly as it always did.
+    assert!(
+        drachenfels_ticks_until_dispelled(
+            &mut engine,
+            knight,
+            ObjectId::new(2781),
+            Vector2::new(1658, 1113),
+            20
+        )
+        .is_some(),
+        "the authored search rect still dispels at the corners it reaches past the circle"
+    );
+}
+
+/// The objects a `_FOW` generator is holding inactive, read from the numbered
+/// locals `Activate` filled (`Local(iHiddenObjCnt++) = pObj`,
+/// Drachenfels.c4s/FoWGenerator.c4d/Script.c:86-93). Numbered `Locals=` are
+/// stored under the `__local_<n>` keys `indexed_local_index` reads back.
+fn drachenfels_hidden_objects(shadow: &ObjectSnapshot) -> Vec<ObjectId> {
+    let count = match shadow.local_vars.get("iHiddenObjCnt") {
+        Some(Value::Int(count)) => *count,
+        _ => 0,
+    };
+    (0..count)
+        .filter_map(|index| shadow.local_vars.get(&format!("__local_{index}")))
+        .filter_map(|value| match value {
+            Value::Object(id) => Some(ObjectId::new(*id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Hold `crew` at `position` and tick, returning the poll on which `shadow`
+/// removed itself. Re-placing every tick keeps gravity from carrying the probe
+/// across the boundary being measured.
+fn drachenfels_ticks_until_dispelled(
+    engine: &mut Engine,
+    crew: ObjectId,
+    shadow: ObjectId,
+    position: Vector2,
+    ticks: u32,
+) -> Option<u32> {
+    (1..=ticks).find(|_| {
+        engine
+            .apply_object_update(
+                crew,
+                ObjectUpdate::new()
+                    .with_position(position)
+                    .with_action("Walk")
+                    .clear_container(),
+            )
+            .expect("hold the crew member at the probe position");
+        engine
+            .tick_without_snapshot()
+            .expect("the generator keeps polling CheckClonk");
+        engine.object_snapshot(shadow).is_none()
+    })
 }
 
 fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag(
