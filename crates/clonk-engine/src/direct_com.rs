@@ -16308,7 +16308,9 @@ public func GetCustomComponents(object builder)
                     .with_plr_view_range(30),
             )
             .expect("repeller spawns");
-        engine.player_mut(1).expect("builder").set_fog_of_war(true);
+        // The repeller above already entered the list through the ordinary
+        // spawn path, so this enabling edge's rebuild would be a no-op.
+        let _ = engine.player_mut(1).expect("builder").set_fog_of_war(true);
         assert!(engine.construction_site_visible(1, Vector2::new(79, 50)));
         assert!(
             !engine.construction_site_visible(1, Vector2::new(80, 50)),

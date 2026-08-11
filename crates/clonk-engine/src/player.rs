@@ -962,6 +962,11 @@ pub struct Player {
     color_dw_raw: Option<u32>,
     fog_of_war: bool,
     force_fog_of_war: bool,
+    /// `C4Player::fFogOfWarInitialized` (NoSave — `C4Player::CompileFunc`
+    /// persists only the two flags above, C4Player.cpp:1580-1581). Every arm
+    /// that switches fog on rebuilds the whole repeller list exactly once,
+    /// and this is the latch that makes it once.
+    fog_of_war_initialized: bool,
     pub(crate) show_control_position: i32,
     pub(crate) show_control: i32,
     /// C4Player::FlashCom (NoSave): the exact contextual command whose key
@@ -1061,6 +1066,7 @@ impl Player {
             color_dw_raw: None,
             fog_of_war: false,
             force_fog_of_war: false,
+            fog_of_war_initialized: false,
             show_control_position: 0,
             show_control: 0,
             flash_command: 0,
@@ -1379,6 +1385,7 @@ impl Player {
             color_dw_raw: None,
             fog_of_war: false,
             force_fog_of_war: false,
+            fog_of_war_initialized: false,
             show_control_position: 0,
             show_control: 0,
             flash_command: 0,
@@ -1586,6 +1593,7 @@ impl Player {
             color_dw_raw,
             fog_of_war,
             force_fog_of_war,
+            fog_of_war_initialized: false,
             show_control_position,
             show_control,
             flash_command: 0,
@@ -1868,22 +1876,57 @@ impl Player {
 
     /// Explicitly enable or disable fog of war. Unlike automatic mouse-control
     /// selection, either value forces the setting (C4Player.cpp:815-824).
-    pub fn set_fog_of_war(&mut self, enabled: bool) {
+    ///
+    /// Returns whether the caller owes a [`FoWViewObjs`
+    /// rebuild](Engine::rebuild_fow_view_objects): C++ runs
+    /// `Game.Objects.AssignPlrViewRange()` before setting the flags, on the
+    /// enabling edge only. The rebuild reads no fog flag, so running it after
+    /// the assignment produces the same list.
+    #[must_use = "an enabling edge owes Engine::rebuild_fow_view_objects"]
+    pub fn set_fog_of_war(&mut self, enabled: bool) -> bool {
+        let rebuild = enabled && !self.fog_of_war_initialized;
         self.fog_of_war = enabled;
+        self.fog_of_war_initialized = enabled;
         self.force_fog_of_war = true;
+        rebuild
     }
 
-    pub(crate) fn initialize_mouse_fog_of_war(&mut self) {
-        if self.mouse_control != 0 && !self.force_fog_of_war && !self.fog_of_war {
+    /// `C4Player::ScenarioInit`'s mouse arm (C4Player.cpp:759-766).
+    #[must_use = "an enabling edge owes Engine::rebuild_fow_view_objects"]
+    pub(crate) fn initialize_mouse_fog_of_war(&mut self) -> bool {
+        if self.mouse_control != 0 && !self.force_fog_of_war && !self.fog_of_war_initialized {
             self.fog_of_war = true;
+            self.fog_of_war_initialized = true;
+            return true;
         }
+        false
     }
 
-    pub(crate) fn apply_mouse_control_toggle(&mut self, enabled: bool) {
+    /// `C4Player::FinalInit`'s savegame arm (C4Player.cpp:804-810): the
+    /// initialized latch is NoSave, so a restored `FogOfWar=true` still owes
+    /// the rebuild that produced its list in the first place.
+    #[must_use = "a restored fog player owes Engine::rebuild_fow_view_objects"]
+    pub(crate) fn restore_fog_of_war_after_load(&mut self) -> bool {
+        if self.fog_of_war && !self.fog_of_war_initialized {
+            self.fog_of_war_initialized = true;
+            return true;
+        }
+        false
+    }
+
+    /// `C4Player::ToggleMouseControl` (C4Player.cpp:2296-2325).
+    #[must_use = "an enabling edge owes Engine::rebuild_fow_view_objects"]
+    pub(crate) fn apply_mouse_control_toggle(&mut self, enabled: bool) -> bool {
         self.mouse_control = i32::from(enabled);
         if enabled {
+            // C++ gates this arm on `!fFogOfWar`, not on the initialized
+            // latch, so re-enabling mouse control after a script
+            // `SetFoW(false)` is a fresh edge — but `bForceFogOfWar` is set by
+            // then, so that combination cannot reach here anyway.
             if !self.force_fog_of_war && !self.fog_of_war {
                 self.fog_of_war = true;
+                self.fog_of_war_initialized = true;
+                return true;
             }
         } else {
             if self.view_mode == PLAYER_VIEW_MODE_SCROLLING {
@@ -1892,8 +1935,10 @@ impl Player {
             }
             if !self.force_fog_of_war {
                 self.fog_of_war = false;
+                self.fog_of_war_initialized = false;
             }
         }
+        false
     }
 
     pub fn surrendered(&self) -> bool {
@@ -2896,16 +2941,52 @@ mod tests {
         assert!(!configured.fog_of_war());
         assert!(!configured.force_fog_of_war());
 
-        player.set_fog_of_war(true);
+        assert!(player.set_fog_of_war(true));
         let enabled = player.to_state();
         assert!(enabled.fog_of_war);
         assert!(enabled.force_fog_of_war);
 
         let mut restored = Player::from_state(enabled);
-        restored.set_fog_of_war(false);
+        assert!(!restored.set_fog_of_war(false));
         let disabled = restored.to_state();
         assert!(!disabled.fog_of_war);
         assert!(disabled.force_fog_of_war);
+    }
+
+    #[test]
+    fn only_the_enabling_edge_of_fog_of_war_owes_the_repeller_rebuild() {
+        // `C4Player::SetFoW` runs `Game.Objects.AssignPlrViewRange()` under
+        // `fEnable && !fFogOfWarInitialized`, then latches both flags to
+        // `fEnable` (C4Player.cpp:815-824). So a redundant enable is free, and
+        // disabling clears the latch so the next enable pays again.
+        let mut player = Player::new(1, "Player");
+        assert!(player.set_fog_of_war(true), "first enable rebuilds");
+        assert!(!player.set_fog_of_war(true), "a redundant enable does not");
+        assert!(!player.set_fog_of_war(false), "disabling never rebuilds");
+        assert!(player.set_fog_of_war(true), "re-enabling rebuilds again");
+    }
+
+    #[test]
+    fn a_restored_fog_player_owes_the_rebuild_its_savegame_did_not_carry() {
+        // `fFogOfWarInitialized` is NoSave — `C4Player::CompileFunc` persists
+        // only the two flags (C4Player.cpp:1580-1581) — which is exactly why
+        // `C4Player::FinalInit` re-runs the rebuild for a restored fog player
+        // (C4Player.cpp:804-810).
+        let mut player = Player::new(1, "Player");
+        assert!(player.set_fog_of_war(true));
+        let mut restored = Player::from_state(player.to_state());
+        assert!(
+            restored.restore_fog_of_war_after_load(),
+            "the latch does not survive the savegame, so the rebuild is owed"
+        );
+        assert!(
+            !restored.restore_fog_of_war_after_load(),
+            "and it is owed exactly once"
+        );
+
+        // A player restored with fog off owes nothing.
+        let mut dark = Player::from_state(Player::new(2, "Dark").to_state());
+        assert!(!dark.restore_fog_of_war_after_load());
     }
 
     #[test]

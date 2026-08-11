@@ -764,6 +764,17 @@ impl Engine {
             self.crew_info_order
                 .insert(number, (0..roster_len).rev().collect());
             self.actualize_ownerless_fow_objects_for_new_player();
+            // `C4Player::FinalInit` restores FoW after a savegame: the
+            // initialized latch is NoSave, so a player whose `FogOfWar=true`
+            // came back off disk still owes the repeller rebuild
+            // (C4Player.cpp:804-810).
+            if self
+                .players
+                .get_mut(&number)
+                .is_some_and(Player::restore_fog_of_war_after_load)
+            {
+                self.rebuild_fow_view_objects();
+            }
             restored.push(RestoredRuntimeJoinPlayer {
                 client_id: source.client_id,
                 player_info_id: source.info.id,

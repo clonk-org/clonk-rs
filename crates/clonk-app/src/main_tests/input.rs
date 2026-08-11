@@ -620,7 +620,10 @@ fn configure_mouse_fog(
         .engine
         .crew_cursor(owner)
         .expect("mouse fog fixture has cursor crew");
-    app.engine
+    // The fixture's own repeller is added below through the ordinary
+    // SetPlrViewRange path, so the enabling edge's rebuild is a no-op here.
+    let _ = app
+        .engine
         .player_mut(owner)
         .expect("mouse fog fixture has local player")
         .set_fog_of_war(true);
@@ -1202,7 +1205,9 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
 fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
     let mut app = new_state_only_running_sandbox_app();
     let owner = app.local_owner;
-    app.engine
+    // Disabling never owes the repeller rebuild.
+    let _ = app
+        .engine
         .player_mut(owner)
         .expect("sandbox local player")
         .set_fog_of_war(false);

@@ -3512,10 +3512,81 @@ fn drachenfels_real_scenario_subcases_batch_3() {
 
 #[test]
 fn drachenfels_real_scenario_subcases_batch_4() {
-    run_drachenfels_batch(&[(
-        "shadow_generators_darken_the_mountain_until_a_clonk_walks_in",
-        dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in,
-    )]);
+    run_drachenfels_batch(&[
+        (
+            "shadow_generators_darken_the_mountain_until_a_clonk_walks_in",
+            dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in,
+        ),
+        (
+            "enabling_fog_rebuilds_every_saved_repeller_into_the_view_list",
+            dragon_rock_enabling_fog_rebuilds_every_saved_repeller_into_the_view_list,
+        ),
+    ]);
+}
+
+/// `C4Player::SetFoW` runs `Game.Objects.AssignPlrViewRange()` the first time
+/// fog is enabled (C4Player.cpp:817-818), which re-actualizes every live
+/// object carrying a nonzero `PlrViewRange`. That matters for saved content:
+/// `Objects.txt` restores `Owner=` for players that never join, and
+/// `C4Object::PlrFoWActualize` puts an object whose owner is not a live player
+/// into *every* player's list (C4Object.cpp:5546-5567). Nothing else re-walks
+/// those — `C4Player::Init`'s own pass covers `NO_OWNER` objects only — so
+/// without the rebuild they light nobody's map.
+///
+/// Dragon Rock ships exactly two of them live: MAGE #1758 and KING #5129, both
+/// `PlrViewRange=500` and both `Owner=10`.
+fn dragon_rock_enabling_fog_rebuilds_every_saved_repeller_into_the_view_list(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock fog rebuild parity", 1);
+
+    // InitializePlayer schedules SetFoW one tick out (Drachenfels.c4s/
+    // Script.c:70; planet/System.c4g/Helpers.c:110-132).
+    engine
+        .tick_without_snapshot()
+        .expect("the real IntSchedule callback evaluates SetFoW");
+
+    let view_objects = engine
+        .snapshot()
+        .fow_players
+        .get(&owner)
+        .map(|frame| frame.view_objects.clone())
+        .expect("a fog-of-war player projects its runtime FoWViewObjs");
+
+    for (number, definition) in [(1758, "MAGE"), (5129, "KING")] {
+        let object = ObjectId::new(number);
+        let loaded = engine
+            .object_snapshot(object)
+            .unwrap_or_else(|| panic!("Dragon Rock object #{number} loads"));
+        assert_eq!(loaded.definition_id, definition);
+        assert!(loaded.status.is_active(), "#{number} loads live");
+        assert_eq!(
+            loaded.plr_view_range, 500,
+            "#{number} saved PlrViewRange=500"
+        );
+        assert!(
+            engine.player(loaded.owner).is_none(),
+            "#{number}'s saved owner must not be a live player for this to bite"
+        );
+        assert!(
+            view_objects.contains(&object),
+            "enabling fog must rebuild saved repeller #{number} into every player's FoWViewObjs"
+        );
+    }
+
+    // The rebuild re-actualizes, it does not append blindly: the four
+    // ownerless generators the join-time pass already added stay exactly once.
+    for (number, ..) in DRACHENFELS_SHADOWS {
+        assert_eq!(
+            view_objects
+                .iter()
+                .filter(|object| **object == ObjectId::new(number))
+                .count(),
+            1,
+            "generator #{number} must not be duplicated by the rebuild"
+        );
+    }
 }
 
 fn run_drachenfels_batch(subcases: &[PreparedScenarioSubcase]) {

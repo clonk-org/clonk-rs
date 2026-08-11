@@ -1450,6 +1450,13 @@ impl Engine {
 
         self.fix_exec_list_order();
         self.rebuild_fow_view_objects();
+        // The rebuild above already served every restored fog player, which is
+        // what `C4Player::FinalInit`'s arm does one player at a time
+        // (C4Player.cpp:804-810). Latch them so a later `SetFoW(true)` is the
+        // no-op C++ makes it, rather than a second full walk.
+        for player in self.players.values_mut() {
+            let _ = player.restore_fog_of_war_after_load();
+        }
         self.rebuild_sectors();
         Ok(())
     }
@@ -4136,8 +4143,16 @@ impl Engine {
                     );
                 }
                 PlayerCommand::SetFogOfWar { player_id, enabled } => {
-                    if let Some(player) = self.players.get_mut(&player_id) {
-                        player.set_fog_of_war(enabled);
+                    // C4Player::SetFoW re-actualizes every live repeller on
+                    // the enabling edge (C4Player.cpp:817-818). Saved objects
+                    // whose `Owner=` never joins reach a player's list only
+                    // here: `C4Player::Init`'s own pass covers NO_OWNER only.
+                    if self
+                        .players
+                        .get_mut(&player_id)
+                        .is_some_and(|player| player.set_fog_of_war(enabled))
+                    {
+                        self.rebuild_fow_view_objects();
                     }
                 }
                 PlayerCommand::SetShowControlPosition {

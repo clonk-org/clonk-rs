@@ -594,7 +594,9 @@ impl Engine {
         number: i32,
         enabled: bool,
     ) -> Result<(), EngineError> {
-        self.player_mut(number)?.apply_mouse_control_toggle(enabled);
+        if self.player_mut(number)?.apply_mouse_control_toggle(enabled) {
+            self.rebuild_fow_view_objects();
+        }
         Ok(())
     }
 
@@ -911,8 +913,12 @@ impl Engine {
         // Mouse-controlled players automatically enable unforced FoW after
         // ready placement and before InitializePlayer. A PreInitializePlayer
         // SetFoW call has already set the force flag and wins this race.
-        if let Some(player) = self.players.get_mut(&number) {
-            player.initialize_mouse_fog_of_war();
+        if self
+            .players
+            .get_mut(&number)
+            .is_some_and(Player::initialize_mouse_fog_of_war)
+        {
+            self.rebuild_fow_view_objects();
         }
 
         // Scenario script init broadcast (C4Player.cpp:769-775): fail-safe
@@ -1744,8 +1750,12 @@ impl Engine {
             self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(id)]),
         )?;
 
-        if let Some(player) = self.players.get_mut(&id) {
-            player.initialize_mouse_fog_of_war();
+        if self
+            .players
+            .get_mut(&id)
+            .is_some_and(Player::initialize_mouse_fog_of_war)
+        {
+            self.rebuild_fow_view_objects();
         }
         if self.players.get(&id).and_then(Player::team).is_some() {
             self.set_player_team_hostility(id);
