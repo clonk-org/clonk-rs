@@ -173,7 +173,7 @@ pub(crate) struct FogDrawContext {
 }
 
 impl FogDrawContext {
-    fn modulation_at_point(&self, x: f32, y: f32) -> u32 {
+    pub(crate) fn modulation_at_point(&self, x: f32, y: f32) -> u32 {
         self.map
             .get_mod_at((x / self.zoom) as i32, (y / self.zoom) as i32)
     }

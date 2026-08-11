@@ -38,3 +38,8 @@ tokio = { version = "1.32", features = ["io-util", "macros", "net", "rt", "rt-mu
 name = "particle_render"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "object_sprite_render"
+harness = false
+required-features = ["bench"]
