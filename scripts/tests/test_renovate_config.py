@@ -32,6 +32,20 @@ class RenovateConfigTests(unittest.TestCase):
         self.assertEqual("7 days", config["minimumReleaseAge"])
         self.assertIsNone(config["vulnerabilityAlerts"]["minimumReleaseAge"])
 
+    def test_a_dependency_pull_request_merges_itself_once_green(self):
+        config = load_config()
+
+        self.assertTrue(config["automerge"])
+
+    def test_automerge_hands_off_to_the_merge_queue(self):
+        # `main` lands through a merge queue, so Renovate must not merge the
+        # branch itself: only GitHub's native auto-merge enqueues an entry.
+        # This is Renovate's default and is written down because it is what
+        # makes automerge work here at all.
+        config = load_config()
+
+        self.assertTrue(config["platformAutomerge"])
+
     def test_lock_file_maintenance_states_its_own_cadence(self):
         # Renovate defaults `lockFileMaintenance.schedule` to
         # ["before 4am on monday"], and a child object's own schedule wins over
