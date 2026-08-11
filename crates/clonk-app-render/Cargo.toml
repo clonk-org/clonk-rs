@@ -48,3 +48,8 @@ required-features = ["bench"]
 name = "landscape_render"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "pxs_render"
+harness = false
+required-features = ["bench"]
