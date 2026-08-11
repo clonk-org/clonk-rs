@@ -1779,7 +1779,6 @@ impl Engine {
         idx: usize,
         t_contact: u32,
         _definition_id: &DefinitionId,
-        solid_mask_indices: &[usize],
     ) -> Result<(), EngineError> {
         let Some(object_id) = self.objects.get(idx).map(|object| object.id) else {
             return Ok(());
@@ -1881,12 +1880,7 @@ impl Engine {
                     let com_dir = self.objects[idx].state.command_direction;
                     let definition_id = self.objects[idx].definition_id.clone();
                     if !com_dir_like(com_dir, CommandDirection::Down) {
-                        let _ = self.object_action_corner_scale(
-                            idx,
-                            &definition_id,
-                            procedure,
-                            solid_mask_indices,
-                        )?;
+                        let _ = self.object_action_corner_scale(idx, &definition_id, procedure)?;
                         return Ok(());
                     }
                     self.object_action_stand(idx, &definition_id)?;
@@ -1923,12 +1917,7 @@ impl Engine {
                     };
                     if !above_liquid {
                         let definition_id = self.objects[idx].definition_id.clone();
-                        let _ = self.object_action_corner_scale(
-                            idx,
-                            &definition_id,
-                            procedure,
-                            solid_mask_indices,
-                        )?;
+                        let _ = self.object_action_corner_scale(idx, &definition_id, procedure)?;
                     }
                     return Ok(());
                 }
@@ -2072,12 +2061,7 @@ impl Engine {
                         return Ok(());
                     }
                     let definition_id = self.objects[idx].definition_id.clone();
-                    let _ = self.object_action_corner_scale(
-                        idx,
-                        &definition_id,
-                        procedure,
-                        solid_mask_indices,
-                    )?;
+                    let _ = self.object_action_corner_scale(idx, &definition_id, procedure)?;
                     return Ok(());
                 }
                 ActionProcedure::Hang => {
@@ -2468,7 +2452,6 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
         procedure: ActionProcedure,
-        solid_mask_indices: &[usize],
     ) -> Result<bool, EngineError> {
         const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
         let corner_okay =
@@ -2483,8 +2466,12 @@ impl Engine {
                 } else {
                     position.x + range_x
                 };
+                // C4Object::ContactCheck reads the live landscape on every
+                // corner candidate. A Contact* callback from the previous
+                // probe can change another object's mask before this one.
+                let solid_mask_indices = engine.active_solid_mask_indices();
                 Ok(engine
-                    .object_contact_check_at(idx, Vector2::new(ctx, cty), solid_mask_indices)?
+                    .object_contact_check_at(idx, Vector2::new(ctx, cty), &solid_mask_indices)?
                     .is_some_and(|contact| contact.contact_cnat == 0))
             };
         let (range_x, range_y) = if matches!(procedure, ActionProcedure::Scale) {
@@ -2561,7 +2548,6 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
         library: &ActionLibrary,
-        solid_mask_indices: &[usize],
     ) -> Result<(), EngineError> {
         if idx >= self.objects.len() {
             return Ok(());
@@ -2594,12 +2580,8 @@ impl Engine {
             && direction == Direction::Left)
             || (command_direction == CommandDirection::Right && direction == Direction::Right);
         if matches!(procedure, ActionProcedure::Scale) && scaling_upward {
-            let corner_scaled = self.object_action_corner_scale(
-                idx,
-                definition_id,
-                ActionProcedure::Scale,
-                solid_mask_indices,
-            )?;
+            let corner_scaled =
+                self.object_action_corner_scale(idx, definition_id, ActionProcedure::Scale)?;
             if corner_scaled {
                 // Scaling upward tries the corner transition before the generic
                 // Jump fallback (C4Object.cpp:4282-4289).

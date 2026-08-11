@@ -97,29 +97,17 @@ thread_local! {
     #[cfg(test)]
     static COMPILED_BINDING_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
-    static COMPILED_PREFLIGHT_NON_CALL_VISITS: Cell<usize> = const { Cell::new(0) };
-    #[cfg(test)]
     static DIAGNOSTIC_OBJECT_FORMATTER_CALLS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static DIAGNOSTIC_FRAME_STRING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
-    static PARAMETER_SCOPE_HEAP_TABLES: Cell<usize> = const { Cell::new(0) };
-    #[cfg(test)]
     static RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
-    static EXTERNAL_ARGUMENT_PRE_SET_CLONES: Cell<usize> = const { Cell::new(0) };
-    #[cfg(test)]
     static GENERIC_HOST_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
-    #[cfg(test)]
-    static NATIVE_HOST_ARGUMENT_VALUE_CLONES: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static DIRECT_BINDING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static NESTED_GENERIC_SCRIPT_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
-    #[cfg(test)]
-    static FORCE_LEGACY_SCRIPT_CALL_FRAMES: Cell<bool> = const { Cell::new(false) };
-    #[cfg(test)]
-    static FORCE_LEGACY_COMPILED_EXECUTOR: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -150,16 +138,6 @@ fn compiled_binding_heap_spills() -> usize {
 }
 
 #[cfg(test)]
-fn reset_compiled_preflight_non_call_visits() {
-    COMPILED_PREFLIGHT_NON_CALL_VISITS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn compiled_preflight_non_call_visits() -> usize {
-    COMPILED_PREFLIGHT_NON_CALL_VISITS.with(Cell::get)
-}
-
-#[cfg(test)]
 fn reset_diagnostic_object_formatter_calls() {
     DIAGNOSTIC_OBJECT_FORMATTER_CALLS.with(|count| count.set(0));
 }
@@ -180,16 +158,6 @@ fn diagnostic_frame_string_allocations() -> usize {
 }
 
 #[cfg(test)]
-fn reset_parameter_scope_heap_tables() {
-    PARAMETER_SCOPE_HEAP_TABLES.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn parameter_scope_heap_tables() -> usize {
-    PARAMETER_SCOPE_HEAP_TABLES.with(Cell::get)
-}
-
-#[cfg(test)]
 fn reset_runtime_container_registration_traversals() {
     RUNTIME_CONTAINER_REGISTRATION_TRAVERSALS.with(|count| count.set(0));
 }
@@ -200,16 +168,6 @@ fn runtime_container_registration_traversals() -> usize {
 }
 
 #[cfg(test)]
-fn reset_external_argument_pre_set_clones() {
-    EXTERNAL_ARGUMENT_PRE_SET_CLONES.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn external_argument_pre_set_clones() -> usize {
-    EXTERNAL_ARGUMENT_PRE_SET_CLONES.with(Cell::get)
-}
-
-#[cfg(test)]
 fn reset_generic_host_resolutions() {
     GENERIC_HOST_RESOLUTIONS.with(|count| count.set(0));
 }
@@ -217,16 +175,6 @@ fn reset_generic_host_resolutions() {
 #[cfg(test)]
 fn generic_host_resolutions() -> usize {
     GENERIC_HOST_RESOLUTIONS.with(Cell::get)
-}
-
-#[cfg(test)]
-fn reset_native_host_argument_value_clones() {
-    NATIVE_HOST_ARGUMENT_VALUE_CLONES.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn native_host_argument_value_clones() -> usize {
-    NATIVE_HOST_ARGUMENT_VALUE_CLONES.with(Cell::get)
 }
 
 #[cfg(test)]
@@ -247,38 +195,6 @@ fn reset_nested_generic_script_resolutions() {
 #[cfg(test)]
 fn nested_generic_script_resolutions() -> usize {
     NESTED_GENERIC_SCRIPT_RESOLUTIONS.with(Cell::get)
-}
-
-#[cfg(test)]
-struct LegacyScriptCallFrameGuard {
-    call_frames: bool,
-    compiled_executor: bool,
-}
-
-#[cfg(test)]
-impl LegacyScriptCallFrameGuard {
-    fn enter() -> Self {
-        Self {
-            call_frames: FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(|flag| flag.replace(true)),
-            compiled_executor: FORCE_LEGACY_COMPILED_EXECUTOR.with(|flag| flag.replace(true)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for LegacyScriptCallFrameGuard {
-    fn drop(&mut self) {
-        FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(|flag| flag.set(self.call_frames));
-        FORCE_LEGACY_COMPILED_EXECUTOR.with(|flag| flag.set(self.compiled_executor));
-    }
-}
-
-fn resolved_script_calls_enabled() -> bool {
-    #[cfg(test)]
-    if FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(Cell::get) {
-        return false;
-    }
-    true
 }
 
 struct ValueStackReservation {
@@ -4721,18 +4637,10 @@ impl<'a> Vm<'a> {
             .fold(0_u16, |mask, (index, arg)| {
                 mask | (u16::from(matches!(arg, CallArg::Reference(_))) << index)
             });
-        #[cfg(test)]
-        let force_legacy_compiled_executor = FORCE_LEGACY_COMPILED_EXECUTOR.with(Cell::get);
-        #[cfg(not(test))]
-        let force_legacy_compiled_executor = false;
-        let compiled = (!force_legacy_compiled_executor)
-            .then(|| {
-                function
-                    .compiled
-                    .get_or_init(|| CompiledFunctionCache::new(function))
-                    .validated(function, target.validate_compiled_source)
-            })
-            .flatten();
+        let compiled = function
+            .compiled
+            .get_or_init(|| CompiledFunctionCache::new(function))
+            .validated(function, target.validate_compiled_source);
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -6366,9 +6274,7 @@ impl<'a> Vm<'a> {
                                     self.direct_call_parameter_limit(name, function),
                                 )?;
                             }
-                            if let Some(function_target) =
-                                function_target.filter(|_| resolved_script_calls_enabled())
-                            {
+                            if let Some(function_target) = function_target {
                                 return self.invoke_resolved_script_value(
                                     name,
                                     function_target,
@@ -6763,9 +6669,7 @@ impl<'a> Vm<'a> {
                                 self.direct_call_parameter_limit(name, function),
                             )?;
                         }
-                        if let Some(function_target) =
-                            function_target.filter(|_| resolved_script_calls_enabled())
-                        {
+                        if let Some(function_target) = function_target {
                             return self.invoke_resolved_script_tracked_value(
                                 name,
                                 function_target,
@@ -10976,12 +10880,19 @@ impl CompiledFunction {
         for site in &self.call_sites {
             let name = &site.name;
             let argument_count = site.argument_count;
+            if (0..argument_count).any(|index| {
+                vm.reference_parameter_probe
+                    .is_some_and(|probe| probe(name, index))
+            }) {
+                return Ok(None);
+            }
             if let Some(target) = vm.resolved_script_function(name, env.engine_scope) {
-                if target
-                    .function
-                    .params
-                    .iter()
-                    .any(|param| param.is_reference)
+                if target.function.returns_reference
+                    || target
+                        .function
+                        .params
+                        .iter()
+                        .any(|param| param.is_reference)
                 {
                     return Ok(None);
                 }
@@ -10993,10 +10904,6 @@ impl CompiledFunction {
                     .host_function_parameter_types
                     .and_then(|types| types.get(name))
                     .is_some_and(|types| types.contains(&C4VType::Ref))
-                || (0..argument_count).any(|index| {
-                    vm.reference_parameter_probe
-                        .is_some_and(|probe| probe(name, index))
-                })
             {
                 return Ok(None);
             }
@@ -11432,11 +11339,7 @@ impl Environment {
             .iter()
             .enumerate()
             .map(|(index, arg)| {
-                #[cfg(test)]
-                let force_heap_binding = FORCE_LEGACY_SCRIPT_CALL_FRAMES.with(Cell::get);
-                #[cfg(not(test))]
-                let force_heap_binding = false;
-                if index >= params.len() && !force_heap_binding {
+                if index >= params.len() {
                     return arg
                         .read_tracked()
                         .map(InlineBinding::new)
@@ -11729,29 +11632,6 @@ mod tests {
     }
 
     #[test]
-    fn native_call_values_move_from_prepared_slots() {
-        // C++ passes AB_CALL's already-resident pPars slots directly to the
-        // native executor (C4AulExec.cpp:1217-1223, 1497-1501).
-        reset_native_host_argument_value_clones();
-        let mut engine = crate::engine::Engine::new();
-        engine.register_host_function("ArrayLength", |args| {
-            Ok(Value::Int(match args.first() {
-                Some(Value::Array(values)) => values.len() as i32,
-                _ => -1,
-            }))
-        });
-        engine
-            .load_script("#strict 2\nfunc Probe() { return ArrayLength([1, 2, 3]); }")
-            .expect("script loads");
-
-        assert_eq!(
-            engine.call("Probe", &[]).expect("native call succeeds"),
-            Value::Int(3)
-        );
-        assert_eq!(native_host_argument_value_clones(), 0);
-    }
-
-    #[test]
     fn direct_native_calls_stay_in_the_compiled_executor() {
         // C++ emits a resolved AB_CALL inside the surrounding bytecode rather
         // than returning to an AST evaluator (C4AulExec.cpp:1217-1297).
@@ -11795,28 +11675,61 @@ mod tests {
     }
 
     #[test]
-    fn compiled_call_preflight_visits_only_call_sites() {
-        // C++ AB_CALL operands already hold their resolved C4AulFunc pointer;
-        // preflight has no reason to walk unrelated bytecode
-        // (C4AulExec.cpp:1217-1223,1250-1297).
-        reset_compiled_preflight_non_call_visits();
+    fn compiled_call_materializes_a_reference_return_before_returning_it_as_a_value() {
+        // A value-context AB_CALL of a `func &` result is followed by
+        // SetNoRef/C4Value::Set, which canonicalizes a retained C4ID(0) to
+        // nil (C4AulParse.cpp:2293-2344; C4Value.cpp:121-140).
         let mut engine = crate::engine::Engine::new();
-        engine.register_host_function("Identity", |args| {
-            Ok(args.first().cloned().unwrap_or(Value::Nil))
-        });
         engine
             .load_script(
-                "#strict 2\nfunc Probe(value) { var a = value + 1; var b = Identity(a); return b + 1; }",
+                r#"#strict 2
+                    local data;
+                    func &GetData() { return data; }
+                    func Probe() { return GetData(); }
+                "#,
+            )
+            .expect("script loads");
+        let locals = HashMap::from([(
+            "data".to_owned(),
+            Value::C4Id(crate::value::c4_id_from_raw(0)),
+        )]);
+
+        let (result, _) = engine
+            .call_with_locals("Probe", &[], &locals)
+            .expect("reference-returning call succeeds");
+
+        assert_eq!(result, Value::Nil);
+    }
+
+    #[test]
+    fn compiled_call_honors_engine_wide_reference_parameter_candidates() {
+        // Parse_Params' `anyfunctakesref` keeps the first argument as a live
+        // reference when ANY same-name engine function declares `&` there.
+        // The selected value-parameter callee dereferences only after every
+        // argument has run (C4AulParse.cpp:2318-2331; C4AulExec.cpp:1364-1397).
+        let mut engine = crate::engine::Engine::new();
+        engine.register_reference_parameter_probe(std::rc::Rc::new(|name, slot| {
+            name == "ReadBeforeMutation" && slot == 0
+        }));
+        engine
+            .load_script(
+                r#"#strict 2
+                    local data;
+                    func Mutate() { data = 2; }
+                    func ReadBeforeMutation(value, ignored) { return value; }
+                    func Probe() {
+                        data = 1;
+                        return ReadBeforeMutation(data, Mutate());
+                    }
+                "#,
             )
             .expect("script loads");
 
-        assert_eq!(
-            engine
-                .call("Probe", &[Value::Int(39)])
-                .expect("call succeeds"),
-            Value::Int(41)
-        );
-        assert_eq!(compiled_preflight_non_call_visits(), 0);
+        let (result, _) = engine
+            .call_with_locals("Probe", &[], &HashMap::new())
+            .expect("same-name reference-aware call succeeds");
+
+        assert_eq!(result, Value::Int(2));
     }
 
     #[test]
@@ -11874,23 +11787,6 @@ mod tests {
 
         assert_eq!(result, Value::Int(42));
         assert_eq!(diagnostic_frame_string_allocations(), 0);
-    }
-
-    #[test]
-    fn small_named_parameter_frames_stay_inline() {
-        // C++ keeps named parameter slots in C4AulExec::Values; a one-argument
-        // helper does not allocate a hash table for its frame
-        // (C4AulExec.cpp:62-63,330-347).
-        reset_parameter_scope_heap_tables();
-        let result = execute_script(
-            "#strict 2\nfunc AddOne(value) { return value + 1; } func Probe() { return AddOne(41); }",
-            "Probe",
-            &[],
-        )
-        .expect("small parameter frame executes");
-
-        assert_eq!(result, Value::Int(42));
-        assert_eq!(parameter_scope_heap_tables(), 0);
     }
 
     #[test]
@@ -11956,104 +11852,6 @@ mod tests {
         assert_eq!(result, Value::Int(17));
         assert_eq!(locals.get("counter"), Some(&Value::Int(1)));
         assert_eq!(compiled_function_execution_count(), 2);
-    }
-
-    #[test]
-    fn dense_stippel_hot_frame_estimates_amortized_fps_under_one_second() {
-        // Paired legacy/current timing removes machine speed from the ratio.
-        // The scale is the self-terminating 1,000-Stippel play-profile run
-        // recorded for this branch before call-frame allocation was removed.
-        const CALIBRATED_LEGACY_FPS: f64 = 18.075_519;
-        const CALIBRATED_FIXED_FRAME_MS: f64 = 15.3;
-        const ROUNDS: usize = 4;
-        const FRAMES_PER_ROUND: usize = 256;
-
-        fn measure(engine: &crate::engine::Engine, legacy: bool) -> Duration {
-            let _legacy = legacy.then(LegacyScriptCallFrameGuard::enter);
-            let started = Instant::now();
-            let mut checksum = 0_i32;
-            for _ in 0..FRAMES_PER_ROUND {
-                let value = std::hint::black_box(
-                    engine
-                        .call("HotFrame", &[])
-                        .expect("amortized frame succeeds"),
-                );
-                checksum = checksum.wrapping_add(value.as_c4_int().unwrap_or_default());
-            }
-            assert_eq!(checksum, FRAMES_PER_ROUND as i32);
-            started.elapsed()
-        }
-
-        let mut engine = crate::engine::Engine::new();
-        engine.register_host_function("Int", |args| {
-            Ok(args.first().cloned().unwrap_or(Value::Int(0)))
-        });
-        engine.register_host_function("Text", |_| Ok(Value::String("Walk".into())));
-        engine.register_host_function("Ping", |_| Ok(Value::Nil));
-        engine
-            .load_script(
-                r#"#strict
-                    local counter, lastAct;
-                    func PhysicalVariation() {
-                        var speed = Int(10000);
-                        speed += 500 - Int(1000);
-                        speed = Int(speed);
-                        Int(speed); Int(speed + 5000); Int(speed + 10000);
-                    }
-                    func HeaderControl() {
-                        if ((Text() eq "Scale") && (Int(0) == 5)) Ping();
-                        else Ping();
-                    }
-                    func Movement() {
-                        if (!Int(1) || !Int(1)) {
-                            var comDir = Int(7);
-                            if (Text() ne "Scale") comDir = Int(comDir);
-                            HeaderControl();
-                        }
-                        if (Int(50) < 10) Ping();
-                        if (Int(50) > Int(5000) - 10) Ping();
-                        if (!Int(1) && (Text() ne "FLIGHT") && !Int(0)) Ping();
-                        if (Int(0)) counter++; else counter = 0;
-                    }
-                    func Attack() {
-                        if ((Text() eq "FLIGHT") || Int(0)) return;
-                        var a0 = Int(0), a1 = Int(1), a2 = Int(2);
-                        var a3 = Int(3), a4 = Int(4), a5 = Int(5);
-                        var victim = Int(a0 + a1 + a2 + a3 + a4 + a5 - 15);
-                        if (victim) Ping();
-                    }
-                    func HotFrame() {
-                        PhysicalVariation(); Movement(); Attack();
-                        return 1;
-                    }
-                "#,
-            )
-            .expect("hot-frame fixture loads");
-        for _ in 0..32 {
-            std::hint::black_box(engine.call("HotFrame", &[]).expect("warmup succeeds"));
-        }
-
-        let mut legacy = Duration::ZERO;
-        let mut current = Duration::ZERO;
-        for _ in 0..ROUNDS {
-            legacy += measure(&engine, true);
-            current += measure(&engine, false);
-        }
-        let calibrated_frame_ms = 1_000.0 / CALIBRATED_LEGACY_FPS;
-        let calibrated_script_ms = (calibrated_frame_ms - CALIBRATED_FIXED_FRAME_MS).max(0.0);
-        let estimated_frame_ms = CALIBRATED_FIXED_FRAME_MS
-            + calibrated_script_ms * current.as_secs_f64() / legacy.as_secs_f64().max(f64::EPSILON);
-        let estimated_fps = 1_000.0 / estimated_frame_ms.max(f64::EPSILON);
-        let estimated_gain = estimated_fps - CALIBRATED_LEGACY_FPS;
-        println!(
-            "STIPPEL_AMORTIZED_ESTIMATE legacy_ms={:.3} current_ms={:.3} estimated_simulation_fps={estimated_fps:.3} estimated_gain_fps={estimated_gain:.3}",
-            legacy.as_secs_f64() * 1_000.0,
-            current.as_secs_f64() * 1_000.0,
-        );
-        assert!(
-            legacy + current < Duration::from_secs(1),
-            "amortized estimator must stay below one second"
-        );
     }
 
     #[test]
@@ -12409,31 +12207,6 @@ mod tests {
         assert_eq!(compiled.1, ast.1);
         assert_eq!(compiled.2, 1);
         assert_eq!(ast.2, 0);
-    }
-
-    #[test]
-    fn callerless_external_argument_set_moves_owned_slots() {
-        reset_external_argument_pre_set_clones();
-        let value = Value::Proplist(ValueMap::from([(
-            "nested".to_string(),
-            Value::Array(vec![Value::Int(1), Value::Int(2)]),
-        )]));
-
-        let result = execute_script(
-            "func Identity(value) { return value; }",
-            "Identity",
-            &[value],
-        )
-        .expect("external argument round-trips");
-
-        assert_eq!(
-            result,
-            Value::Proplist(ValueMap::from([(
-                "nested".to_string(),
-                Value::Array(vec![Value::Int(1), Value::Int(2)]),
-            )]))
-        );
-        assert_eq!(external_argument_pre_set_clones(), 0);
     }
 
     #[test]

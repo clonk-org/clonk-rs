@@ -834,22 +834,12 @@ impl Engine {
         object_id: ObjectId,
         definition_id: &str,
     ) -> Result<Value, EngineError> {
-        #[cfg(test)]
-        let snapshot_started = std::time::Instant::now();
         let state_snapshot = Rc::new(
             self.objects
                 .get(index)
                 .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
                 .script_state_snapshot(),
         );
-        #[cfg(test)]
-        MOVEMENT_CALLBACK_SNAPSHOT_NANOS.with(|elapsed| {
-            elapsed.set(
-                elapsed
-                    .get()
-                    .saturating_add(snapshot_started.elapsed().as_nanos() as u64),
-            )
-        });
         let definition = self
             .definitions
             .get(definition_id)
@@ -857,20 +847,8 @@ impl Engine {
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        #[cfg(test)]
-        let world_started = std::time::Instant::now();
         let world =
             self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
-        #[cfg(test)]
-        MOVEMENT_CALLBACK_WORLD_NANOS.with(|elapsed| {
-            elapsed.set(
-                elapsed
-                    .get()
-                    .saturating_add(world_started.elapsed().as_nanos() as u64),
-            )
-        });
-        #[cfg(test)]
-        let script_started = std::time::Instant::now();
         let call = definition.call_object_function(
             state_snapshot.as_ref(),
             object_id,
@@ -885,14 +863,6 @@ impl Engine {
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
-        #[cfg(test)]
-        MOVEMENT_CALLBACK_SCRIPT_NANOS.with(|elapsed| {
-            elapsed.set(
-                elapsed
-                    .get()
-                    .saturating_add(script_started.elapsed().as_nanos() as u64),
-            )
-        });
         let (value, outcome, audio_state, new_rng) = match call {
             Ok(ok) => ok,
             // Pre-error mutations persist (C++ mutated the live objects).
@@ -909,8 +879,6 @@ impl Engine {
         };
         self.rng = new_rng;
         self.audio_registry = audio_state;
-        #[cfg(test)]
-        let fold_started = std::time::Instant::now();
         self.apply_callback_outcome(
             index,
             outcome,
@@ -919,14 +887,6 @@ impl Engine {
             definition_id,
             false,
         )?;
-        #[cfg(test)]
-        MOVEMENT_CALLBACK_FOLD_NANOS.with(|elapsed| {
-            elapsed.set(
-                elapsed
-                    .get()
-                    .saturating_add(fold_started.elapsed().as_nanos() as u64),
-            )
-        });
         Ok(value)
     }
 

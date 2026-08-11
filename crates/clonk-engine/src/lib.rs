@@ -369,34 +369,11 @@ std::thread_local! {
     static SCRIPT_STATE_LOCAL_VAR_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static COMMAND_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SECTOR_FULL_REBUILDS: Cell<usize> = const { Cell::new(0) };
-    static FORCE_LEGACY_SECTOR_REBUILD: Cell<bool> = const { Cell::new(false) };
-    static FORCE_LEGACY_FIND_FUNC_SCALAR_PREFIX: Cell<bool> = const { Cell::new(false) };
-    static FORCE_LEGACY_STIPPEL_FRAME_PATH: Cell<bool> = const { Cell::new(false) };
-    static FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
-    static EFFECT_WORLD_CONTEXT_NANOS: Cell<u64> = const { Cell::new(0) };
-    static EFFECT_STATE_SNAPSHOT_NANOS: Cell<u64> = const { Cell::new(0) };
-    static EFFECT_CALLBACK_NANOS: Cell<u64> = const { Cell::new(0) };
-    static EFFECT_EXEC_NANOS: Cell<u64> = const { Cell::new(0) };
-    static EFFECT_FOLD_NANOS: Cell<u64> = const { Cell::new(0) };
-    static FIND_CRITERION_PARSE_NANOS: Cell<u64> = const { Cell::new(0) };
-    static FIND_CANDIDATE_ENUM_NANOS: Cell<u64> = const { Cell::new(0) };
-    static FIND_CANDIDATE_MATCH_NANOS: Cell<u64> = const { Cell::new(0) };
-    static MOBILE_MOVEMENT_NANOS: Cell<u64> = const { Cell::new(0) };
-    static FRAME_SOLID_MASK_UPDATE_NANOS: Cell<u64> = const { Cell::new(0) };
-    static FRAME_SECTOR_UPDATE_NANOS: Cell<u64> = const { Cell::new(0) };
-    static ACTION_EXEC_NANOS: Cell<u64> = const { Cell::new(0) };
-    static ACTION_PHYSICS_NANOS: Cell<u64> = const { Cell::new(0) };
-    static REFRESH_OCF_NANOS: Cell<u64> = const { Cell::new(0) };
     static EMPTY_COMMAND_QUEUE_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
     static SYNTHETIC_COMMAND_FOLDS: Cell<usize> = const { Cell::new(0) };
     static ACTION_CALLBACK_DRAIN_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
     static DEFINITION_METADATA_TABLE_READS: Cell<usize> = const { Cell::new(0) };
-    static SHAPE_CONTACT_HEAP_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static MOVEMENT_CALLBACK_SNAPSHOT_NANOS: Cell<u64> = const { Cell::new(0) };
-    static MOVEMENT_CALLBACK_WORLD_NANOS: Cell<u64> = const { Cell::new(0) };
-    static MOVEMENT_CALLBACK_SCRIPT_NANOS: Cell<u64> = const { Cell::new(0) };
-    static MOVEMENT_CALLBACK_FOLD_NANOS: Cell<u64> = const { Cell::new(0) };
-    static COMMAND_EXEC_NANOS: Cell<u64> = const { Cell::new(0) };
+    static OBJECT_VISIBILITY_VISITING_SETS: Cell<usize> = const { Cell::new(0) };
 }
 
 use crate::math::{
@@ -5238,6 +5215,12 @@ pub fn object_visible_for_player(
     player: i32,
     as_overlay: bool,
 ) -> bool {
+    if object.visibility == VIS_ALL
+        && (as_overlay || object.layer.is_none_or(|layer| layer == object.id))
+    {
+        return true;
+    }
+
     fn hostile(players: &[PlayerState], first: i32, second: i32) -> bool {
         let Some(first_player) = players.iter().find(|candidate| candidate.id == first) else {
             return false;
@@ -5322,6 +5305,8 @@ pub fn object_visible_for_player(
         result
     }
 
+    #[cfg(test)]
+    OBJECT_VISIBILITY_VISITING_SETS.with(|sets| sets.set(sets.get().saturating_add(1)));
     inner(
         objects,
         players,
@@ -5330,6 +5315,25 @@ pub fn object_visible_for_player(
         as_overlay,
         &mut HashSet::new(),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn vis_all_object_without_external_layer_skips_cycle_tracking() {
+    // C4Object::IsVisible reaches `VIS_All` after its optional layer gate
+    // (C4Object.cpp:5600-5629); without that gate the answer is unconditional.
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition("VISA", "Visible", "#strict\n")
+        .expect("definition registers");
+    let object = engine
+        .spawn_object(SpawnConfig::new("VISA"))
+        .expect("object spawns");
+    let snapshot = engine.snapshot();
+
+    OBJECT_VISIBILITY_VISITING_SETS.with(|sets| sets.set(0));
+    assert!(snapshot.object_visible_for_player(object, OWNER_NONE, false));
+    assert_eq!(OBJECT_VISIBILITY_VISITING_SETS.with(Cell::get), 0);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8990,10 +8994,6 @@ fn shape_contact_check(
     excluded_solid_mask: Option<ObjectId>,
     contact_density: i32,
 ) -> ShapeContact {
-    #[cfg(test)]
-    if FORCE_LEGACY_SHAPE_CONTACT_ALLOCATIONS.with(Cell::get) {
-        drop(std::hint::black_box(vec![0u32; vertices.len()]));
-    }
     let mut contact = ShapeContact::default();
     for (index, vertex) in vertices.iter().enumerate() {
         if vertex.cnat & CNAT_NO_COLLISION != 0 {

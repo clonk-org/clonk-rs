@@ -4585,8 +4585,6 @@ impl Definition {
                     })
                     .flatten()
             });
-        #[cfg(test)]
-        let exec_started = std::time::Instant::now();
         let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
             ambient.map(|(state, object_id)| {
                 let ambient_walk_rotation = ambient_metadata
@@ -4782,9 +4780,6 @@ impl Definition {
                 )
             },
         );
-        #[cfg(test)]
-        EFFECT_EXEC_NANOS
-            .with(|elapsed| elapsed.set(elapsed.get() + exec_started.elapsed().as_nanos() as u64));
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();

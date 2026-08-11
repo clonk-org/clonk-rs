@@ -4169,42 +4169,34 @@ fn find_first_with_sort(
 /// parses as a condition or sort; conditions AND together, sorts merge into
 /// a Multiple; no conditions at all is a script error.
 fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriterion>)> {
-    #[cfg(test)]
-    let started = std::time::Instant::now();
-    let parsed = (|| {
-        let mut conditions = Vec::new();
-        let mut sorts = Vec::new();
-        for arg in args.iter().take(10) {
-            // The first raw-falsy parameter ends the criteria list
-            // (`if (!Data) break;`, C4Script.cpp:1996).
-            if !arg.as_bool() {
-                break;
-            }
-            match FindCondition::parse(arg) {
-                ParsedCriterion::Condition(condition) => conditions.push(condition),
-                ParsedCriterion::Sort(sort) => sorts.push(sort),
-                ParsedCriterion::None => {}
-            }
+    let mut conditions = Vec::new();
+    let mut sorts = Vec::new();
+    for arg in args.iter().take(10) {
+        // The first raw-falsy parameter ends the criteria list
+        // (`if (!Data) break;`, C4Script.cpp:1996).
+        if !arg.as_bool() {
+            break;
         }
-        if conditions.is_empty() {
-            return None;
+        match FindCondition::parse(arg) {
+            ParsedCriterion::Condition(condition) => conditions.push(condition),
+            ParsedCriterion::Sort(sort) => sorts.push(sort),
+            ParsedCriterion::None => {}
         }
-        let condition = if conditions.len() == 1 {
-            conditions.into_iter().next().expect("one condition")
-        } else {
-            FindCondition::And(conditions)
-        };
-        let sort = match sorts.len() {
-            0 => None,
-            1 => sorts.into_iter().next(),
-            _ => Some(SortCriterion::Multiple(sorts)),
-        };
-        Some((condition, sort))
-    })();
-    #[cfg(test)]
-    FIND_CRITERION_PARSE_NANOS
-        .with(|elapsed| elapsed.set(elapsed.get() + started.elapsed().as_nanos() as u64));
-    parsed
+    }
+    if conditions.is_empty() {
+        return None;
+    }
+    let condition = if conditions.len() == 1 {
+        conditions.into_iter().next().expect("one condition")
+    } else {
+        FindCondition::And(conditions)
+    };
+    let sort = match sorts.len() {
+        0 => None,
+        1 => sorts.into_iter().next(),
+        _ => Some(SortCriterion::Multiple(sorts)),
+    };
+    Some((condition, sort))
 }
 
 /// FindObject2/ObjectCount2 declare all ten native parameters as C4V_Array.
@@ -4242,9 +4234,7 @@ fn validate_array_criterion_args(function: &str, args: &[Value]) -> Result<(), R
 /// world without a sector map (legacy fixture contexts) — walk the master
 /// list.
 fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> Vec<ObjectId> {
-    #[cfg(test)]
-    let started = std::time::Instant::now();
-    let candidates = condition
+    condition
         .bounds()
         .and_then(|(rect, use_shapes)| {
             if use_shapes {
@@ -4255,11 +4245,7 @@ fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> 
         })
         // Unbounded criteria walk `Objs.First -> Next`, the forward master
         // list (C4FindObject.cpp:188-216), not the callback's storage order.
-        .unwrap_or_else(|| world.master_object_ids());
-    #[cfg(test)]
-    FIND_CANDIDATE_ENUM_NANOS
-        .with(|elapsed| elapsed.set(elapsed.get() + started.elapsed().as_nanos() as u64));
-    candidates
+        .unwrap_or_else(|| world.master_object_ids())
 }
 
 /// Collect matches in C++ walk order (C4FindObject::FindMany,
@@ -4274,35 +4260,22 @@ fn find_condition_matches(
     let mut matches = Vec::new();
     if !condition.uses_func() {
         let candidates = find_candidate_ids(world, condition);
-        #[cfg(test)]
-        let started = std::time::Instant::now();
         for object_id in candidates {
             if world.matches_find_condition_candidate(object_id, condition) == Some(true) {
                 matches.push(object_id);
             }
         }
-        #[cfg(test)]
-        FIND_CANDIDATE_MATCH_NANOS
-            .with(|elapsed| elapsed.set(elapsed.get() + started.elapsed().as_nanos() as u64));
         return Ok(matches);
     }
-    #[cfg(test)]
-    let force_legacy_prefix = FORCE_LEGACY_FIND_FUNC_SCALAR_PREFIX.with(Cell::get);
-    #[cfg(not(test))]
-    let force_legacy_prefix = false;
     let candidates = find_candidate_ids(world, condition);
-    #[cfg(test)]
-    let started = std::time::Instant::now();
     for object_id in candidates {
-        if !force_legacy_prefix {
-            match world.matches_find_condition_scalar_prefix(object_id, condition) {
-                Some(false) => continue,
-                Some(true) => {
-                    matches.push(object_id);
-                    continue;
-                }
-                None => {}
+        match world.matches_find_condition_scalar_prefix(object_id, condition) {
+            Some(false) => continue,
+            Some(true) => {
+                matches.push(object_id);
+                continue;
             }
+            None => {}
         }
         let Some(object) = world.get_object(object_id) else {
             continue;
@@ -4314,9 +4287,6 @@ fn find_condition_matches(
             matches.push(object_id);
         }
     }
-    #[cfg(test)]
-    FIND_CANDIDATE_MATCH_NANOS
-        .with(|elapsed| elapsed.set(elapsed.get() + started.elapsed().as_nanos() as u64));
     Ok(matches)
 }
 
@@ -4332,48 +4302,29 @@ fn find_first_condition_match(
     }
     if !condition.uses_func() {
         let candidates = find_candidate_ids(world, condition);
-        #[cfg(test)]
-        let started = std::time::Instant::now();
         let result = candidates.into_iter().find(|object_id| {
             world.matches_find_condition_candidate(*object_id, condition) == Some(true)
         });
-        #[cfg(test)]
-        FIND_CANDIDATE_MATCH_NANOS
-            .with(|elapsed| elapsed.set(elapsed.get() + started.elapsed().as_nanos() as u64));
         return Ok(result);
     }
-    #[cfg(test)]
-    let force_legacy_prefix = FORCE_LEGACY_FIND_FUNC_SCALAR_PREFIX.with(Cell::get);
-    #[cfg(not(test))]
-    let force_legacy_prefix = false;
     let candidates = find_candidate_ids(world, condition);
-    #[cfg(test)]
-    let started = std::time::Instant::now();
-    let result = (|| {
-        for object_id in candidates {
-            if !force_legacy_prefix {
-                match world.matches_find_condition_scalar_prefix(object_id, condition) {
-                    Some(false) => continue,
-                    Some(true) => return Ok(Some(object_id)),
-                    None => {}
-                }
-            }
-            let Some(object) = world.get_object(object_id) else {
-                continue;
-            };
-            if !object.status().is_active() {
-                continue;
-            }
-            if condition.check(world, &object)? && object_present_after_callback(world, object_id) {
-                return Ok(Some(object_id));
-            }
+    for object_id in candidates {
+        match world.matches_find_condition_scalar_prefix(object_id, condition) {
+            Some(false) => continue,
+            Some(true) => return Ok(Some(object_id)),
+            None => {}
         }
-        Ok(None)
-    })();
-    #[cfg(test)]
-    FIND_CANDIDATE_MATCH_NANOS
-        .with(|elapsed| elapsed.set(elapsed.get() + started.elapsed().as_nanos() as u64));
-    result
+        let Some(object) = world.get_object(object_id) else {
+            continue;
+        };
+        if !object.status().is_active() {
+            continue;
+        }
+        if condition.check(world, &object)? && object_present_after_callback(world, object_id) {
+            return Ok(Some(object_id));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether the criteria need the reentrant live-view evaluation path.

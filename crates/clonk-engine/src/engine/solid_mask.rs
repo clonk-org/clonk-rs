@@ -2911,36 +2911,25 @@ mod tests {
     }
 
     #[test]
-    fn grid_worlds_do_not_scan_rect_solid_mask_candidates() {
-        let mut landscape = Landscape::new(2, vec![0; 2]).expect("landscape builds");
-        landscape.set_world_height(2);
-        landscape.set_pixel_grid(landscape::PixelGrid::new(
-            2,
-            2,
-            vec![0; 4],
-            vec![0, 100],
-            vec![None, Some("Vehicle".into())],
-            vec![None; 2],
-        ));
-
-        let mut definition =
-            Definition::from_script("Mask", "Mask", "").expect("definition compiles");
-        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = Engine::new();
-        engine.set_landscape(landscape);
+    fn frozen_solid_mask_candidates_survive_a_grid_mode_change() {
+        let mut engine = grid_world_engine();
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
         engine
-            .register_definition(definition)
-            .expect("definition registers");
+            .register_definition(masked)
+            .expect("masked definition registers");
         engine
-            .spawn_object(SpawnConfig::new("Mask"))
-            .expect("mask object spawns");
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
 
-        // C4SolidMask::Put bakes grid-world masks into the landscape plane;
-        // movement never needs a second rectangle overlay (C4SolidMask.cpp:24-107).
-        SOLID_MASK_DEFINITION_LOOKUPS.with(|count| count.set(0));
-        assert!(engine.active_solid_mask_indices().is_empty());
-        assert_eq!(SOLID_MASK_DEFINITION_LOOKUPS.with(Cell::get), 0);
+        // Rust movement freezes fixture-overlay candidates before some
+        // contact/action callbacks and consumes them afterwards. A mode
+        // change across that seam must not erase an otherwise-live candidate.
+        let candidates = engine.active_solid_mask_indices();
+        engine.clear_landscape();
+
+        assert_eq!(engine.solid_masks_for_movement(&candidates).len(), 1);
     }
 
     #[test]

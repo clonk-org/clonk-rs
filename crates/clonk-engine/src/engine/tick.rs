@@ -399,23 +399,10 @@ impl Engine {
             let Some(idx) = self.find_object_index(current_id) else {
                 continue;
             };
-            #[cfg(test)]
-            let command_started = std::time::Instant::now();
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
-            #[cfg(test)]
-            let refresh_ocf_started = std::time::Instant::now();
             self.refresh_object_ocf(idx);
-            #[cfg(test)]
-            REFRESH_OCF_NANOS.with(|elapsed| {
-                elapsed.set(elapsed.get() + refresh_ocf_started.elapsed().as_nanos() as u64)
-            });
             let object_has_commands = !self.objects[idx].commands.is_empty();
-            #[cfg(test)]
-            let force_legacy_stippel_frame = FORCE_LEGACY_STIPPEL_FRAME_PATH.with(Cell::get);
-            #[cfg(not(test))]
-            let force_legacy_stippel_frame = false;
-            let skip_command_stage = !force_legacy_stippel_frame
-                && !object_has_commands
+            let skip_command_stage = !object_has_commands
                 && self.objects[idx].command_queue.is_empty()
                 && !self.objects[idx].commands.has_execution_tail();
             let (mut definition_id, mut action_library) = self.object_definition_context(idx)?;
@@ -514,9 +501,8 @@ impl Engine {
                         self.object_physical_will_fill_fair_cache(idx);
                     command_snapshots.insert(current_id, actor_snapshot);
                 }
-                let object_may_execute_command_work = force_legacy_stippel_frame
-                    || object_has_commands
-                    || !self.objects[idx].command_queue.is_empty();
+                let object_may_execute_command_work =
+                    object_has_commands || !self.objects[idx].command_queue.is_empty();
                 let mut landscape_slot = object_may_execute_command_work
                     .then(|| self.landscape.take())
                     .flatten();
@@ -580,8 +566,7 @@ impl Engine {
                     let previous_owner = object.state.owner;
                     let previous_crew = object.state.crew_member;
                     let previous_status = object.state.status;
-                    let outcome = if object.command_queue.is_empty() && !force_legacy_stippel_frame
-                    {
+                    let outcome = if object.command_queue.is_empty() {
                         CommandQueueOutcome::default()
                     } else {
                         object.execute_command_queue(
@@ -821,12 +806,6 @@ impl Engine {
             };
 
             dbg_stage(&self.objects[idx], "POSTCMD");
-            #[cfg(test)]
-            COMMAND_EXEC_NANOS.with(|elapsed| {
-                elapsed.set(elapsed.get() + command_started.elapsed().as_nanos() as u64)
-            });
-            #[cfg(test)]
-            let action_started = std::time::Instant::now();
             // ExecAction captures pAction before procedure steering. SetDir
             // may replace the live action through TurnAction, but C++ keeps
             // this entry for phase advance through the end of ExecAction.
@@ -835,14 +814,8 @@ impl Engine {
             let (exec_action_definition_id, exec_action_library) =
                 self.object_definition_context(idx)?;
             let mut exec_action_physical = None;
-            #[cfg(test)]
-            let action_physics_started = std::time::Instant::now();
             let exec_action_returned_early =
                 self.apply_physics_at_index_inner(idx, Some(&mut exec_action_physical))?;
-            #[cfg(test)]
-            ACTION_PHYSICS_NANOS.with(|elapsed| {
-                elapsed.set(elapsed.get() + action_physics_started.elapsed().as_nanos() as u64)
-            });
             if self.objects[idx].destroyed {
                 continue;
             }
@@ -1001,9 +974,7 @@ impl Engine {
             // the snap eat the sub-pixel remainder DoMovement just built.
             // Transitions recorded during movement/effects still drain at
             // the post-movement call below.
-            if force_legacy_stippel_frame
-                || allow_deleted_phase_end_start
-                || !self.objects[idx].pending_action_events.is_empty()
+            if allow_deleted_phase_end_start || !self.objects[idx].pending_action_events.is_empty()
             {
                 self.trigger_action_callbacks_impl(
                     idx,
@@ -1015,10 +986,6 @@ impl Engine {
                 continue;
             }
             (definition_id, action_library) = self.object_definition_context(idx)?;
-            #[cfg(test)]
-            ACTION_EXEC_NANOS.with(|elapsed| {
-                elapsed.set(elapsed.get() + action_started.elapsed().as_nanos() as u64)
-            });
             dbg_stage(&self.objects[idx], "PREMOVE");
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
@@ -1038,18 +1005,12 @@ impl Engine {
                     // DoMovement itself owns the mask lifecycle: DigFree and
                     // pre-motion contacts see the put mask, the first
                     // DoMotion removes it, and the tail always re-puts it.
-                    #[cfg(test)]
-                    let movement_started = std::time::Instant::now();
                     let _movement_outcome = self.exec_mobile_object_movement(
                         idx,
                         &action_library,
                         &definition_id,
                         &solid_mask_indices,
                     )?;
-                    #[cfg(test)]
-                    MOBILE_MOVEMENT_NANOS.with(|elapsed| {
-                        elapsed.set(elapsed.get() + movement_started.elapsed().as_nanos() as u64)
-                    });
                 } else {
                     // Static objects stabilize every frame
                     // (C4Movement.cpp:579).
@@ -1108,20 +1069,8 @@ impl Engine {
             // Masks follow every state change this frame
             // (C4Object::UpdateSolidMask fires from UpdatePos/Enter/
             // Exit/DoCon; the end-of-exec update covers the net state).
-            #[cfg(test)]
-            let solid_mask_started = std::time::Instant::now();
             self.update_solid_mask(idx);
-            #[cfg(test)]
-            FRAME_SOLID_MASK_UPDATE_NANOS.with(|elapsed| {
-                elapsed.set(elapsed.get() + solid_mask_started.elapsed().as_nanos() as u64)
-            });
-            #[cfg(test)]
-            let sector_started = std::time::Instant::now();
             self.update_sector_for_index(idx);
-            #[cfg(test)]
-            FRAME_SECTOR_UPDATE_NANOS.with(|elapsed| {
-                elapsed.set(elapsed.get() + sector_started.elapsed().as_nanos() as u64)
-            });
             // Script effect timers execute HERE in C++ — pEffects->Execute
             // follows ExecAction and ExecMovement inside C4Object::Execute
             // (C4Object.cpp:1069-1090): an action set by a timer callback
@@ -1297,8 +1246,6 @@ impl Engine {
                 self.sync_next_object_id(next_object_id);
                 self.audio_registry = audio_state;
                 Some(command)
-            } else if force_legacy_stippel_frame {
-                Some(CommandBatch::default())
             } else {
                 None
             };
@@ -1636,16 +1583,13 @@ impl Engine {
                 self.update_sector_for_index(idx);
             }
 
-            if force_legacy_stippel_frame || !self.objects[idx].pending_action_events.is_empty() {
+            if !self.objects[idx].pending_action_events.is_empty() {
                 self.trigger_action_callbacks(idx, Some(previous_action_name))?;
                 self.update_sector_for_index(idx);
             }
 
             if self.objects[idx].destroyed {
                 continue;
-            }
-            if force_legacy_stippel_frame {
-                self.update_sector_for_index(idx);
             }
             if command_snapshots_are_full
                 || command_snapshots.contains_key(&object_id)
@@ -1831,10 +1775,6 @@ impl Engine {
                 });
             }
             self.note_objects_changed();
-        }
-        #[cfg(test)]
-        if FORCE_LEGACY_SECTOR_REBUILD.with(Cell::get) {
-            self.rebuild_sectors();
         }
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
         // C4Game::Execute phase order (C4Game.cpp:810-822): ExecObjects

@@ -13,6 +13,7 @@ use crate::math::{fixtof, C4Fixed};
 use crate::{ObjectId, ParticleLayer};
 use clonk_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use thiserror::Error;
@@ -344,8 +345,9 @@ pub struct Particle {
 pub struct ParticleSystem {
     /// Insertion-ordered def list (C++ keeps a linked list, pDef0..pDefL).
     defs: Vec<ParticleDef>,
-    def_names: Rc<HashSet<String>>,
-    reloadable_def_names: Rc<HashSet<String>>,
+    def_names: RefCell<Rc<HashSet<String>>>,
+    reloadable_def_names: RefCell<Rc<HashSet<String>>>,
+    def_name_caches_dirty: Cell<bool>,
     particles: Vec<Particle>,
     pub safe_rng: SafeRng,
     /// Local `Config.Graphics.SmokeLevel` (default 200, C4Config.cpp:452).
@@ -363,8 +365,9 @@ impl Default for ParticleSystem {
     fn default() -> Self {
         Self {
             defs: Vec::new(),
-            def_names: Rc::new(HashSet::new()),
-            reloadable_def_names: Rc::new(HashSet::new()),
+            def_names: RefCell::new(Rc::new(HashSet::new())),
+            reloadable_def_names: RefCell::new(Rc::new(HashSet::new())),
+            def_name_caches_dirty: Cell::new(false),
             particles: Vec::new(),
             safe_rng: SafeRng::default(),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
@@ -415,15 +418,23 @@ pub struct ObjectFireEmission {
 }
 
 impl ParticleSystem {
-    fn refresh_def_name_caches(&mut self) {
-        self.def_names = Rc::new(self.defs.iter().map(|def| def.core.name.clone()).collect());
-        self.reloadable_def_names = Rc::new(
+    fn refresh_def_name_caches(&self) {
+        *self.def_names.borrow_mut() =
+            Rc::new(self.defs.iter().map(|def| def.core.name.clone()).collect());
+        *self.reloadable_def_names.borrow_mut() = Rc::new(
             self.defs
                 .iter()
                 .filter(|def| def.source_path.is_some())
                 .map(|def| def.core.name.clone())
                 .collect(),
         );
+        self.def_name_caches_dirty.set(false);
+    }
+
+    fn refresh_def_name_caches_if_dirty(&self) {
+        if self.def_name_caches_dirty.get() {
+            self.refresh_def_name_caches();
+        }
     }
 
     /// `C4ParticleSystem::GetDef` (C4Particles.cpp:465-473).
@@ -432,7 +443,12 @@ impl ParticleSystem {
     }
 
     pub fn get_def_mut(&mut self, name: &str) -> Option<&mut ParticleDef> {
-        self.defs.iter_mut().find(|def| def.core.name == name)
+        let index = self.defs.iter().position(|def| def.core.name == name)?;
+        // Name and source path are public fields, so arbitrary mutation may
+        // invalidate both script-host snapshots. Their next reader rebuilds
+        // from the live definition list after this mutable borrow ends.
+        self.def_name_caches_dirty.set(true);
+        self.defs.get_mut(index)
     }
 
     pub fn def_count(&self) -> usize {
@@ -621,11 +637,13 @@ impl ParticleSystem {
     pub fn def_names(&self) -> std::collections::HashSet<String> {
         #[cfg(test)]
         crate::PARTICLE_DEF_NAME_REBUILDS.with(|count| count.set(count.get() + 1));
-        self.def_names.as_ref().clone()
+        self.refresh_def_name_caches_if_dirty();
+        self.def_names.borrow().as_ref().clone()
     }
 
     pub(crate) fn shared_def_names(&self) -> Rc<HashSet<String>> {
-        Rc::clone(&self.def_names)
+        self.refresh_def_name_caches_if_dirty();
+        Rc::clone(&self.def_names.borrow())
     }
 
     /// Attach the group a definition was loaded from after the fact.
@@ -652,11 +670,13 @@ impl ParticleSystem {
     /// (`C4Particles.cpp:197`), so a manually registered simulation-only def
     /// can never reload however it is named.
     pub fn reloadable_def_names(&self) -> std::collections::HashSet<String> {
-        self.reloadable_def_names.as_ref().clone()
+        self.refresh_def_name_caches_if_dirty();
+        self.reloadable_def_names.borrow().as_ref().clone()
     }
 
     pub(crate) fn shared_reloadable_def_names(&self) -> Rc<HashSet<String>> {
-        Rc::clone(&self.reloadable_def_names)
+        self.refresh_def_name_caches_if_dirty();
+        Rc::clone(&self.reloadable_def_names.borrow())
     }
 
     /// `C4ParticleList::Remove` via FnClearParticles (C4Script.cpp:4925-4944):
@@ -683,7 +703,7 @@ impl ParticleSystem {
             }
         });
         for name in removed {
-            if let Some(def) = self.get_def_mut(&name) {
+            if let Some(def) = self.defs.iter_mut().find(|def| def.core.name == name) {
                 def.count -= 1;
             }
         }
@@ -692,7 +712,11 @@ impl ParticleSystem {
     /// Reinstate a particle from a saved snapshot, bumping its def count.
     /// Bypasses the init proc and creation limits (load path, not Create).
     pub fn restore_particle(&mut self, particle: Particle) {
-        if let Some(def) = self.get_def_mut(&particle.def_name) {
+        if let Some(def) = self
+            .defs
+            .iter_mut()
+            .find(|def| def.core.name == particle.def_name)
+        {
             def.count += 1;
         }
         self.particles.push(particle);
@@ -1362,6 +1386,33 @@ mod tests {
         assert_eq!(
             system.get_def("Smoke").unwrap().draw_proc,
             ParticleDrawProc::Std
+        );
+    }
+
+    #[test]
+    fn mutable_definition_access_refreshes_name_and_reloadability_snapshots() {
+        // GetDef and Reload inspect the live linked definition, so cached host
+        // snapshots must follow its current Name/Filename fields
+        // (C4Particles.cpp:197-205,465-473).
+        let mut system = ParticleSystem::default();
+        system.register_def(std_core("Old"), 1, 1.0).unwrap();
+
+        let def = system.get_def_mut("Old").expect("definition exists");
+        def.core.name = "New".to_owned();
+        def.source_path = Some(std::path::PathBuf::from("New.c4p"));
+
+        assert_eq!(system.def_names(), HashSet::from(["New".to_owned()]));
+        assert_eq!(
+            system.reloadable_def_names(),
+            HashSet::from(["New".to_owned()])
+        );
+        assert_eq!(
+            system.shared_def_names().as_ref(),
+            &HashSet::from(["New".to_owned()])
+        );
+        assert_eq!(
+            system.shared_reloadable_def_names().as_ref(),
+            &HashSet::from(["New".to_owned()])
         );
     }
 

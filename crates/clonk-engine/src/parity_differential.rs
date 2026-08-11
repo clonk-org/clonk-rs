@@ -1936,7 +1936,7 @@ fn parity_differential_matches_cpp_golden() {
         engine.objects[object_index].state.ocf = i(case, "ocf") as u32;
         let definition_id = engine.objects[object_index].definition_id.clone();
         engine
-            .exec_contact_action(object_index, crate::CNAT_BOTTOM, &definition_id, &[])
+            .exec_contact_action(object_index, crate::CNAT_BOTTOM, &definition_id)
             .expect("bottom flight ContactAction executes");
 
         let object = &engine.objects[object_index];
@@ -2048,7 +2048,7 @@ fn parity_differential_matches_cpp_golden() {
         let definition_id = engine.objects[object_index].definition_id.clone();
         let contact = i(case, "contact") as u32;
         engine
-            .exec_contact_action(object_index, contact, &definition_id, &[])
+            .exec_contact_action(object_index, contact, &definition_id)
             .expect("top/side flight ContactAction executes");
 
         let object = &engine.objects[object_index];

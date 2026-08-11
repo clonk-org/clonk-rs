@@ -671,12 +671,6 @@ impl Engine {
     }
 
     pub(crate) fn active_solid_mask_indices(&self) -> Vec<usize> {
-        // Grid worlds bake masks into the landscape plane. Every caller of
-        // this candidate list eventually reaches `solid_masks_for_movement`,
-        // which already returns an empty rectangle overlay in this mode.
-        if self.solid_mask_grid_mode() {
-            return Vec::new();
-        }
         let definitions_have_solid_masks = self
             .definitions
             .values()
