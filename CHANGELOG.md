@@ -4,6 +4,38 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-08-11
+
+### Bug fixes
+
+- Draw a classic menu row whose picture never resolved (#295)
+- Rebuild the fog repeller list when fog of war is enabled (#280)
+
+### Continuous integration
+
+- Auto-merge renovate dependency updates through the merge queue (#263)
+
+### Features
+
+- Let a host bar rejoining after elimination (#302)
+- Lift dragon rock shadows at the edge of their own darkness (#276)
+- Pick the X11 backend when Steam Input drives a Wayland session (#266)
+- Show time of day with a sun and moon (#264)
+
+### Performance
+
+- Instance exact old-style PXS line fragments (#281)
+- Coalesce compatible fogged landscape draws (#275)
+- Retain and instance object sprites (#265)
+
+### Refactoring
+
+- Remove obsolete internal code (#278)
+
+### Testing
+
+- Pin network-host readmission of a retired profile (#279)
+
 ## [0.9.7] - 2026-08-11
 
 ### Bug fixes
