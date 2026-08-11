@@ -11,6 +11,7 @@ pub mod context_menu;
 pub mod definition_sel;
 mod developer_chrome;
 pub mod developer_console;
+pub mod developer_context_menu;
 pub mod download_dialog;
 mod draw_primitives;
 pub mod flash_message;
