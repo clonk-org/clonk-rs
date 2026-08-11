@@ -277,6 +277,7 @@ impl<'a> Parser<'a> {
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
                 compiled: std::sync::OnceLock::new(),
+                resolved_snapshot: std::sync::OnceLock::new(),
             },
             error,
         ))
@@ -358,6 +359,7 @@ impl<'a> Parser<'a> {
                 overloaded: None,
                 hard_inherited_line: self.hard_inherited_line.take(),
                 compiled: std::sync::OnceLock::new(),
+                resolved_snapshot: std::sync::OnceLock::new(),
             },
             error,
         ))

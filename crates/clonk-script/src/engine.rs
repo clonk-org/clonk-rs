@@ -2735,7 +2735,7 @@ impl Engine {
         Some(ScriptFunctionResolution {
             scope,
             host_identity,
-            function: Arc::new(function.clone()),
+            function: function.resolved_snapshot(),
         })
     }
 
@@ -2747,7 +2747,7 @@ impl Engine {
         Some(ScriptFunctionResolution {
             scope: ScriptFunctionScope::Global,
             host_identity: function.global_link_host.unwrap_or(self.host_identity),
-            function: Arc::new(function.clone()),
+            function: function.resolved_snapshot(),
         })
     }
 
@@ -3506,6 +3506,58 @@ mod tests {
                 .0,
             Value::Int(2),
             "the global body resolves against the engine, not its LinkedTo host"
+        );
+    }
+
+    #[test]
+    fn repeated_function_resolution_retains_the_same_function_snapshot() {
+        // C4Aul lookup returns the installed C4AulFunc pointer, and deferred
+        // effect dispatch retains that pointer rather than copying its body
+        // on every lookup (C4Aul.cpp:118-127; C4Effect.cpp:42-56).
+        let mut host = Engine::new();
+        host.load_script("func Pulse() { return 1; }")
+            .expect("function compiles");
+
+        let first = host
+            .resolve_function("Pulse", false)
+            .expect("first lookup resolves");
+        let second = host
+            .resolve_function("Pulse", false)
+            .expect("second lookup resolves");
+
+        assert!(Arc::ptr_eq(&first.function, &second.function));
+    }
+
+    #[test]
+    fn include_relink_invalidates_the_resolved_function_snapshot() {
+        // Include linking appends the parent to OwnerOverloaded. A function
+        // pointer retained before that link stays immutable, while later
+        // lookups see the newly linked node (C4AulLink.cpp:113-141;
+        // C4AulParse.cpp:1404-1408).
+        let mut child = Engine::new();
+        child
+            .load_script("#strict 3\nfunc Pulse() { return inherited() + 1; }")
+            .expect("child function compiles");
+        let before = child
+            .resolve_function("Pulse", false)
+            .expect("pre-link lookup resolves");
+
+        let mut parent = Engine::new();
+        parent
+            .load_script("#strict 3\nfunc Pulse() { return 41; }")
+            .expect("parent function compiles");
+        child.merge_from(&parent);
+
+        let after = child
+            .resolve_function("Pulse", false)
+            .expect("post-link lookup resolves");
+        assert!(!Arc::ptr_eq(&before.function, &after.function));
+        assert_eq!(
+            child
+                .call_pinned_with_ref_args(&after.function, false, &[])
+                .expect("new snapshot carries the inherited target")
+                .0,
+            Value::Int(42)
         );
     }
 
