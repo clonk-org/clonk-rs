@@ -1180,6 +1180,20 @@ impl GpuSceneRecorder {
     ) {
         let mut vertices = Vec::with_capacity(self.next_solid_run_capacity(key));
         vertices.extend(endpoints);
+        self.push_solid_run(key, vertices);
+    }
+
+    /// Open a run around storage the caller already owns.
+    ///
+    /// A whole command arrives with its own buffer, so take it rather than
+    /// copying it into a fresh one, and only grow it to last frame's length.
+    fn adopt_solid_run(&mut self, key: SolidRunKey, mut vertices: Vec<GpuSolidVertex>) {
+        let capacity = self.next_solid_run_capacity(key);
+        vertices.reserve_exact(capacity.saturating_sub(vertices.len()));
+        self.push_solid_run(key, vertices);
+    }
+
+    fn push_solid_run(&mut self, key: SolidRunKey, vertices: Vec<GpuSolidVertex>) {
         self.commands.push(GpuCommand::Solid {
             vertices,
             topology: key.topology,
@@ -1369,7 +1383,7 @@ impl GpuSceneRecorder {
                     return;
                 }
             }
-            self.open_solid_run(
+            self.adopt_solid_run(
                 SolidRunKey {
                     topology,
                     alpha_mode,
@@ -2227,6 +2241,32 @@ mod tests {
             })
         ));
         assert_eq!(recorder.commands, before);
+    }
+
+    #[test]
+    fn a_whole_solid_command_keeps_the_buffer_it_arrived_with() {
+        // GUI lines and flattened scratch surfaces hand over a command they
+        // already built. Opening its run must adopt that buffer; copying it
+        // into a fresh one would allocate for every such command.
+        let vertex = GpuSolidVertex {
+            position: [0.5, 0.5, 1.0],
+            color: [1.0; 4],
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let mut vertices = Vec::with_capacity(8);
+        vertices.extend([vertex, vertex]);
+        let mut recorder = GpuSceneRecorder::default();
+
+        recorder.push(GpuCommand::Solid {
+            vertices,
+            topology: GpuPrimitiveTopology::LineList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: None,
+            blend: GpuBlend::Normal,
+            style: GpuSolidStyle::NONE,
+        });
+
+        assert_eq!(recorder.first_solid_run_capacity(), Some(8));
     }
 
     #[test]
