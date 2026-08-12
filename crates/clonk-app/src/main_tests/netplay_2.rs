@@ -1061,8 +1061,7 @@ fn recoverable_route_diagnostic_keeps_the_classic_host_lobby_open() {
     }));
     let (manager, events) = NetworkManager::test_stub();
     app.network = Some(manager);
-    let warning = "connection admission from 127.0.0.1:32122 failed: \
-                           connection transport failed: I/O error: unexpected end of file";
+    let warning = "could not connect to 127.0.0.1:32122 using TCP: Connection refused.";
     events
         .send(NetworkEvent::RecoverableRouteDiagnostic {
             client_id: None,
