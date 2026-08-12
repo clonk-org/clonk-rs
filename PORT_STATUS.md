@@ -3117,6 +3117,83 @@ an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
 
+- **LAN discovery re-probes every five seconds and a new host repeats its
+  announce for ten** (`LAN_DISCOVERY_INTERVAL`, `SearchDeadlines`,
+  `GameDiscoveryQueryGate`, `crates/clonk-network/src/search.rs`;
+  `AnnounceSchedule`, `crates/clonk-network/src/advertise.rs`; no key; C++
+  `C4StartupNetDlg::OnSec1Timer`, `C4StartupNetDlg::AddReferenceQuery`,
+  `C4Network2IODiscover::Announce`, LegacyClonk 7d43b47
+  src/C4StartupNetDlg.cpp:1116-1131,1133-1154,590-600;
+  src/C4Network2Discover.cpp:41-46,67-72; src/C4Network2IO.cpp:268-278).
+  Approved 2026-08-12, clonk-org/clonk-rs#306. C++ counts `iGameDiscoverInterval`
+  down once per second and re-sends the one-byte probe when the post-decrement
+  passes zero, so the LAN list refreshes every 31 seconds
+  (`C4NetGameDiscoveryInterval = 30`, src/C4StartupNetDlg.h:31), and a host
+  multicasts its four-byte announce unsolicited exactly once, from
+  `C4Network2IO::SetAcceptMode`; afterwards it speaks only when probed. A game
+  opened while the browser is already on screen is therefore invisible for up to
+  half a minute, and Reload exists to paper over the wait — the reporter's point
+  is that pressing it is not the user's job.
+
+  The port re-probes every `LAN_DISCOVERY_INTERVAL`, and a host repeats its
+  announce every two seconds for the ten seconds after the advertiser starts
+  before falling permanently silent, still answering every probe as C++ does.
+  Probe cadence and per-host reference-query cadence are decoupled to pay for
+  it: `GameDiscoveryQueryGate` refuses a second query to an address until
+  `C4NetMasterServerQueryInterval` after one that returned references — the
+  interval at which C++'s own probe would have re-created the row it deletes on
+  conversion (src/C4StartupNetDlg.cpp:329-334) — and until `C4NetErrorRefTimeout`
+  after one that returned none or failed. A host seen for the first time has no
+  entry and is queried on the very next probe, which is the whole point: a game
+  that opens now appears in about two seconds through its own announce, or
+  within five through the next probe, while a host already on the list is
+  re-queried on the oracle's thirty and its row never blinks. The masterserver
+  keeps `C4NetMasterServerQueryInterval` untouched; it is a shared public server
+  this project does not operate.
+
+  **Blast radius.** None of this is simulation-facing: discovery selects which
+  game to join, before any control is exchanged, and the reference it fetches is
+  the same document either way, so it cannot desync. A host serves no more HTTP
+  than under C++, because the gate holds the oracle's per-address intervals no
+  matter how often the probe fires. One arm of that gate is a deliberate
+  difference rather than a re-derivation: `IsSameRefQueryAddress` refuses to
+  match a failed non-masterserver row — `// if request failed, create a
+  duplicate anyway in case the game is opened now`
+  (src/C4StartupNetDlg.cpp:590-600) — so C++ retries a refusing host on every
+  probe, which at six probes per oracle interval would stack six error rows and
+  six connection attempts inside the ten seconds one row is displayed. The port
+  reuses `C4NetErrorRefTimeout`, the lifetime C++ already gives that row
+  (:506-531), so the retry lands as the stale row expires; it equals
+  `STARTUP_NETWORK_QUERY_ERROR_LIFETIME`, and `poll_startup_game_search` sweeps
+  expiries before draining events, so one address never holds two rows. The cost
+  that does leave this machine is borne by a C++ client sharing the group: a host
+  answers a probe with a *multicast* announce (src/C4Network2Discover.cpp:41-46),
+  and `AddReferenceQuery` dedupes unretrieved rows only, so every probe we send
+  makes every C++ client re-fetch every host's reference and blink a query row.
+  That is bounded work — one reference GET per host per probe, six times the
+  oracle rate — and it is why the interval is five seconds rather than one, and
+  why the host repeat is a ten-second burst rather than a heartbeat, which would
+  drive that re-fetch on every C++ client for the whole hosted session. In the
+  other direction the port is now *quieter* than C++: the gate absorbs the
+  announces another client's probe provokes, which today each cost a full
+  reference query. `MAX_LAN_DISCOVERS` is improved rather than threatened —
+  `lan_discover_count` resets on each probe, so a faster probe widens the window,
+  and C++ likewise buffers into its 64-slot array before any dedupe runs
+  (src/C4Network2Discover.cpp:75-90). No configuration key: C4Config has no
+  discovery-interval field, both neighbouring discovery divergences are keyless
+  for the same reason, and a player cannot evaluate a number whose only real cost
+  lands on someone else's client. Reload and F5 are untouched, and an explicit
+  refresh clears the gate so the button still means now. Pinned by
+  `a_resolved_lan_host_is_requeried_on_the_cpp_discovery_interval`,
+  `a_failed_lan_reference_query_backs_off_for_the_cpp_error_row_lifetime`,
+  `an_explicit_refresh_readmits_every_host_the_gate_is_holding`,
+  `lan_probes_run_more_often_than_the_masterserver_query`,
+  `a_stalled_search_worker_sends_one_catch_up_lan_probe`,
+  `a_started_host_repeats_its_discovery_announce_on_the_burst_interval`,
+  `a_host_falls_silent_after_its_announce_burst_window`, and the unchanged
+  `duplicate_live_lan_reference_queries_are_suppressed_by_address` and
+  `cpp_discovery_probe_produces_the_abi_padded_native_endian_reply`.
+
 - **A host may refuse to readmit a profile its player was eliminated with**
   (`ControlPlayerInfoRegistry::admit_request_with`,
   `crates/clonk-engine/src/control_execution.rs`; opt-in per host through
@@ -3442,7 +3519,8 @@ an ordered-map model gap.
   second case also loops each announce back once per shared interface: measured
   at 49 of the 64 `MAX_LAN_DISCOVERS` slots on the reporter's 22-interface Mac,
   so a machine with nine or more loopback-capable joined interfaces could spend
-  the cap on itself — bounded, reset at each 30 s probe, and only reachable by
+  the cap on itself — bounded, reset at each `LAN_DISCOVERY_INTERVAL` probe
+  (clonk-org/clonk-rs#306, which now clears it six times as often), and only reachable by
   running a host and the network dialog as two processes on one such machine,
   which the app itself never does because every host path drops the searcher
   first. Windows keeps the C++ behaviour unchanged — enumerating there needs
