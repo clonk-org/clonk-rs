@@ -970,8 +970,7 @@ async fn run_game_search(
     let mut masterserver_generation = 0_u64;
     let mut masterserver_failures = 0_u8;
     let mut masterserver_query: Option<tokio::task::JoinHandle<()>> = None;
-    let mut active_discovery_queries = HashSet::new();
-    let mut empty_discovery_query_expirations = HashMap::new();
+    let mut discovery_queries = GameDiscoveryQueryGate::default();
     let mut stopped = false;
     let mut datagram = [0_u8; 512];
     let mut next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
@@ -987,8 +986,7 @@ async fn run_game_search(
                     }
                     generation = generation.wrapping_add(1);
                     masterserver_failures = 0;
-                    active_discovery_queries.clear();
-                    empty_discovery_query_expirations.clear();
+                    discovery_queries.clear();
                     next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     let _ = events.send(StartupGameSearchEvent::Cleared);
@@ -1101,27 +1099,24 @@ async fn run_game_search(
                 masterserver_query.take();
                 next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
             }
-            if let Some(address) = discovery_address {
-                active_discovery_queries.remove(&address);
-            }
             match query.result {
                 Ok(response) => {
+                    let now = Instant::now();
                     if let Some(address) = discovery_address {
-                        if response.references.is_empty() {
-                            let now = Instant::now();
-                            empty_discovery_query_expirations.insert(
-                                address,
-                                now.checked_add(EMPTY_REFERENCE_LIFETIME).unwrap_or(now),
-                            );
-                        } else {
-                            empty_discovery_query_expirations.remove(&address);
-                        }
+                        discovery_queries.finish_at(
+                            now,
+                            address,
+                            if response.references.is_empty() {
+                                GameDiscoveryQueryOutcome::NoReferences
+                            } else {
+                                GameDiscoveryQueryOutcome::References
+                            },
+                        );
                     }
                     let ReferenceQueryResponse {
                         references,
                         masterserver,
                     } = response;
-                    let now = Instant::now();
                     let selected_reference = (query.direct_request_id.is_some()
                         || discovery_address.is_some())
                     .then(|| references.first().cloned())
@@ -1168,7 +1163,11 @@ async fn run_game_search(
                         && query.source == ReferenceQuerySource::Masterserver
                         && masterserver_failure_allows_fast_retry(&mut masterserver_failures);
                     if let Some(address) = discovery_address {
-                        empty_discovery_query_expirations.remove(&address);
+                        discovery_queries.finish_at(
+                            Instant::now(),
+                            address,
+                            GameDiscoveryQueryOutcome::Failed,
+                        );
                     }
                     let message = error.to_string();
                     if let Some(request_id) = query.direct_request_id {
@@ -1251,12 +1250,7 @@ async fn run_game_search(
             .await
             {
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
-                    if register_game_discovery_query(
-                        &mut active_discovery_queries,
-                        &mut empty_discovery_query_expirations,
-                        Instant::now(),
-                        &command,
-                    ) {
+                    if discovery_queries.begin_at(Instant::now(), &command) {
                         execute_search_command(
                             command,
                             (generation, masterserver_generation),
@@ -1277,28 +1271,65 @@ async fn run_game_search(
     }
 }
 
-fn register_game_discovery_query(
-    active: &mut HashSet<SocketAddr>,
-    empty_expirations: &mut HashMap<SocketAddr, Instant>,
-    now: Instant,
-    command: &SearchCommand,
-) -> bool {
-    match command {
-        SearchCommand::QueryReferences {
+/// How a LAN reference query ended, which is what decides when its address may
+/// be queried again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GameDiscoveryQueryOutcome {
+    References,
+    NoReferences,
+    Failed,
+}
+
+/// Per-host gate for LAN reference queries.
+///
+/// `C4StartupNetDlg` keeps one list entry per discovered address and
+/// `AddReferenceQuery` refuses a second query while that entry is still waiting
+/// for its answer (pinned oracle src/C4StartupNetDlg.cpp:1133-1154,590-600), so
+/// how often a host is re-queried follows the lifetime of the row its last
+/// answer produced rather than anything the probe decides.
+#[derive(Debug, Default)]
+struct GameDiscoveryQueryGate {
+    active: HashSet<SocketAddr>,
+    next_allowed: HashMap<SocketAddr, Instant>,
+}
+
+impl GameDiscoveryQueryGate {
+    fn clear(&mut self) {
+        self.active.clear();
+        self.next_allowed.clear();
+    }
+
+    fn begin_at(&mut self, now: Instant, command: &SearchCommand) -> bool {
+        let SearchCommand::QueryReferences {
             endpoint: ReferenceEndpoint::Address(address),
             source: ReferenceQuerySource::GameDiscovery,
             ..
-        } => {
-            if empty_expirations
-                .get(address)
-                .is_some_and(|expires_at| now < *expires_at)
-            {
-                return false;
-            }
-            empty_expirations.remove(address);
-            active.insert(*address)
+        } = command
+        else {
+            return true;
+        };
+        if self
+            .next_allowed
+            .get(address)
+            .is_some_and(|allowed_at| now < *allowed_at)
+        {
+            return false;
         }
-        _ => true,
+        self.next_allowed.remove(address);
+        self.active.insert(*address)
+    }
+
+    fn finish_at(&mut self, now: Instant, address: SocketAddr, outcome: GameDiscoveryQueryOutcome) {
+        self.active.remove(&address);
+        match outcome {
+            GameDiscoveryQueryOutcome::NoReferences => {
+                let allowed_at = now.checked_add(EMPTY_REFERENCE_LIFETIME).unwrap_or(now);
+                self.next_allowed.insert(address, allowed_at);
+            }
+            GameDiscoveryQueryOutcome::References | GameDiscoveryQueryOutcome::Failed => {
+                self.next_allowed.remove(&address);
+            }
+        }
     }
 }
 
@@ -2895,37 +2926,15 @@ Title=Empty\n",
             source: ReferenceQuerySource::GameDiscovery,
             timeout: REFERENCE_QUERY_TIMEOUT,
         };
-        let mut active = HashSet::new();
-        let mut empty_expirations = HashMap::new();
+        let mut gate = GameDiscoveryQueryGate::default();
         let now = Instant::now();
 
-        assert!(register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            now,
-            &command,
-        ));
-        assert!(!register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            now,
-            &command,
-        ));
-        assert!(active.remove(&address));
+        assert!(gate.begin_at(now, &command));
+        assert!(!gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::NoReferences);
         let empty_until = now + EMPTY_REFERENCE_LIFETIME;
-        empty_expirations.insert(address, empty_until);
-        assert!(!register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            empty_until - Duration::from_millis(1),
-            &command,
-        ));
-        assert!(register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            empty_until,
-            &command,
-        ));
+        assert!(!gate.begin_at(empty_until - Duration::from_millis(1), &command));
+        assert!(gate.begin_at(empty_until, &command));
     }
 
     #[test]
