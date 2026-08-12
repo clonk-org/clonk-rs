@@ -452,10 +452,37 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   whose `XPar` is not a live object (`C4Script.cpp:1670-1678`), which is why the
   chooser draws each rule from a throwaway instance.
 
-  Still uncovered, and the reason the issue itself stays open pending the
-  reporter's round log: nothing executes real Hazard content, so this pins the
-  engine contract the chooser depends on rather than the shipped scripts
-  themselves.
+  **Superseded in part on 2026-08-12: the reporter confirmed the rule *was*
+  enabled and that other players still damaged him. The cause is explosives,
+  and it is still upstream behaviour.** `FriendlyFire()` is consulted in exactly
+  one place on any weapon path — inside `CheckEnemy`
+  (`EnemyChecks.c:101`) — and blast damage never reaches it.
+  `C4Game::BlastObjects` (`C4Game.cpp:1243-1296`) filters on `Status`,
+  `Contained`, `pLayer`, the 5-pixel direct-hit box, `Category`,
+  `NoHorizontalMove`, range and the Grab/Vehicle/`DFA_FLOAT` exclusions, and on
+  nothing else: a living target takes `DoEnergy(-level/2)` + `DoDamage(level/2)`
+  with the causing player attached regardless of owner, team or hostility
+  (`C4Game.cpp:1281-1284`). `native_blast_objects`
+  (`crates/clonk-engine/src/compat/effects.rs:2081-2334`, living leg at
+  `:2215-2233`) mirrors that exactly, including the omission — there is not one
+  hostility reference in it, which is correct.
+
+  It reaches every AH_Predator round immediately: `System.c4g/Arena.c:59-65`
+  hands every relaunching player a Pistol plus `DoAmmo(GRAM, 2, pCrew)`, the
+  Pistol's grenade firemode is the default (`Pistol.c4d/Script.c:79`,
+  `FM_Condition = !GetUpgrade(KSLM)`, and `KSLM` never spawns there), and
+  `GrenadeLauncher.c4d/Grenade.c4d/Script.c:62-67` `HitObject` calls
+  `BlastObjects` + `Explode` with no `CheckEnemy`.
+  `the_no_friendly_fire_rule_declines_a_bullet_but_never_a_blast` pins both legs
+  in the no-teams AH_Predator shape: the bullet is declined, the blast lands and
+  carries the causing player.
+
+  **Do not add an owner/hostility filter to the engine blast.** It would diverge
+  from the oracle, desync, and change every scenario that relies on blast
+  reaching everything. Making the rule cover explosives is a deliberate
+  *gameplay* divergence and belongs in content (`#appendto` in
+  `planet/System.c4g`), gated on an explicit decision to diverge; it is not
+  taken here.
 
 - Open: **Malformed and duplicate direct-recreation player sources still have
   edge semantics beyond the savegame-resume path.** Ordinary network, replay
