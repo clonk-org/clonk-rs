@@ -10722,6 +10722,28 @@ impl EditCursorHitTest {
         crate::compat::objects::edit_cursor_object_at(&self.world, x, y, after)
     }
 
+    /// `C4Object::At(ctx, cty)` for one named object (`C4Object.cpp:1124-1131`).
+    ///
+    /// `RightButtonDown` asks this of every *selected* object rather than
+    /// calling `FindObject` (`C4EditCursor.cpp:251-257`), because the question
+    /// is "is the cursor on the selection", not "what is under the cursor" —
+    /// an object buried beneath another still keeps the selection alive.
+    ///
+    /// The rectangle is the sector/`At` one, so it carries `addtop()`: an
+    /// object shorter than 18 pixels is hit-tested as if it reached that far
+    /// up, which is exactly what makes small objects clickable.
+    pub fn object_covers(&self, object: ObjectId, x: i32, y: i32) -> bool {
+        // `if (Status) if (!Contained) if (Def)` — a contained object is never
+        // At() anywhere, which is the same exclusion `OCF_NotContained` makes
+        // on the FindObject path.
+        self.world.get(object).is_some_and(|live| {
+            live.container.is_none() && {
+                let rect = self.world.object_shape_rect(&live);
+                (0..rect.width).contains(&(x - rect.x)) && (0..rect.height).contains(&(y - rect.y))
+            }
+        })
+    }
+
     /// One object's live `C4Shape` rectangle, relative to its position.
     ///
     /// `DrawSelectMark` frames `cobj->x + cobj->Shape.x` by `Shape.Wdt`

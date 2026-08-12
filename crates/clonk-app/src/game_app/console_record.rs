@@ -339,7 +339,9 @@ impl GameApp {
                 DeveloperConsoleAction::Halt => self.set_runtime_pause(true),
                 DeveloperConsoleAction::TogglePause => self.toggle_runtime_pause(),
                 DeveloperConsoleAction::SetEditMode(mode) => {
+                    let previous = self.console_cursor_mode();
                     self.developer_console_edit_mode = mode;
+                    self.apply_developer_cursor_mode_change(previous);
                 }
                 DeveloperConsoleAction::SubmitInput(input) => {
                     let editing = self.developer_console_editing();

@@ -187,6 +187,9 @@ pub(crate) fn handle_console_viewport_event(
         } => {
             if let Some(identity) = windows.host(key).and_then(DeveloperHost::viewport_identity) {
                 app.close_physical_viewport_identity(identity);
+                // The popup is painted on this window's frame, so it dies with
+                // it rather than waiting for a click that can no longer arrive.
+                app.dismiss_console_viewport_context_menu_for(identity);
             }
             windows.close(key);
         }
@@ -275,6 +278,13 @@ pub(crate) fn handle_console_viewport_event(
             };
             viewport.last_pointer = (position.x as i32, position.y as i32);
             let (identity, local) = (viewport.identity, viewport.last_pointer);
+            let surface_local = viewport.surface_pointer();
+            // The popup owns the pointer while it is up — the row under the
+            // cursor highlights and the edit cursor beneath sees nothing.
+            if app.console_viewport_context_menu_motion(identity, surface_local) {
+                windows.request_redraw(key);
+                return;
+            }
             let modifiers = app.keyboard_modifiers;
             app.console_viewport_motion(
                 identity,
@@ -293,6 +303,21 @@ pub(crate) fn handle_console_viewport_event(
                 },
             ..
         } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            // The popup owns the whole click, press and release: C++'s menu is
+            // modal, so `LeftButtonUp` never runs while it is up. Letting the
+            // release through would clear the `Hold` that Grab contents sets
+            // one line before its control goes out — and the press that chose
+            // the item may already have closed the menu, so the grab is what
+            // is asked, not whether a popup is still open.
+            let identity = viewport.identity;
+            if app.take_console_viewport_pointer_grab(identity)
+                || app.console_viewport_context_menu_owns_pointer(identity)
+            {
+                return;
+            }
             app.console_viewport_release();
         }
         Event::WindowEvent {
@@ -308,6 +333,19 @@ pub(crate) fn handle_console_viewport_event(
                 return;
             };
             let (identity, local) = (viewport.identity, viewport.last_pointer);
+            let (surface_local, extent) = (viewport.surface_pointer(), viewport.surface_extent());
+            // An open popup takes the click: `TrackPopupMenu` is modal and the
+            // GTK menu holds a pointer grab, so neither ever lets one through
+            // to the viewport underneath.
+            if app.console_viewport_context_menu_click(identity, surface_local, extent) {
+                windows.request_redraw(key);
+                return;
+            }
+            // A press the popup did not take starts an ordinary gesture, so
+            // any grab left behind by a click whose release never arrived —
+            // the window lost focus between the two — ends here rather than
+            // swallowing this gesture's release instead.
+            app.console_viewport_context_menu_grab = None;
             // `LeftButtonDown(fControl)` and `Move`'s Shift arm read the
             // live modifier state (`C4EditCursor.cpp:143,206`).
             let modifiers = app.keyboard_modifiers;
@@ -318,6 +356,77 @@ pub(crate) fn handle_console_viewport_event(
                 modifiers.control_key(),
                 modifiers.shift_key(),
             );
+        }
+        // `C4EditCursor::RightButtonDown` settles the selection and
+        // `RightButtonUp` opens the menu over it (`C4EditCursor.cpp:244-274,
+        // 332-340`) — two messages, so a drag between them cannot change what
+        // the menu was built for.
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    button: winit::event::MouseButton::Right,
+                    ..
+                },
+            ..
+        } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            let (identity, local) = (viewport.identity, viewport.last_pointer);
+            // A second right-click while the popup is up cancels it and
+            // touches nothing underneath — the modal menu would have eaten
+            // the message. Without this the selection is re-picked *behind*
+            // the menu the user is still reading.
+            if app.console_viewport_context_menu_owns_pointer(identity) {
+                app.dismiss_console_viewport_context_menu();
+                app.console_viewport_context_menu_grab = Some(identity);
+                windows.request_redraw(key);
+                return;
+            }
+            let modifiers = app.keyboard_modifiers;
+            app.console_viewport_right_press(identity, local, 1.0, modifiers.control_key());
+        }
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Released,
+                    button: winit::event::MouseButton::Right,
+                    ..
+                },
+            ..
+        } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            let (identity, local) = (viewport.identity, viewport.surface_pointer());
+            // The release that completes a cancelling right-click opens
+            // nothing: `RightButtonUp` runs `DoContextMenu` once per press.
+            if app.take_console_viewport_pointer_grab(identity) {
+                return;
+            }
+            app.open_console_viewport_context_menu(identity, local);
+            windows.request_redraw(key);
+        }
+        // Escape closes the popup without running anything, as it does for
+        // both native menus.
+        Event::WindowEvent {
+            event:
+                WindowEvent::KeyboardInput {
+                    event:
+                        winit::event::KeyEvent {
+                            physical_key:
+                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape),
+                            state: winit::event::ElementState::Pressed,
+                            ..
+                        },
+                    ..
+                },
+            ..
+        } => {
+            if app.dismiss_console_viewport_context_menu() {
+                windows.request_redraw(key);
+            }
         }
         Event::WindowEvent {
             event: WindowEvent::RedrawRequested,

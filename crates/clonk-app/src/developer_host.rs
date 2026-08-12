@@ -10,12 +10,16 @@
 
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
 use crate::shell_window_host::ShellWindowHost;
+use crate::toolbox_window_host::ToolboxWindowHost;
 use crate::viewport_window_host::ViewportWindowHost;
 use crate::GameApp;
 
 pub enum DeveloperHost {
     Shell(ShellWindowHost),
     Viewport(ViewportWindowHost),
+    /// The `C4DevmodeDlg` notebook. There is one for the process, and it
+    /// outlives every close — only shutdown removes its record.
+    Toolbox(ToolboxWindowHost),
 }
 
 impl DeveloperHost {
@@ -25,7 +29,16 @@ impl DeveloperHost {
     pub fn as_shell_mut(&mut self) -> Option<&mut ShellWindowHost> {
         match self {
             Self::Shell(shell) => Some(shell),
-            Self::Viewport(_) => None,
+            Self::Viewport(_) | Self::Toolbox(_) => None,
+        }
+    }
+
+    /// The toolbox's concrete state, for the page it draws and the position it
+    /// is asked to remember.
+    pub fn as_toolbox_mut(&mut self) -> Option<&mut ToolboxWindowHost> {
+        match self {
+            Self::Toolbox(toolbox) => Some(toolbox),
+            Self::Shell(_) | Self::Viewport(_) => None,
         }
     }
 
@@ -33,7 +46,7 @@ impl DeveloperHost {
     pub fn viewport_identity(&self) -> Option<u64> {
         match self {
             Self::Viewport(viewport) => Some(viewport.identity),
-            Self::Shell(_) => None,
+            Self::Shell(_) | Self::Toolbox(_) => None,
         }
     }
 
@@ -42,6 +55,7 @@ impl DeveloperHost {
         match self {
             Self::Shell(shell) => &shell.window,
             Self::Viewport(viewport) => &viewport.window,
+            Self::Toolbox(toolbox) => &toolbox.window,
         }
     }
 }
@@ -51,6 +65,7 @@ impl DeveloperWindowHost for DeveloperHost {
         match self {
             Self::Shell(shell) => shell.resize(width, height),
             Self::Viewport(viewport) => viewport.resize(width, height),
+            Self::Toolbox(toolbox) => toolbox.resize(width, height),
         }
     }
 
@@ -58,6 +73,7 @@ impl DeveloperWindowHost for DeveloperHost {
         match self {
             Self::Shell(shell) => shell.request_redraw(),
             Self::Viewport(viewport) => viewport.request_redraw(),
+            Self::Toolbox(toolbox) => toolbox.request_redraw(),
         }
     }
 
@@ -65,6 +81,7 @@ impl DeveloperWindowHost for DeveloperHost {
         match self {
             Self::Shell(shell) => shell.set_visible(visible),
             Self::Viewport(viewport) => viewport.set_visible(visible),
+            Self::Toolbox(toolbox) => toolbox.set_visible(visible),
         }
     }
 
@@ -72,6 +89,7 @@ impl DeveloperWindowHost for DeveloperHost {
         match self {
             Self::Shell(shell) => shell.visible(),
             Self::Viewport(viewport) => viewport.visible(),
+            Self::Toolbox(toolbox) => toolbox.visible(),
         }
     }
 }
@@ -81,6 +99,7 @@ impl DeveloperWindowPresenter<GameApp> for DeveloperHost {
         match self {
             Self::Shell(shell) => shell.present(app),
             Self::Viewport(viewport) => viewport.present(app),
+            Self::Toolbox(toolbox) => toolbox.present(app),
         }
     }
 }

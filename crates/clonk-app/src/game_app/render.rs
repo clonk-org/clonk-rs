@@ -2652,7 +2652,8 @@ impl GameApp {
                 self.edit_cursor_drag_frame = Some(((x, y), (x, y)));
                 self.developer_selection.clear(SelectionWriter::EditCursor)
             }
-            None => None,
+            // The bare clear is the right button's alone (`right_press`).
+            Some(SelectionEdit::Clear) | None => None,
         }
     }
 
@@ -2785,6 +2786,606 @@ impl GameApp {
             }
         }
         result
+    }
+
+    /// `C4EditCursor::RightButtonDown` (`C4EditCursor.cpp:244-274`).
+    ///
+    /// The selection is settled *before* the menu opens, so the enablement the
+    /// menu is built with already describes what its Delete would act on.
+    pub(crate) fn console_viewport_right_press(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+        control: bool,
+    ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        use clonk_engine::developer_cursor::{right_press, SelectionEdit};
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let (x, y) = self.console_viewport_world(identity, local, scale)?;
+        let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        // `fCursorIsOnSelection` — `pLnk->Obj->At(X, Y)` over the selection
+        // itself, not the topmost object under the cursor (`:251-257`).
+        let cursor_on_selection = self
+            .developer_selection
+            .objects()
+            .iter()
+            .any(|object| hit_test.object_covers(*object, x, y));
+        let target = hit_test.object_at(x, y, None);
+        match right_press(
+            self.console_cursor_mode(),
+            control,
+            target,
+            cursor_on_selection,
+        ) {
+            Some(SelectionEdit::Replace(object)) => self
+                .developer_selection
+                .replace(SelectionWriter::EditCursor, object),
+            Some(SelectionEdit::Clear) => {
+                self.developer_selection.clear(SelectionWriter::EditCursor)
+            }
+            // The right button produces neither a toggle nor a rubber band.
+            Some(SelectionEdit::Remove(_))
+            | Some(SelectionEdit::Add(_))
+            | Some(SelectionEdit::ClearAndDragFrame)
+            | None => None,
+        }
+    }
+
+    /// `C4EditCursor::RightButtonUp` -> `DoContextMenu` (`:332-340`,
+    /// `:582-628`).
+    ///
+    /// `local` is in the viewport window's *surface* coordinates, which is
+    /// where the popup is drawn — C++ pops up at the screen cursor, but this
+    /// menu lives on the viewport's own frame.
+    pub(crate) fn open_console_viewport_context_menu(&mut self, identity: u64, local: (i32, i32)) {
+        use clonk_engine::developer_cursor::context_menu;
+        use clonk_frontend::developer_context_menu::ViewportContextMenu;
+
+        // `Target = nullptr` — the hover is dropped before the menu opens.
+        self.developer_selection.set_hover(None);
+        let selection = self.developer_selection.objects();
+        // `Selection.GetObject()->Contents.ObjectCount()` asks the *first*
+        // selected object only (`:590`).
+        let contents = selection
+            .first()
+            .and_then(|object| self.snapshot.object(*object))
+            .map_or(0, |object| object.contents.len());
+        let enablement = context_menu(
+            self.console_cursor_mode(),
+            self.developer_console_editing(),
+            !selection.is_empty(),
+            contents,
+        );
+        let labels = self.console_viewport_context_labels();
+        self.console_viewport_context_menu = Some((
+            identity,
+            ViewportContextMenu::new(enablement, &labels, local),
+        ));
+    }
+
+    /// The resource strings `DoContextMenu` writes into the menu
+    /// (`:592-595`).
+    fn console_viewport_context_labels(
+        &self,
+    ) -> clonk_frontend::developer_context_menu::ViewportContextLabels {
+        use clonk_frontend::developer_context_menu::ViewportContextLabels;
+
+        let mut labels = ViewportContextLabels::default();
+        for (target, key, fallback) in [
+            (&mut labels.delete, "IDS_MNU_DELETE", "Delete"),
+            (&mut labels.duplicate, "IDS_MNU_DUPLICATE", "Duplicate"),
+            (&mut labels.contents, "IDS_MNU_CONTENTS", "Grab contents"),
+            (&mut labels.properties, "IDS_CNS_PROPERTIES", "Properties"),
+            (&mut labels.tools, "IDS_CNS_TOOLS", "Tools"),
+        ] {
+            *target = self.runtime_resource_text(key, fallback);
+        }
+        labels
+    }
+
+    /// Track the pointer over an open popup so its rows highlight.
+    pub(crate) fn console_viewport_context_menu_motion(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+    ) -> bool {
+        let Some((open, menu)) = self.console_viewport_context_menu.as_mut() else {
+            return false;
+        };
+        if *open != identity {
+            return false;
+        }
+        menu.handle_pointer_move(clonk_frontend::GuiPoint::new(
+            local.0 as f32,
+            local.1 as f32,
+        ));
+        true
+    }
+
+    /// Whether an open popup owns this viewport's pointer events.
+    ///
+    /// C++'s menu is modal — `TrackPopupMenu` blocks until an item is chosen
+    /// (`C4EditCursor.cpp:597`) and the GTK menu holds a pointer grab — so
+    /// *no* button message reaches the viewport while it is up. The port's
+    /// popup is painted rather than owned by the window system, so the grab
+    /// has to be made explicit, and it covers both buttons: without it a
+    /// right-click over the popup would re-pick the selection underneath it,
+    /// and the release that follows a chosen item would run
+    /// `LeftButtonUp` — clearing the very `Hold` Grab contents had just set.
+    pub(crate) fn console_viewport_context_menu_owns_pointer(&self, identity: u64) -> bool {
+        self.console_viewport_context_menu
+            .as_ref()
+            .is_some_and(|(open, _)| *open == identity)
+    }
+
+    /// Consume the grab a swallowed press left behind, so exactly one release
+    /// is swallowed with it.
+    pub(crate) fn take_console_viewport_pointer_grab(&mut self, identity: u64) -> bool {
+        self.console_viewport_context_menu_grab
+            .take_if(|held| *held == identity)
+            .is_some()
+    }
+
+    /// A click while the popup is up. Returns whether the menu consumed it.
+    pub(crate) fn console_viewport_context_menu_click(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use clonk_frontend::developer_context_menu::ViewportContextOutcome;
+
+        let Some((open, menu)) = self.console_viewport_context_menu.as_mut() else {
+            return false;
+        };
+        if *open != identity {
+            return false;
+        }
+        let outcome = menu.handle_pointer_up(
+            clonk_frontend::GuiPoint::new(local.0 as f32, local.1 as f32),
+            extent.0,
+            extent.1,
+        );
+        // The release completing this click belongs to the menu too, whether
+        // or not the menu is still up by the time it arrives.
+        self.console_viewport_context_menu_grab = Some(identity);
+        match outcome {
+            ViewportContextOutcome::Activate(item) => {
+                self.console_viewport_context_menu = None;
+                self.activate_console_viewport_context_item(item);
+            }
+            // A greyed row or the separator: swallowed, and the menu stays.
+            ViewportContextOutcome::Ignored => {}
+            ViewportContextOutcome::Dismiss => self.console_viewport_context_menu = None,
+        }
+        true
+    }
+
+    /// Close the popup without running anything — the Escape key.
+    pub(crate) fn dismiss_console_viewport_context_menu(&mut self) -> bool {
+        self.console_viewport_context_menu.take().is_some()
+    }
+
+    /// Close the popup only if it belongs to `identity`, so one viewport's
+    /// window closing never takes a sibling's menu with it.
+    pub(crate) fn dismiss_console_viewport_context_menu_for(&mut self, identity: u64) -> bool {
+        self.console_viewport_context_menu
+            .take_if(|(open, _)| *open == identity)
+            .is_some()
+    }
+
+    /// `DoContextMenu`'s switch over the chosen item (`:602-608`).
+    fn activate_console_viewport_context_item(
+        &mut self,
+        item: clonk_frontend::developer_context_menu::ViewportContextItem,
+    ) {
+        use clonk_frontend::developer_context_menu::ViewportContextItem;
+
+        match item {
+            ViewportContextItem::Delete => self.console_delete_selection(),
+            ViewportContextItem::Duplicate => self.console_duplicate_selection(),
+            ViewportContextItem::GrabContents => self.console_grab_contents(),
+            ViewportContextItem::Properties => self.open_developer_prop_tools(),
+        }
+    }
+
+    /// `C4EditCursor::OpenPropTools` (`C4EditCursor.cpp:361-374`).
+    ///
+    /// The page follows the cursor mode, and both pages exist from the first
+    /// call: `C4DevmodeDlg::AddPage` appends without showing, so the notebook
+    /// holds them whichever one is switched to (`C4DevmodeDlg.cpp:53-77`).
+    pub(crate) fn open_developer_prop_tools(&mut self) {
+        use crate::developer_windows::ToolboxPage;
+        use crate::toolbox_window_host::prop_tools_page;
+
+        let page = prop_tools_page(self.console_cursor_mode());
+        // `C4ToolsDlg::Open`'s tail on a build with no dialog of its own:
+        // `Active = true` plus the ordered refresh (`C4ToolsDlg.cpp:399-408`).
+        if page == ToolboxPage::Tools {
+            let _ = self.developer_tools.open();
+        }
+        for page in [ToolboxPage::Tools, ToolboxPage::Property] {
+            let effect = self.developer_toolbox.add_page(page);
+            self.developer_toolbox_effects.extend(effect);
+        }
+        let position = self.developer_toolbox.remembered_position();
+        let effect = self.developer_toolbox.switch_page(page, position);
+        self.developer_toolbox_effects.extend(effect);
+    }
+
+    /// `C4EditCursor::SetMode`'s prop-tools arm (`C4EditCursor.cpp:503-518`).
+    ///
+    /// A mode change clears the page the mode it *left* owns and reopens the
+    /// toolbox only when one of the two was already up — switching modes never
+    /// opens it from nothing, which is why the console's Draw button alone
+    /// still shows no window.
+    pub(crate) fn apply_developer_cursor_mode_change(
+        &mut self,
+        previous: clonk_engine::developer_cursor::CursorMode,
+    ) {
+        use clonk_engine::developer_cursor::{set_mode, PropertyToolsPage};
+
+        let change = set_mode(
+            previous,
+            self.console_cursor_mode(),
+            self.developer_tools.active(),
+            // `C4PropertyDlg::Active`, which only a *shown* property page
+            // sets. Asking `current_page` instead would call a closed toolbox
+            // active forever, because hiding it keeps its pages.
+            self.developer_toolbox.visible()
+                && self.developer_toolbox.current_page()
+                    == Some(crate::developer_windows::ToolboxPage::Property),
+        );
+        // `Clear()` drops `Active` and nothing else, which is why re-opening
+        // restores the previous selection rather than the defaults.
+        if change.clear_page == Some(PropertyToolsPage::Tools) {
+            self.developer_tools.clear();
+        }
+        if change.reopen_prop_tools {
+            self.open_developer_prop_tools();
+        }
+    }
+
+    /// The toolbox window closing, from its own close button.
+    ///
+    /// `C4DevmodeDlg`'s `delete-event` hides rather than destroys, and the
+    /// shared window's `"hide"` signal is separately connected to
+    /// `C4ToolsDlg::OnWindowHide`, whose whole body is `Active = false`
+    /// (`C4ToolsDlg.cpp:393,1098-1101`). Dropping that second half is what
+    /// would make the next mode change resurrect a toolbox the user closed —
+    /// `SetMode` reopens on `ToolsDlg.Active || PropertyDlg.Active`.
+    pub(crate) fn close_developer_toolbox(&mut self, position: Option<(i32, i32)>) {
+        let effect = self.developer_toolbox.close(position);
+        self.developer_toolbox_effects.extend(effect);
+        self.developer_tools.clear();
+    }
+
+    /// Draw one toolbox page at the window's extent.
+    pub(crate) fn render_developer_toolbox_page(
+        &mut self,
+        page: crate::developer_windows::ToolboxPage,
+        width: u32,
+        height: u32,
+    ) -> clonk_graphics::Surface {
+        use crate::developer_windows::ToolboxPage;
+
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let font = self.assets.font_arc();
+        match page {
+            ToolboxPage::Tools => self
+                .developer_tools_page_model()
+                .render(&mut surface, font.as_ref()),
+            ToolboxPage::Property => {
+                let text = self.developer_property_page_text();
+                crate::developer_toolbox_view::render_property_page(
+                    &mut surface,
+                    font.as_ref(),
+                    &text,
+                );
+            }
+        }
+        surface
+    }
+
+    /// A click on whichever page the toolbox shows.
+    pub(crate) fn developer_toolbox_click(&mut self, point: (i32, i32), extent: (u32, u32)) {
+        use crate::developer_toolbox_view::ToolsPageAction;
+        use crate::developer_windows::ToolboxPage;
+
+        // The property page is a read-only text box (`IDC_EDITOUTPUT`).
+        if self.developer_toolbox.current_page() != Some(ToolboxPage::Tools) {
+            return;
+        }
+        let Some(action) = self
+            .developer_tools_page_model()
+            .hit(extent.0, extent.1, point)
+        else {
+            return;
+        };
+        match action {
+            // The one control on the page that is a synchronized *control*:
+            // every peer has to change landscape mode at the same tick
+            // (`C4ToolsDlg.cpp:875-879`).
+            ToolsPageAction::SetLandscapeMode(mode) => self.submit_editor_landscape_mode(mode),
+            ToolsPageAction::SetTool(tool) => self.developer_tools.set_tool(tool, false),
+            ToolsPageAction::SetIft(ift) => {
+                self.developer_tools.set_ift(ift);
+            }
+            ToolsPageAction::SetGrade(grade) => {
+                self.developer_tools.set_grade(grade);
+            }
+            // `C4ToolsDlg::SetMaterial` runs `AssertValidTexture` after the
+            // material lands (`:565-572`), which is what stops a Static
+            // landscape being handed a pair its tex map has no slot for.
+            ToolsPageAction::SetMaterial(material) => {
+                self.developer_tools.set_material(material);
+                self.assert_valid_developer_texture();
+            }
+            ToolsPageAction::SetTexture(texture) => self.developer_tools.set_texture(texture),
+        }
+    }
+
+    /// `C4ToolsDlg::AssertValidTexture` (`C4ToolsDlg.cpp:965-983`).
+    fn assert_valid_developer_texture(&mut self) {
+        let Some(state) = self.engine.developer_landscape_tool_state() else {
+            return;
+        };
+        if let Some(texture) = clonk_engine::developer_landscape::corrected_tool_texture(
+            state.texmap(),
+            self.developer_tools.material(),
+            self.developer_tools.texture(),
+            state.mode,
+        ) {
+            self.developer_tools.set_texture(texture);
+        }
+    }
+
+    /// `C4ToolsDlg::SetLandscapeMode(iMode, false)` (`C4ToolsDlg.cpp:865-879`).
+    ///
+    /// The local path *changes nothing*: it confirms the one destructive
+    /// transition and enqueues `EMDT_SetMode`. The dialog state moves only
+    /// when that control comes back out of the queue, which is what keeps
+    /// every peer's landscape mode identical.
+    pub(crate) fn submit_editor_landscape_mode(
+        &mut self,
+        target: clonk_engine::developer_tools::LandscapeMode,
+    ) {
+        use clonk_engine::developer_tools::landscape_mode_needs_confirmation;
+
+        let Some(mode) = self.engine.landscape().map(|landscape| landscape.mode()) else {
+            return;
+        };
+        if landscape_mode_needs_confirmation(landscape_mode_of(mode), target) {
+            // A declined confirmation **aborts**: `SetLandscapeMode` returns
+            // false before enqueueing anything (`C4ToolsDlg.cpp:869-874`). And
+            // on the reference build it is always declined — `C4Console::
+            // Message`'s two bodies are behind `_WIN32`/`WITH_DEVELOPER_MODE`
+            // and past their `#endif` it is a bare `return false`
+            // (`C4Console.cpp:841-853`). So the one destructive transition is
+            // refused there, and is refused here. Saying so is the port's own
+            // choice of surface; discarding an exact landscape on a click no
+            // dialog ever confirmed would be the worse divergence.
+            let message = self.runtime_resource_text(
+                "IDS_CNS_EXACTTOSTATIC",
+                "The exact landscape would be lost. Switching to static is refused.",
+            );
+            self.developer_console.out(&message);
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_draw_tool(clonk_engine::EmDrawToolControlData {
+                action: clonk_engine::EMDT_SET_MODE,
+                mode: landscape_mode_value(target),
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor landscape mode");
+        }
+    }
+
+    /// Everything the Tools page draws, read fresh — C++ refreshes the same
+    /// controls from `Game.Landscape` on every `Open` and `EnableControls`.
+    pub(crate) fn developer_tools_page_model(
+        &self,
+    ) -> crate::developer_toolbox_view::ToolsPageModel {
+        use crate::developer_toolbox_view::ToolsPageModel;
+        use clonk_engine::developer_tools::LandscapeMode;
+
+        let state = self.engine.developer_landscape_tool_state();
+        let material = self.developer_tools.material().to_owned();
+        ToolsPageModel {
+            mode: state.as_ref().map_or(LandscapeMode::Undefined, |state| {
+                landscape_mode_of(state.mode)
+            }),
+            has_map: state.as_ref().is_some_and(|state| state.has_map),
+            tool: self.developer_tools.tool(),
+            grade: self.developer_tools.grade(),
+            ift: self.developer_tools.ift(),
+            materials: state
+                .as_ref()
+                .map(|state| state.material_catalog())
+                .unwrap_or_default(),
+            textures: state
+                .as_ref()
+                .map(|state| state.texture_catalog(&material))
+                .unwrap_or_default(),
+            texture: self.developer_tools.texture().to_owned(),
+            material,
+        }
+    }
+
+    /// `C4PropertyDlg::Update` over the live selection
+    /// (`C4PropertyDlg.cpp:169-256`).
+    fn developer_property_page_text(&self) -> String {
+        use clonk_engine::developer_property_text::{property_panel_text, PropertyPanelStrings};
+
+        let mut strings = PropertyPanelStrings {
+            no_object: String::new(),
+            type_line: String::new(),
+            owner: String::new(),
+            contents: String::new(),
+            action: String::new(),
+            locals: String::new(),
+            effects: String::new(),
+            multiple_objects: String::new(),
+        };
+        for (target, key, fallback) in [
+            (&mut strings.no_object, "IDS_CNS_NOOBJECT", "No object"),
+            (&mut strings.type_line, "IDS_CNS_TYPE", "Type: %s (%s)"),
+            (&mut strings.owner, "IDS_CNS_OWNER", "Owner: %s"),
+            (&mut strings.contents, "IDS_CNS_CONTENTS", "Contents:"),
+            (&mut strings.action, "IDS_CNS_ACTION", "Action:"),
+            (&mut strings.locals, "IDS_CNS_LOCALS", "Local variables:"),
+            (&mut strings.effects, "IDS_CNS_EFFECTS", "Effects:"),
+            (
+                &mut strings.multiple_objects,
+                "IDS_CNS_MULTIPLEOBJECTS",
+                "%d objects selected",
+            ),
+        ] {
+            *target = self.runtime_resource_text(key, fallback);
+        }
+        let selection = self.developer_selection.objects();
+        let object = selection
+            .first()
+            .filter(|_| selection.len() == 1)
+            .and_then(|id| self.developer_property_page_object(*id));
+        property_panel_text(&strings, selection.len(), object.as_ref())
+    }
+
+    /// One selected object's already-formatted detail, in C++'s section order.
+    fn developer_property_page_object(
+        &self,
+        id: clonk_engine::ObjectId,
+    ) -> Option<clonk_engine::developer_property_text::PropertyPanelObject> {
+        use clonk_engine::developer_inspection::{effect_lines, name_list};
+        use clonk_engine::developer_locals::local_lines;
+        use clonk_engine::developer_property_text::PropertyPanelObject;
+
+        let object = self.snapshot.object(id)?;
+        let definition = object.definition_id.clone();
+        let name_of = |id: &str| {
+            self.engine
+                .definition(id)
+                .map(|definition| definition.name().to_owned())
+        };
+        let contents = name_list(&object.contents, &self.snapshot, name_of);
+        Some(PropertyPanelObject {
+            name: object
+                .custom_name
+                .clone()
+                .or_else(|| name_of(&definition))
+                .unwrap_or_else(|| definition.clone()),
+            id: definition.clone(),
+            // `ValidPlr(cobj->Owner)` (`:190-194`) — NO_OWNER prints no line.
+            owner: self
+                .engine
+                .player(object.owner)
+                .map(|player| player.name().to_owned()),
+            contents: (!contents.is_empty()).then_some(contents),
+            // `Action.Act != ActIdle` (`:203-208`).
+            action: object
+                .action_procedure
+                .clone()
+                .filter(|action| !action.is_empty()),
+            locals: local_lines(&object.local_vars, &self.developer_local_names(&definition)),
+            effects: effect_lines(&object.effects),
+        })
+    }
+
+    /// A definition's declared `local` names, which decide the named half of
+    /// the panel's locals section.
+    fn developer_local_names(&self, definition: &str) -> Vec<String> {
+        self.engine
+            .definition(definition)
+            .map(|definition| {
+                definition
+                    .local_variable_names()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `C4EditCursor::Delete` (`:350-359`).
+    fn console_delete_selection(&mut self) {
+        if !self.console_editing_ok() {
+            return;
+        }
+        self.submit_editor_selection_action(clonk_engine::EMMO_REMOVE, "delete");
+    }
+
+    /// `C4EditCursor::Duplicate` (`:376-380`).
+    ///
+    /// C++ does **not** open this one with `EditingOK`, unlike `Delete` — the
+    /// menu item's own enablement is the only gate, so a caller reaching it
+    /// another way would duplicate during a replay.
+    fn console_duplicate_selection(&mut self) {
+        self.submit_editor_selection_action(clonk_engine::EMMO_DUPLICATE, "duplicate");
+    }
+
+    /// `C4EditCursor::GrabContents` (`:640-651`).
+    ///
+    /// The selection is *replaced* by the first selected object's contents and
+    /// only then exited, so the command acts on what was inside the container,
+    /// not on the container. `Hold` is set before the control goes out, which
+    /// is what lets the freed objects be dragged straight out of it.
+    fn console_grab_contents(&mut self) {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let Some(container) = self.developer_selection.objects().first().copied() else {
+            return;
+        };
+        let Some(contents) = self
+            .snapshot
+            .object(container)
+            .map(|object| object.contents.clone())
+        else {
+            return;
+        };
+        self.developer_selection
+            .select_frame(SelectionWriter::EditCursor, contents);
+        self.edit_cursor_hold = true;
+        self.submit_editor_selection_action(clonk_engine::EMMO_EXIT, "grab contents");
+    }
+
+    /// `EMMoveObject(action, 0, 0, nullptr, &Selection)` — the three menu
+    /// commands that carry no offset and no target object.
+    fn submit_editor_selection_action(&mut self, action: u8, what: &str) {
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor {what}");
+        }
+    }
+
+    /// The edit cursor's mode as the ported console logic names it.
+    pub(crate) fn console_cursor_mode(&self) -> clonk_engine::developer_cursor::CursorMode {
+        use clonk_engine::developer_cursor::CursorMode;
+
+        match self.developer_console_edit_mode {
+            ConsoleEditMode::Play => CursorMode::Play,
+            ConsoleEditMode::Edit => CursorMode::Edit,
+            ConsoleEditMode::Draw => CursorMode::Draw,
+        }
     }
 
     /// This window's pointer position in world coordinates, through the
@@ -3321,6 +3922,16 @@ impl GameApp {
         // through; nothing else records this viewport's own ViewX/ViewY.
         self.console_viewport_projections
             .insert(identity, frame.projection);
+        // The context menu is *not* part of `C4Viewport::Draw`: C++ hands it to
+        // the window system, which paints it above the window entirely. With no
+        // OS popup to hand it to, the port paints it last, over everything the
+        // viewport just drew.
+        if let Some((open, menu)) = self.console_viewport_context_menu.as_ref() {
+            if *open == identity {
+                let font = self.assets.font_arc();
+                menu.render(&mut frame.surface, font.as_ref());
+            }
+        }
         Some(frame.surface)
     }
 
@@ -5548,5 +6159,40 @@ impl GameApp {
             frontend,
             definition_load,
         )
+    }
+}
+
+/// `Game.Landscape.Mode` as the ported tools state names it.
+///
+/// The two spellings exist because `C4LSC_*` is an untyped `int32_t` on the
+/// control wire and in the landscape, while the console's own logic is written
+/// against an enum that cannot hold a fifth value.
+pub(crate) fn landscape_mode_of(mode: i32) -> clonk_engine::developer_tools::LandscapeMode {
+    use clonk_engine::developer_tools::LandscapeMode;
+    use clonk_engine::landscape::{
+        LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+    };
+
+    match mode {
+        LANDSCAPE_MODE_DYNAMIC => LandscapeMode::Dynamic,
+        LANDSCAPE_MODE_STATIC => LandscapeMode::Static,
+        LANDSCAPE_MODE_EXACT => LandscapeMode::Exact,
+        _ => LandscapeMode::Undefined,
+    }
+}
+
+/// The `C4LSC_*` value an `EMDT_SetMode` control carries.
+pub(crate) fn landscape_mode_value(mode: clonk_engine::developer_tools::LandscapeMode) -> i32 {
+    use clonk_engine::developer_tools::LandscapeMode;
+    use clonk_engine::landscape::{
+        LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+        LANDSCAPE_MODE_UNDEFINED,
+    };
+
+    match mode {
+        LandscapeMode::Dynamic => LANDSCAPE_MODE_DYNAMIC,
+        LandscapeMode::Static => LANDSCAPE_MODE_STATIC,
+        LandscapeMode::Exact => LANDSCAPE_MODE_EXACT,
+        LandscapeMode::Undefined => LANDSCAPE_MODE_UNDEFINED,
     }
 }

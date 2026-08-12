@@ -723,6 +723,16 @@ impl Definition {
         self.script.has_function(name)
     }
 
+    /// The script's declared `local` names, in declaration order.
+    ///
+    /// The property panel's named-locals section walks `Def->Script`'s own
+    /// list rather than the object's assignments
+    /// (`C4PropertyDlg.cpp:222-234`), which is what makes a declared-but-never
+    /// assigned local print as `nil` instead of being omitted.
+    pub fn local_variable_names(&self) -> impl Iterator<Item = &str> {
+        self.script.local_variable_names()
+    }
+
     pub fn includes(&self) -> &[String] {
         &self.includes
     }

@@ -5872,6 +5872,480 @@
             .is_none());
     }
 
+    // C4EditCursor.cpp:244-274,332-340,350-359,376-380,582-628,640-651 — the
+    // viewport context menu and the three object commands it is the only way
+    // to reach. Their executors and wire codecs were landed and pinned long
+    // before anything could emit one.
+    #[test]
+    fn console_viewport_context_menu_emits_the_object_commands() {
+        use clonk_frontend::developer_context_menu::{
+            ViewportContextEntry, ViewportContextItem,
+        };
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        // Drawing is what publishes this window's own projection.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+
+        let subject = app.snapshot.objects.first().expect("a live object");
+        let (id, position) = (subject.id, subject.position);
+        let local = (
+            position.x - projection.target_x,
+            position.y - projection.target_y,
+        );
+        let empty = (2, 2);
+
+        // `RightButtonDown` off the selection and over an object selects it,
+        // exactly as a plain left click would.
+        assert_eq!(
+            app.console_viewport_right_press(identity, local, 1.0, false)
+                .expect("the right press changed the selection")
+                .objects,
+            vec![id]
+        );
+        // A second right press *on* that selection leaves it alone — this is
+        // `fCursorIsOnSelection`, and it is what lets a multi-object selection
+        // survive the click that opens the menu.
+        assert!(app
+            .console_viewport_right_press(identity, local, 1.0, false)
+            .is_none());
+
+        // `RightButtonUp` opens the menu. A selected object with no contents
+        // greys Grab contents and nothing else.
+        app.open_console_viewport_context_menu(identity, local);
+        let (open, menu) = app
+            .console_viewport_context_menu
+            .as_ref()
+            .expect("the release opened the menu");
+        assert_eq!(*open, identity);
+        let live = |menu: &clonk_frontend::developer_context_menu::ViewportContextMenu| {
+            menu.entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    ViewportContextEntry::Item {
+                        item,
+                        enabled: true,
+                        ..
+                    } => Some(*item),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            live(menu),
+            vec![
+                ViewportContextItem::Delete,
+                ViewportContextItem::Duplicate,
+                ViewportContextItem::Properties,
+            ],
+            "an empty container greys Grab contents alone"
+        );
+        // The popup is drawn onto the viewport's own frame, so rendering it
+        // must stay clean at the extent the window presents.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+        // Choosing Duplicate emits `EMMoveObject(EMMO_Duplicate, 0, 0,
+        // nullptr, &Selection)` and closes the menu.
+        let rows = app
+            .console_viewport_context_menu
+            .as_ref()
+            .expect("the menu is still open")
+            .1
+            .layout(320, 200);
+        let center = |index: usize| {
+            let rect = rows[index].rect;
+            (rect.x + rect.w / 2, rect.y + rect.h / 2)
+        };
+        assert!(app.console_viewport_context_menu_click(identity, center(1), (320, 200)));
+        assert!(
+            app.console_viewport_context_menu.is_none(),
+            "a chosen item closes the menu"
+        );
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmMoveObject(duplicate), false)] = decided.as_slice()
+        else {
+            panic!("expected one duplicate control, got {decided:?}");
+        };
+        assert_eq!(duplicate.action, clonk_engine::EMMO_DUPLICATE);
+        assert_eq!(duplicate.objects, vec![id.as_u64() as i32]);
+        assert_eq!(duplicate.by_client, 7);
+
+        // Delete is the same shape under `EMMO_Remove`.
+        app.open_console_viewport_context_menu(identity, local);
+        assert!(app.console_viewport_context_menu_click(identity, center(0), (320, 200)));
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmMoveObject(remove), false)] = decided.as_slice()
+        else {
+            panic!("expected one remove control, got {decided:?}");
+        };
+        assert_eq!(remove.action, clonk_engine::EMMO_REMOVE);
+        assert_eq!(remove.objects, vec![id.as_u64() as i32]);
+
+        // A disabled row swallows its click and the menu *stays up*, as a
+        // grayed Win32 item and an insensitive GTK one both do — only a click
+        // outside cancels. Grab contents is grey while the selection holds
+        // nothing.
+        app.open_console_viewport_context_menu(identity, local);
+        assert!(app.console_viewport_context_menu_click(identity, center(2), (320, 200)));
+        assert!(
+            app.console_viewport_context_menu.is_some(),
+            "a greyed row does not dismiss the menu"
+        );
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a greyed item runs nothing"
+        );
+        assert!(app.console_viewport_context_menu_click(
+            identity,
+            (rows[0].rect.x - 4, rows[0].rect.y - 4),
+            (320, 200)
+        ));
+        assert!(
+            app.console_viewport_context_menu.is_none(),
+            "a click outside cancels it"
+        );
+
+        // Escape closes the popup without choosing anything, and only the
+        // viewport that owns it can be closed out from under it.
+        app.open_console_viewport_context_menu(identity, local);
+        assert!(!app.dismiss_console_viewport_context_menu_for(identity ^ 0xff));
+        assert!(app.dismiss_console_viewport_context_menu_for(identity));
+        assert!(!app.dismiss_console_viewport_context_menu());
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a dismissed menu runs nothing"
+        );
+
+        // A right-click on empty space drops the selection, which greys every
+        // object command and leaves Properties as the only live row.
+        app.console_viewport_right_press(identity, local, 1.0, false);
+        assert!(app
+            .console_viewport_right_press(identity, empty, 1.0, false)
+            .is_some_and(|snapshot| snapshot.objects.is_empty()));
+        app.open_console_viewport_context_menu(identity, empty);
+        assert_eq!(
+            live(&app
+                .console_viewport_context_menu
+                .as_ref()
+                .expect("the menu opened over nothing")
+                .1),
+            vec![ViewportContextItem::Properties]
+        );
+    }
+
+    // C4EditCursor.cpp:361-374,503-518 and C4ToolsDlg.cpp:865-879 — the
+    // context menu's Properties/Tools row is the only thing that opens the
+    // toolbox, the page follows the cursor mode, and the landscape mode
+    // buttons are the one page control that travels as a control.
+    #[test]
+    fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
+        use crate::developer_toolbox::ToolboxEffect;
+        use crate::developer_toolbox_view::{TOOLBOX_HEIGHT, TOOLBOX_WIDTH};
+        use crate::developer_tools_page::ToolsControl;
+        use crate::developer_windows::ToolboxPage;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Draw;
+
+        // Nothing opens the toolbox on its own: `SetMode` reopens it only when
+        // one of the two pages was already active (`:508-516`).
+        assert!(app.developer_toolbox_effects.is_empty());
+        assert_eq!(app.developer_toolbox.current_page(), None);
+
+        // Draw mode's Properties row opens the Tools page, and `C4ToolsDlg::
+        // Open`'s tail sets Active even with no dialog of its own.
+        app.open_developer_prop_tools();
+        assert!(app.developer_tools.active());
+        assert_eq!(
+            app.developer_toolbox.current_page(),
+            Some(ToolboxPage::Tools)
+        );
+        assert_eq!(
+            app.developer_toolbox.pages(),
+            &[ToolboxPage::Tools, ToolboxPage::Property],
+            "both pages are appended, whichever is switched to"
+        );
+        let effects = std::mem::take(&mut app.developer_toolbox_effects);
+        assert!(
+            matches!(effects.first(), Some(ToolboxEffect::Create(_))),
+            "the first page creates the window: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                ToolboxEffect::Show {
+                    page: ToolboxPage::Tools,
+                    ..
+                }
+            )),
+            "and it is shown on the Tools page: {effects:?}"
+        );
+
+        // Leaving Draw clears the tools and, because a page was up, reopens
+        // the toolbox on Property (`:503-516`).
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Edit,
+        )])
+        .expect("the console switched to Edit");
+        assert!(!app.developer_tools.active(), "Clear drops Active");
+        assert_eq!(
+            app.developer_toolbox.current_page(),
+            Some(ToolboxPage::Property)
+        );
+
+        // The page's own controls: everything but the landscape mode is local
+        // dialog state, and only the mode leaves as a control.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Draw,
+        )])
+        .expect("the console switched back to Draw");
+        app.developer_toolbox_effects.clear();
+        let extent = (TOOLBOX_WIDTH, TOOLBOX_HEIGHT);
+        let center = |app: &GameApp, control: ToolsControl| {
+            let rect = app
+                .developer_tools_page_model()
+                .layout(extent.0, extent.1)
+                .into_iter()
+                .find(|slot| slot.control == control)
+                .expect("the control is laid out")
+                .rect;
+            (rect.x + rect.w / 2, rect.y + rect.h / 2)
+        };
+
+        // Offline the control applies straight away, so this is also the
+        // fixture that puts the landscape somewhere the rest of the page is
+        // live at all — everything but the mode buttons is dead below Static.
+        let exact = center(&app, ToolsControl::ModeExact);
+        app.developer_toolbox_click(exact, extent);
+        assert_eq!(
+            app.developer_tools_page_model().mode,
+            clonk_engine::developer_tools::LandscapeMode::Exact
+        );
+
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.developer_toolbox_click(center(&app, ToolsControl::Line), extent);
+        assert_eq!(
+            app.developer_tools.tool(),
+            clonk_engine::developer_tools::Tool::Line
+        );
+        app.developer_toolbox_click(center(&app, ToolsControl::NoIft), extent);
+        assert!(!app.developer_tools.ift());
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "the tool and IFT are dialog state, not synchronized state"
+        );
+
+        // The three mode buttons are the exception: `SetLandscapeMode(iMode,
+        // false)` enqueues `EMDT_SetMode` and changes nothing locally, so
+        // every peer switches at the same tick. Exact is the button that is
+        // always live — Dynamic is enabled only when the landscape already is
+        // dynamic, and Static needs a map (`C4ToolsDlg.cpp:796-812`).
+        let before = app
+            .engine
+            .landscape()
+            .expect("the sandbox landscape")
+            .mode();
+        app.developer_toolbox_click(center(&app, ToolsControl::ModeExact), extent);
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(set_mode), false)] = decided.as_slice()
+        else {
+            panic!("expected one set-mode control, got {decided:?}");
+        };
+        assert_eq!(set_mode.action, clonk_engine::EMDT_SET_MODE);
+        assert_eq!(set_mode.mode, clonk_engine::landscape::LANDSCAPE_MODE_EXACT);
+        assert_eq!(
+            app.engine
+                .landscape()
+                .expect("the sandbox landscape")
+                .mode(),
+            before,
+            "the local request changes nothing until the control executes"
+        );
+
+        // Exact -> Static is the one destructive transition, and it is
+        // **refused**: `SetLandscapeMode` returns false unless
+        // `Console.Message` confirms, and past its two `#ifdef` bodies that
+        // function is a bare `return false` (`C4Console.cpp:841-853`). So
+        // nothing is enqueued.
+        let model = app.developer_tools_page_model();
+        assert_eq!(
+            model.mode,
+            clonk_engine::developer_tools::LandscapeMode::Exact
+        );
+        // Driven at the seam rather than through the button, because the
+        // button carries a second gate — Static needs `Game.Landscape.Map`,
+        // which this fixture's landscape may not have.
+        app.submit_editor_landscape_mode(clonk_engine::developer_tools::LandscapeMode::Static);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a refused Exact -> Static enqueues nothing"
+        );
+        // Every other transition still goes out, so the refusal is the
+        // confirmation's and not a blanket block.
+        app.submit_editor_landscape_mode(clonk_engine::developer_tools::LandscapeMode::Dynamic);
+        assert_eq!(
+            commands.take_submitted_decided_controls().len(),
+            1,
+            "only the destructive transition is refused"
+        );
+
+        // Closing the toolbox clears `ToolsDlg.Active` — C++ connects the
+        // shared devmode window's "hide" to `OnWindowHide`, whose body is
+        // exactly that (`C4ToolsDlg.cpp:393,1098-1101`). Without it the next
+        // mode change would resurrect a toolbox the user closed.
+        assert!(app.developer_tools.active());
+        app.close_developer_toolbox(Some((120, 80)));
+        assert!(!app.developer_tools.active());
+        assert!(!app.developer_toolbox.visible());
+        assert_eq!(app.developer_toolbox.remembered_position(), Some((120, 80)));
+        app.developer_toolbox_effects.clear();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Play,
+        )])
+        .expect("the console switched to Play");
+        assert!(
+            app.developer_toolbox_effects.is_empty(),
+            "a closed toolbox is not reopened by a mode change"
+        );
+        // Re-opening restores the remembered position rather than re-centring.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Draw,
+        )])
+        .expect("the console switched to Draw");
+        app.open_developer_prop_tools();
+        assert!(app.developer_toolbox_effects.iter().any(|effect| matches!(
+            effect,
+            ToolboxEffect::Show {
+                position: Some((120, 80)),
+                ..
+            }
+        )));
+        app.developer_toolbox_effects.clear();
+
+        // The property page is a read-only text box: clicking it emits
+        // nothing at all.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Edit,
+        )])
+        .expect("the console switched to Edit");
+        assert_eq!(
+            app.developer_toolbox.current_page(),
+            Some(ToolboxPage::Property)
+        );
+        app.developer_toolbox_click(center(&app, ToolsControl::ModeExact), extent);
+        assert!(commands.take_submitted_decided_controls().is_empty());
+
+        // Both pages draw at the window's extent without panicking.
+        for page in [ToolboxPage::Tools, ToolboxPage::Property] {
+            let surface = app.render_developer_toolbox_page(page, TOOLBOX_WIDTH, TOOLBOX_HEIGHT);
+            assert_eq!(surface.width(), TOOLBOX_WIDTH);
+            assert!(surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+        }
+    }
+
+    // C4EditCursor.cpp:640-651 — Grab contents replaces the selection with the
+    // container's own Contents and *then* exits them, so the command acts on
+    // what was inside rather than on the container.
+    #[test]
+    fn console_viewport_grab_contents_exits_the_container_it_selected() {
+        use clonk_frontend::developer_context_menu::ViewportContextItem;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+        // Give one object a Contents list to grab.
+        let subject = app.snapshot.objects.first().expect("a live object");
+        let (container, definition) = (subject.id, subject.definition_id.clone());
+        let held = app
+            .engine
+            .spawn_object(
+                clonk_engine::SpawnConfig::new(definition).with_container(container),
+            )
+            .expect("an object inside the container");
+        app.snapshot = app.engine.snapshot();
+        assert_eq!(
+            app.snapshot
+                .object(container)
+                .expect("the container is live")
+                .contents,
+            vec![held]
+        );
+
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.developer_selection.replace(
+            clonk_engine::developer_selection::SelectionWriter::EditCursor,
+            container,
+        );
+        app.open_console_viewport_context_menu(identity, (4, 4));
+        let menu = &app
+            .console_viewport_context_menu
+            .as_ref()
+            .expect("the menu opened")
+            .1;
+        let contents_row = menu
+            .entries()
+            .iter()
+            .position(|entry| entry.item() == Some(ViewportContextItem::GrabContents))
+            .expect("the menu has a Grab contents row");
+        let rect = menu.layout(320, 200)[contents_row].rect;
+        assert!(app.console_viewport_context_menu_click(
+            identity,
+            (rect.x + rect.w / 2, rect.y + rect.h / 2),
+            (320, 200)
+        ));
+
+        // The selection is now the contents, not the container, and `Hold` is
+        // set before the control leaves — that is what lets the freed objects
+        // be dragged straight out.
+        assert_eq!(app.developer_selection.objects(), &[held]);
+        assert!(app.edit_cursor_hold);
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmMoveObject(exit), false)] = decided.as_slice()
+        else {
+            panic!("expected one exit control, got {decided:?}");
+        };
+        assert_eq!(exit.action, clonk_engine::EMMO_EXIT);
+        assert_eq!(
+            exit.objects,
+            vec![held.as_u64() as i32],
+            "EMMO_Exit carries the contents, never the container"
+        );
+
+        // The release completing that click belongs to the menu: C++'s popup
+        // is modal, so `LeftButtonUp` never runs, and letting it through here
+        // would clear the `Hold` the command set one line before its control
+        // went out.
+        assert!(
+            app.take_console_viewport_pointer_grab(identity),
+            "the popup grabbed the pointer for the whole click"
+        );
+        assert!(app.edit_cursor_hold, "and Hold survives it");
+        assert!(
+            !app.take_console_viewport_pointer_grab(identity),
+            "exactly one release is swallowed"
+        );
+    }
+
     // C4EditCursor.cpp:224-236,551-572 — Draw mode routes the same viewport
     // gestures into the landscape tools, and every stroke leaves as an
     // EMDrawTool control rather than a direct raster write.

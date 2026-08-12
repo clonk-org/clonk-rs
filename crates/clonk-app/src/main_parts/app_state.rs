@@ -399,6 +399,35 @@ pub(crate) struct GameApp {
     /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
     /// rubber band is armed.
     pub(crate) edit_cursor_drag_frame: Option<((i32, i32), (i32, i32))>,
+    /// `C4EditCursor::DoContextMenu`'s popup and the physical viewport whose
+    /// window it belongs to, in that window's surface coordinates.
+    ///
+    /// C++ hands the menu to the OS — `TrackPopupMenu` blocks until an item is
+    /// chosen (`C4EditCursor.cpp:597`) — and neither of its two bodies is
+    /// compiled on the reference build. A winit window cannot host an OS
+    /// popup, so the port draws it onto the viewport's own frame and keeps it
+    /// here until the next click resolves it.
+    pub(crate) console_viewport_context_menu: Option<(
+        u64,
+        clonk_frontend::developer_context_menu::ViewportContextMenu,
+    )>,
+    /// The viewport whose popup swallowed the last button press, so the
+    /// release that completes that click is swallowed with it.
+    ///
+    /// C++ needs no such latch: `TrackPopupMenu` blocks and the GTK menu holds
+    /// a pointer grab, so the whole click — press *and* release — happens
+    /// inside the menu and `C4EditCursor::LeftButtonUp` never sees it. A
+    /// painted popup gets the release afterwards, when it may already have
+    /// closed, and running the edit cursor's release then would clear the
+    /// `Hold` `GrabContents` sets (`C4EditCursor.cpp:649`).
+    pub(crate) console_viewport_context_menu_grab: Option<u64>,
+    /// `C4Console::ToolsDlg` and `PropertyDlg`'s shared `C4DevmodeDlg`
+    /// notebook. The model owns every decision about the window
+    /// ([`crate::developer_toolbox`]); the runner owns the window itself, so
+    /// the effects it produces queue here until the event loop, which is the
+    /// only place winit will build one, can apply them.
+    pub(crate) developer_toolbox: crate::developer_toolbox::DeveloperToolbox,
+    pub(crate) developer_toolbox_effects: Vec<crate::developer_toolbox::ToolboxEffect>,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.

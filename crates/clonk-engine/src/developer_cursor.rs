@@ -263,11 +263,14 @@ pub fn drop_target(
         .map(|candidate| candidate.id)
 }
 
-/// What a left-button press does to the selection.
+/// What a button press does to the selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionEdit {
     /// Ctrl-click on a selected object — `Selection.Remove(Target)`.
     Remove(ObjectId),
+    /// `Selection.Clear()` with nothing armed. Only the right button produces
+    /// this: the left button's clear always arms the rubber band with it.
+    Clear,
     /// Ctrl-click on an unselected object — `Selection.Add(Target, stNone)`.
     /// The rest of the selection is untouched.
     Add(ObjectId),
@@ -314,6 +317,35 @@ pub fn edit_press(control: bool, target: Option<ObjectId>, selection: &[ObjectId
         hold: true,
         selection: edit,
     }
+}
+
+/// `C4EditCursor::RightButtonDown` (`C4EditCursor.cpp:244-274`) — the
+/// selection change that precedes the context menu.
+///
+/// `cursor_on_selection` is C++'s `fCursorIsOnSelection`: whether **any**
+/// selected object's `At(X, Y)` covers the cursor (`:251-257`). That is the
+/// whole point of the arm — a right-click *inside* an existing multi-object
+/// selection must keep it, so the menu's Delete acts on all of it, while a
+/// right-click elsewhere behaves like a plain left-click and re-selects.
+///
+/// Ctrl skips the branch entirely, and only Edit mode has one: the `switch`
+/// has no `C4CNS_ModePlay` or `C4CNS_ModeDraw` case, so the menu there opens
+/// over whatever was already selected.
+pub fn right_press(
+    mode: CursorMode,
+    control: bool,
+    target: Option<ObjectId>,
+    cursor_on_selection: bool,
+) -> Option<SelectionEdit> {
+    if mode != CursorMode::Edit || control || cursor_on_selection {
+        return None;
+    }
+    // `if (Target && !Selection.GetLink(Target))` then `if (!Target)`. The
+    // caller has already established the cursor is off the selection, so a
+    // target found here cannot be a selected object.
+    target.map_or(Some(SelectionEdit::Clear), |target| {
+        Some(SelectionEdit::Replace(target))
+    })
 }
 
 /// One step of the console's per-tick pass.
@@ -471,6 +503,67 @@ mod tests {
             )),
             None
         );
+    }
+
+    // C4Object.cpp:1124-1131 — `C4Object::At`, which `RightButtonDown` asks of
+    // every selected object to decide `fCursorIsOnSelection` (`:251-257`).
+    // This is *not* `Game.FindObject`: it tests one named object rather than
+    // returning the topmost, which is the whole reason a right-click inside a
+    // multi-object selection keeps it.
+    #[test]
+    fn object_covers_asks_one_named_object_where_find_object_returns_the_stack() {
+        let recording = crate::fixtures::basic_movement_recording(2).expect("fixture recording");
+        let snapshot = recording.frames().last().expect("a recorded frame");
+        let subject = snapshot.objects.first().expect("a live object");
+        let (x, y) = (subject.position.x, subject.position.y);
+        let hit_test = crate::EditCursorHitTest::new(snapshot);
+
+        assert!(hit_test.object_covers(subject.id, x, y));
+        // The shape is finite in both axes; `addtop` only ever grows it
+        // upward, so a point far below is outside whatever the height is.
+        assert!(!hit_test.object_covers(subject.id, x, y + 10_000));
+        assert!(!hit_test.object_covers(subject.id, x - 10_000, y));
+        // An object that does not exist covers nothing rather than panicking.
+        assert!(!hit_test.object_covers(ObjectId(u64::MAX), x, y));
+    }
+
+    // C4EditCursor.cpp:244-274 — what pressing the *right* button does to the
+    // selection before the context menu opens.
+    #[test]
+    fn right_press_selects_under_the_cursor_only_outside_the_selection() {
+        let a = ObjectId(1);
+        let b = ObjectId(2);
+
+        // The cursor is over something already selected: the whole selection
+        // survives, which is what lets a multi-object selection be deleted in
+        // one command.
+        assert_eq!(right_press(CursorMode::Edit, false, Some(a), true), None);
+        assert_eq!(right_press(CursorMode::Edit, false, None, true), None);
+
+        // Off the selection and over an object: that object replaces it.
+        assert_eq!(
+            right_press(CursorMode::Edit, false, Some(b), false),
+            Some(SelectionEdit::Replace(b))
+        );
+
+        // Off the selection and over nothing: the selection is dropped. The
+        // right button never arms a rubber band, unlike the left one.
+        assert_eq!(
+            right_press(CursorMode::Edit, false, None, false),
+            Some(SelectionEdit::Clear)
+        );
+
+        // Ctrl skips the whole branch, so a Ctrl-right-click keeps whatever
+        // was selected however far the cursor is from it.
+        assert_eq!(right_press(CursorMode::Edit, true, Some(b), false), None);
+        assert_eq!(right_press(CursorMode::Edit, true, None, false), None);
+
+        // Only Edit mode has an arm at all — the switch has no Play or Draw
+        // case, so the menu opens over an untouched selection there.
+        for mode in [CursorMode::Play, CursorMode::Draw] {
+            assert_eq!(right_press(mode, false, Some(b), false), None);
+            assert_eq!(right_press(mode, false, None, false), None);
+        }
     }
 
     // C4EditCursor.cpp:201-229 — what pressing the left button does to the
