@@ -162,3 +162,34 @@ fn current_wgpu_vulkan_warnings_reach_stderr() {
         "the rest of the Vulkan backend must keep warning: {stderr}"
     );
 }
+
+const CALLOOP_STALE_SOURCE_MARKER: &str =
+    "[calloop] Received an event for non-existence source: TokenInner { id: 3, version: 4419, sub_id: 0 }";
+const CALLOOP_PING_MARKER: &str = "[calloop] Failed to write a ping";
+
+/// winit's Wayland backend drives the compositor through calloop. Removing a
+/// source — a key-repeat timer, a `WaitUntil` deadline — can leave one last
+/// epoll event queued, and calloop then warns at `calloop::loop_logic` for a
+/// token that no longer exists. The token id stays put while the version
+/// climbs, which is the reuse of one slot, not a fault we can fix: we do not
+/// own those sources. The rest of `calloop` keeps `warn`.
+#[test]
+fn calloop_stale_source_warnings_stay_off_stderr() {
+    if env::var_os(CHILD_MODE).is_some() {
+        clonk_logging::init();
+        tracing::warn!(target: "calloop::loop_logic", "{CALLOOP_STALE_SOURCE_MARKER}");
+        tracing::warn!(target: "calloop::sources::ping", "{CALLOOP_PING_MARKER}");
+        return;
+    }
+
+    let output = run_child("calloop_stale_source_warnings_stay_off_stderr", None, None);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(CALLOOP_STALE_SOURCE_MARKER),
+        "a stale-source warning reached stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(CALLOOP_PING_MARKER),
+        "the rest of calloop must keep warning: {stderr}"
+    );
+}
