@@ -1146,13 +1146,18 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   wins, and only then is the file loaded and looked up a *second* time — C++
   tests both. The two failure texts differ and the difference is real:
   `DropFile` names the **file** (`GetFilename`), `DropDef` names the **id**
-  (`C4IdText`). And the drop position adds the window-local point to `ViewX`/
-  `ViewY` **unscaled**, where `WM_USER_DROPDEF` one screen up divides by the
-  application scale (`:112`); the port keeps them different rather than
-  unifying them. `CID_EMDropDef` finally has an emitter. Pinned by
+  (`C4IdText`). The two C++ drop entry points disagree about the application
+  scale — `WM_USER_DROPDEF` divides by it (`:112`) and `DropFiles` does not
+  (`:236`), so at a scale other than 1 the same screen point drops an object in
+  two different places depending on which message carried it. The port takes
+  the dividing one for both: it is the conversion every other pointer path in a
+  viewport window already performs, and it is the one that puts the object
+  under the cursor. Nothing determinism-critical rides on the choice — the
+  position is decided locally and then travels inside the control.
+  `CID_EMDropDef` finally has an emitter. Pinned by
   `drop_file_resolves_a_loaded_definition_before_loading_the_dropped_one`,
   `drop_definition_reports_the_id_where_drop_file_reports_the_file`,
-  `drop_world_position_offsets_the_view_origin_without_scaling` and
+  `drop_world_position_offsets_the_view_origin` and
   `console_viewport_file_drop_emits_a_definition_drop_control`.
   **Still open:** `Defs.Load` mid-round. The port has no runtime loader for a
   definition it has never seen — only `ReloadDef` for one it already holds — so
@@ -1199,7 +1204,24 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   holds `Game.Script`, `Game.Title` and `Game.Info` for the whole round; here
   the scenario's script reaches the engine as source and is never held as
   bytes, and `Info.txt` is not read at all — so the editor loads the component
-  from the scenario group it will be saved back into.
+  from the scenario group it will be saved back into. Three consequences of
+  that split are ported deliberately rather than left to fall out, because
+  each one loses data if it does. A component edited earlier this round
+  **reopens on its own committed bytes**, not the stale text still on disk, and
+  a second commit **replaces** the first rather than queueing a second write of
+  the same filename. Both hosts and the open editor are **cleared when the
+  round closes**, as `C4Game::Clear`'s `Info.Clear(); Title.Clear();
+  Script.Clear()` does (`C4Game.cpp:604-606`) — carried over, an emptied Info
+  host would have deleted the *next* scenario's `Info.txt`. And a second
+  editor cannot open over the first: `ShowDialog` is `DialogBoxParam`, i.e.
+  modal, so C++ cannot reach the console menu while one is up.
+  Enter is a **newline** and Ctrl/Cmd-Enter commits: the Win32 control is
+  multi-line with OK as a separate button, and a script editor whose most
+  common key closed it would be unusable. The editor window tracks its **own**
+  modifier state, because each developer window sees only its own
+  `ModifiersChanged` — a handler reading the shared field finds whatever the
+  last *other* window left there, which is what made the newline unreachable
+  in the first cut.
   **Still open:** the editor surface is a plain line editor — no selection, no
   clipboard, no undo, and the caret is drawn at the line start rather than
   measured between glyphs. The Win32 dialog is an `EDITTEXT` control, so there
