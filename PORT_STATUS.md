@@ -1060,8 +1060,15 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   The **presentation is invented**, as the console shell's already is: a Win9x
   popup drawn onto the viewport's own framebuffer, because a winit window
   cannot host an OS popup. It is clamped into the window — a row outside it
-  could never be clicked — and it takes the click that lands on it, as both
-  toolkits do.
+  could never be clicked. Two consequences of *not* being a real popup are
+  ported deliberately. A greyed row **swallows its click and leaves the menu
+  up**: `MF_GRAYED` absorbs the click without dismissing, and a GTK
+  insensitive item never emits `activate`; only a click outside cancels. And
+  the popup takes an explicit pointer grab, because `TrackPopupMenu` blocks
+  and the GTK menu grabs — so no button message reaches the viewport while the
+  menu is up, and the *release* completing a chosen item is swallowed too.
+  Letting it through would run `LeftButtonUp` and clear the `Hold` that
+  `GrabContents` sets one line before its control goes out (`:649`).
 
 - **The developer toolbox opens, with both pages.**
   `C4DevmodeDlg`'s notebook model was ported and had no window;
@@ -1084,17 +1091,36 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   Properties/Tools row is the only thing that opens it, exactly as in C++.
   `SetMode` clears the page the mode it left owns and reopens the toolbox
   **only when one of the two was already up** (`:503-518`), so the console's
-  Draw button still shows no window on its own. `SetMaterial` runs
+  Draw button still shows no window on its own — and closing the toolbox
+  clears `ToolsDlg.Active`, because C++ connects the shared devmode window's
+  `"hide"` signal to `OnWindowHide`, whose whole body is that assignment
+  (`C4ToolsDlg.cpp:393,1098-1101`); without it a later mode change would
+  resurrect a toolbox the user had closed. `SetMaterial` runs
   `AssertValidTexture` after the material lands (`:565-572`). And the three
   landscape mode buttons are the one page control that is a *control*:
   `SetLandscapeMode(iMode, false)` changes nothing locally and enqueues
   `EMDT_SetMode` as `CDT_Decide` (`:865-879`), so every peer switches at the
   same tick — the emitter that was missing, and with it the Dynamic landscape
-  that could not be drawn on. Pinned by
+  that could not be drawn on.
+  Two enablement rules bite here and only one of them is in `EnableControls`.
+  The mode buttons are gated separately by `UpdateLandscapeModeCtrls`
+  (`:796-812`): **Dynamic is live only when the landscape already is dynamic**,
+  Static needs `Game.Landscape.Map`, and Exact carries no `EnableWindow` call
+  at all. Reading `EnableControls` alone — which never disables them — leaves
+  all three permanently clickable, so `landscape_mode_button_enabled` ports the
+  second rule beside it. And **Exact -> Static is refused**: the transition is
+  gated on `Console.Message(IDS_CNS_EXACTTOSTATIC, true)` and a declined
+  confirmation returns before enqueueing anything (`:869-874`) — past its
+  `_WIN32` and `WITH_DEVELOPER_MODE` bodies that function is a bare
+  `return false` (`C4Console.cpp:841-853`), so on the reference build it is
+  always declined. The port refuses it too and says so on the console log;
+  discarding an exact landscape on a click no dialog ever confirmed would be
+  the worse divergence. Pinned by
   `developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls`,
   `tools_page_places_every_control_inside_the_page_without_overlap`,
   `tools_page_click_is_refused_by_every_disabled_control`,
-  `grade_scale_runs_inverted_and_clamps_to_its_range` and
+  `grade_scale_runs_inverted_and_clamps_to_its_range`,
+  `landscape_mode_buttons_gate_dynamic_on_the_mode_and_static_on_a_map` and
   `open_prop_tools_picks_the_page_by_cursor_mode`.
   The **layout is invented** — there is no oracle for a pixel of it — but it
   follows the box tree's grouping and order, and the grade scale runs inverted
