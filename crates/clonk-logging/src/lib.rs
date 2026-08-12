@@ -7,12 +7,13 @@ use std::{
 };
 
 use clonk_core::std_markup::Markup;
+use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::format::{DefaultFields, Writer};
 use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, OptionalWriter};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::{SubscriberInitExt, TryInitError};
 use tracing_subscriber::{fmt, EnvFilter};
@@ -23,6 +24,23 @@ static INITIALIZED: OnceLock<()> = OnceLock::new();
 /// so a more specific one — `LC_LOG=info,wgpu_hal=debug` — still wins.
 const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu=warn,wgpu_core=warn,wgpu_hal=warn,\
      naga=warn,winit=warn,calloop=warn,mio=warn";
+/// The module whose stale-source warning [`DropUpstreamNoise`] drops.
+const CALLOOP_LOOP_LOGIC_TARGET: &str = "calloop::loop_logic";
+/// The one upstream line suppressed by message rather than by target.
+///
+/// winit's Wayland backend removes the key-repeat timer and inserts a new one
+/// on every press, release and focus change. calloop reuses the freed slab
+/// slot, so a timeout that came due before its source went away is dispatched
+/// holding the previous token, finds no source, and is discarded with this
+/// warning (`calloop-0.13.0/src/loop_logic.rs:499-533`). Discarding it is the
+/// correct outcome — that repeat was cancelled — and the replacement timer has
+/// its own token, so key repeat is unaffected. The line fires on ordinary key
+/// presses (clonk-org/clonk-rs#311) and names nothing anyone here can act on.
+///
+/// Matching the message rather than muting `calloop::loop_logic` keeps the
+/// module's real faults visible: a source that failed to unregister warns from
+/// the same target a few lines above this one.
+const CALLOOP_STALE_SOURCE_MESSAGE: &str = "[calloop] Received an event for non-existence source";
 /// Target of the panic hook. Deliberately not the script target: a Rust panic
 /// is not content output and has no business on the in-game message board.
 const PANIC_LOG_TARGET: &str = "panic";
@@ -175,6 +193,58 @@ impl<'writer> FormatFields<'writer> for StrippedFields {
     }
 }
 
+/// Drops [`CALLOOP_STALE_SOURCE_MESSAGE`] before any sink sees it.
+///
+/// `event_enabled` is ANDed down the layer stack, so refusing the event once
+/// here removes it from stderr, the session log and the GUI sinks alike —
+/// where a writer-level filter would have to be repeated on each of them. The
+/// message is only rendered for events from the emitting module, so every
+/// other event costs one target comparison.
+struct DropUpstreamNoise;
+
+impl<S: Subscriber> Layer<S> for DropUpstreamNoise {
+    fn event_enabled(&self, event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
+        if event.metadata().target() != CALLOOP_LOOP_LOGIC_TARGET {
+            return true;
+        }
+        let mut message = MessageStartsWith::new(CALLOOP_STALE_SOURCE_MESSAGE);
+        event.record(&mut message);
+        !message.matched
+    }
+}
+
+/// Whether an event's `message` field opens with `prefix`.
+struct MessageStartsWith<'a> {
+    prefix: &'a str,
+    matched: bool,
+}
+
+impl<'a> MessageStartsWith<'a> {
+    fn new(prefix: &'a str) -> Self {
+        Self {
+            prefix,
+            matched: false,
+        }
+    }
+}
+
+impl Visit for MessageStartsWith<'_> {
+    /// calloop logs through the `log` crate, whose bridge records the message
+    /// as the `fmt::Arguments` it was formatted from — a `Debug` value that
+    /// renders as the plain text, unquoted.
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.matched = format!("{value:?}").starts_with(self.prefix);
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.matched = value.starts_with(self.prefix);
+        }
+    }
+}
+
 /// Install the process-wide subscriber. Every event fans out to stderr and the
 /// session log; the developer console and the message board attach only when
 /// the application opened them.
@@ -190,6 +260,7 @@ fn install(
     let (filter, rejected_directives) = env_filter(default_level);
     let installed = tracing_subscriber::registry()
         .with(filter)
+        .with(DropUpstreamNoise)
         .with(
             fmt::layer()
                 .fmt_fields(StrippedFields::default())
