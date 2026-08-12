@@ -4313,8 +4313,7 @@ fn effect_map_denumeration_preserves_existing_and_removed_hidden_slots() {
 #[test]
 fn object_snapshot_carries_exceptional_live_shape_and_fire_top_for_rendering() {
     let mut engine = Engine::new();
-    let mut definition =
-        Definition::from_script("FIRE", "Fire fixture", "").expect("definition compiles");
+    let mut definition = test_definition("FIRE", "Fire fixture", "");
     definition.set_shape_rect(Some(DefinitionRect::new(-6, -4, 12, 8)));
     definition.set_shape_vertices(vec![ObjectVertex::new(2, -1), ObjectVertex::new(5, 3)]);
     definition.set_rotateable(1);
@@ -4422,8 +4421,7 @@ fn object_snapshot_carries_exceptional_live_shape_and_fire_top_for_rendering() {
 #[test]
 fn movement_circle_wrap_retains_pre_wrap_live_shape() {
     let mut engine = Engine::new();
-    let mut definition =
-        Definition::from_script("TURN", "Turning fixture", "").expect("definition compiles");
+    let mut definition = test_definition("TURN", "Turning fixture", "");
     definition.set_shape_rect(Some(DefinitionRect::new(-3, -4, 6, 8)));
     definition.set_rotateable(1);
     engine
@@ -4490,8 +4488,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
     }
 
     let mut engine = Engine::new();
-    let mut definition = Definition::from_script("VBND", "Vertical bounds fixture", "")
-        .expect("definition compiles");
+    let mut definition = test_definition("VBND", "Vertical bounds fixture", "");
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
     engine
         .register_definition(definition)
@@ -4654,29 +4651,28 @@ fn shape_refresh_order_preserves_only_later_script_vertex_edits() {
     // AddVertex survives; an earlier AddVertex is discarded by that refresh.
     // Exercise both the calling-object and foreign-object copy-out folds.
     let mut engine = Engine::new();
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "VRTX",
         "Vertex ordering fixture",
         r#"#strict
-public func RotateThenAdd()
-{
-    SetR(90);
-    AddVertex(17, -9);
-    return GetVertexNum();
-}
-public func AddThenRotate()
-{
-    AddVertex(17, -9);
-    SetR(90);
-    return GetVertexNum();
-}
-public func MutateTarget(target)
-{
-    return target->RotateThenAdd();
-}
-"#,
-    )
-    .expect("vertex-ordering definition compiles");
+    public func RotateThenAdd()
+    {
+        SetR(90);
+        AddVertex(17, -9);
+        return GetVertexNum();
+    }
+    public func AddThenRotate()
+    {
+        AddVertex(17, -9);
+        SetR(90);
+        return GetVertexNum();
+    }
+    public func MutateTarget(target)
+    {
+        return target->RotateThenAdd();
+    }
+    "#,
+    );
     definition.set_c4_callback_convention(true);
     definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
     definition.set_shape_vertices(vec![ObjectVertex::new(2, 0)]);
@@ -4757,61 +4753,58 @@ public func MutateTarget(target)
 #[test]
 fn enter_and_status_activation_refresh_shape_before_callbacks_but_keep_later_setshape() {
     let mut engine = Engine::new();
-    let mut container = Definition::from_script(
+    let mut container = test_definition(
         "CONT",
         "Container",
         r#"#strict
-local collection_wdt;
-protected func Collection2(item) { collection_wdt = GetObjWidth(item); }
-public func ReadCollectionWdt() { return collection_wdt; }
-"#,
-    )
-    .expect("container compiles");
+    local collection_wdt;
+    protected func Collection2(item) { collection_wdt = GetObjWidth(item); }
+    public func ReadCollectionWdt() { return collection_wdt; }
+    "#,
+    );
     container.set_c4_callback_convention(true);
     engine
         .register_definition(container)
         .expect("container registers");
 
-    let mut item = Definition::from_script(
+    let mut item = test_definition(
         "ITEM",
         "Item",
         r#"#strict
-local entrance_wdt;
-public func ProbeEnter(container)
-{
-    SetShape(-1, -1, 27, 41);
-    if (!Enter(container)) return -1;
-    var after_enter = GetObjWidth();
-    SetShape(-2, -3, 9, 11);
-    return after_enter;
-}
-protected func Entrance(container) { entrance_wdt = GetObjWidth(); }
-public func ReadEntranceWdt() { return entrance_wdt; }
-"#,
-    )
-    .expect("item compiles");
+    local entrance_wdt;
+    public func ProbeEnter(container)
+    {
+        SetShape(-1, -1, 27, 41);
+        if (!Enter(container)) return -1;
+        var after_enter = GetObjWidth();
+        SetShape(-2, -3, 9, 11);
+        return after_enter;
+    }
+    protected func Entrance(container) { entrance_wdt = GetObjWidth(); }
+    public func ReadEntranceWdt() { return entrance_wdt; }
+    "#,
+    );
     item.set_c4_callback_convention(true);
     item.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
     engine.register_definition(item).expect("item registers");
 
-    let mut activatable = Definition::from_script(
+    let mut activatable = test_definition(
         "ACTV",
         "Activatable",
         r#"#strict
-local transfer_wdt;
-public func ProbeActivate()
-{
-    SetShape(-1, -1, 27, 41);
-    if (!SetObjectStatus(1)) return -1;
-    var after_activate = GetObjWidth();
-    SetShape(-2, -3, 9, 11);
-    return after_activate;
-}
-protected func UpdateTransferZone() { transfer_wdt = GetObjWidth(); }
-public func ReadTransferWdt() { return transfer_wdt; }
-"#,
-    )
-    .expect("activatable compiles");
+    local transfer_wdt;
+    public func ProbeActivate()
+    {
+        SetShape(-1, -1, 27, 41);
+        if (!SetObjectStatus(1)) return -1;
+        var after_activate = GetObjWidth();
+        SetShape(-2, -3, 9, 11);
+        return after_activate;
+    }
+    protected func UpdateTransferZone() { transfer_wdt = GetObjWidth(); }
+    public func ReadTransferWdt() { return transfer_wdt; }
+    "#,
+    );
     activatable.set_c4_callback_convention(true);
     activatable.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
     engine
@@ -12733,6 +12726,33 @@ fn value_to_liquid_segments(
 }
 
 #[cfg(test)]
+#[track_caller]
+fn test_definition(id: impl Into<String>, name: impl Into<String>, source: &str) -> Definition {
+    Definition::from_script(id, name, source).expect("test definition compiles")
+}
+
+#[cfg(test)]
+trait TestValueExt<T> {
+    fn test_value(self) -> T;
+}
+
+#[cfg(test)]
+impl<T> TestValueExt<T> for Option<T> {
+    #[track_caller]
+    fn test_value(self) -> T {
+        self.expect("engine-test value exists")
+    }
+}
+
+#[cfg(test)]
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    #[track_caller]
+    fn test_value(self) -> T {
+        self.expect("engine-test operation succeeds")
+    }
+}
+
+#[cfg(test)]
 #[path = "lib_tests/control_message_say_regression.rs"]
 mod control_message_say_regression;
 
@@ -12933,8 +12953,7 @@ mod material_colorization_regression {
     fn definition_graphics_lookups_use_legacy_byte_case_folding() {
         let lowercase_name = clonk_script::c4_string_from_bytes(b"\xfc");
         let uppercase_name = clonk_script::c4_string_from_bytes(b"\xdc");
-        let mut definition =
-            Definition::from_script("BYTE", "Byte graphics", "").expect("definition compiles");
+        let mut definition = test_definition("BYTE", "Byte graphics", "");
         definition.set_sprite_variants(HashMap::from([(
             clonk_resources::material::c4_name_key(&lowercase_name),
             sprite(&[[1, 2, 3, 255]]),
@@ -12983,8 +13002,7 @@ mod material_colorization_regression {
             palette_pixel(4),
             unmatched,
         ];
-        let mut definition =
-            Definition::from_script("TINT", "Tinted", "").expect("definition compiles");
+        let mut definition = test_definition("TINT", "Tinted", "");
         definition.color_by_material = "gOlD".to_string();
         definition.set_sprite_image(Some(sprite(&source)));
         definition.set_solid_mask(Some(DefinitionTargetRect::new(3, 0, 1, 1, 0, 0)));
@@ -13053,8 +13071,7 @@ mod material_colorization_regression {
     #[test]
     fn unknown_color_by_material_logs_cpp_error_and_leaves_graphics_untinted() {
         let original = palette_pixel(1);
-        let mut definition =
-            Definition::from_script("MISS", "Missing", "").expect("definition compiles");
+        let mut definition = test_definition("MISS", "Missing", "");
         definition.color_by_material = "UnknownGold".to_string();
         definition.set_sprite_image(Some(sprite(&[original])));
 

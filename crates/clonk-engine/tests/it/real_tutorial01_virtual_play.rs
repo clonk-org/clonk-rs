@@ -10,26 +10,24 @@ use clonk_engine::{
 
 fn load_tutorial01() -> (Engine, i32) {
     let mut engine = load_tutorial(1, 0);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 1 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial01 virtual player joins")
-        .number();
+    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial 1 virtual player".to_owned(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: true,
+        startup_player_count: 1,
+    }))
+    .number();
     (engine, owner)
 }
 
@@ -55,10 +53,8 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
 fn tutorial01_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial01();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial01 joins one selected CLNK");
-    let hut = object_with_definition(&engine, "HUT2").expect("Tutorial01 creates HUT2");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let hut = crate::support::TestValueExt::test_value(object_with_definition(&engine, "HUT2"));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     player.wait_until("the tumbling Clonk lands in the valley", 180, |engine| {
@@ -217,7 +213,7 @@ fn tutorial01_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         },
     )?;
     let gold =
-        object_with_definition(player.engine(), "GOLD").expect("Tutorial01 Script150 creates GOLD");
+        crate::support::TestValueExt::test_value(object_with_definition(player.engine(), "GOLD"));
 
     // Script160 recognizes the real 150..250 by 250..350 lesson area and
     // calls ResetPhysical before teaching Dig (Tutorial01/Script.c:134-141).
@@ -308,10 +304,8 @@ fn tutorial01_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.press(COM_RIGHT)?;
     let mut previous_action = String::new();
     for _ in 0..1_800 {
-        let clonk_now = player
-            .engine()
-            .object_snapshot(clonk)
-            .expect("GOLD-carrying Clonk survives the return");
+        let clonk_now =
+            crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk));
         if clonk_now.position.x >= 558 {
             break;
         }

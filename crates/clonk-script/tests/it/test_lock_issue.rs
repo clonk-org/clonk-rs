@@ -1,9 +1,9 @@
 // Test for LOCK script array literal / annotation issue
 
-#[test]
-fn lock_simple_annotation_ascii() {
-    // Line 32 from LOCK with ASCII-only: annotation without dollar signs
-    let source = r#"
+// Line 32 from LOCK with ASCII-only: annotation without dollar signs
+crate::support::compile_case!(
+    lock_simple_annotation_ascii,
+    r#"
 func ControlThrow(pClonk)
 {
   [Key insert or remove]
@@ -14,22 +14,20 @@ func ControlThrow(pClonk)
   }
   return(1);
 }
-    "#;
-    crate::support::assert_compiles(source);
-}
+    "#,
+);
 
-#[test]
-fn simple_bracket_annotation() {
-    // Minimal test with bracket annotation
-    let source = r#"
+// Minimal test with bracket annotation
+crate::support::compile_case!(
+    simple_bracket_annotation,
+    r#"
 func Test()
 {
   [Some text]
   return 1;
 }
-    "#;
-    crate::support::assert_compiles(source);
-}
+    "#,
+);
 
 #[test]
 fn function_description_accepts_german_chars() {

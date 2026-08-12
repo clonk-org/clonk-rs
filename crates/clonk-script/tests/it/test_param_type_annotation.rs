@@ -17,17 +17,15 @@ fn runtime_message(error: clonk_script::ScriptError) -> String {
     }
 }
 
-#[test]
-fn param_with_object_type() {
-    let source = r#"func Test(object pMage) { return 1; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    param_with_object_type,
+    r#"func Test(object pMage) { return 1; }"#
+);
 
-#[test]
-fn param_with_int_type() {
-    let source = r#"func Test(int value) { return value; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    param_with_int_type,
+    r#"func Test(int value) { return value; }"#
+);
 
 #[test]
 fn map_parameter_carries_map_annotation_and_checks_runtime_type() {

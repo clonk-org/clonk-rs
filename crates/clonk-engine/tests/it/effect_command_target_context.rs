@@ -12,6 +12,7 @@
 //! (Living.c4d/Spaceclonk.c4d/Script.c:28-31,325-329).
 
 use crate::support::real_scenario::load_installed_scenario;
+use crate::support::EngineTestExt;
 use clonk_engine::{
     Definition, Engine, ObjectId, PlayerConfig, SpawnConfig, Vector2, CATEGORY_LIVING,
     CATEGORY_VEHICLE,
@@ -58,39 +59,27 @@ fn effect_callbacks_run_implicit_object_natives_on_the_command_target() {
         ("CARR", "Rock", CARRIER),
     ] {
         let mut definition =
-            Definition::from_script(id, name, script).expect("definition compiles");
+            crate::support::TestValueExt::test_value(Definition::from_script(id, name, script));
         // Real content receives object references, not the synthetic state
         // proplists the command-DSL fixtures use.
         definition.set_c4_callback_convention(true);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_definition(definition);
     }
 
-    let carrier = engine
-        .spawn_object(SpawnConfig::new("CARR").with_category(CATEGORY_VEHICLE))
-        .expect("carrier spawns");
-    let commander = engine
-        .spawn_object(
-            SpawnConfig::new("CTGT")
-                .with_category(CATEGORY_LIVING)
-                .with_owner(PLAYER)
-                .with_alive(true),
-        )
-        .expect("command target spawns");
+    let carrier =
+        engine.spawn_test_object(SpawnConfig::new("CARR").with_category(CATEGORY_VEHICLE));
+    let commander = engine.spawn_test_object(
+        SpawnConfig::new("CTGT")
+            .with_category(CATEGORY_LIVING)
+            .with_owner(PLAYER)
+            .with_alive(true),
+    );
 
-    let index = engine
-        .find_object_index(commander)
-        .expect("command target is live");
-    engine
-        .call_object_function(index, "Arm", vec![Value::Object(carrier.as_u64())])
-        .expect("the cross-targeted effect arms");
-    engine.tick_without_snapshot().expect("timer frame runs");
+    let index = engine.test_object_index(commander);
+    engine.call_test_object_function(index, "Arm", vec![Value::Object(carrier.as_u64())]);
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
-    let locals = engine
-        .object_snapshot(commander)
-        .expect("command target survives")
-        .local_vars;
+    let locals = engine.test_object_snapshot(commander).local_vars;
     let probe = |name: &str| locals.get(name).cloned().unwrap_or(Value::Nil);
 
     assert_eq!(
@@ -124,20 +113,16 @@ fn mars_spaceclonk_headlamp_survives_its_first_timer_tick() {
     // branch deletes the crew's only directional light one frame after every
     // spawn.
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    engine
-        .register_player(PlayerConfig::new(PLAYER, "Mars headlamp tester"))
-        .expect("test player registers");
+    engine.register_test_player(PlayerConfig::new(PLAYER, "Mars headlamp tester"));
 
-    let clonk = engine
-        .spawn_object(
-            SpawnConfig::new("SCNK")
-                .with_owner(PLAYER)
-                .with_controller(PLAYER)
-                .with_alive(true)
-                .with_crew_member(true)
-                .with_position(Vector2::new(300, 200)),
-        )
-        .expect("Spaceclonk spawns");
+    let clonk = engine.spawn_test_object(
+        SpawnConfig::new("SCNK")
+            .with_owner(PLAYER)
+            .with_controller(PLAYER)
+            .with_alive(true)
+            .with_crew_member(true)
+            .with_position(Vector2::new(300, 200)),
+    );
 
     let lamps = |engine: &Engine| -> Vec<ObjectId> {
         engine
@@ -154,7 +139,7 @@ fn mars_spaceclonk_headlamp_survives_its_first_timer_tick() {
     );
 
     for _ in 0..5 {
-        engine.tick_without_snapshot().expect("headlamp frame runs");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
     assert_eq!(

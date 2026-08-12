@@ -10,7 +10,7 @@ const TUTORIAL06_RAMP: [u32; 3] = [0x000000, 0x646464, 0xc8c8c8];
 const COLD_WINTER_RAMP: [u32; 3] = [0x00000a, 0x75759a, 0xe5e5ff];
 
 fn gamma_probe_definition() -> Definition {
-    Definition::from_script(
+    crate::support::TestValueExt::test_value(Definition::from_script(
         "GAMM",
         "Gamma probe",
         r#"
@@ -68,18 +68,13 @@ fn gamma_probe_definition() -> Definition {
             SetGamma(0x111111, 0x222222, 0x333333, 9);
         }
         "#,
-    )
-    .expect("gamma probe compiles")
+    ))
 }
 
 fn gamma_probe_engine() -> Engine {
     let mut engine = Engine::with_seed(0);
-    engine
-        .register_definition(gamma_probe_definition())
-        .expect("gamma probe registers");
-    engine
-        .spawn_object(SpawnConfig::new("GAMM"))
-        .expect("gamma probe spawns");
+    crate::support::TestValueExt::test_value(engine.register_definition(gamma_probe_definition()));
+    crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("GAMM")));
     engine
 }
 
@@ -117,9 +112,7 @@ fn weather_init_writes_exact_season_gamma_to_slot_one() {
     let mut engine = Engine::with_seed(0);
     engine.set_environment(EnvironmentSettings::new(0).with_gamma_enabled());
 
-    engine
-        .apply_weather_init(&init)
-        .expect("weather initialization succeeds");
+    crate::support::TestValueExt::test_value(engine.apply_weather_init(&init));
 
     assert_eq!(engine.gamma_controls().ramp(1), Some(COLD_WINTER_RAMP));
 }
@@ -139,9 +132,9 @@ fn no_gamma_leaves_the_existing_season_slot_untouched() {
             .with_gamma_disabled(),
     );
 
-    engine
-        .apply_weather_init(&cold_winter_weather_init(true))
-        .expect("weather initialization succeeds");
+    crate::support::TestValueExt::test_value(
+        engine.apply_weather_init(&cold_winter_weather_init(true)),
+    );
     assert_eq!(engine.gamma_controls().ramp(1), expected);
 
     for function in ["SetWinter", "SetCold", "SetNewClimate"] {
@@ -210,9 +203,7 @@ fn season_rollover_refreshes_gamma_before_temperature_drift() {
     engine.set_environment(environment);
 
     for _ in 0..34 {
-        engine
-            .tick_without_snapshot()
-            .expect("pre-rollover frame succeeds");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
         engine.gamma_controls().ramp(1),
@@ -220,9 +211,7 @@ fn season_rollover_refreshes_gamma_before_temperature_drift() {
         "non-Tick35 frames do not rewrite the season control"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("rollover frame succeeds");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     assert_eq!(engine.environment().season, 1);
     assert_eq!(engine.environment().temperature, -9);
@@ -310,28 +299,24 @@ fn gamma_controls_survive_save_snapshot_and_recording_roundtrips() {
     call_probe(&mut engine, "SetSecond");
     let expected = *engine.gamma_controls();
 
-    let serialized = engine
-        .capture_state()
-        .to_json_string()
-        .expect("engine state serializes");
-    let state = EngineState::from_json_str(&serialized).expect("engine state parses");
+    let serialized =
+        crate::support::TestValueExt::test_value(engine.capture_state().to_json_string());
+    let state = crate::support::TestValueExt::test_value(EngineState::from_json_str(&serialized));
     assert_eq!(state.gamma, expected);
 
     let mut restored = Engine::with_seed(99);
-    restored
-        .register_definition(gamma_probe_definition())
-        .expect("restored gamma probe registers");
-    restored
-        .restore_state(&state)
-        .expect("engine state restores");
+    crate::support::TestValueExt::test_value(
+        restored.register_definition(gamma_probe_definition()),
+    );
+    crate::support::TestValueExt::test_value(restored.restore_state(&state));
     assert_eq!(*restored.gamma_controls(), expected);
 
     let snapshot = restored.snapshot();
     assert_eq!(snapshot.environment.gamma, expected);
     let mut recording = Recording::new();
     recording.push(snapshot);
-    let serialized = recording.to_string().expect("recording serializes");
-    let recording = Recording::from_str(&serialized).expect("recording parses");
+    let serialized = crate::support::TestValueExt::test_value(recording.to_string());
+    let recording = crate::support::TestValueExt::test_value(Recording::from_str(&serialized));
     assert_eq!(recording.frames()[0].environment.gamma, expected);
 
     assert!(Engine::new().gamma_controls().is_default());

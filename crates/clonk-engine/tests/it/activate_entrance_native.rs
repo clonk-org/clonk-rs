@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use std::fs;
 
 use clonk_engine::scenario::LegacyDefinitionResolver;
@@ -44,93 +45,87 @@ fn install_entrance_fixture(
     hostile: bool,
     reject_hostile_entrance: Option<bool>,
 ) -> ObjectId {
-    engine
-        .register_player(PlayerConfig::new(BASE_PLAYER, "Base Player"))
-        .expect("base player registers");
-    engine
-        .register_player(PlayerConfig::new(VISITOR_CONTROLLER, "Visitor"))
-        .expect("visitor registers");
-    engine
-        .register_player(PlayerConfig::new(BASE_OWNER, "Keeper"))
-        .expect("object owner registers");
-    engine
-        .set_hostility(VISITOR_CONTROLLER, BASE_PLAYER, hostile)
-        .expect("visitor hostility is configured");
+    engine.register_test_player(PlayerConfig::new(BASE_PLAYER, "Base Player"));
+    engine.register_test_player(PlayerConfig::new(VISITOR_CONTROLLER, "Visitor"));
+    engine.register_test_player(PlayerConfig::new(BASE_OWNER, "Keeper"));
+    crate::support::TestValueExt::test_value(engine.set_hostility(
+        VISITOR_CONTROLLER,
+        BASE_PLAYER,
+        hostile,
+    ));
     if let Some(enabled) = reject_hostile_entrance {
         engine.set_base_reject_entrance_enabled(enabled);
     }
 
-    let mut visitor = Definition::from_script(
+    let mut visitor = crate::support::TestValueExt::test_value(Definition::from_script(
         "VSTR",
         "Visitor",
         r#"#strict
-public func StartEnter(pTarget) { return(SetCommand(this(), "Enter", pTarget)); }
-public func StartExit()
-{
-  var queued = SetCommand(this(), "Exit");
-  ExecuteCommand(); // InitEvaluation
-  return(queued);
-}
-local observed_after_execute;
-public func ExecuteExitAndRead(pTarget)
-{
-  SetCommand(this(), "Exit");
-  ExecuteCommand(); // InitEvaluation
-  ExecuteCommand();
-  observed_after_execute = pTarget->ReadActivateCount();
-  return(observed_after_execute);
-}
-public func ExecuteExitAfterRemovingEntrance(pTarget)
-{
-  ChangeDef(NENT, pTarget);
-  SetCommand(this(), "Exit");
-  ExecuteCommand(); // InitEvaluation
-  ExecuteCommand();
-  return(GetCommand());
-}
-"#,
-    )
-    .expect("visitor definition compiles");
+    public func StartEnter(pTarget) { return(SetCommand(this(), "Enter", pTarget)); }
+    public func StartExit()
+    {
+      var queued = SetCommand(this(), "Exit");
+      ExecuteCommand(); // InitEvaluation
+      return(queued);
+    }
+    local observed_after_execute;
+    public func ExecuteExitAndRead(pTarget)
+    {
+      SetCommand(this(), "Exit");
+      ExecuteCommand(); // InitEvaluation
+      ExecuteCommand();
+      observed_after_execute = pTarget->ReadActivateCount();
+      return(observed_after_execute);
+    }
+    public func ExecuteExitAfterRemovingEntrance(pTarget)
+    {
+      ChangeDef(NENT, pTarget);
+      SetCommand(this(), "Exit");
+      ExecuteCommand(); // InitEvaluation
+      ExecuteCommand();
+      return(GetCommand());
+    }
+    "#,
+    ));
     visitor.set_c4_callback_convention(true);
     visitor.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
     visitor.set_crew_member(true);
 
-    let mut base = Definition::from_script(
+    let mut base = crate::support::TestValueExt::test_value(Definition::from_script(
         "BASE",
         "Base",
         r#"#strict
-local activate_count, activate_caller, replace_exit_once, reenter_exit_once;
-public func ReadActivateCount() { return(activate_count); }
-public func ReplaceExitOnce()
-{
-  replace_exit_once = 1;
-  return(1);
-}
-public func ReenterExitOnce()
-{
-  reenter_exit_once = 1;
-  return(1);
-}
-protected func ActivateEntrance(pCaller)
-{
-  activate_count += 1;
-  activate_caller = pCaller;
-  if (reenter_exit_once && activate_count == 1)
-  {
+    local activate_count, activate_caller, replace_exit_once, reenter_exit_once;
+    public func ReadActivateCount() { return(activate_count); }
+    public func ReplaceExitOnce()
+    {
+      replace_exit_once = 1;
+      return(1);
+    }
+    public func ReenterExitOnce()
+    {
+      reenter_exit_once = 1;
+      return(1);
+    }
+    protected func ActivateEntrance(pCaller)
+    {
+      activate_count += 1;
+      activate_caller = pCaller;
+      if (reenter_exit_once && activate_count == 1)
+      {
     ExecuteCommand(pCaller);
     return(0);
-  }
-  if (replace_exit_once && activate_count == 1)
-  {
+      }
+      if (replace_exit_once && activate_count == 1)
+      {
     SetCommand(pCaller, "Exit");
     return(0);
-  }
-  SetEntrance(1);
-  return(1);
-}
-"#,
-    )
-    .expect("base definition compiles");
+      }
+      SetEntrance(1);
+      return(1);
+    }
+    "#,
+    ));
     base.set_c4_callback_convention(true);
     base.set_can_be_base(true);
     base.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
@@ -138,48 +133,37 @@ protected func ActivateEntrance(pCaller)
         base.set_entrance_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
     }
 
-    let mut no_entrance = Definition::from_script(
+    let mut no_entrance = crate::support::TestValueExt::test_value(Definition::from_script(
         "NENT",
         "No entrance",
         r#"#strict
-protected func ActivateEntrance(pCaller)
-{
-  SetEntrance(1);
-  return(1);
-}
-"#,
-    )
-    .expect("no-entrance definition compiles");
+    protected func ActivateEntrance(pCaller)
+    {
+      SetEntrance(1);
+      return(1);
+    }
+    "#,
+    ));
     no_entrance.set_c4_callback_convention(true);
     no_entrance.set_can_be_base(true);
     no_entrance.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
 
-    engine
-        .register_definition(visitor)
-        .expect("visitor definition registers");
-    engine
-        .register_definition(base)
-        .expect("base definition registers");
-    engine
-        .register_definition(no_entrance)
-        .expect("no-entrance definition registers");
+    engine.register_test_definition(visitor);
+    engine.register_test_definition(base);
+    engine.register_test_definition(no_entrance);
 
     spawn_closed_base(engine)
 }
 
 fn spawn_closed_base(engine: &mut Engine) -> ObjectId {
-    let base = engine
-        .spawn_object(
-            SpawnConfig::new("BASE")
-                .with_owner(BASE_OWNER)
-                .with_position(Vector2::new(100, 120)),
-        )
-        .expect("base spawns");
+    let base = engine.spawn_test_object(
+        SpawnConfig::new("BASE")
+            .with_owner(BASE_OWNER)
+            .with_position(Vector2::new(100, 120)),
+    );
     let mut closed_base = ObjectUpdate::new().with_base(BASE_PLAYER);
     closed_base.entrance_status = Some(false);
-    engine
-        .apply_object_update(base, closed_base)
-        .expect("base is closed and assigned");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(base, closed_base));
 
     base
 }
@@ -206,17 +190,17 @@ fn spawn_visitor(engine: &mut Engine, container: Option<ObjectId>) -> ObjectId {
         .with_alive(true)
         .with_crew_member(true)
         .with_position(Vector2::new(100, 100));
-    let visitor = engine.spawn_object(visitor).expect("visitor spawns");
+    let visitor = engine.spawn_test_object(visitor);
     if let Some(container) = container {
-        engine
-            .apply_object_update(visitor, ObjectUpdate::new().with_container(container))
-            .expect("visitor is placed inside the base");
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(visitor, ObjectUpdate::new().with_container(container)),
+        );
     }
     visitor
 }
 
 fn call(engine: &mut Engine, object: ObjectId, function: &str, args: Vec<Value>) -> Value {
-    let index = engine.find_object_index(object).expect("caller survives");
+    let index = engine.test_object_index(object);
     engine
         .call_object_function(index, function, args)
         .unwrap_or_else(|error| panic!("{function} executes: {error}"))
@@ -233,13 +217,13 @@ fn assert_hostile_entrance_message(engine: &Engine, base: ObjectId) {
 #[test]
 fn hostile_enter_rejects_before_activate_entrance_and_reports_base_owner() {
     let (mut engine, base) = entrance_fixture(true, true, true);
-    let base_now = engine.object_snapshot(base).expect("base survives");
+    let base_now = engine.test_object_snapshot(base);
     assert_eq!(base_now.base, BASE_PLAYER);
     assert_eq!(base_now.owner, BASE_OWNER);
     assert_ne!(base_now.ocf & ocf::ENTRANCE, 0, "base has a live entrance");
 
     let visitor = spawn_visitor(&mut engine, None);
-    let visitor_now = engine.object_snapshot(visitor).expect("visitor survives");
+    let visitor_now = engine.test_object_snapshot(visitor);
     assert_eq!(visitor_now.owner, BASE_PLAYER);
     assert_eq!(visitor_now.controller, VISITOR_CONTROLLER);
     assert_eq!(
@@ -251,22 +235,13 @@ fn hostile_enter_rejects_before_activate_entrance_and_reports_base_owner() {
         ),
         Value::Bool(true)
     );
-    engine
-        .tick_without_snapshot()
-        .expect("hostile Enter executes");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
+    assert_eq!(engine.test_object_snapshot(visitor).container, None);
     assert_eq!(
         engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
-        None
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
+            .test_object_snapshot(visitor)
             .command_stack
             .command_names(),
         ["Enter"],
@@ -278,7 +253,7 @@ fn hostile_enter_rejects_before_activate_entrance_and_reports_base_owner() {
 #[test]
 fn hostile_exit_rejects_before_activate_entrance_and_fails() {
     let (mut engine, base) = entrance_fixture(true, true, true);
-    let base_now = engine.object_snapshot(base).expect("base survives");
+    let base_now = engine.test_object_snapshot(base);
     assert_eq!(base_now.base, BASE_PLAYER);
     assert_ne!(base_now.ocf & ocf::ENTRANCE, 0, "base has a live entrance");
 
@@ -287,24 +262,18 @@ fn hostile_exit_rejects_before_activate_entrance_and_fails() {
         call(&mut engine, visitor, "StartExit", Vec::new()),
         Value::Bool(true)
     );
-    engine
-        .tick_without_snapshot()
-        .expect("hostile Exit asks the native gate");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
+        engine.test_object_snapshot(visitor).container,
         Some(base),
         "hostile Exit does not eject the visitor"
     );
     assert_hostile_entrance_message(&engine, base);
     assert!(
         engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
+            .test_object_snapshot(visitor)
             .command_stack
             .command_names()
             .is_empty(),
@@ -334,10 +303,7 @@ fn script_execute_command_observes_native_entrance_activation_before_returning()
     assert_eq!(local_int(&engine, base, "activate_count"), 1);
     assert_eq!(local_int(&engine, visitor, "observed_after_execute"), 1);
     assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
+        engine.test_object_snapshot(visitor).container,
         Some(base),
         "successful activation leaves Exit pending for its next execution"
     );
@@ -360,8 +326,7 @@ fn script_execute_command_synchronously_rejects_hostile_exit() {
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert!(
         engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
+            .test_object_snapshot(visitor)
             .command_stack
             .command_names()
             .is_empty(),
@@ -385,7 +350,7 @@ fn script_execute_command_uses_same_call_cached_entrance_ocf() {
         Value::Nil,
         "the OCF-rejected Exit finishes before ExecuteCommand returns"
     );
-    let base_index = engine.find_object_index(base).expect("base survives");
+    let base_index = engine.test_object_index(base);
     assert_eq!(engine.objects[base_index].definition_id, "NENT");
     assert_eq!(engine.objects[base_index].state.ocf & ocf::ENTRANCE, 0);
     assert!(
@@ -393,8 +358,7 @@ fn script_execute_command_uses_same_call_cached_entrance_ocf() {
         "stale OCF must not call NENT's ActivateEntrance callback"
     );
     assert!(engine
-        .object_snapshot(visitor)
-        .expect("visitor survives")
+        .test_object_snapshot(visitor)
         .command_stack
         .command_names()
         .is_empty());
@@ -404,7 +368,7 @@ fn script_execute_command_uses_same_call_cached_entrance_ocf() {
 fn closed_exit_without_current_entrance_ocf_skips_callback_and_fails() {
     let (mut engine, base) = entrance_fixture(false, false, false);
     assert_eq!(
-        engine.object_snapshot(base).expect("base survives").ocf & ocf::ENTRANCE,
+        engine.test_object_snapshot(base).ocf & ocf::ENTRANCE,
         0,
         "fixture has no current OCF_Entrance"
     );
@@ -414,21 +378,12 @@ fn closed_exit_without_current_entrance_ocf_skips_callback_and_fails() {
         Value::Bool(true)
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("closed Exit checks current OCF");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
-    assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
-        Some(base)
-    );
+    assert_eq!(engine.test_object_snapshot(visitor).container, Some(base));
     assert!(engine.snapshot().hud.messages.is_empty());
     assert!(engine
-        .object_snapshot(visitor)
-        .expect("visitor survives")
+        .test_object_snapshot(visitor)
         .command_stack
         .command_names()
         .is_empty());
@@ -448,9 +403,7 @@ fn disabling_base_reject_gate_allows_hostile_activate_entrance() {
         Value::Bool(true)
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("hostile Enter calls the enabled entrance");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(local_int(&engine, base, "activate_count"), 1);
     assert_eq!(
         engine
@@ -460,16 +413,8 @@ fn disabling_base_reject_gate_allows_hostile_activate_entrance() {
     );
     assert!(engine.snapshot().hud.messages.is_empty());
 
-    engine
-        .tick_without_snapshot()
-        .expect("opened entrance accepts the visitor");
-    assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
-        Some(base)
-    );
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    assert_eq!(engine.test_object_snapshot(visitor).container, Some(base));
     assert_eq!(
         local_int(&engine, base, "activate_count"),
         1,
@@ -484,7 +429,7 @@ fn base_reject_entrance_flag_survives_state_restore() {
     assert_eq!(state.base_reject_entrance_enabled, Some(false));
 
     engine.set_base_reject_entrance_enabled(true);
-    engine.restore_state(&state).expect("state restores");
+    crate::support::TestValueExt::test_value(engine.restore_state(&state));
 
     let visitor = spawn_visitor(&mut engine, None);
     assert_eq!(
@@ -496,9 +441,7 @@ fn base_reject_entrance_flag_survives_state_restore() {
         ),
         Value::Bool(true)
     );
-    engine
-        .tick_without_snapshot()
-        .expect("restored flag controls activation");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
         local_int(&engine, base, "activate_count"),
         1,
@@ -600,12 +543,10 @@ fn legacy_section_switch_projects_its_base_reject_entrance_mask(
 fn false_activation_does_not_fail_callback_replacement_exit() {
     let (mut engine, base) = entrance_fixture(true, false, true);
     let visitor = spawn_visitor(&mut engine, Some(base));
-    engine
-        .apply_object_update(
-            visitor,
-            ObjectUpdate::new().with_command_direction(clonk_engine::CommandDirection::Right),
-        )
-        .expect("visitor starts moving");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        visitor,
+        ObjectUpdate::new().with_command_direction(clonk_engine::CommandDirection::Right),
+    ));
     assert_eq!(
         call(&mut engine, base, "ReplaceExitOnce", Vec::new()),
         Value::Int(1)
@@ -615,66 +556,45 @@ fn false_activation_does_not_fail_callback_replacement_exit() {
         Value::Bool(true)
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("first Exit is replaced by its callback");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(local_int(&engine, base, "activate_count"), 1);
     assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .command_direction,
+        engine.test_object_snapshot(visitor).command_direction,
         clonk_engine::CommandDirection::Stop,
         "the detached false Exit still runs C4Command::Fail feedback"
     );
     assert_eq!(
         engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
+            .test_object_snapshot(visitor)
             .command_stack
             .command_names(),
         ["Exit"],
         "the callback-installed Exit survives the old false result"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("replacement Exit performs InitEvaluation");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
         local_int(&engine, base, "activate_count"),
         1,
         "InitEvaluation does not activate the entrance"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("replacement Exit activates the entrance");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
         local_int(&engine, base, "activate_count"),
         2,
         "the replacement executes instead of inheriting the old failure"
     );
-    let base_index = engine.find_object_index(base).expect("base survives");
+    let base_index = engine.test_object_index(base);
     assert!(engine.objects[base_index].state.entrance_status);
     assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
+        engine.test_object_snapshot(visitor).container,
         Some(base),
         "a successful activation leaves Exit pending until its recheck"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("replacement Exit leaves the open base");
-    assert_eq!(
-        engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
-            .container,
-        None
-    );
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    assert_eq!(engine.test_object_snapshot(visitor).container, None);
 }
 
 #[test]
@@ -698,8 +618,7 @@ fn reentrant_activation_resolves_each_attempt_on_the_same_exit() {
     );
     assert!(
         engine
-            .object_snapshot(visitor)
-            .expect("visitor survives")
+            .test_object_snapshot(visitor)
             .command_stack
             .command_names()
             .is_empty(),

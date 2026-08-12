@@ -7,28 +7,27 @@ use clonk_script::Value;
 use tempfile::tempdir;
 
 fn write_definition(path: &Path, def_core: &str, script: &str) {
-    fs::create_dir_all(path).expect("definition directory creates");
-    fs::write(path.join("DefCore.txt"), def_core).expect("DefCore writes");
-    fs::write(path.join("Script.c"), script).expect("Script writes");
+    crate::support::TestValueExt::test_value(fs::create_dir_all(path));
+    crate::support::TestValueExt::test_value(fs::write(path.join("DefCore.txt"), def_core));
+    crate::support::TestValueExt::test_value(fs::write(path.join("Script.c"), script));
 }
 
 fn probe(def_core: &str, script: &str) -> Value {
-    let root = tempdir().expect("resource root creates");
+    let root = crate::support::TestValueExt::test_value(tempdir());
     let path = root.path().join("Probe.c4d");
     write_definition(&path, def_core, script);
-    let resource = ResourceDefinition::load(&Group::open(&path).expect("group opens"))
-        .expect("definition loads");
+    let resource = crate::support::TestValueExt::test_value(ResourceDefinition::load(
+        &crate::support::TestValueExt::test_value(Group::open(&path)),
+    ));
     let mut engine = Engine::new();
-    engine
-        .register_definition(Definition::from_resource(&resource).expect("definition compiles"))
-        .expect("definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("PRB1").with_loaded(true))
-        .expect("object spawns");
-    let index = engine.find_object_index(object).expect("object exists");
-    engine
-        .call_object_function(index, "Probe", vec![])
-        .expect("probe runs")
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_resource(&resource)),
+    ));
+    let object = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("PRB1").with_loaded(true)),
+    );
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
+    crate::support::TestValueExt::test_value(engine.call_object_function(index, "Probe", vec![]))
 }
 
 /// `SetVertex(..., VTX_SetPermanentUpd)` writes the own-vertex backup at

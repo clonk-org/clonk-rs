@@ -44,7 +44,7 @@
                 Value::Int(4),
             ])
         });
-        let value = result.expect("GetEffect command target succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Object(7));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
@@ -63,7 +63,7 @@
                 Value::Int(5),
             ])
         });
-        let value = result.expect("GetEffect command id succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::C4Id("BARL".into()));
     }
 
@@ -84,33 +84,13 @@ public func Probe(object carrier)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CMND", "Command target", command_script)
-                    .expect("command target compiles"),
-            )
-            .expect("command target registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("HOLD", "Effect holder", "#strict 2")
-                    .expect("effect holder compiles"),
-            )
-            .expect("effect holder registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("NEWD", "Changed command target", "#strict 2")
-                    .expect("changed command target compiles"),
-            )
-            .expect("changed command target registers");
-        let command = engine
-            .spawn_object(crate::SpawnConfig::new("CMND"))
-            .expect("command target spawns");
-        let holder = engine
-            .spawn_object(crate::SpawnConfig::new("HOLD"))
-            .expect("effect holder spawns");
+        engine.register_test_definition(test_definition("CMND", "Command target", command_script));
+        engine.register_test_definition(test_definition("HOLD", "Effect holder", "#strict 2"));
+        engine.register_test_definition(test_definition("NEWD", "Changed command target", "#strict 2"));
+        let command = engine.spawn_test_object(crate::SpawnConfig::new("CMND"));
+        let holder = engine.spawn_test_object(crate::SpawnConfig::new("HOLD"));
         let command_index = engine
-            .find_object_index(command)
-            .expect("command target exists");
+            .find_object_index(command).test_value();
 
         assert_eq!(
             engine
@@ -148,7 +128,7 @@ public func Probe(object carrier)
                 Value::Int(5),
             ])
         });
-        let value = result.expect("GetEffect command id succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::C4Id("BARL".into()));
     }
 
@@ -174,7 +154,7 @@ public func Probe(object carrier)
             remove_effect(&[Value::String("First".into()), state.clone()])?;
             get_effect(&[Value::String("*Control*".into()), state.clone()])
         });
-        let value = result.expect("GetEffect succeeds");
+        let value = result.test_value();
         assert_eq!(
             value,
             Value::Int(2),
@@ -203,7 +183,7 @@ public func Probe(object carrier)
             remove_effect(&[Value::String("First".into()), state.clone()])?;
             get_effect(&[Value::Int(0), state.clone(), Value::Int(2), Value::Int(1)])
         });
-        let value = result.expect("GetEffect succeeds");
+        let value = result.test_value();
         assert_eq!(
             value,
             Value::String("XControl".into()),
@@ -235,7 +215,7 @@ public func Probe(object carrier)
                 Value::String("Activate".into()),
             ])
         });
-        let value = result.expect("EffectCall chain succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil, "unknown effect number is a silent nil");
     }
 
@@ -260,7 +240,7 @@ public func Probe(object carrier)
             let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
             effect_call(&[state.clone(), number, Value::String("Activate".into())])
         });
-        let value = result.expect("EffectCall succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -290,7 +270,7 @@ public func Probe(object carrier)
             add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
             get_effect_count(&[Value::Nil, state.clone()])
         });
-        let value = result.expect("GetEffectCount succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(3));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
@@ -299,7 +279,7 @@ public func Probe(object carrier)
             add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
             get_effect_count(&[Value::String("Glow".into()), state.clone()])
         });
-        let value = result.expect("GetEffectCount with name succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
@@ -308,7 +288,7 @@ public func Probe(object carrier)
             add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
             get_effect_count(&[Value::Nil, state.clone(), Value::Int(90)])
         });
-        let value = result.expect("GetEffectCount with priority succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(2));
     }
 
@@ -336,8 +316,7 @@ public func Probe(object carrier)
         // Clonk.c4d Script.c:587 gates riding controls on
         // `WildcardMatch(GetAction(), "Ride*")`.
         let m = |s: &str, w: &str| {
-            wildcard_match(&[Value::String(s.into()), Value::String(w.into())])
-                .expect("WildcardMatch succeeds")
+            wildcard_match(&[Value::String(s.into()), Value::String(w.into())]).test_value()
         };
         assert_eq!(m("Walk", "Ride*"), Value::Int(0));
         assert_eq!(m("Ride", "Ride*"), Value::Int(1));
@@ -397,14 +376,14 @@ public func Probe(object carrier)
             add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
             get_effect_count(&[Value::Int(0), state.clone()])
         });
-        let value = result.expect("GetEffectCount with falsy int name succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(2));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
             get_effect_count(&[Value::Bool(false), state.clone()])
         });
-        let value = result.expect("GetEffectCount with falsy bool name succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
@@ -439,7 +418,7 @@ public func Probe(object carrier)
             remove_effect(&[Value::Int(0), state.clone(), number])?;
             get_effect_count(&[Value::Nil, state.clone()])
         });
-        let value = result.expect("falsy-name GetEffect/RemoveEffect chain succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(0));
     }
 
@@ -476,24 +455,19 @@ public func Probe(object carrier)
             Value::Proplist(map)
         };
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Nil])
-            .expect("GetEffectCount without context succeeds");
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Nil]).test_value();
         assert_eq!(value, Value::Int(3));
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(0)])
-            .expect("explicit zero keeps the C++ unbounded sentinel");
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(0)]).test_value();
         assert_eq!(value, Value::Int(3));
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(100)])
-            .expect("positive cap includes temp-removed effects by signed priority");
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(100)]).test_value();
         assert_eq!(value, Value::Int(3));
 
-        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(-100)])
-            .expect("negative priority caps are valid");
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(-100)]).test_value();
         assert_eq!(value, Value::Int(1));
 
-        let value = get_effect_count(&[Value::String("Spark".into()), state, Value::Int(50)])
-            .expect("GetEffectCount with state filter succeeds");
+        let value = get_effect_count(&[Value::String("Spark".into()), state, Value::Int(50)]).test_value();
         assert_eq!(value, Value::Int(0));
     }
 
@@ -543,7 +517,7 @@ public func Probe(object carrier)
             Ok(Value::Nil)
         });
 
-        result.expect("EffectVar interactions succeed");
+        result.test_value();
         assert_eq!(outcome.object.len(), 4);
         match &outcome.object[3] {
             // EffectVar writes fold as number-keyed UPDATEs — an Add
@@ -577,12 +551,10 @@ public func Probe(object carrier)
         );
         let state = Value::Proplist(state_map);
 
-        let read_value = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)])
-            .expect("EffectVar read succeeds");
+        let read_value = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)]).test_value();
         assert_eq!(read_value, Value::Int(9));
 
-        let read_string = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])
-            .expect("EffectVar string read succeeds");
+        let read_string = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)]).test_value();
         assert_eq!(read_string, Value::String("pulse".into()));
 
         let set_result = effect_var(&[Value::Int(0), state, Value::Int(1), Value::Int(5)]);
@@ -593,10 +565,10 @@ public func Probe(object carrier)
     fn set_action_records_object_update() {
         let args = vec![Value::String("Walk".into())];
         let (result, outcome) = with_object_host_context_actions(&["Walk"], || set_action(&args));
-        let value = result.expect("SetAction should succeed");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("action update present");
-        let action = update.action.expect("action delta present");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.name.as_deref(), Some("Walk"));
         assert!(outcome.object_commands.is_empty());
         assert!(!outcome.destroy_object);
@@ -611,10 +583,10 @@ public func Probe(object carrier)
         target_map.insert("id".into(), Value::Int(2));
         let args = vec![Value::String("Jump".into()), Value::Proplist(target_map)];
         let (result, outcome) = with_object_host_context_actions(&["Jump"], || set_action(&args));
-        let value = result.expect("SetAction returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("action update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.target, Some(Some(ObjectId::new(2))));
     }
 
@@ -626,10 +598,10 @@ public func Probe(object carrier)
         // explicit nils and omitted arguments alike.
         let args = vec![Value::String("Jump".into()), Value::Nil, Value::Nil];
         let (result, outcome) = with_object_host_context_actions(&["Jump"], || set_action(&args));
-        let value = result.expect("SetAction returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("action update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.target, None, "nil target1 must not stage a clear");
         assert_eq!(action.target2, None, "nil target2 must not stage a clear");
     }
@@ -646,8 +618,7 @@ public func Probe(object carrier)
             let action = outcome
                 .object_update
                 .expect("action update recorded")
-                .action
-                .expect("action delta present");
+                .action.test_value();
             assert_eq!(action.name.as_deref(), Some("Idle"));
             assert_eq!(action.target, None, "{name} must ignore target1");
             assert_eq!(action.target2, None, "{name} must ignore target2");
@@ -668,8 +639,7 @@ public func Probe(object carrier)
         let action = outcome
             .object_update
             .expect("action update recorded")
-            .action
-            .expect("action delta present");
+            .action.test_value();
         assert_eq!(action.name.as_deref(), Some("Idle"));
         assert_eq!(action.phase, None, "already-zero phase needs no write");
         assert_eq!(action.ticks, Some(0), "PhaseDelay resets unconditionally");
@@ -727,8 +697,7 @@ public func Probe(object carrier)
                 source.push_str(" }\n");
             }
             script
-                .load_script(&source)
-                .expect("FightWith fixture script compiles");
+                .load_script(&source).test_value();
             Arc::new(script)
         };
 
@@ -809,11 +778,11 @@ public func Probe(object carrier)
 
         assert_eq!(result.expect("FightWith succeeds"), Value::Bool(true));
         let caller_action =
-            fight_with_action(&outcome, caller_id).expect("caller Fight action recorded");
+            fight_with_action(&outcome, caller_id).test_value();
         assert_eq!(caller_action.name.as_deref(), Some("Fight"));
         assert_eq!(caller_action.target, Some(Some(target_id)));
         let target_action =
-            fight_with_action(&outcome, target_id).expect("target Fight action recorded");
+            fight_with_action(&outcome, target_id).test_value();
         assert_eq!(target_action.name.as_deref(), Some("Fight"));
         assert_eq!(target_action.target, Some(Some(caller_id)));
     }
@@ -856,8 +825,7 @@ public func Probe(object carrier)
             fight_with_action(&outcome, ObjectId::new(1)).is_none(),
             "clonk callback and Fight action are both skipped"
         );
-        let target_action = fight_with_action(&outcome, ObjectId::new(2))
-            .expect("target veto callback side effect is preserved");
+        let target_action = fight_with_action(&outcome, ObjectId::new(2)).test_value();
         assert_eq!(target_action.name.as_deref(), Some("Checked"));
     }
 
@@ -875,11 +843,9 @@ public func Probe(object carrier)
             result.expect("clonk veto returns false"),
             Value::Bool(false)
         );
-        let caller_action = fight_with_action(&outcome, ObjectId::new(1))
-            .expect("clonk veto callback side effect is preserved");
+        let caller_action = fight_with_action(&outcome, ObjectId::new(1)).test_value();
         assert_eq!(caller_action.name.as_deref(), Some("Checked"));
-        let target_action = fight_with_action(&outcome, ObjectId::new(2))
-            .expect("target callback ran before clonk veto");
+        let target_action = fight_with_action(&outcome, ObjectId::new(2)).test_value();
         assert_eq!(target_action.name.as_deref(), Some("Checked"));
     }
 
@@ -938,8 +904,7 @@ public func Probe(object carrier)
         holder_state.layer = Some(target_id);
         let mut holder_commands = CommandStack::new();
         holder_commands
-            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
-            .expect("holder command is valid");
+            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id))).test_value();
         let holder = fixture_world_object(holder_id, "HOLD")
             .with_action_target(Some(target_id))
         .with_full_state(Rc::new(holder_state))
@@ -964,9 +929,9 @@ public func Probe(object carrier)
     fn set_object_status_records_update() {
         let args = vec![Value::Int(ObjectStatus::Inactive.to_script_value())];
         let (result, outcome) = with_object_host_context(|| set_object_status(&args));
-        let value = result.expect("SetObjectStatus succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("status update present");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
     }
 
@@ -1003,8 +968,7 @@ public func Probe(object carrier)
             .other_objects
             .iter()
             .find(|object| object.object_id == target_id)
-            .and_then(|object| object.update.as_ref())
-            .expect("foreign status update recorded");
+            .and_then(|object| object.update.as_ref()).test_value();
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
         assert!(
             outcome
@@ -1054,12 +1018,10 @@ public func Probe(object carrier)
         let target_outcome = outcome
             .other_objects
             .iter()
-            .find(|object| object.object_id == target_id)
-            .expect("foreign target outcome recorded");
+            .find(|object| object.object_id == target_id).test_value();
         let target_update = target_outcome
             .update
-            .as_ref()
-            .expect("foreign target update recorded");
+            .as_ref().test_value();
         assert_eq!(target_update.status, Some(ObjectStatus::Inactive));
         assert_eq!(
             target_update
@@ -1072,12 +1034,10 @@ public func Probe(object carrier)
         let holder_outcome = outcome
             .other_objects
             .iter()
-            .find(|object| object.object_id == holder_id)
-            .expect("holder pointer clears recorded");
+            .find(|object| object.object_id == holder_id).test_value();
         let holder_update = holder_outcome
             .update
-            .as_ref()
-            .expect("holder pointer clears recorded");
+            .as_ref().test_value();
         assert_eq!(
             holder_update
                 .action
@@ -1148,7 +1108,7 @@ public func Probe(object carrier)
     fn set_object_status_rejects_deleted() {
         let args = vec![Value::Int(ObjectStatus::Deleted.to_script_value())];
         let (result, outcome) = with_object_host_context(|| set_object_status(&args));
-        let value = result.expect("SetObjectStatus returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -1162,9 +1122,9 @@ public func Probe(object carrier)
             get_object_status(&[])
         });
 
-        let value = result.expect("GetObjectStatus succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(ObjectStatus::Inactive.to_script_value()));
-        let update = outcome.object_update.expect("status update present");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
     }
 
@@ -1190,7 +1150,7 @@ public func Probe(object carrier)
             || get_owner(&[]),
         );
 
-        let value = result.expect("GetOwner succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(5));
     }
 
@@ -1204,7 +1164,7 @@ public func Probe(object carrier)
         let args = [object_reference_value(ObjectId::new(7))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_owner(&args));
 
-        let value = result.expect("GetOwner for target succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(42));
     }
 
@@ -1225,52 +1185,37 @@ func ChangeAndProbe()
 "#;
         let caller_dir = tempfile::Builder::new()
             .prefix("lc-test-")
-            .tempdir()
-            .expect("caller resource directory");
+            .tempdir().test_value();
         std::fs::write(
             caller_dir.path().join("DefCore.txt"),
             b"[DefCore]\nid=CALL\nName=Caller\nCrewMember=-2\n",
-        )
-        .expect("caller DefCore writes");
-        std::fs::write(caller_dir.path().join("Script.c"), script).expect("caller script writes");
+        ).test_value();
+        std::fs::write(caller_dir.path().join("Script.c"), script).test_value();
         let caller_group =
-            clonk_resources::Group::open(caller_dir.path()).expect("caller group opens");
-        let caller_resource = clonk_resources::ResourceDefinition::load(&caller_group)
-            .expect("caller resource loads");
+            clonk_resources::Group::open(caller_dir.path()).test_value();
+        let caller_resource = clonk_resources::ResourceDefinition::load(&caller_group).test_value();
         let caller_definition =
-            crate::Definition::from_resource(&caller_resource).expect("caller resource compiles");
+            crate::Definition::from_resource(&caller_resource).test_value();
         assert_eq!(caller_definition.crew_member_value(), -2);
         assert!(caller_definition.is_crew());
         let mut raw_definition =
-            crate::Definition::from_script("RAWW", "Raw", "#strict\n").expect("raw compiles");
+            test_definition("RAWW", "Raw", "#strict\n");
         raw_definition.set_crew_member_value(7);
         let zero_definition =
-            crate::Definition::from_script("ZERO", "Zero", "#strict\n").expect("zero compiles");
+            test_definition("ZERO", "Zero", "#strict\n");
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(caller_definition)
-            .expect("caller registers");
-        engine
-            .register_definition(raw_definition)
-            .expect("raw registers");
-        engine
-            .register_definition(zero_definition)
-            .expect("zero registers");
+        engine.register_test_definition(caller_definition);
+        engine.register_test_definition(raw_definition);
+        engine.register_test_definition(zero_definition);
 
         // Runtime crew membership is deliberately the inverse of the
         // definitions. FnCrewMember reads Def->CrewMember, not Object state
         // or OCF_CrewMember.
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL").with_crew_member(false))
-            .expect("caller spawns");
-        let raw = engine
-            .spawn_object(crate::SpawnConfig::new("RAWW").with_crew_member(false))
-            .expect("raw target spawns");
-        let runtime_crew = engine
-            .spawn_object(crate::SpawnConfig::new("ZERO").with_crew_member(true))
-            .expect("runtime crew target spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL").with_crew_member(false));
+        let raw = engine.spawn_test_object(crate::SpawnConfig::new("RAWW").with_crew_member(false));
+        let runtime_crew = engine.spawn_test_object(crate::SpawnConfig::new("ZERO").with_crew_member(true));
+        let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -1293,8 +1238,7 @@ func ChangeAndProbe()
         );
 
         let changed = engine
-            .call_object_function(caller_index, "ChangeAndProbe", vec![])
-            .expect("ChangeDef probe runs");
+            .call_object_function(caller_index, "ChangeAndProbe", vec![]).test_value();
 
         let carrier = HostObjectContext {
             id: ObjectId::new(99),
@@ -1376,9 +1320,9 @@ func ChangeAndProbe()
             || set_owner(&[Value::Int(3)]),
         );
 
-        let value = result.expect("SetOwner returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("owner update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.owner, Some(3));
         assert_eq!(update.controller, Some(3));
     }
@@ -1405,8 +1349,7 @@ func ChangeAndProbe()
         assert_eq!(outcome.other_objects.len(), 1, "target changes once");
         let update = outcome.other_objects[0]
             .update
-            .as_ref()
-            .expect("foreign owner update recorded");
+            .as_ref().test_value();
         assert_eq!(update.owner, Some(1));
         assert_eq!(update.controller, Some(1));
     }
@@ -1440,8 +1383,7 @@ func ChangeAndProbe()
         assert_eq!(outcome.other_objects.len(), 1, "target changes once");
         let update = outcome.other_objects[0]
             .update
-            .as_ref()
-            .expect("foreign owner update recorded");
+            .as_ref().test_value();
         assert_eq!(update.owner, Some(OWNER_NONE));
         assert_eq!(update.controller, Some(OWNER_NONE));
     }
@@ -1600,9 +1542,9 @@ func ChangeAndProbe()
             || set_alive(&[Value::Bool(false)]),
         );
 
-        let value = result.expect("SetAlive returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("alive update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.alive, Some(false));
     }
 
@@ -1649,8 +1591,7 @@ func ChangeAndProbe()
             .other_objects
             .iter()
             .find(|object| object.object_id == target_id)
-            .and_then(|object| object.update.as_ref())
-            .expect("foreign alive update recorded");
+            .and_then(|object| object.update.as_ref()).test_value();
         assert_eq!(update.alive, Some(true));
     }
 
@@ -1675,8 +1616,7 @@ func ChangeAndProbe()
             .other_objects
             .iter()
             .find(|object| object.object_id == target_id)
-            .and_then(|object| object.update.as_ref())
-            .expect("foreign alive update recorded");
+            .and_then(|object| object.update.as_ref()).test_value();
         assert_eq!(update.alive, Some(false));
     }
 
@@ -1693,7 +1633,7 @@ func ChangeAndProbe()
             || get_alive(&[]),
         );
 
-        let value = result.expect("GetAlive returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -1721,7 +1661,7 @@ func ChangeAndProbe()
         let args = [object_reference_value(ObjectId::new(7))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_alive(&args));
 
-        let value = result.expect("GetAlive for target succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -1743,14 +1683,13 @@ func ChangeAndProbe()
             assert_eq!(kill(&[])?, Value::Bool(false));
             Ok::<_, RuntimeError>(())
         });
-        result.expect("Kill calls succeed");
+        result.test_value();
         assert!(
             outcome.other_objects.is_empty(),
             "the active object's synchronous death stays on its update channel"
         );
         let update = outcome
-            .object_update
-            .expect("the completed lifecycle records its final state");
+            .object_update.test_value();
         assert_eq!(update.alive, Some(false));
         assert_eq!(update.selected, Some(false));
     }
@@ -1801,12 +1740,11 @@ func ChangeAndProbe()
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("foreign Kill succeeds");
+        result.test_value();
         let death = outcome
             .other_objects
             .iter()
-            .find(|outcome| outcome.object_id == ObjectId::new(7))
-            .expect("the target carries its death outcome");
+            .find(|outcome| outcome.object_id == ObjectId::new(7)).test_value();
         assert_eq!(
             death.update.as_ref().and_then(|update| update.alive),
             Some(false),
@@ -1828,25 +1766,20 @@ func ChangeAndProbe()
         // C4Object::DoEnergy calls AssignDeath inline on the nonzero -> zero
         // transition, and AssignDeath calls Death before DoEnergy returns
         // (oracle-src-pinned src/C4Object.cpp:1164-1205,1372-1393).
-        let mut definition = crate::Definition::from_script(
-            "CLNK",
-            "Clonk",
-            r#"#strict
-local order;
-public func Trigger()
-{
-    order = 1;
-    DoEnergy(-10, 0, true);
-    order = order * 10 + 3;
-    return order;
-}
-protected func Death()
-{
-    order = order * 10 + 2;
-}
-"#,
-        )
-        .expect("death-order script compiles");
+        let mut definition = test_definition("CLNK", "Clonk", r#"#strict
+        local order;
+        public func Trigger()
+        {
+            order = 1;
+            DoEnergy(-10, 0, true);
+            order = order * 10 + 3;
+            return order;
+        }
+        protected func Death()
+        {
+            order = order * 10 + 2;
+        }
+        "#);
         definition.set_physical(PhysicalInfo {
             energy: C4_MAX_PHYSICAL,
             ..PhysicalInfo::default()
@@ -1861,19 +1794,14 @@ protected func Death()
             },
         ));
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("death-order definition registers");
-        let clonk = engine
-            .spawn_object(SpawnConfig::new("CLNK"))
-            .expect("clonk spawns");
-        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.register_test_definition(definition);
+        let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+        let index = engine.find_object_index(clonk).test_value();
         engine.objects[index].state.energy = 10;
         engine.objects[index].state.alive = true;
 
         let result = engine
-            .call_object_function(index, "Trigger", Vec::new())
-            .expect("lethal Trigger succeeds");
+            .call_object_function(index, "Trigger", Vec::new()).test_value();
         assert_eq!(engine.objects[index].state.energy, 0);
         assert_eq!(
             death_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1895,32 +1823,22 @@ protected func Death()
         // src/C4ObjectCom.cpp:737-767; src/C4Object.cpp:2224-2227).
         let catch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_catch_calls = Arc::clone(&catch_calls);
-        let attacker_definition = crate::Definition::from_script(
-            "PATK",
-            "Punch attacker",
-            r#"#strict
-public func Trigger(target)
-{
-    return Punch(target, 10);
-}
-"#,
-        )
-        .expect("punch attacker compiles");
-        let mut target_definition = crate::Definition::from_script(
-            "PTGT",
-            "Punch target",
-            r#"#strict
-protected func Death()
-{
-    RemoveObject();
-}
-protected func CatchBlow(strength, attacker)
-{
-    return 1;
-}
-"#,
-        )
-        .expect("punch target compiles");
+        let attacker_definition = test_definition("PATK", "Punch attacker", r#"#strict
+        public func Trigger(target)
+        {
+            return Punch(target, 10);
+        }
+        "#);
+        let mut target_definition = test_definition("PTGT", "Punch target", r#"#strict
+        protected func Death()
+        {
+            RemoveObject();
+        }
+        protected func CatchBlow(strength, attacker)
+        {
+            return 1;
+        }
+        "#);
         target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         target_definition.configure_actions(
             Some("Idle".to_string()),
@@ -1940,21 +1858,13 @@ protected func CatchBlow(strength, attacker)
         ));
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(attacker_definition)
-            .expect("punch attacker registers");
-        engine
-            .register_definition(target_definition)
-            .expect("punch target registers");
-        let attacker = engine
-            .spawn_object(SpawnConfig::new("PATK"))
-            .expect("punch attacker spawns");
-        let target = engine
-            .spawn_object(SpawnConfig::new("PTGT").with_alive(true))
-            .expect("punch target spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.register_test_definition(attacker_definition);
+        engine.register_test_definition(target_definition);
+        let attacker = engine.spawn_test_object(SpawnConfig::new("PATK"));
+        let target = engine.spawn_test_object(SpawnConfig::new("PTGT").with_alive(true));
+        let target_index = engine.find_object_index(target).test_value();
         engine.objects[target_index].state.energy = 1;
-        let attacker_index = engine.find_object_index(attacker).expect("attacker exists");
+        let attacker_index = engine.find_object_index(attacker).test_value();
 
         assert_eq!(
             engine
@@ -1983,27 +1893,22 @@ protected func CatchBlow(strength, attacker)
         let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_first = Arc::clone(&first_calls);
         let observed_second = Arc::clone(&second_calls);
-        let mut target_definition = crate::Definition::from_script(
-            "TARG",
-            "Target",
-            r#"#strict
-public func Setup()
-{
-    AddEffect("First", this, 10, 0, this);
-    AddEffect("Second", this, 20, 0, this);
-}
-protected func FxFirstDamage(target, number, change, cause, caused_by)
-{
-    RemoveObject(target);
-    return change;
-}
-protected func FxSecondDamage(target, number, change, cause, caused_by)
-{
-    return change;
-}
-"#,
-        )
-        .expect("damage-removal target compiles");
+        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        public func Setup()
+        {
+            AddEffect("First", this, 10, 0, this);
+            AddEffect("Second", this, 20, 0, this);
+        }
+        protected func FxFirstDamage(target, number, change, cause, caused_by)
+        {
+            RemoveObject(target);
+            return change;
+        }
+        protected func FxSecondDamage(target, number, change, cause, caused_by)
+        {
+            return change;
+        }
+        "#);
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxFirstDamage" => {
@@ -2015,36 +1920,22 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
                 _ => {}
             },
         ));
-        let caller_definition = crate::Definition::from_script(
-            "CALL",
-            "Caller",
-            r#"#strict
-public func Trigger(target)
-{
-    return DoEnergy(-1, target, true);
-}
-"#,
-        )
-        .expect("damage-removal caller compiles");
+        let caller_definition = test_definition("CALL", "Caller", r#"#strict
+        public func Trigger(target)
+        {
+            return DoEnergy(-1, target, true);
+        }
+        "#);
 
         let mut engine = crate::Engine::with_seed(0);
+        engine.register_test_definition(target_definition);
+        engine.register_test_definition(caller_definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let target_index = engine.find_object_index(target).test_value();
         engine
-            .register_definition(target_definition)
-            .expect("damage-removal target registers");
-        engine
-            .register_definition(caller_definition)
-            .expect("damage-removal caller registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
-            .expect("damage-removal target spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("damage-removal caller spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
-        engine
-            .call_object_function(target_index, "Setup", Vec::new())
-            .expect("damage effects install");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+            .call_object_function(target_index, "Setup", Vec::new()).test_value();
+        let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -2074,31 +1965,26 @@ public func Trigger(target)
         let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_first = Arc::clone(&first_calls);
         let observed_second = Arc::clone(&second_calls);
-        let mut target_definition = crate::Definition::from_script(
-            "TARG",
-            "Target",
-            r#"#strict
-public func Setup()
-{
-    AddEffect("First", this, 10, 0, this);
-    AddEffect("Second", this, 20, 0, this);
-}
-public func Trigger()
-{
-    return DoEnergy(-1, this, true);
-}
-protected func FxFirstDamage(target, number, change, cause, caused_by)
-{
-    RemoveEffect("Second", target, 0, true);
-    return change;
-}
-protected func FxSecondDamage(target, number, change, cause, caused_by)
-{
-    return change;
-}
-"#,
-        )
-        .expect("damage-effect-removal target compiles");
+        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        public func Setup()
+        {
+            AddEffect("First", this, 10, 0, this);
+            AddEffect("Second", this, 20, 0, this);
+        }
+        public func Trigger()
+        {
+            return DoEnergy(-1, this, true);
+        }
+        protected func FxFirstDamage(target, number, change, cause, caused_by)
+        {
+            RemoveEffect("Second", target, 0, true);
+            return change;
+        }
+        protected func FxSecondDamage(target, number, change, cause, caused_by)
+        {
+            return change;
+        }
+        "#);
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxFirstDamage" => {
@@ -2112,16 +1998,11 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
         ));
 
         let mut engine = crate::Engine::with_seed(0);
+        engine.register_test_definition(target_definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
+        let target_index = engine.find_object_index(target).test_value();
         engine
-            .register_definition(target_definition)
-            .expect("damage-effect-removal target registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
-            .expect("damage-effect-removal target spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
-        engine
-            .call_object_function(target_index, "Setup", Vec::new())
-            .expect("damage effects install");
+            .call_object_function(target_index, "Setup", Vec::new()).test_value();
 
         assert_eq!(
             engine
@@ -2143,59 +2024,49 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
         // only after Fx*Damage returns. An effect inserted after that node is
         // therefore visited in this chain; one inserted before it is not
         // (oracle-src-pinned src/C4Effect.cpp:427-436,59-93).
-        let definition = crate::Definition::from_script(
-            "TARG",
-            "Target",
-            r#"#strict
-local order;
-public func Setup()
-{
-    AddEffect("First", this, 10, 0, this);
-    AddEffect("Second", this, 30, 0, this);
-}
-public func Trigger()
-{
-    order = 0;
-    DoEnergy(-1, this, true);
-    return order;
-}
-protected func FxFirstDamage(target, number, change, cause, caused_by)
-{
-    order = order * 10 + 1;
-    AddEffect("Before", this, 5, 0, this);
-    AddEffect("Between", this, 20, 0, this);
-    return change;
-}
-protected func FxBeforeDamage(target, number, change, cause, caused_by)
-{
-    order = order * 10 + 9;
-    return change;
-}
-protected func FxBetweenDamage(target, number, change, cause, caused_by)
-{
-    order = order * 10 + 2;
-    return change;
-}
-protected func FxSecondDamage(target, number, change, cause, caused_by)
-{
-    order = order * 10 + 3;
-    return change;
-}
-"#,
-        )
-        .expect("live-next damage script compiles");
+        let definition = test_definition("TARG", "Target", r#"#strict
+        local order;
+        public func Setup()
+        {
+            AddEffect("First", this, 10, 0, this);
+            AddEffect("Second", this, 30, 0, this);
+        }
+        public func Trigger()
+        {
+            order = 0;
+            DoEnergy(-1, this, true);
+            return order;
+        }
+        protected func FxFirstDamage(target, number, change, cause, caused_by)
+        {
+            order = order * 10 + 1;
+            AddEffect("Before", this, 5, 0, this);
+            AddEffect("Between", this, 20, 0, this);
+            return change;
+        }
+        protected func FxBeforeDamage(target, number, change, cause, caused_by)
+        {
+            order = order * 10 + 9;
+            return change;
+        }
+        protected func FxBetweenDamage(target, number, change, cause, caused_by)
+        {
+            order = order * 10 + 2;
+            return change;
+        }
+        protected func FxSecondDamage(target, number, change, cause, caused_by)
+        {
+            order = order * 10 + 3;
+            return change;
+        }
+        "#);
 
         let mut engine = crate::Engine::with_seed(0);
+        engine.register_test_definition(definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
+        let target_index = engine.find_object_index(target).test_value();
         engine
-            .register_definition(definition)
-            .expect("live-next damage target registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
-            .expect("live-next damage target spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
-        engine
-            .call_object_function(target_index, "Setup", Vec::new())
-            .expect("initial damage effects install");
+            .call_object_function(target_index, "Setup", Vec::new()).test_value();
 
         assert_eq!(
             engine
@@ -2214,43 +2085,38 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
         // src/C4Object.cpp:1164-1205; src/C4Effect.cpp:407-425;
         // src/C4Object.h:361).
         fn run(forced: bool) -> (Value, bool, String, usize, usize, usize, Value) {
-            let mut definition = crate::Definition::from_script(
-                "CLNK",
-                "Clonk",
-                r#"#strict
-local order, stop_alive, stop_ocf_alive;
-public func Trigger(forced)
-{
-    order = 1;
-    AddEffect("Guard", this, 1, 0, this);
-    Kill(this, forced);
-    order = order * 10 + 3;
-    return order;
-}
-protected func FxGuardStop(target, number, reason)
-{
-    stop_alive = GetAlive(target);
-    stop_ocf_alive = GetOCF(target) & OCF_Alive;
-    if (reason == 4)
-    {
-        SetAlive(true, target);
-        return -1;
-    }
-    return 0;
-}
-protected func Death()
-{
-    order = order * 10 + 2;
-    return 0;
-}
-public func StopProbe()
-{
-    if (stop_alive) return -1;
-    return stop_ocf_alive;
-}
-"#,
-            )
-            .expect("revival script compiles");
+            let mut definition = test_definition("CLNK", "Clonk", r#"#strict
+            local order, stop_alive, stop_ocf_alive;
+            public func Trigger(forced)
+            {
+                order = 1;
+                AddEffect("Guard", this, 1, 0, this);
+                Kill(this, forced);
+                order = order * 10 + 3;
+                return order;
+            }
+            protected func FxGuardStop(target, number, reason)
+            {
+                stop_alive = GetAlive(target);
+                stop_ocf_alive = GetOCF(target) & OCF_Alive;
+                if (reason == 4)
+                {
+                    SetAlive(true, target);
+                    return -1;
+                }
+                return 0;
+            }
+            protected func Death()
+            {
+                order = order * 10 + 2;
+                return 0;
+            }
+            public func StopProbe()
+            {
+                if (stop_alive) return -1;
+                return stop_ocf_alive;
+            }
+            "#);
             definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
             definition.configure_actions(
                 Some("Idle".to_string()),
@@ -2277,22 +2143,16 @@ public func StopProbe()
             ));
 
             let mut engine = crate::Engine::with_seed(0);
-            engine
-                .register_definition(definition)
-                .expect("revival definition registers");
-            let clonk = engine
-                .spawn_object(SpawnConfig::new("CLNK"))
-                .expect("clonk spawns");
-            let index = engine.find_object_index(clonk).expect("clonk exists");
+            engine.register_test_definition(definition);
+            let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+            let index = engine.find_object_index(clonk).test_value();
             engine.objects[index].state.alive = true;
             engine.refresh_object_ocf(index);
 
             let result = engine
-                .call_object_function(index, "Trigger", vec![Value::Bool(forced)])
-                .expect("Kill trigger succeeds");
+                .call_object_function(index, "Trigger", vec![Value::Bool(forced)]).test_value();
             let stop_probe = engine
-                .call_object_function(index, "StopProbe", Vec::new())
-                .expect("Stop observation remains readable");
+                .call_object_function(index, "StopProbe", Vec::new()).test_value();
             let object = &engine.objects[index];
             (
                 result,
@@ -2355,32 +2215,27 @@ public func StopProbe()
         let observed_high = Arc::clone(&high_calls);
         let observed_old_low = Arc::clone(&old_low_calls);
         let observed_changed_low = Arc::clone(&changed_low_calls);
-        let mut definition = crate::Definition::from_script(
-            "TARG",
-            "Target",
-            r#"#strict
-public func Trigger()
-{
-    AddEffect("Low", this, 10, 0, this);
-    AddEffect("High", this, 20, 0, this);
-    return Kill(this, true);
-}
-protected func FxHighStop(target, number, reason)
-{
-    if (reason == 4) ChangeEffect("Low", target, 0, "Changed", -1);
-    return 0;
-}
-protected func FxLowStop(target, number, reason)
-{
-    return 0;
-}
-protected func FxChangedStop(target, number, reason)
-{
-    return 0;
-}
-"#,
-        )
-        .expect("ClearAll live-node target compiles");
+        let mut definition = test_definition("TARG", "Target", r#"#strict
+        public func Trigger()
+        {
+            AddEffect("Low", this, 10, 0, this);
+            AddEffect("High", this, 20, 0, this);
+            return Kill(this, true);
+        }
+        protected func FxHighStop(target, number, reason)
+        {
+            if (reason == 4) ChangeEffect("Low", target, 0, "Changed", -1);
+            return 0;
+        }
+        protected func FxLowStop(target, number, reason)
+        {
+            return 0;
+        }
+        protected func FxChangedStop(target, number, reason)
+        {
+            return 0;
+        }
+        "#);
         definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxHighStop" => {
@@ -2397,13 +2252,9 @@ protected func FxChangedStop(target, number, reason)
         ));
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("ClearAll live-node target registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
-            .expect("ClearAll live-node target spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.register_test_definition(definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
+        let target_index = engine.find_object_index(target).test_value();
 
         assert_eq!(
             engine
@@ -2430,49 +2281,44 @@ protected func FxChangedStop(target, number, reason)
         // SetAction performs SetOCF, which also makes a dead living object
         // non-inflammable (oracle-src-pinned src/C4Object.cpp:564-568,
         // 1164-1205, 4165-4169).
-        let mut definition = crate::Definition::from_script(
-            "DCOF",
-            "Death OCF",
-            r#"#strict
-local stop_alive, stop_ocf_alive, stop_ocf_crew, stop_ocf_inflammable;
-local start_ocf_alive, start_ocf_crew, start_ocf_inflammable;
-local abort_ocf_alive, abort_ocf_crew, abort_ocf_inflammable;
-local death_ocf_alive, death_ocf_crew, death_ocf_inflammable;
-public func Trigger()
-{
-    AddEffect("Probe", this, 1, 0, this);
-    Kill(this, true);
-    return 1;
-}
-protected func FxProbeStop()
-{
-    stop_alive = GetAlive();
-    stop_ocf_alive = GetOCF() & OCF_Alive;
-    stop_ocf_crew = GetOCF() & OCF_CrewMember;
-    stop_ocf_inflammable = GetOCF() & OCF_Inflammable;
-    return 0;
-}
-protected func DeadStart()
-{
-    start_ocf_alive = GetOCF() & OCF_Alive;
-    start_ocf_crew = GetOCF() & OCF_CrewMember;
-    start_ocf_inflammable = GetOCF() & OCF_Inflammable;
-}
-protected func WalkAbort()
-{
-    abort_ocf_alive = GetOCF() & OCF_Alive;
-    abort_ocf_crew = GetOCF() & OCF_CrewMember;
-    abort_ocf_inflammable = GetOCF() & OCF_Inflammable;
-}
-protected func Death()
-{
-    death_ocf_alive = GetOCF() & OCF_Alive;
-    death_ocf_crew = GetOCF() & OCF_CrewMember;
-    death_ocf_inflammable = GetOCF() & OCF_Inflammable;
-}
-"#,
-        )
-        .expect("death OCF script compiles");
+        let mut definition = test_definition("DCOF", "Death OCF", r#"#strict
+        local stop_alive, stop_ocf_alive, stop_ocf_crew, stop_ocf_inflammable;
+        local start_ocf_alive, start_ocf_crew, start_ocf_inflammable;
+        local abort_ocf_alive, abort_ocf_crew, abort_ocf_inflammable;
+        local death_ocf_alive, death_ocf_crew, death_ocf_inflammable;
+        public func Trigger()
+        {
+            AddEffect("Probe", this, 1, 0, this);
+            Kill(this, true);
+            return 1;
+        }
+        protected func FxProbeStop()
+        {
+            stop_alive = GetAlive();
+            stop_ocf_alive = GetOCF() & OCF_Alive;
+            stop_ocf_crew = GetOCF() & OCF_CrewMember;
+            stop_ocf_inflammable = GetOCF() & OCF_Inflammable;
+            return 0;
+        }
+        protected func DeadStart()
+        {
+            start_ocf_alive = GetOCF() & OCF_Alive;
+            start_ocf_crew = GetOCF() & OCF_CrewMember;
+            start_ocf_inflammable = GetOCF() & OCF_Inflammable;
+        }
+        protected func WalkAbort()
+        {
+            abort_ocf_alive = GetOCF() & OCF_Alive;
+            abort_ocf_crew = GetOCF() & OCF_CrewMember;
+            abort_ocf_inflammable = GetOCF() & OCF_Inflammable;
+        }
+        protected func Death()
+        {
+            death_ocf_alive = GetOCF() & OCF_Alive;
+            death_ocf_crew = GetOCF() & OCF_CrewMember;
+            death_ocf_inflammable = GetOCF() & OCF_Inflammable;
+        }
+        "#);
         definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         definition.set_crew_member(true);
         definition.set_fire_properties(1, false, false);
@@ -2491,24 +2337,16 @@ protected func Death()
         );
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("death OCF definition registers");
-        let object_id = engine
-            .spawn_object(
-                SpawnConfig::new("DCOF")
-                    .with_alive(true)
-                    .with_action(ActionState::new("Walk")),
-            )
-            .expect("death OCF object spawns");
+        engine.register_test_definition(definition);
+        let object_id = engine.spawn_test_object(SpawnConfig::new("DCOF")
+            .with_alive(true)
+            .with_action(ActionState::new("Walk")));
         let index = engine
-            .find_object_index(object_id)
-            .expect("death OCF object exists");
+            .find_object_index(object_id).test_value();
         engine.refresh_object_ocf(index);
 
         engine
-            .call_object_function(index, "Trigger", Vec::new())
-            .expect("death OCF trigger succeeds");
+            .call_object_function(index, "Trigger", Vec::new()).test_value();
 
         let locals = &engine.objects[index].state.local_vars;
         assert_eq!(locals.get("stop_alive"), Some(&Value::Bool(false)));
@@ -2557,22 +2395,17 @@ protected func Death()
         // must win both immediately and at copy-out (oracle-src-pinned
         // src/C4Object.h:311; src/C4Object.cpp:564-568,602-624,
         // 1164-1205).
-        let mut definition = crate::Definition::from_script(
-            "DCTG",
-            "Death category",
-            r#"#strict
-local before_category_ocf, after_category_ocf;
-public func Trigger()
-{
-    Kill(this, true);
-    before_category_ocf = GetOCF();
-    SetCategory(C4D_Object);
-    after_category_ocf = GetOCF();
-    return true;
-}
-"#,
-        )
-        .expect("death-category script compiles");
+        let mut definition = test_definition("DCTG", "Death category", r#"#strict
+        local before_category_ocf, after_category_ocf;
+        public func Trigger()
+        {
+            Kill(this, true);
+            before_category_ocf = GetOCF();
+            SetCategory(C4D_Object);
+            after_category_ocf = GetOCF();
+            return true;
+        }
+        "#);
         definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         definition.set_fire_properties(1, false, false);
         definition.configure_actions(
@@ -2584,15 +2417,10 @@ public func Trigger()
         );
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("death-category definition registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("DCTG").with_alive(true))
-            .expect("death-category object spawns");
+        engine.register_test_definition(definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("DCTG").with_alive(true));
         let index = engine
-            .find_object_index(target)
-            .expect("death-category object exists");
+            .find_object_index(target).test_value();
         engine.refresh_object_ocf(index);
 
         assert_eq!(
@@ -2606,13 +2434,11 @@ public func Trigger()
         let before = state
             .local_vars
             .get("before_category_ocf")
-            .and_then(Value::as_c4_int)
-            .expect("pre-category OCF recorded") as u32;
+            .and_then(Value::as_c4_int).test_value() as u32;
         let after = state
             .local_vars
             .get("after_category_ocf")
-            .and_then(Value::as_c4_int)
-            .expect("post-category OCF recorded") as u32;
+            .and_then(Value::as_c4_int).test_value() as u32;
         assert_ne!(before & crate::ocf::LIVING, 0);
         assert_eq!(before & crate::ocf::INFLAMMABLE, 0);
         assert_eq!(after & crate::ocf::LIVING, 0);
@@ -2632,23 +2458,18 @@ public func Trigger()
         // src/C4Object.cpp:1164-1205).
         let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_deaths = Arc::clone(&death_calls);
-        let mut target_definition = crate::Definition::from_script(
-            "TARG",
-            "Target",
-            r#"#strict
-local death_count;
-protected func Death()
-{
-    death_count++;
-    return 0;
-}
-public func DeathCount()
-{
-    return death_count;
-}
-"#,
-        )
-        .expect("target script compiles");
+        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        local death_count;
+        protected func Death()
+        {
+            death_count++;
+            return 0;
+        }
+        public func DeathCount()
+        {
+            return death_count;
+        }
+        "#);
         target_definition.configure_actions(
             Some("Idle".to_string()),
             HashMap::from([
@@ -2663,39 +2484,24 @@ public func DeathCount()
                 }
             },
         ));
-        let caller_definition = crate::Definition::from_script(
-            "CALL",
-            "Caller",
-            r#"#strict
-public func Trigger(target)
-{
-    if (!Kill(target)) return -1;
-    if (GetAlive(target)) return -2;
-    return target->DeathCount();
-}
-"#,
-        )
-        .expect("caller script compiles");
+        let caller_definition = test_definition("CALL", "Caller", r#"#strict
+        public func Trigger(target)
+        {
+            if (!Kill(target)) return -1;
+            if (GetAlive(target)) return -2;
+            return target->DeathCount();
+        }
+        "#);
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(target_definition)
-            .expect("target definition registers");
-        engine
-            .register_definition(caller_definition)
-            .expect("caller definition registers");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG"))
-            .expect("target spawns");
+        engine.register_test_definition(target_definition);
+        engine.register_test_definition(caller_definition);
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
         let caller_index = engine
-            .find_object_index(caller)
-            .expect("caller remains present");
+            .find_object_index(caller).test_value();
         let target_index = engine
-            .find_object_index(target)
-            .expect("target remains present");
+            .find_object_index(target).test_value();
         engine.objects[target_index].state.alive = true;
 
         assert_eq!(

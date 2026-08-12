@@ -19,21 +19,17 @@ global Healthy:
     assert!(engine.debug_global_has_function("Broken"));
     assert!(engine.debug_global_has_function("Healthy"));
 
-    engine
-        .register_definition(
-            Definition::from_script(
-                "CALL",
-                "Global declaration caller",
-                "func CallBroken() { return Broken(); }\n\
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_script(
+            "CALL",
+            "Global declaration caller",
+            "func CallBroken() { return Broken(); }\n\
                  func CallHealthy() { return Healthy(); }",
-            )
-            .expect("caller compiles"),
-        )
-        .expect("caller registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("CALL"))
-        .expect("caller spawns");
-    let index = engine.find_object_index(object).expect("caller exists");
+        )),
+    ));
+    let object =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("CALL")));
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
 
     assert_eq!(
         engine

@@ -14,24 +14,20 @@ fn eke_uzi_shoot_action_loops_its_actmap_sound() {
         0,
     );
     let owner = join_local_player_on_team(&mut engine, "Eke uzi action sound", 1);
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("GoldPlateau joins with a selected SFT");
-    let uzi = engine
-        .spawn_object(SpawnConfig::new("UZ5B").with_container(clonk))
-        .expect("the shipped UZ5B spawns into the SFT");
-    engine
-        .spawn_object(SpawnConfig::new("CA5B").with_container(clonk))
-        .expect("the shipped magazine spawns into the SFT");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let uzi = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("UZ5B").with_container(clonk)),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("CA5B").with_container(clonk)),
+    );
     // Uzi::Shooting aborts unless the carrier holds an "Uzi*" action and the
     // weapon is Contents.First (Eke Weapons.c4d/Uzi.c4d/Script.c:32-44).
-    engine
-        .apply_object_update(clonk, ObjectUpdate::new().with_action("UziWalk"))
-        .expect("the SFT takes its Uzi carry action");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(clonk, ObjectUpdate::new().with_action("UziWalk")),
+    );
 
-    let uzi_index = engine
-        .find_object_index(uzi)
-        .expect("the UZ5B has an index");
+    let uzi_index = crate::support::TestValueExt::test_value(engine.find_object_index(uzi));
     assert_eq!(
         engine
             .call_object_function(uzi_index, "Activate", vec![Value::Object(clonk.as_u64())])
@@ -41,12 +37,10 @@ fn eke_uzi_shoot_action_loops_its_actmap_sound() {
     // Activate parks the weapon in Stop, and ControlThrow refuses to fire out
     // of Stop ("zu schnelles Feuern unterbinden"). Let that action expire.
     for _ in 0..20 {
-        engine.tick().expect("the reload Stop action expires");
+        crate::support::TestValueExt::test_value(engine.tick());
     }
 
-    let uzi_index = engine
-        .find_object_index(uzi)
-        .expect("the UZ5B has an index");
+    let uzi_index = crate::support::TestValueExt::test_value(engine.find_object_index(uzi));
     assert_eq!(
         engine
             .call_object_function(
@@ -70,7 +64,7 @@ fn eke_uzi_shoot_action_loops_its_actmap_sound() {
     let mut shoot_starts = 0_usize;
     let mut stops = 0_usize;
     for _ in 0..12 {
-        let presentation = engine.tick().expect("the armed Uzi keeps firing");
+        let presentation = crate::support::TestValueExt::test_value(engine.tick());
         for event in &presentation.audio {
             match event {
                 AudioCommand::PlaySound {

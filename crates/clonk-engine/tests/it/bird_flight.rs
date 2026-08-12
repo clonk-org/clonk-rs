@@ -4,6 +4,7 @@
 //! differential covers it and these are the only tests that pin it.
 
 use crate::support::real_scenario::{join_local_player, prepare_installed_scenario};
+use crate::support::EngineTestExt;
 use clonk_engine::{CommandDirection, Engine, ObjectId, ObjectUpdate, SpawnConfig, Vector2};
 use clonk_script::Value;
 
@@ -34,7 +35,7 @@ fn birds(engine: &Engine) -> Vec<ObjectId> {
 
 fn tick(engine: &mut Engine, frames: u32) {
     for _ in 0..frames {
-        engine.tick_without_snapshot().expect("the frame executes");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 }
 
@@ -53,7 +54,7 @@ fn bird_flight_controller_installs_itself_on_every_placed_bird() {
     tick(&mut engine, 40);
 
     for bird in flock {
-        let object = engine.object_snapshot(bird).expect("the bird remains live");
+        let object = engine.test_object_snapshot(bird);
         assert!(
             object
                 .effects
@@ -78,7 +79,7 @@ fn bird_flight_controller_installs_itself_on_every_placed_bird() {
 #[test]
 fn bird_heading_turns_continuously_instead_of_snapping_to_an_axis() {
     let mut engine = prepare_installed_scenario(BIRD_SCENARIO, 0).instantiate();
-    let bird = *birds(&engine).first().expect("Wipfrace places a bird");
+    let bird = *crate::support::TestValueExt::test_value(birds(&engine).first());
 
     tick(&mut engine, 40);
 
@@ -86,7 +87,8 @@ fn bird_heading_turns_continuously_instead_of_snapping_to_an_axis() {
     // 12, flee 25. Terrain and contact reflections are deliberately large and
     // can land on the same frame as another, so the invariant is that big
     // steps are the exception, not that they never happen.
-    let mut previous = local_int(&engine, bird, "flight_heading").expect("seeded heading");
+    let mut previous =
+        crate::support::TestValueExt::test_value(local_int(&engine, bird, "flight_heading"));
     let mut samples = 0;
     let mut abrupt = 0;
     let mut axis_aligned = 0;
@@ -165,12 +167,11 @@ fn bird_velocity_stays_inside_the_float_physical_clamp() {
 /// draw-for-draw identical to the shipped content.
 #[test]
 fn bird_flight_controller_adds_no_draw_site_and_leaves_scenario_init_untouched() {
-    let source = std::fs::read_to_string(
+    let source = crate::support::TestValueExt::test_value(std::fs::read_to_string(
         crate::support::real_scenario::repository_root()
             .join("planet/System.c4g")
             .join(APPEND),
-    )
-    .expect("the controller source is readable");
+    ));
 
     // Every Random() below is one of the shipped draws; the controller's own
     // variation must never reach for the synchronized stream.
@@ -226,9 +227,7 @@ fn bird_flight_is_reproducible_from_a_fixed_seed() {
             .iter()
             .filter(|object| object.definition_id == "BIRD")
             .map(|object| {
-                let fixed = object
-                    .fixed_position
-                    .expect("a live bird carries fixed position");
+                let fixed = crate::support::TestValueExt::test_value(object.fixed_position);
                 (format!("{:?}", object.id), fixed.x.val(), fixed.y.val())
             })
             .collect();
@@ -259,20 +258,13 @@ fn contact_right_reflects_away_from_the_wall_instead_of_back_into_it() {
     let prepared = prepare_installed_scenario(BIRD_SCENARIO, 0);
 
     let mut shipped = prepared.instantiate_without_system_script(APPEND);
-    let shipped_bird = *birds(&shipped).first().expect("Wipfrace places a bird");
-    let index = shipped
-        .find_object_index(shipped_bird)
-        .expect("the bird has an index");
+    let shipped_bird = *crate::support::TestValueExt::test_value(birds(&shipped).first());
+    let index = shipped.test_object_index(shipped_bird);
     let mut steered_into_the_wall = 0;
     for _ in 0..60 {
-        shipped
-            .call_object_function(index, "ContactRight", Vec::new())
-            .expect("the shipped ContactRight runs");
+        shipped.call_test_object_function(index, "ContactRight", Vec::new());
         if matches!(
-            shipped
-                .object_snapshot(shipped_bird)
-                .expect("the bird remains live")
-                .command_direction,
+            shipped.test_object_snapshot(shipped_bird).command_direction,
             CommandDirection::UpRight | CommandDirection::DownRight
         ) {
             steered_into_the_wall += 1;
@@ -285,18 +277,15 @@ fn contact_right_reflects_away_from_the_wall_instead_of_back_into_it() {
     );
 
     let mut engine = prepared.instantiate();
-    let bird = *birds(&engine).first().expect("Wipfrace places a bird");
+    let bird = *crate::support::TestValueExt::test_value(birds(&engine).first());
     tick(&mut engine, 40);
-    let index = engine
-        .find_object_index(bird)
-        .expect("the bird has an index");
+    let index = engine.test_object_index(bird);
     for call in 0..60 {
-        engine
-            .call_object_function(index, "ContactRight", Vec::new())
-            .expect("the resteered ContactRight runs");
+        engine.call_test_object_function(index, "ContactRight", Vec::new());
         // Clonk orientation: 0 is up and angles run clockwise, so a heading
         // that clears a right-side wall is strictly between 180 and 360.
-        let heading = local_int(&engine, bird, "flight_heading").expect("a driven heading");
+        let heading =
+            crate::support::TestValueExt::test_value(local_int(&engine, bird, "flight_heading"));
         assert!(
             (185..=355).contains(&heading),
             "call {call}: after a right-side contact the heading must point \
@@ -313,19 +302,14 @@ fn contact_right_reflects_away_from_the_wall_instead_of_back_into_it() {
 fn birds_startle_and_flee_when_a_clonk_comes_close() {
     let mut engine = prepare_installed_scenario(BIRD_SCENARIO, 0).instantiate();
     let owner = join_local_player(&mut engine, "Bird startle");
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Wipfrace joins with a crew");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // Pick a bird that is airborne and settled, then put the crew right under
     // it. `Placement=2` spawns birds in open air, so this stays clear of the
     // terrain arm, which would otherwise win the priority order.
-    let bird = *birds(&engine).first().expect("Wipfrace places a bird");
+    let bird = *crate::support::TestValueExt::test_value(birds(&engine).first());
     tick(&mut engine, 40);
-    let perch = engine
-        .object_snapshot(bird)
-        .expect("the bird remains live")
-        .position;
+    let perch = engine.test_object_snapshot(bird).position;
 
     assert_eq!(
         local_int(&engine, bird, "flight_alarm").unwrap_or(0),
@@ -337,12 +321,10 @@ fn birds_startle_and_flee_when_a_clonk_comes_close() {
     // fall, so it has to be re-placed each frame to stay inside the radius.
     let mut alarmed = 0;
     for _ in 0..24 {
-        engine
-            .apply_object_update(
-                clonk,
-                ObjectUpdate::new().with_position(Vector2::new(perch.x, perch.y + 20)),
-            )
-            .expect("the crew stays under the bird");
+        crate::support::TestValueExt::test_value(engine.apply_object_update(
+            clonk,
+            ObjectUpdate::new().with_position(Vector2::new(perch.x, perch.y + 20)),
+        ));
         tick(&mut engine, 1);
         alarmed = alarmed.max(local_int(&engine, bird, "flight_alarm").unwrap_or(0));
     }
@@ -354,15 +336,9 @@ fn birds_startle_and_flee_when_a_clonk_comes_close() {
 
     // Alarm raises cruise to 190 and agility to 6, so a startled bird should
     // put real distance between itself and where the Clonk was.
-    let before = engine
-        .object_snapshot(bird)
-        .expect("the bird remains live")
-        .position;
+    let before = engine.test_object_snapshot(bird).position;
     tick(&mut engine, 60);
-    let after = engine
-        .object_snapshot(bird)
-        .expect("the bird remains live")
-        .position;
+    let after = engine.test_object_snapshot(bird).position;
     let near = (before.x - perch.x).pow(2) + (before.y - perch.y).pow(2);
     let far = (after.x - perch.x).pow(2) + (after.y - perch.y).pow(2);
     assert!(
@@ -379,23 +355,18 @@ fn birds_startle_and_flee_when_a_clonk_comes_close() {
 #[test]
 fn birds_separate_from_neighbours_that_start_on_top_of_each_other() {
     let mut engine = prepare_installed_scenario(BIRD_SCENARIO, 0).instantiate();
-    let seed_bird = *birds(&engine).first().expect("Wipfrace places a bird");
+    let seed_bird = *crate::support::TestValueExt::test_value(birds(&engine).first());
     tick(&mut engine, 40);
-    let origin = engine
-        .object_snapshot(seed_bird)
-        .expect("the bird remains live")
-        .position;
+    let origin = engine.test_object_snapshot(seed_bird).position;
 
     // Stack three fresh birds within a couple of pixels of each other, well
     // inside the 90px separation radius.
     let stacked: Vec<ObjectId> = (0..3)
         .map(|offset| {
-            engine
-                .spawn_object(
-                    SpawnConfig::new("BIRD")
-                        .with_position(Vector2::new(origin.x + offset, origin.y + offset)),
-                )
-                .expect("a bird spawns in open air")
+            engine.spawn_test_object(
+                SpawnConfig::new("BIRD")
+                    .with_position(Vector2::new(origin.x + offset, origin.y + offset)),
+            )
         })
         .collect();
 

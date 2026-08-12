@@ -80,8 +80,7 @@
 
     #[test]
     fn initial_game_save_serializes_the_effective_modules_not_the_authored_reflection() {
-        let core = parse_legacy_scenario_text("[Definitions]\nDefinitions=Old.c4d\n")
-            .expect("legacy core parses")
+        let core = parse_legacy_scenario_text("[Definitions]\nDefinitions=Old.c4d\n").test_value()
             .core;
         let modules = vec!["Effective.c4d".to_owned()];
 
@@ -89,7 +88,7 @@
             core.initial_network_save("Title", &modules, "", "", ""),
             core.initial_record_save("Title", &modules, "", "", ""),
         ] {
-            let serialized = String::from_utf8(saved.serialize()).expect("Scenario.txt is UTF-8");
+            let serialized = String::from_utf8(saved.serialize()).test_value();
             assert!(serialized.contains("Definitions=\"Effective.c4d\"\r\n"));
             assert!(!serialized.contains("Old.c4d"));
         }
@@ -99,12 +98,10 @@
     fn runtime_scenario_and_savegame_core_adjustments_match_cpp() {
         let core = parse_legacy_scenario_text(
             "[Head]\nIcon=7\nTitle=Authored\nVersion=1,2,3,4,359\nSaveGame=1\nNoInitialize=0\nMissionAccess=MISS\nNetworkGame=true\nNetworkRuntimeJoin=true\nOrigin=Retained\\Game.c4s\n\n[Definitions]\nDefinitions=Old.c4d\n",
-        )
-        .expect("legacy core parses")
+        ).test_value()
         .core;
 
-        let scenario = String::from_utf8(core.runtime_scenario_save().serialize())
-            .expect("Scenario.txt is UTF-8");
+        let scenario = String::from_utf8(core.runtime_scenario_save().serialize()).test_value();
         for expected in [
             "Title=Authored\r\n",
             "Version=4,9,11,0,359\r\n",
@@ -129,8 +126,7 @@
                 4,
             )
             .serialize(),
-        )
-        .expect("Scenario.txt is UTF-8");
+        ).test_value();
         for expected in [
             "Icon=4\r\n",
             "Title=Runtime\r\n",
@@ -180,8 +176,7 @@
                 "",
                 "",
                 "Fallback.c4s",
-            )
-            .expect("legacy initial record scenario serializes");
+            ).test_value();
 
         assert_eq!(
             actual,
@@ -217,9 +212,8 @@
             "[Head]\nNetworkGame=true\nMissionAccess=MISS\n\n[Game]\nStructNeedEnergy=0\n",
         );
         let actual = scenario
-            .serialize_initial_record_scenario("Record", &[], "", "", "Folder\\Game.c4s")
-            .expect("legacy initial record scenario serializes");
-        let actual = String::from_utf8(actual).expect("Scenario.txt is UTF-8");
+            .serialize_initial_record_scenario("Record", &[], "", "", "Folder\\Game.c4s").test_value();
+        let actual = String::from_utf8(actual).test_value();
 
         assert!(actual.contains("Replay=1\r\n"));
         assert!(actual.contains("Icon=29\r\n"));
@@ -251,8 +245,7 @@
         );
 
         let metadata = scenario
-            .initial_network_scenario_metadata()
-            .expect("legacy scenario exposes initial network metadata");
+            .initial_network_scenario_metadata().test_value();
 
         assert_eq!(
             metadata,
@@ -293,8 +286,7 @@
         );
 
         let metadata = scenario
-            .initial_network_scenario_metadata()
-            .expect("legacy scenario exposes initial network metadata");
+            .initial_network_scenario_metadata().test_value();
 
         assert!(metadata.definition_modules.is_empty());
         assert!(!metadata.use_fair_crew);
@@ -323,31 +315,30 @@
         scenario.legacy_team_metadata = Some(
             parse_legacy_team_metadata_source(
                 r#"[Teams]
-Active=0
-AllowTeamSwitch=1
-LastTeamID=1
-TeamDistribution=RandomInv
-TeamColors=1
-MaxScriptPlayers=3
-ScriptPlayerNames="Wolf|Bear"
-RandomTeamCount=2
+            Active=0
+            AllowTeamSwitch=1
+            LastTeamID=1
+            TeamDistribution=RandomInv
+            TeamColors=1
+            MaxScriptPlayers=3
+            ScriptPlayerNames="Wolf|Bear"
+            RandomTeamCount=2
 
-  [Team]
-  id=3
-  Name=Third
-  PlrStartIndex=2
-  PlayerCount=3
-  Players=9,4
-  IconSpec="Portrait:KNIG::1"
-  MaxPlayer=5
+              [Team]
+              id=3
+              Name=Third
+              PlrStartIndex=2
+              PlayerCount=3
+              Players=9,4
+              IconSpec="Portrait:KNIG::1"
+              MaxPlayer=5
 
-  [Team]
-  id=1
-  Name=First
-  Color=1193046
-"#,
-            )
-            .expect("Teams.txt parses"),
+              [Team]
+              id=1
+              Name=First
+              Color=1193046
+            "#,
+            ).test_value(),
         );
 
         assert_eq!(
@@ -398,10 +389,9 @@ RandomTeamCount=2
         // (C4Teams.cpp:605-651; C4Scenario.cpp:503-540).
         let mut empty_file = scenario_with_retained_legacy_core("[Game]\nStructNeedEnergy=0\n");
         empty_file.legacy_team_metadata =
-            Some(parse_legacy_team_metadata_source("[Teams]\n").expect("empty Teams.txt parses"));
+            Some(parse_legacy_team_metadata_source("[Teams]\n").test_value());
         let empty_file = empty_file
-            .initial_network_team_metadata()
-            .expect("empty team file has C++ defaults");
+            .initial_network_team_metadata().test_value();
         assert!(empty_file.active);
         assert!(empty_file.custom);
         assert!(!empty_file.allow_hostility_change);
@@ -409,16 +399,14 @@ RandomTeamCount=2
         assert!(empty_file.teams.is_empty());
 
         let cooperative = scenario_with_retained_legacy_core("[Game]\nStructNeedEnergy=0\n")
-            .initial_network_team_metadata()
-            .expect("missing Teams.txt derives cooperative defaults");
+            .initial_network_team_metadata().test_value();
         assert!(!cooperative.active);
         assert!(!cooperative.custom);
         assert!(cooperative.allow_hostility_change);
         assert!(!cooperative.auto_generate_teams);
 
         let melee = scenario_with_retained_legacy_core("[Game]\nMode=1\nStructNeedEnergy=0\n")
-            .initial_network_team_metadata()
-            .expect("missing Teams.txt derives converted melee defaults");
+            .initial_network_team_metadata().test_value();
         assert!(melee.active);
         assert!(!melee.custom);
         assert!(melee.allow_hostility_change);
@@ -444,25 +432,22 @@ RandomTeamCount=2
         // on bytes; C4Team::Name is then read into C4MaxName+1 with a 30-byte
         // limit (C4Group.cpp:2243-2260; C4LangStringTable.cpp:33-144;
         // C4Teams.cpp:138-150). CP1252 bytes must not silently become UTF-8.
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("Teams.txt"),
             b"[Teams]\nScriptPlayerNames=\"$Roster$\"\n\n  [Team]\n  id=1\n  Name=$LocalizedTeam$\n  IconSpec=\"\\334\"\n",
-        )
-        .expect("write Teams.txt");
+        );
         let mut table = b"LocalizedTeam=".to_vec();
         table.extend(std::iter::repeat_n(0xdc, 35));
         table.extend_from_slice(b"\nRoster=");
         table.extend_from_slice(&[0xc4, b'|', 0xd6, b'\n']);
-        std::fs::write(dir.path().join("StringTbl.txt"), []).expect("write empty string table");
-        std::fs::write(dir.path().join("StringTblUS.txt"), table)
-            .expect("write localized string table");
+        write_test_file(dir.path().join("StringTbl.txt"), []);
+        write_test_file(dir.path().join("StringTblUS.txt"), table);
 
-        let group = Group::open(dir.path()).expect("open group");
+        let group = Group::open(dir.path()).test_value();
         let (teams, loaded) =
-            load_initial_network_teams(&group, &ComponentGroups::local(&group), &["US"])
-                .expect("load Teams.txt");
-        let metadata = loaded.expect("Teams.txt metadata").metadata;
+            load_initial_network_teams(&group, &ComponentGroups::local(&group), &["US"]).test_value();
+        let metadata = loaded.test_value().metadata;
 
         assert_eq!(clonk_script::c4_string_bytes(&teams[0].name), [0xdc; 30]);
         assert_eq!(metadata.teams[0].name.as_bytes(), &[0xdc; 30]);
@@ -472,24 +457,19 @@ RandomTeamCount=2
 
     #[test]
     fn legacy_team_strings_preserve_cp1252_bytes_through_load_runtime_and_save() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Teams.txt"),
             b"[Teams]\nScriptPlayerNames=$Roster$\n  [Team]\n  id=1\n  Name=$TeamName$\n  Color=1\n  IconSpec=$TeamIcon$\n",
-        )
-        .expect("write Teams.txt");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("StringTblUS.txt"),
             b"TeamName=Caf\xe9\nTeamIcon=Cr\xe8st:1\nRoster=Andr\xe9|Ren\xe9\n",
-        )
-        .expect("write byte-native string table");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        );
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
-        let scenario = Scenario::load_from_path_with_languages(&scenario_dir, &resolver, &["US"])
-            .expect("legacy scenario loads");
+        let scenario = Scenario::load_from_path_with_languages(&scenario_dir, &resolver, &["US"]).test_value();
         let expected_name = b"Caf\xe9";
         let expected_icon = b"Cr\xe8st:1";
         let expected_roster = b"Andr\xe9|Ren\xe9";
@@ -507,8 +487,7 @@ RandomTeamCount=2
             expected_icon
         );
         let lobby_teams = scenario
-            .lobby_metadata()
-            .expect("legacy lobby metadata")
+            .lobby_metadata().test_value()
             .teams();
         assert_eq!(
             clonk_script::c4_string_bytes(lobby_teams.teams()[0].name()),
@@ -526,9 +505,7 @@ RandomTeamCount=2
         );
 
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("legacy scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         assert_eq!(
             clonk_script::c4_string_bytes(&engine.teams()[0].name),
             expected_name
@@ -545,16 +522,12 @@ RandomTeamCount=2
 
         let encoded = engine
             .capture_state()
-            .to_json_string()
-            .expect("engine state serializes");
-        let state = crate::EngineState::from_json_str(&encoded).expect("engine state deserializes");
+            .to_json_string().test_value();
+        let state = crate::EngineState::from_json_str(&encoded).test_value();
         let mut restored = Engine::with_seed(0);
-        scenario
-            .apply(&mut restored)
-            .expect("scenario applies before restore");
+        apply_test_scenario(&scenario, &mut restored);
         restored
-            .restore_state(&state)
-            .expect("engine state restores");
+            .restore_state(&state).test_value();
         assert_eq!(
             clonk_script::c4_string_bytes(&restored.teams()[0].name),
             expected_name
@@ -572,41 +545,38 @@ RandomTeamCount=2
 
     #[test]
     fn loader_head_uses_case_insensitive_scenario_entry_lookup() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("sCeNaRiO.TxT"),
             "[Head]\nLoader=LoaderMixed*\n",
-        )
-        .expect("mixed-case core");
-        let group = Group::open(directory.path()).expect("scenario group");
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        );
+        let group = Group::open(directory.path()).test_value();
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.loader().configured_specification(), "LoaderMixed*");
     }
 
     #[test]
     fn legacy_landscape_entries_match_case_insensitively_in_directory_and_packed_groups() {
-        let directory = tempdir().expect("scenario directory");
+        let directory = test_tempdir();
         let entries: [(&str, &[u8]); 3] = [
             ("mAp.BmP", b"map"),
             ("lAnDsCaPe.BmP", b"landscape"),
             ("landscape.txt", b"script"),
         ];
         for (name, bytes) in entries {
-            std::fs::write(directory.path().join(name), bytes).expect("directory entry");
+            write_test_file(directory.path().join(name), bytes);
         }
-        let directory_group = Group::open(directory.path()).expect("directory group");
+        let directory_group = Group::open(directory.path()).test_value();
 
         let mut mutable = clonk_resources::MutableGroup::new("Case.c4s");
         for (name, bytes) in entries {
             mutable
-                .add_file(name, bytes.to_vec())
-                .expect("packed entry");
+                .add_file(name, bytes.to_vec()).test_value();
         }
         let packed_group = Group::from_memory(
             PathBuf::from("Case.c4s"),
             mutable.pack().expect("packed group image"),
-        )
-        .expect("packed group");
+        ).test_value();
 
         for (query, expected) in [
             ("Map.bmp", b"map".as_slice()),
@@ -633,8 +603,8 @@ RandomTeamCount=2
 
     #[test]
     fn loader_head_retains_cpp_can_open_player_constraints() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             concat!(
                 "[Head]\n",
@@ -647,11 +617,10 @@ RandomTeamCount=2
                 "[Game]\n",
                 "Mode=1\n",
             ),
-        )
-        .expect("scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.min_players(), 2, "melee derives a two-player floor");
         assert_eq!(head.max_players(), 0);
         assert!(head.is_save_game());
@@ -661,15 +630,14 @@ RandomTeamCount=2
 
     #[test]
     fn loader_head_retains_native_byte_and_capped_mission_access() {
-        let directory = tempdir().expect("scenario directory");
+        let directory = test_tempdir();
         let mut core = b"[Head]\nMissionAccess=Secr\x80t".to_vec();
         core.extend(std::iter::repeat_n(b'A', 520));
         core.extend_from_slice(b"\n");
-        std::fs::write(directory.path().join("Scenario.txt"), core)
-            .expect("native-byte scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
+        write_test_file(directory.path().join("Scenario.txt"), core);
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         let access = clonk_script::c4_string_bytes(head.mission_access());
         assert_eq!(&access[..6], b"Secr\x80t");
         assert_eq!(access.len(), 512, "C4MaxTitle truncates the fixed buffer");
@@ -677,14 +645,13 @@ RandomTeamCount=2
 
     #[test]
     fn loader_head_applies_subpath_origin_validation_and_separator_normalization() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nOrigin=\\..\\Bad*?<>;|:A:B.c4s\n",
-        )
-        .expect("scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        );
+        let group = Group::open(directory.path()).test_value();
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         let expected = if cfg!(windows) {
             "___\\Bad_______A_B.c4s"
         } else {
@@ -692,23 +659,21 @@ RandomTeamCount=2
         };
         assert_eq!(head.origin(), Some(expected));
 
-        std::fs::write(directory.path().join("Scenario.txt"), "[Head]\nOrigin=\n")
-            .expect("empty origin");
-        let empty = ScenarioLoaderHead::load_from_group(&group).expect("empty origin head");
+        write_test_file(directory.path().join("Scenario.txt"), "[Head]\nOrigin=\n");
+        let empty = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(empty.origin(), Some("empty"));
     }
 
     #[test]
     fn loader_head_parses_only_raw_scenario_core_prefix_before_nul() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             b"[Head]\nTitle=Visible\0\nLoader=LoaderHidden*\nOrigin=Hidden.c4f/Hidden.c4s\n",
-        )
-        .expect("NUL scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("visible core prefix");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.scenario_title(), "Visible");
         assert_eq!(head.loader().configured_specification(), "");
         assert_eq!(head.origin(), None);
@@ -716,29 +681,25 @@ RandomTeamCount=2
 
     #[test]
     fn loader_head_title_ignores_rust_manifest_and_uses_classic_precedence() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nTitle=Legacy fallback\n",
-        )
-        .expect("scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             directory.path().join("Scenario.json"),
             r#"{"name":"Rust-only title","definitions":[]}"#,
-        )
-        .expect("Rust manifest");
-        std::fs::write(
+        );
+        write_test_file(
             directory.path().join("tItLeUs.TxT"),
             "US:Localized classic title\n",
-        )
-        .expect("title component");
-        let group = Group::open(directory.path()).expect("scenario group");
-        let head = ScenarioLoaderHead::load_from_group_with_languages(&group, &["US", "DE"])
-            .expect("loader head");
+        );
+        let group = Group::open(directory.path()).test_value();
+        let head = ScenarioLoaderHead::load_from_group_with_languages(&group, &["US", "DE"]).test_value();
         assert_eq!(head.scenario_title(), "Localized classic title");
 
-        std::fs::remove_file(directory.path().join("tItLeUs.TxT")).expect("remove title");
-        let fallback = ScenarioLoaderHead::load_from_group(&group).expect("fallback head");
+        std::fs::remove_file(directory.path().join("tItLeUs.TxT")).test_value();
+        let fallback = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(fallback.scenario_title(), "Legacy fallback");
     }
 
@@ -759,20 +720,17 @@ RandomTeamCount=2
         // are case-sensitive; RCT_All skips leading spaces but preserves a
         // Name's trailing bytes (C4Group.cpp:2243-2259;
         // StdCompiler.cpp:498-532,692-714,794-865,897-998).
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("Teams.txt"), []).expect("write empty Teams.txt");
-        let group = Group::open(dir.path()).expect("open group");
+        let dir = test_tempdir();
+        write_test_file(dir.path().join("Teams.txt"), []);
+        let group = Group::open(dir.path()).test_value();
         let (_, loaded) =
-            load_initial_network_teams(&group, &ComponentGroups::local(&group), &["US"])
-                .expect("load empty Teams.txt");
+            load_initial_network_teams(&group, &ComponentGroups::local(&group), &["US"]).test_value();
         assert!(loaded.is_none());
 
-        let core = parse_legacy_scenario_text("[Game]\nStructNeedEnergy=0\n")
-            .expect("default cooperative scenario")
+        let core = parse_legacy_scenario_text("[Game]\nStructNeedEnergy=0\n").test_value()
             .core;
         let (_, lobby_teams) =
-            load_legacy_teams(&group, &ComponentGroups::local(&group), &["US"], &core)
-                .expect("load lobby team metadata");
+            load_legacy_teams(&group, &ComponentGroups::local(&group), &["US"], &core).test_value();
         assert_eq!(
             lobby_teams.source(),
             ScenarioTeamsSource::DerivedScenarioDefault
@@ -806,8 +764,7 @@ RandomTeamCount=2
             "TeamDistribution=randominv\n",
             "  [team]\n  id=99\n  Color=1\n",
             "  [Team]\n  ID=7\n  id=2\n  Name=  Tail  \n  Color=1\n",
-        ))
-        .expect("warnings retain compiler defaults");
+        )).test_value();
         assert!(loaded.metadata.active);
         assert!(!loaded.metadata.custom);
         assert!(loaded.metadata.allow_team_switch);
@@ -830,8 +787,7 @@ RandomTeamCount=2
     fn initial_network_team_metadata_typed_rejects_unknown_numeric_distribution() {
         let mut scenario = scenario_with_retained_legacy_core("[Game]\nStructNeedEnergy=0\n");
         scenario.legacy_team_metadata = Some(
-            parse_legacy_team_metadata_source("[Teams]\nTeamDistribution=9\n")
-                .expect("numeric enum compiles as uint8"),
+            parse_legacy_team_metadata_source("[Teams]\nTeamDistribution=9\n").test_value(),
         );
 
         assert!(matches!(
@@ -860,9 +816,8 @@ RandomTeamCount=2
                 "",
                 "",
                 "Converted.c4s",
-            )
-            .expect("legacy initial network scenario serializes");
-        let serialized = String::from_utf8(serialized).expect("Scenario.txt is UTF-8");
+            ).test_value();
+        let serialized = String::from_utf8(serialized).test_value();
 
         assert!(serialized.contains(concat!(
             "[Game]\r\n",
@@ -900,8 +855,7 @@ RandomTeamCount=2
         );
 
         let actual = scenario
-            .serialize_initial_network_scenario("New", &[], "", "", "Fallback.c4s")
-            .expect("legacy initial network scenario serializes");
+            .serialize_initial_network_scenario("New", &[], "", "", "Fallback.c4s").test_value();
 
         assert_eq!(
             actual,
@@ -929,141 +883,125 @@ RandomTeamCount=2
 
     #[test]
     fn loader_head_title_uses_classic_cr_before_lf_termination() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nTitle=Fallback\n",
-        )
-        .expect("scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             directory.path().join("TitleUS.txt"),
             b"US:one\ntwo\rignored",
-        )
-        .expect("mixed-newline title component");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.scenario_title(), "one\ntwo");
     }
 
     #[test]
     fn loader_head_title_skips_zero_size_language_component() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nTitle=Head fallback\n",
-        )
-        .expect("scenario core");
-        std::fs::write(directory.path().join("TitleUS.txt"), [])
-            .expect("empty localized title component");
-        std::fs::write(directory.path().join("Title.txt"), b"US:Plain fallback\n")
-            .expect("plain title component");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        write_test_file(directory.path().join("TitleUS.txt"), []);
+        write_test_file(directory.path().join("Title.txt"), b"US:Plain fallback\n");
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.scenario_title(), "Plain fallback");
     }
 
     #[test]
     fn loader_head_title_ignores_component_data_after_nul() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nTitle=Head fallback\n",
-        )
-        .expect("scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             directory.path().join("TitleUS.txt"),
             b"prefix\0US:Wrong suffix",
-        )
-        .expect("NUL title component");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.scenario_title(), "Head fallback");
     }
 
     #[test]
     fn loader_head_title_decodes_legacy_cp1252_for_presentation() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nTitle=Head fallback\n",
-        )
-        .expect("scenario core");
-        std::fs::write(directory.path().join("TitleUS.txt"), b"US:Caf\xe9\n")
-            .expect("legacy title component");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        write_test_file(directory.path().join("TitleUS.txt"), b"US:Caf\xe9\n");
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.scenario_title(), "Caf\u{e9}");
         assert_eq!(head.scenario_title_bytes(), b"Caf\xe9");
     }
 
     #[test]
     fn loader_head_fallback_title_preserves_native_cp1252_bytes() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             b"[Head]\nTitle=S\xe4uresee\n",
-        )
-        .expect("legacy scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         assert_eq!(head.scenario_title(), "S\u{e4}uresee");
         assert_eq!(head.scenario_title_bytes(), b"S\xe4uresee");
     }
 
     #[test]
     fn loader_head_title_uses_classic_nonoverlapping_ssearch() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nTitle=Head fallback\n",
-        )
-        .expect("scenario core");
-        std::fs::write(directory.path().join("TitleAA.txt"), b"AAA:Wrong")
-            .expect("overlapping-prefix title component");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        write_test_file(directory.path().join("TitleAA.txt"), b"AAA:Wrong");
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group_with_languages(&group, &["AA"])
-            .expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group_with_languages(&group, &["AA"]).test_value();
         assert_eq!(head.scenario_title(), "Head fallback");
     }
 
     #[test]
     fn loader_head_fallback_title_truncates_native_bytes_like_cpp() {
-        let directory = tempdir().expect("scenario directory");
+        let directory = test_tempdir();
         let title = format!("{}é", "A".repeat(119));
-        std::fs::write(
+        write_test_file(
             directory.path().join("Scenario.txt"),
             format!("[Head]\nTitle={title}\n"),
-        )
-        .expect("scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let head = ScenarioLoaderHead::load_from_group(&group).test_value();
         let source = title.as_bytes();
         assert_eq!(head.scenario_title_bytes(), &source[..120]);
     }
 
     #[test]
     fn resource_registration_head_never_resolves_unrelated_title_data() {
-        let directory = tempdir().expect("scenario directory");
+        let directory = test_tempdir();
         let title = format!("{}é", "A".repeat(119));
-        std::fs::write(
+        write_test_file(
             directory.path().join("Scenario.txt"),
             format!(
                 "[Head]\nTitle={title}\nOrigin=Parent.c4s\n\
                  \n[Definitions]\nLocalOnly=1\nDefinition1=Objects.c4d\n"
             ),
-        )
-        .expect("scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
+        );
+        let group = Group::open(directory.path()).test_value();
 
-        let head = ScenarioLoaderHead::load_from_group_for_resource_registration(&group)
-            .expect("resource registration head");
+        let head = ScenarioLoaderHead::load_from_group_for_resource_registration(&group).test_value();
         assert_eq!(head.scenario_title(), "");
         assert_eq!(head.origin(), Some("Parent.c4s"));
         assert_eq!(head.configured_definition_modules(), ["Objects.c4d"]);
@@ -1089,7 +1027,7 @@ RandomTeamCount=2
         put_i32(
             &mut header,
             36,
-            i32::try_from(entries.len()).expect("test entry count fits i32"),
+            i32::try_from(entries.len()).test_value(),
         );
         for byte in &mut header {
             *byte ^= 237;
@@ -1107,12 +1045,12 @@ RandomTeamCount=2
             put_i32(
                 &mut entry,
                 268,
-                i32::try_from(data.len()).expect("test entry size fits i32"),
+                i32::try_from(data.len()).test_value(),
             );
             put_i32(
                 &mut entry,
                 276,
-                i32::try_from(data_offset).expect("test offset fits i32"),
+                i32::try_from(data_offset).test_value(),
             );
             image.extend_from_slice(&entry);
             data_offset += data.len();
@@ -1130,15 +1068,13 @@ RandomTeamCount=2
         for (name, child, data) in entries {
             if *child {
                 group
-                    .add_packed_child_with_metadata((*name).to_owned(), data.to_vec(), 0, 0, false)
-                    .expect("packed child adds");
+                    .add_packed_child_with_metadata((*name).to_owned(), data.to_vec(), 0, 0, false).test_value();
             } else {
                 group
-                    .add_file((*name).to_owned(), data.to_vec())
-                    .expect("packed file adds");
+                    .add_file((*name).to_owned(), data.to_vec()).test_value();
             }
         }
-        group.pack().expect("standalone packed group compresses")
+        group.pack().test_value()
     }
 
     #[test]
@@ -1220,8 +1156,7 @@ RandomTeamCount=2
             "\tPlayerCount=none\n",
             "\tColor=fa1010\n",
             "\tMaxPlayer=none\n",
-        ))
-        .expect("unreadable team numbers default instead of failing the load");
+        )).test_value();
 
         assert_eq!(parsed.metadata.last_team_id, 1, "raised by the team id");
         assert_eq!(parsed.metadata.max_script_players, 0);
@@ -1243,8 +1178,7 @@ RandomTeamCount=2
         // is negated modulo the unsigned range before the uint32_t store
         // (StdCompiler.cpp:648-653; C4Teams.cpp:147).
         let colors = |source: &str| {
-            parse_legacy_team_metadata_source(source)
-                .expect("Teams.txt parses")
+            parse_legacy_team_metadata_source(source).test_value()
                 .metadata
                 .teams
                 .iter()
@@ -1295,7 +1229,7 @@ RandomTeamCount=2
         let crlf = lf.replace('\n', "\r\n");
         let cr = lf.replace('\n', "\r");
         let expected =
-            parse_legacy_team_metadata_source(&crlf).expect("CRLF exact Teams.txt metadata parses");
+            parse_legacy_team_metadata_source(&crlf).test_value();
 
         for (label, source) in [("LF", lf), ("CR", cr.as_str())] {
             let parsed = parse_legacy_team_metadata_source(source)
@@ -1327,17 +1261,16 @@ RandomTeamCount=2
 
     #[test]
     fn legacy_lobby_projection_keeps_scenario_parameter_and_team_boundaries() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Lobby Probe\nLoader=\nMaxPlayer=7\nMinPlayer=0\n\
              SaveGame=1\nReplay=0\nForcedNoCrew=2\nDefCrewStrength=99\n\
              NetworkGame=1\nNetworkRuntimeJoin=1\n\n[Definitions]\n\
              AllowUserChange=1\nDefinition1=Defs.c4d\n\n[Game]\nMode=1\n",
-        )
-        .expect("write scenario");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Parameters.txt"),
             concat!(
                 "[Parameters]\n",
@@ -1363,9 +1296,8 @@ RandomTeamCount=2
                 "  Nick=Host // literal\n",
                 "  LobbyReady=1\n",
             ),
-        )
-        .expect("write parameters");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Teams.txt"),
             concat!(
                 "[Teams]\n",
@@ -1392,20 +1324,16 @@ RandomTeamCount=2
                 "  id=12\n",
                 "  Name=Twelfth\n",
             ),
-        )
-        .expect("write teams");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Game.txt"),
             "[DefinitionFiles]\nDefinition1=OldObjects.c4d\nDefinition2=OldPack.c4d\n\n[Game]\n",
-        )
-        .expect("write game text");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        );
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
-        let lobby = scenario.lobby_metadata().expect("legacy lobby metadata");
+            load_test_scenario(&scenario_dir, &resolver);
+        let lobby = scenario.lobby_metadata().test_value();
         let head = lobby.head();
         assert_eq!(head.configured_min_players(), 0);
         assert_eq!(head.min_players(), 2);
@@ -1454,8 +1382,7 @@ RandomTeamCount=2
         );
 
         let parameters = lobby
-            .embedded_game_parameters()
-            .expect("Parameters.txt boundary retained");
+            .embedded_game_parameters().test_value();
         assert_eq!(parameters.random_seed(), Some(44));
         assert_eq!(parameters.max_players(), Some(5));
         assert_eq!(parameters.startup_player_count(), Some(3));
@@ -1480,8 +1407,7 @@ RandomTeamCount=2
             ScenarioGameParameterResolution::EmbeddedFileBeforeRuntimeAdjustments
         );
         let merged = lobby
-            .embedded_game_parameter_values()
-            .expect("defaulted embedded values");
+            .embedded_game_parameter_values().test_value();
         assert_eq!(merged.control_rate(), 4);
         assert_eq!(merged.max_players(), 5);
 
@@ -1519,13 +1445,12 @@ RandomTeamCount=2
             ScenarioTeamColor::DeferredRuntimeRandom
         );
 
-        let replay_core = std::fs::read_to_string(scenario_dir.join("Scenario.txt"))
-            .expect("read scenario")
+        let replay_core = std::fs::read_to_string(scenario_dir.join("Scenario.txt")).test_value()
             .replace("SaveGame=1", "SaveGame=0")
             .replace("Replay=0", "Replay=1");
-        std::fs::write(scenario_dir.join("Scenario.txt"), replay_core).expect("write replay core");
-        let replay = Scenario::load_from_path_with(&scenario_dir, &resolver).expect("replay loads");
-        let replay_lobby = replay.lobby_metadata().expect("replay metadata");
+        write_test_file(scenario_dir.join("Scenario.txt"), replay_core);
+        let replay = load_test_scenario(&scenario_dir, &resolver);
+        let replay_lobby = replay.lobby_metadata().test_value();
         assert!(replay_lobby.head().is_replay());
         assert!(!replay_lobby.head().is_save_game());
         assert_eq!(
@@ -1545,8 +1470,7 @@ RandomTeamCount=2
     fn legacy_lobby_defaults_distinguish_min_players_and_missing_teams() {
         let cooperative = parse_legacy_scenario_text(
             "[Head]\nMaxPlayer=5\nMaxPlayer=broken-but-ignored\n\n[Game]\nRules=RVLR=1\n",
-        )
-        .expect("cooperative core parses");
+        ).test_value();
         assert_eq!(cooperative.core.head.max_player_league, 5);
         assert_eq!(legacy_effective_min_players(&cooperative.core), 1);
         let rivalry_teams = derive_legacy_teams_default(&cooperative.core);
@@ -1558,14 +1482,12 @@ RandomTeamCount=2
         assert!(rivalry_teams.auto_generates_teams());
         assert!(!rivalry_teams.is_custom());
 
-        let melee = parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=1\n")
-            .expect("melee core parses");
+        let melee = parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=1\n").test_value();
         assert_eq!(legacy_effective_min_players(&melee.core), 2);
         assert_eq!(melee.core.head.max_player, 12);
         assert_eq!(melee.core.head.max_player_league, 12);
 
-        let duplicate_melee = parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=0;MELE=1\n")
-            .expect("duplicate goals parse");
+        let duplicate_melee = parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=0;MELE=1\n").test_value();
         assert_eq!(
             legacy_effective_min_players(&duplicate_melee.core),
             1,
@@ -1573,8 +1495,7 @@ RandomTeamCount=2
         );
         assert!(!ScenarioValueStore::from_runtime_core(&duplicate_melee.core, false).is_melee());
         let duplicate_melee_reversed =
-            parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=1;MELE=0\n")
-                .expect("reversed duplicate goals parse");
+            parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=1;MELE=0\n").test_value();
         assert_eq!(
             legacy_effective_min_players(&duplicate_melee_reversed.core),
             2
@@ -1584,7 +1505,7 @@ RandomTeamCount=2
         );
 
         let explicit =
-            parse_legacy_scenario_text("[Head]\nMinPlayer=-2\n").expect("explicit minimum parses");
+            parse_legacy_scenario_text("[Head]\nMinPlayer=-2\n").test_value();
         assert_eq!(legacy_effective_min_players(&explicit.core), -2);
 
         let unknown_force = ScenarioFairCrewForce::from_raw(7);
@@ -1625,33 +1546,27 @@ RandomTeamCount=2
         }
 
         fn evaluate(source: &str) -> Engine {
-            let parsed = parse_legacy_scenario_text(source).expect("scenario core parses");
+            let parsed = parse_legacy_scenario_text(source).test_value();
             let mut engine = Engine::new();
             engine.set_scenario_values(ScenarioValueStore::from_runtime_core(&parsed.core, false));
-            engine
-                .register_player(
+            engine.register_test_player(
                     crate::PlayerConfig::new(0, "Winner")
                         .with_score(250)
                         .with_rounds(4, 2, 2)
                         .with_initial_value(100),
-                )
-                .expect("winner registers");
-            engine
-                .register_player(
+                );
+            engine.register_test_player(
                     crate::PlayerConfig::new(1, "Loser")
                         .with_status(crate::PlayerStatus::Eliminated)
                         .with_score(80)
                         .with_rounds(7, 5, 2)
                         .with_initial_value(100),
-                )
-                .expect("loser registers");
+                );
             engine
-                .player_mut(0)
-                .expect("winner exists")
+                .player_mut(0).test_value()
                 .update_asset_value(165, 0);
             engine
-                .player_mut(1)
-                .expect("loser exists")
+                .player_mut(1).test_value()
                 .update_asset_value(75, 0);
             engine.game_time = 20;
             engine.crew_rosters.insert(
@@ -1662,13 +1577,13 @@ RandomTeamCount=2
                     crew_info("Unused", 9, 30, false, false, 0),
                 ],
             );
-            engine.evaluate_game().expect("game evaluates");
+            engine.evaluate_game().test_value();
             engine
         }
 
         let cooperative = evaluate("[Game]\n");
-        let coop_winner = cooperative.player(0).expect("co-op winner remains");
-        let coop_loser = cooperative.player(1).expect("co-op loser remains");
+        let coop_winner = cooperative.player(0).test_value();
+        let coop_loser = cooperative.player(1).test_value();
         assert_eq!((coop_winner.score(), coop_loser.score()), (382, 112));
         assert_eq!(
             (
@@ -1691,14 +1606,14 @@ RandomTeamCount=2
         assert!(melee.scenario_values.is_melee());
         assert_eq!(melee.player(0).map(crate::Player::score), Some(415));
         assert_eq!(melee.player(1).map(crate::Player::score), Some(80));
-        let roster = melee.crew_rosters.get(&0).expect("crew roster remains");
+        let roster = melee.crew_rosters.get(&0).test_value();
         assert_eq!((roster[0].rounds, roster[0].total_playing_time), (4, 25));
         assert!(!roster[0].in_action, "active crew is retired at evaluation");
         assert_eq!((roster[1].rounds, roster[1].total_playing_time), (8, 17));
         assert_eq!((roster[2].rounds, roster[2].total_playing_time), (9, 30));
 
         let before = melee.capture_state();
-        melee.evaluate_game().expect("second evaluation is ignored");
+        melee.evaluate_game().test_value();
         assert_eq!(melee.capture_state().players, before.players);
         assert_eq!(
             melee.capture_state().crew_info_rosters,
@@ -1709,28 +1624,22 @@ RandomTeamCount=2
     #[test]
     fn delayed_player_retirement_uses_the_same_melee_and_crew_evaluation() {
         let parsed =
-            parse_legacy_scenario_text("[Game]\nGoals=MELE=1\n").expect("melee core parses");
+            parse_legacy_scenario_text("[Game]\nGoals=MELE=1\n").test_value();
         let mut engine = Engine::new();
         engine.set_scenario_values(ScenarioValueStore::from_runtime_core(&parsed.core, false));
-        engine
-            .register_player(
+        engine.register_test_player(
                 crate::PlayerConfig::new(3, "Retiring")
                     .with_status(crate::PlayerStatus::Eliminated)
                     .with_score(10)
                     .with_rounds(2, 1, 1)
                     .with_initial_value(100),
-            )
-            .expect("retiring player registers");
+            );
+        engine.register_test_player(crate::PlayerConfig::new(4, "Peer").with_initial_value(100));
         engine
-            .register_player(crate::PlayerConfig::new(4, "Peer").with_initial_value(100))
-            .expect("peer registers");
-        engine
-            .player_mut(3)
-            .expect("retiring player exists")
+            .player_mut(3).test_value()
             .update_asset_value(140, 0);
         engine
-            .player_mut(4)
-            .expect("peer exists")
+            .player_mut(4).test_value()
             .update_asset_value(200, 0);
         engine.game_time = 12;
         engine.crew_rosters.insert(
@@ -1747,7 +1656,7 @@ RandomTeamCount=2
             }],
         );
 
-        let retired = engine.retire_player(3).expect("player retires");
+        let retired = engine.retire_player(3).test_value();
         assert_eq!(
             retired.score(),
             50,
@@ -1802,7 +1711,7 @@ RandomTeamCount=2
             ScenarioTeamDistribution::Free
         );
 
-        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n").expect("default core");
+        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n").test_value();
         let defaults = game_parameter_defaults(&core.core);
         let parameters = parse_legacy_game_parameter_overrides(
             concat!(
@@ -1848,8 +1757,7 @@ RandomTeamCount=2
             "Goals=MELE=1\n",
             "[Game]\n",
             "Goals=MELE=1\n",
-        ))
-        .expect("exact scenario INI tree parses");
+        )).test_value();
 
         assert_eq!(manifest.core.head.max_player, 7);
         assert_eq!(manifest.core.head.min_player, 0);
@@ -1864,13 +1772,11 @@ RandomTeamCount=2
         assert_eq!(manifest.core.game.goals[0].id, "MELE");
         assert_eq!(manifest.core.game.goals[0].count, Some(0));
 
-        let malformed = parse_legacy_scenario_text("[Head]\nMaxPlayer=broken\n")
-            .expect("malformed scalar uses DefaultAdapt");
+        let malformed = parse_legacy_scenario_text("[Head]\nMaxPlayer=broken\n").test_value();
         assert_eq!(malformed.core.head.max_player, 12);
         assert_eq!(malformed.core.head.max_player_league, 12);
 
-        let integer_flag = parse_legacy_scenario_text("[Head]\nSaveGame=true\n")
-            .expect("integer-backed flag defaults on a boolean token");
+        let integer_flag = parse_legacy_scenario_text("[Head]\nSaveGame=true\n").test_value();
         assert_eq!(integer_flag.core.head.save_game, 0);
     }
 
@@ -1891,7 +1797,7 @@ RandomTeamCount=2
         );
         let crlf = lf.replace('\n', "\r\n");
         let cr = lf.replace('\n', "\r");
-        let expected = parse_legacy_scenario_text(&crlf).expect("CRLF Scenario.txt parses");
+        let expected = parse_legacy_scenario_text(&crlf).test_value();
 
         for (label, source) in [("LF", lf), ("CR", cr.as_str())] {
             let parsed = parse_legacy_scenario_text(source)
@@ -1906,7 +1812,7 @@ RandomTeamCount=2
 
     #[test]
     fn parameters_recover_containers_validate_clients_and_sort_by_id() {
-        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n").expect("default core");
+        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n").test_value();
         let defaults = game_parameter_defaults(&core.core);
         let parameters = parse_legacy_game_parameter_overrides(
             concat!(
@@ -1942,18 +1848,16 @@ RandomTeamCount=2
 
     #[test]
     fn replay_startup_preflight_merges_scenario_and_parameter_map_inputs() {
-        let directory = tempdir().expect("replay group");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\nReplay=1\nRandomSeed=41\n",
-        )
-        .unwrap();
-        std::fs::write(
+        );
+        write_test_file(
             directory.path().join("Parameters.txt"),
             "[Parameters]\nRandomSeed=73\nStartupPlayerCount=4\n",
-        )
-        .unwrap();
-        std::fs::write(
+        );
+        write_test_file(
             directory.path().join("PlayerInfos.txt"),
             concat!(
                 "[PlayerInfoList]\n",
@@ -1969,9 +1873,8 @@ RandomTeamCount=2
                 "    [Player]\n",
                 "    Name=Second\n",
             ),
-        )
-        .unwrap();
-        let group = Group::open(directory.path()).unwrap();
+        );
+        let group = Group::open(directory.path()).test_value();
 
         assert_eq!(
             Scenario::preflight_replay_startup_from_group(&group).unwrap(),
@@ -1981,8 +1884,8 @@ RandomTeamCount=2
             })
         );
 
-        std::fs::write(directory.path().join("Game.txt"), "[Game]\nFrame=37\n").unwrap();
-        let group = Group::open(directory.path()).unwrap();
+        write_test_file(directory.path().join("Game.txt"), "[Game]\nFrame=37\n");
+        let group = Group::open(directory.path()).test_value();
         assert_eq!(
             Scenario::preflight_replay_startup_from_group(&group).unwrap(),
             Some(ReplayScenarioStartupPreflight {
@@ -1992,9 +1895,9 @@ RandomTeamCount=2
             "nonzero-frame records retain the serialized parameter"
         );
 
-        std::fs::remove_file(directory.path().join("Game.txt")).unwrap();
-        std::fs::remove_file(directory.path().join("PlayerInfos.txt")).unwrap();
-        let group = Group::open(directory.path()).unwrap();
+        std::fs::remove_file(directory.path().join("Game.txt")).test_value();
+        std::fs::remove_file(directory.path().join("PlayerInfos.txt")).test_value();
+        let group = Group::open(directory.path()).test_value();
         assert_eq!(
             Scenario::preflight_replay_startup_from_group(&group)
                 .unwrap()
@@ -2004,6 +1907,7 @@ RandomTeamCount=2
             "a frame-zero replay with no PlayerInfos has an empty startup list"
         );
     }
+
 
     #[test]
     fn legacy_parameters_preflight_accepts_cpp_line_endings_and_rejects_bom_header() {
@@ -2039,8 +1943,7 @@ RandomTeamCount=2
             "[Landscape]\n",
             "SkyFade=1,bad,3\n",
             "MapWidth=101,bad,70,300\n",
-        ))
-        .expect("malformed components use their adaptor defaults");
+        )).test_value();
 
         assert_eq!(manifest.core.head.version, [4, 0, 0, 0, 0]);
         assert_eq!(manifest.core.players[0].position, [22, -1]);
@@ -2059,8 +1962,7 @@ RandomTeamCount=2
             .join(";");
         let manifest = parse_legacy_scenario_text(&format!(
             "[Game]\nClearMaterials={layers}\n[Landscape]\nLayers={layers}\n"
-        ))
-        .expect("bounded C4NameList fields parse");
+        )).test_value();
         assert_eq!(manifest.core.game.clear_materials.len(), 10);
         assert_eq!(manifest.core.landscape.layers.len(), 10);
         assert_eq!(manifest.core.landscape.layers[0].name, "Layer1");
@@ -2071,8 +1973,7 @@ RandomTeamCount=2
             "ClearMaterials=ABCDEFGHIJKLMNOPQRSTUVWXYZ12345=2;Gold=3\n",
             "[Landscape]\n",
             "Layers=My Rock=2;Earth=3\n",
-        ))
-        .expect("truncated name lists use compiler defaults");
+        )).test_value();
         assert_eq!(
             malformed
                 .core
@@ -2099,8 +2000,7 @@ RandomTeamCount=2
             "ClearMaterials=A=1=2;B=3\n",
             "[Landscape]\n",
             "Layers=\u{a0}Gold=1\n",
-        ))
-        .expect("separator reentry and raw identifier bytes parse");
+        )).test_value();
         assert_eq!(
             reentered
                 .core
@@ -2116,28 +2016,22 @@ RandomTeamCount=2
 
     #[test]
     fn savegame_definition_boundary_precedes_missing_scenario_modules() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("OldSave.c4s");
-        std::fs::create_dir(&scenario_dir).expect("create scenario");
-        std::fs::write(
+        std::fs::create_dir(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Old Save\nSaveGame=1\n\n[Definitions]\nDefinition1=Missing.c4d\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Game.txt"),
             "[DefinitionFiles]\nDefinition1=Historical.c4d\n\n[Game]\n",
-        )
-        .expect("write old save definition vector");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        );
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
-        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
-            .expect("unresolved old-save boundary remains inspectable");
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         let definitions = scenario
-            .lobby_metadata()
-            .expect("legacy lobby metadata")
+            .lobby_metadata().test_value()
             .definitions();
         assert_eq!(definitions.configured_modules(), ["Missing.c4d"]);
         assert_eq!(definitions.requested_modules(), ["Missing.c4d"]);
@@ -2161,12 +2055,12 @@ RandomTeamCount=2
             "the initialized official content submodule must provide Canyon Scenario.txt and Teams.txt"
         );
         let scenario_source = decode_legacy_script_text(
-            &std::fs::read(&scenario_path).expect("read shipped Scenario.txt"),
+            &std::fs::read(&scenario_path).test_value(),
         );
         let team_source =
-            decode_legacy_script_text(&std::fs::read(&teams_path).expect("read shipped Teams.txt"));
+            decode_legacy_script_text(&std::fs::read(&teams_path).test_value());
         let manifest =
-            parse_legacy_scenario_text(&scenario_source).expect("parse Canyon Scenario.txt");
+            parse_legacy_scenario_text(&scenario_source).test_value();
         let teams = parse_legacy_teams_source(&team_source);
 
         assert_eq!(manifest.core.head.max_player, 6);
@@ -2186,26 +2080,24 @@ RandomTeamCount=2
 
     #[test]
     fn json_scenarios_do_not_synthesize_legacy_lobby_metadata() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("Scenario.json"),
             r#"{"name":"Fixture","definitions":[{"id":"TEST","script":"Def.c"}]}"#,
-        )
-        .expect("write manifest");
-        std::fs::write(dir.path().join("Def.c"), "// fixture\n").expect("write script");
-        let scenario = Scenario::load_from_path(dir.path()).expect("JSON scenario loads");
+        );
+        write_test_file(dir.path().join("Def.c"), "// fixture\n");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         assert!(scenario.lobby_metadata().is_none());
     }
 
     #[test]
     fn json_manifest_script_paths_preserve_native_bytes() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("Scenario.json"),
             r#"{"definitions":[{"id":"TEST","script":"Def.c"}],"script":"Scenario.c"}"#,
-        )
-        .expect("write manifest");
-        std::fs::write(
+        );
+        write_test_file(
             dir.path().join("Def.c"),
             [
                 b"#strict\nfunc Raw() { return \"".as_slice(),
@@ -2213,9 +2105,8 @@ RandomTeamCount=2
                 b"\"; }\n",
             ]
             .concat(),
-        )
-        .expect("write raw definition source");
-        std::fs::write(
+        );
+        write_test_file(
             dir.path().join("Scenario.c"),
             [
                 b"#strict\nglobal func Initialize(state, random) { Message(\"".as_slice(),
@@ -2223,10 +2114,9 @@ RandomTeamCount=2
                 b"\"); }\n",
             ]
             .concat(),
-        )
-        .expect("write raw scenario source");
+        );
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("JSON scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         assert!(
             clonk_script::c4_string_bytes(&scenario.definitions[0].script)
                 .windows(2)
@@ -2239,15 +2129,13 @@ RandomTeamCount=2
         }));
 
         let mut engine = Engine::new();
-        scenario.apply(&mut engine).expect("raw sources compile");
+        apply_test_scenario(&scenario, &mut engine);
         assert_eq!(
             clonk_script::c4_string_bytes(&engine.snapshot().hud.messages[0].lines[0]),
             [0xe9, 0xff]
         );
-        let object = engine
-            .spawn_object(SpawnConfig::new("TEST"))
-            .expect("TEST spawns");
-        let index = engine.find_object_index(object).expect("TEST index");
+        let object = engine.spawn_test_object(SpawnConfig::new("TEST"));
+        let index = engine.test_object_index(object);
         assert_eq!(
             engine
                 .call_object_function(index, "Raw", Vec::new())
@@ -2258,23 +2146,19 @@ RandomTeamCount=2
 
     #[test]
     fn json_scenario_with_missing_definition_include_still_applies() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("Scenario.json"),
             r#"{"name":"Missing include","definitions":[{"id":"TEST","script":"Def.c"}]}"#,
-        )
-        .expect("write manifest");
-        std::fs::write(
+        );
+        write_test_file(
             dir.path().join("Def.c"),
             "#include MISS\npublic func OwnValue() { return 42; }\n",
-        )
-        .expect("write definition script");
+        );
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("JSON scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::new();
-        scenario
-            .apply(&mut engine)
-            .expect("missing include does not abort complete scenario apply");
+        apply_test_scenario(&scenario, &mut engine);
         assert!(engine.definition_script_has_function("TEST", "OwnValue"));
     }
 
@@ -2313,7 +2197,7 @@ RandomTeamCount=2
         let mut files_with_icons = 0;
         let mut icon_count = 0;
         for path in team_files {
-            let bytes = std::fs::read(&path).expect("read shipped Teams.txt");
+            let bytes = std::fs::read(&path).test_value();
             let source = decode_legacy_script_text(&bytes);
             let teams = parse_legacy_teams_source(&source);
             let icons = teams
@@ -2363,7 +2247,7 @@ RandomTeamCount=2
     #[test]
     fn legacy_fow_color_minus_one_reinterprets_as_u32_max() {
         let manifest =
-            parse_legacy_scenario_text("[Game]\nFoWColor=-1\n").expect("signed FoWColor parses");
+            parse_legacy_scenario_text("[Game]\nFoWColor=-1\n").test_value();
 
         assert_eq!(manifest.core.game.fow_color, u32::MAX);
     }
@@ -2376,8 +2260,7 @@ RandomTeamCount=2
             ("+0x80000000", 0),
             ("4294967295", u32::MAX),
         ] {
-            let manifest = parse_legacy_scenario_text(&format!("[Game]\nFoWColor={raw}\n"))
-                .expect("FoWColor prefix parses");
+            let manifest = parse_legacy_scenario_text(&format!("[Game]\nFoWColor={raw}\n")).test_value();
 
             assert_eq!(manifest.core.game.fow_color, expected, "FoWColor={raw}");
         }
@@ -2386,8 +2269,7 @@ RandomTeamCount=2
     #[test]
     fn legacy_fow_color_keeps_in_range_decimal_and_hex_values() {
         for (raw, expected) in [("305419896", 0x1234_5678), ("0x89abcdef", 0x89ab_cdef)] {
-            let manifest = parse_legacy_scenario_text(&format!("[Game]\nFoWColor={raw}\n"))
-                .expect("in-range FoWColor parses");
+            let manifest = parse_legacy_scenario_text(&format!("[Game]\nFoWColor={raw}\n")).test_value();
 
             assert_eq!(manifest.core.game.fow_color, expected, "FoWColor={raw}");
         }
@@ -2396,7 +2278,7 @@ RandomTeamCount=2
     #[test]
     fn scenario_value_store_reinterprets_fow_color_as_signed_i32() {
         let manifest =
-            parse_legacy_scenario_text("[Game]\nFoWColor=-1\n").expect("signed FoWColor parses");
+            parse_legacy_scenario_text("[Game]\nFoWColor=-1\n").test_value();
         let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
 
         assert_eq!(
@@ -2410,7 +2292,7 @@ RandomTeamCount=2
     #[test]
     fn scenario_value_store_projects_fow_resolution_for_the_renderer() {
         let manifest =
-            parse_legacy_scenario_text("[Landscape]\nFoWRes=96\n").expect("FoWRes parses");
+            parse_legacy_scenario_text("[Landscape]\nFoWRes=96\n").test_value();
         let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
 
         assert_eq!(values.fow_resolution(), 96);
@@ -2545,7 +2427,7 @@ Nest=ANT_=3
 Objects=STNE=1;TREE=1
 "#;
 
-        let manifest = parse_legacy_scenario_text(legacy).expect("legacy scenario manifest parses");
+        let manifest = parse_legacy_scenario_text(legacy).test_value();
         let core = &manifest.core;
 
         assert_eq!(core.head.title, "Legacy Land");
@@ -2670,4 +2552,3 @@ Objects=STNE=1;TREE=1
         assert_eq!(core.animals.earth_nest.len(), 1);
         assert_eq!(core.environment.objects.len(), 2);
     }
-

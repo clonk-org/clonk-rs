@@ -87,11 +87,29 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll};
     use std::time::Duration;
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, ReadBuf};
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream, ReadBuf};
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, timeout_at};
 
     const CPP_COMPATIBILITY_BUILD: i32 = CURRENT_GAME_BUILD + 2;
+
+    trait TestValueExt<T> {
+        fn test_value(self) -> T;
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            Option::expect(self, "network-test value exists")
+        }
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            Result::expect(self, "network-test operation succeeds")
+        }
+    }
 
     struct FailingWriteStream;
 
@@ -131,7 +149,7 @@ mod tests {
     }
 
     fn compatibility_test_core(client_id: i32, name: &[u8]) -> clonk_engine::ClientCoreControlData {
-        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
         clonk_engine::ClientCoreControlData {
             client_id,
             activated: true,
@@ -147,10 +165,68 @@ mod tests {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let mut transport = crate::ControlTransport::new(stream);
-        match transport.read_message().await.unwrap() {
+        match transport.read_message().await.test_value() {
             ControlMessage::ConnectionRequest(request) => request,
             other => panic!("expected client connection request, got {other:?}"),
         }
+    }
+
+    async fn start_test_host(config: HostConfig) -> (SocketAddr, HostHandle) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
+        let host = start_host(listener, config).await.test_value();
+        (address, host)
+    }
+
+    async fn connect_test_player(address: SocketAddr, name: &str) -> ClientHandle {
+        connect_client(address, ClientConfig::new(name, ParticipantKind::Player))
+            .await
+            .test_value()
+    }
+
+    type TestClientLoop = (
+        DuplexStream,
+        mpsc::Sender<ClientCommand>,
+        mpsc::Receiver<ClientEvent>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    );
+
+    fn start_test_client_loop(
+        buffer: usize,
+        command_capacity: usize,
+        event_capacity: usize,
+    ) -> TestClientLoop {
+        start_test_client_loop_with_state(
+            buffer,
+            command_capacity,
+            event_capacity,
+            BTreeMap::new(),
+            ClientResourceState::empty(),
+        )
+    }
+
+    fn start_test_client_loop_with_state(
+        buffer: usize,
+        command_capacity: usize,
+        event_capacity: usize,
+        client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
+        resource_state: ClientResourceState,
+    ) -> TestClientLoop {
+        let (client_stream, host_stream) = duplex(buffer);
+        let (command_tx, command_rx) = mpsc::channel(command_capacity);
+        let (event_tx, event_rx) = mpsc::channel(event_capacity);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            client_addresses,
+            resource_state,
+        ));
+        (host_stream, command_tx, event_rx, shutdown_tx, task)
     }
 
     #[test]
@@ -331,17 +407,17 @@ mod tests {
     }
 
     async fn write_udp_session_payload(stream: &mut crate::ReliableUdpPeerStream, payload: &[u8]) {
-        stream.write_all(&tcp_frame(payload)).await.unwrap();
-        stream.flush().await.unwrap();
+        stream.write_all(&tcp_frame(payload)).await.test_value();
+        stream.flush().await.test_value();
     }
 
     async fn read_udp_session_payload(stream: &mut crate::ReliableUdpPeerStream) -> Vec<u8> {
         let mut header = [0_u8; 5];
-        stream.read_exact(&mut header).await.unwrap();
+        stream.read_exact(&mut header).await.test_value();
         assert_eq!(header[0], 0xff);
-        let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+        let length = u32::from_ne_bytes(header[1..].try_into().test_value()) as usize;
         let mut payload = vec![0; length];
-        stream.read_exact(&mut payload).await.unwrap();
+        stream.read_exact(&mut payload).await.test_value();
         payload
     }
 
@@ -359,7 +435,7 @@ mod tests {
     impl crate::upnp::ActivePortMappings for RecordingActivePortMappings {
         fn shutdown(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
             Box::pin(async move {
-                self.released.lock().unwrap().push(self.requests);
+                self.released.lock().test_value().push(self.requests);
             })
         }
     }
@@ -369,7 +445,7 @@ mod tests {
             &self,
             requests: &[crate::upnp::PortMappingRequest],
         ) -> Box<dyn crate::upnp::ActivePortMappings> {
-            self.started.lock().unwrap().push(requests.to_vec());
+            self.started.lock().test_value().push(requests.to_vec());
             Box::new(RecordingActivePortMappings {
                 requests: requests.to_vec(),
                 released: Arc::clone(&self.released),
@@ -440,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn enabled_upnp_host_requests_tcp_udp_and_releases_on_shutdown() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let config = HostConfig {
             enable_upnp: true,
             udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
@@ -454,7 +530,7 @@ mod tests {
         let host =
             start_host_with_udp_binding_and_backend(Some(listener), config, udp_binding, &backend)
                 .await
-                .unwrap();
+                .test_value();
         let expected = vec![
             crate::upnp::PortMappingRequest {
                 protocol: crate::upnp::PortMappingProtocol::Tcp,
@@ -472,16 +548,16 @@ mod tests {
             std::slice::from_ref(&expected)
         );
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
         assert_eq!(&*backend.released.lock().unwrap(), &[expected]);
     }
 
     #[tokio::test]
     async fn host_session_requests_puncher_id_punches_and_reports_assigned_state() {
         let mut puncher =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let puncher_address = puncher.local_addr();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -493,12 +569,12 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let host_udp_address = host.udp_local_addr().unwrap();
+        .test_value();
+        let host_udp_address = host.udp_local_addr().test_value();
         let mut puncher_stream = timeout(Duration::from_secs(2), puncher.accept())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         let observed_address = puncher_stream.peer_addr();
 
         let request = timeout(
@@ -506,7 +582,7 @@ mod tests {
             read_udp_session_payload(&mut puncher_stream),
         )
         .await
-        .unwrap();
+        .test_value();
         assert_eq!(
             crate::decode_netpuncher_packet(&request).unwrap(),
             NetpuncherPacket::IdRequest
@@ -524,7 +600,7 @@ mod tests {
             }
         })
         .await
-        .unwrap();
+        .test_value();
         let observed_udp =
             crate::NetworkAddress::new(crate::NetworkProtocol::Udp, observed_address);
         let mut configured_udp = observed_address;
@@ -558,13 +634,13 @@ mod tests {
             }
         })
         .await
-        .unwrap();
+        .test_value();
         assert_eq!(game_ids.ipv4, assigned_id);
         assert_eq!(game_ids.ipv6, 0);
         assert_eq!(assigned_addresses, local_addresses);
 
-        let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let target_address = target.local_addr().unwrap();
+        let target = UdpSocket::bind("127.0.0.1:0").await.test_value();
+        let target_address = target.local_addr().test_value();
         write_udp_session_payload(
             &mut puncher_stream,
             &crate::encode_netpuncher_packet(&NetpuncherPacket::ClientRequest {
@@ -576,7 +652,7 @@ mod tests {
         let (length, source) = timeout(Duration::from_secs(2), target.recv_from(&mut raw_punch))
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         assert_eq!(
             crate::canonical_reliable_udp_peer_address(source),
             host_udp_address
@@ -584,23 +660,23 @@ mod tests {
         assert_eq!(length, 9);
         assert_eq!(raw_punch[0], 0x01);
 
-        host.shutdown().await.unwrap();
-        puncher.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
+        puncher.shutdown().await.test_value();
     }
 
     #[tokio::test]
     async fn live_host_initializes_one_netpuncher_per_resolved_family() {
         let mut ipv4_puncher =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let mut ipv6_puncher =
             crate::ReliableUdpSessionHub::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)))
-                .unwrap();
+                .test_value();
         let ipv4_address = ipv4_puncher.local_addr();
         let ipv6_address = ipv6_puncher.local_addr();
         let ignored_same_family = SocketAddr::from(([127, 0, 0, 2], ipv4_address.port()));
         let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)))
             .await
-            .unwrap();
+            .test_value();
         let host = start_host(
             listener,
             HostConfig {
@@ -610,11 +686,11 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .test_value();
 
         host.init_netpunchers(vec![ipv4_address, ignored_same_family, ipv6_address])
             .await
-            .unwrap();
+            .test_value();
         let (mut ipv4_stream, mut ipv6_stream) = tokio::join!(
             async {
                 timeout(Duration::from_secs(2), ipv4_puncher.accept())
@@ -632,16 +708,16 @@ mod tests {
         for stream in [&mut ipv4_stream, &mut ipv6_stream] {
             let payload = timeout(Duration::from_secs(2), read_udp_session_payload(stream))
                 .await
-                .unwrap();
+                .test_value();
             assert_eq!(
                 crate::decode_netpuncher_packet(&payload).unwrap(),
                 NetpuncherPacket::IdRequest
             );
         }
 
-        host.shutdown().await.unwrap();
-        ipv4_puncher.shutdown().await.unwrap();
-        ipv6_puncher.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
+        ipv4_puncher.shutdown().await.test_value();
+        ipv6_puncher.shutdown().await.test_value();
     }
 
     fn add_test_route_queue(
@@ -679,7 +755,7 @@ mod tests {
         let config = HostConfig::default();
         let backlog_limit = config.backlog_limit;
         let mut coordinator = ControlCoordinator::with_start_tick(backlog_limit, config.start_tick);
-        coordinator.register_client(HOST_CLIENT_ID).unwrap();
+        coordinator.register_client(HOST_CLIENT_ID).test_value();
         let (event_tx, _event_rx) = mpsc::channel(1);
         let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
             &crate::ClientBootstrapLocalCandidates::default(),
@@ -698,7 +774,7 @@ mod tests {
                 ClientConnection {
                     outbound: outbound.clone(),
                     core: peer_core.clone(),
-                    peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                    peer_addr: "127.0.0.1:11112".parse().test_value(),
                     join_data_sent: true,
                     join_data_needed_emitted: false,
                 },
@@ -708,7 +784,7 @@ mod tests {
                 AcceptedConnectionRoute {
                     client_id,
                     remote_connection_id: 2,
-                    peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                    peer_addr: "127.0.0.1:11112".parse().test_value(),
                     protocol: crate::NetworkProtocol::Tcp,
                     ping: RoutePingLag::default(),
                     outbound,
@@ -800,7 +876,7 @@ mod tests {
             connection_id,
             91,
             core,
-            "127.0.0.1:11113".parse().unwrap(),
+            "127.0.0.1:11113".parse().test_value(),
             crate::NetworkProtocol::Tcp,
             outbound,
             setup_tx,
@@ -892,7 +968,7 @@ mod tests {
             connection_id,
             92,
             core,
-            "127.0.0.1:11114".parse().unwrap(),
+            "127.0.0.1:11114".parse().test_value(),
             crate::NetworkProtocol::Tcp,
             outbound,
             setup_tx,
@@ -948,7 +1024,7 @@ mod tests {
         state
             .accepted_routes
             .get_mut(&1)
-            .expect("first message route")
+            .test_value()
             .ping
             .record_pong(100);
         assert_eq!(
@@ -965,7 +1041,7 @@ mod tests {
             ClientConnection {
                 outbound: second_outbound.clone(),
                 core: second_core.clone(),
-                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 join_data_sent: true,
                 join_data_needed_emitted: false,
             },
@@ -983,7 +1059,7 @@ mod tests {
             AcceptedConnectionRoute {
                 client_id: second_id,
                 remote_connection_id: 4,
-                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 protocol: crate::NetworkProtocol::Tcp,
                 ping: second_ping,
                 outbound: second_outbound,
@@ -1018,7 +1094,7 @@ mod tests {
             AcceptedConnectionRoute {
                 client_id: first_id,
                 remote_connection_id: 12,
-                peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                peer_addr: "127.0.0.1:11112".parse().test_value(),
                 protocol: crate::NetworkProtocol::Udp,
                 ping: RoutePingLag::default(),
                 outbound: first_udp,
@@ -1032,7 +1108,7 @@ mod tests {
             ClientConnection {
                 outbound: second_tcp.clone(),
                 core: second_core.clone(),
-                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 join_data_sent: true,
                 join_data_needed_emitted: false,
             },
@@ -1043,7 +1119,7 @@ mod tests {
             AcceptedConnectionRoute {
                 client_id: second_id,
                 remote_connection_id: 13,
-                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 protocol: crate::NetworkProtocol::Tcp,
                 ping: RoutePingLag::default(),
                 outbound: second_tcp,
@@ -1098,12 +1174,12 @@ mod tests {
         let mut routes = ClientRouteManager::new();
         let _host_tcp =
             add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
-        routes.routes.get_mut(&1).unwrap().ping.record_pong(900);
+        routes.routes.get_mut(&1).test_value().ping.record_pong(900);
         let _host_udp =
             add_test_route_queue(&mut routes, 2, HOST_CLIENT_ID, crate::NetworkProtocol::Udp);
-        routes.routes.get_mut(&2).unwrap().ping.record_pong(40);
+        routes.routes.get_mut(&2).test_value().ping.record_pong(40);
         let _peer = add_test_route_queue(&mut routes, 3, 7, crate::NetworkProtocol::Tcp);
-        routes.routes.get_mut(&3).unwrap().ping.record_pong(100);
+        routes.routes.get_mut(&3).test_value().ping.record_pong(100);
 
         assert_eq!(
             routes.control_send_time_ms(0, [HOST_CLIENT_ID, 7, 8]),
@@ -1134,7 +1210,7 @@ mod tests {
                 route_id: 2,
                 round_trip_ms: 80,
             })
-            .unwrap();
+            .test_value();
         assert!(matches!(
             routes.read_event().await.unwrap(),
             ClientRouteRead::PingMeasured {
@@ -1215,13 +1291,13 @@ mod tests {
         let mut state = host_state_with_test_route(7, outbound);
         let (event_tx, mut event_rx) = mpsc::channel(4);
         state.event_tx = event_tx;
-        let unencodable_tick = u32::try_from(i32::MAX).unwrap() + 1;
+        let unencodable_tick = u32::try_from(i32::MAX).test_value() + 1;
         state.coordinator =
             ControlCoordinator::with_start_tick(state.config.backlog_limit, unencodable_tick);
         state
             .coordinator
             .register_client(HOST_CLIENT_ID)
-            .expect("register host at fatal test tick");
+            .test_value();
         let payload = legacy_packet(HOST_CLIENT_ID, 0, 0x71).payload().to_vec();
 
         ingest_control(
@@ -1231,10 +1307,7 @@ mod tests {
         )
         .await;
 
-        match timeout(EVENT_WAIT, event_rx.recv())
-            .await
-            .expect("fatal ready-tick event timeout")
-        {
+        match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
             Some(HostEvent::FatalError { error }) => {
                 assert!(error.contains("failed to aggregate ready tick"));
             }
@@ -1262,10 +1335,7 @@ mod tests {
         )
         .await;
 
-        match timeout(EVENT_WAIT, event_rx.recv())
-            .await
-            .expect("fatal local-coordinator event timeout")
-        {
+        match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
             Some(HostEvent::FatalError { error }) => {
                 assert!(error.contains("not registered"));
             }
@@ -1288,7 +1358,7 @@ mod tests {
         state.pending_route_clients.insert(99, client_id);
         state
             .pending_admissions
-            .insert(99, i32::try_from(client_id).unwrap());
+            .insert(99, i32::try_from(client_id).test_value());
 
         handle_admission_failed(99, "original route timed out".to_string(), &mut state).await;
 
@@ -1361,7 +1431,7 @@ mod tests {
             ClientConnection {
                 outbound: live.clone(),
                 core: live_core.clone(),
-                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 join_data_sent: true,
                 join_data_needed_emitted: false,
             },
@@ -1372,7 +1442,7 @@ mod tests {
             AcceptedConnectionRoute {
                 client_id: live_client_id,
                 remote_connection_id: 4,
-                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
                 protocol: crate::NetworkProtocol::Tcp,
                 ping: RoutePingLag::default(),
                 outbound: live,
@@ -1454,7 +1524,7 @@ mod tests {
             control_mode: 0,
             target_tick: 9,
         });
-        routes.try_send_to(8, delivered.clone()).unwrap();
+        routes.try_send_to(8, delivered.clone()).test_value();
         assert!(matches!(
             live_receiver.try_recv(),
             Ok(ClientRouteCommand::Message(message)) if message == delivered
@@ -1537,7 +1607,7 @@ mod tests {
         fn take_message(
             receiver: &mut mpsc::UnboundedReceiver<ClientRouteCommand>,
         ) -> ControlMessage {
-            match receiver.try_recv().expect("recovery request is queued") {
+            match receiver.try_recv().test_value() {
                 ClientRouteCommand::Message(message) => message,
                 ClientRouteCommand::Flush(_) => panic!("unexpected recovery flush"),
             }
@@ -1550,7 +1620,7 @@ mod tests {
 
         send_client_recovery_request(&mut routes, 1, 17)
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             take_message(&mut host),
             ControlMessage::Request { from_tick: 17 }
@@ -1559,7 +1629,7 @@ mod tests {
 
         send_client_recovery_request(&mut routes, 0, 18)
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             take_message(&mut host),
             ControlMessage::Request { from_tick: 18 }
@@ -1573,10 +1643,7 @@ mod tests {
     fn take_queued_resource(
         receiver: &mut mpsc::UnboundedReceiver<ClientRouteCommand>,
     ) -> ResourcePacket {
-        match receiver
-            .try_recv()
-            .expect("resource command is queued on the selected route")
-        {
+        match receiver.try_recv().test_value() {
             ClientRouteCommand::Message(ControlMessage::Resource(packet)) => packet,
             ClientRouteCommand::Message(other) => {
                 panic!("unexpected queued resource message: {other:?}")
@@ -1588,7 +1655,7 @@ mod tests {
     #[tokio::test]
     async fn client_mesh_warms_puncher_and_sends_family_server_request_before_host_join() {
         let mut puncher =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let puncher_address = puncher.local_addr();
         let config = ClientConfig::new("Client", ParticipantKind::Player)
             .with_mesh_udp_bind_address(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -1597,21 +1664,21 @@ mod tests {
                 game_id: 0x1122_3344,
             }]);
 
-        let mut prepared = prepare_client_mesh(&config, false).await.unwrap();
-        let local_address = prepared.udp_hub.as_ref().unwrap().local_addr();
+        let mut prepared = prepare_client_mesh(&config, false).await.test_value();
+        let local_address = prepared.udp_hub.as_ref().test_value().local_addr();
         let mut puncher_stream = timeout(EVENT_WAIT, puncher.accept())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         let mut header = [0_u8; 5];
         timeout(EVENT_WAIT, puncher_stream.read_exact(&mut header))
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         assert_eq!(header[0], 0xff);
-        let payload_len = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+        let payload_len = u32::from_ne_bytes(header[1..].try_into().test_value()) as usize;
         let mut payload = vec![0_u8; payload_len];
-        puncher_stream.read_exact(&mut payload).await.unwrap();
+        puncher_stream.read_exact(&mut payload).await.test_value();
         assert_eq!(
             payload,
             crate::encode_netpuncher_packet(&crate::NetpuncherPacket::ServerRequest {
@@ -1639,22 +1706,18 @@ mod tests {
         );
 
         let mut game_peer =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-        let handle = prepared.udp_hub.as_ref().unwrap().handle();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
+        let handle = prepared.udp_hub.as_ref().test_value().handle();
         let (game_stream, incoming_game_stream) =
             tokio::join!(handle.connect(game_peer.local_addr()), game_peer.accept());
-        let game_stream = game_stream.unwrap();
-        let incoming_game_stream = incoming_game_stream.unwrap();
+        let game_stream = game_stream.test_value();
+        let incoming_game_stream = incoming_game_stream.test_value();
         assert_eq!(incoming_game_stream.peer_addr(), local_address);
         drop(game_stream);
         drop(incoming_game_stream);
 
-        prepared
-            .puncher_init
-            .lock()
-            .expect("puncher initialization lock")
-            .initializing = false;
-        handle.close_puncher(puncher_address).await.unwrap();
+        prepared.puncher_init.lock().test_value().initializing = false;
+        handle.close_puncher(puncher_address).await.test_value();
         let mut closed = [0_u8; 1];
         assert_eq!(
             timeout(EVENT_WAIT, puncher_stream.read(&mut closed))
@@ -1667,11 +1730,11 @@ mod tests {
         handle
             .init_puncher(puncher_address, NetpuncherRole::Client)
             .await
-            .unwrap();
+            .test_value();
         let mut reconnected = timeout(EVENT_WAIT, puncher.accept())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         assert!(timeout(
             Duration::from_millis(100),
             read_udp_session_payload(&mut reconnected),
@@ -1681,10 +1744,10 @@ mod tests {
         drop(reconnected);
 
         if let Some(hub) = prepared.udp_hub.take() {
-            hub.shutdown().await.unwrap();
+            hub.shutdown().await.test_value();
         }
-        game_peer.shutdown().await.unwrap();
-        puncher.shutdown().await.unwrap();
+        game_peer.shutdown().await.test_value();
+        puncher.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1692,30 +1755,19 @@ mod tests {
         // PID_Fwd dispatches its complete nested packet exactly once when the
         // local client matches the positive list (pristine C++
         // src/C4Network2IO.cpp:1026-1033).
-        let (client_stream, host_stream) = duplex(512);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(2);
-        let (event_tx, mut event_rx) = mpsc::channel(2);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.change_mode(0, 0).unwrap();
-        resource_state.control.register(0).unwrap();
-        resource_state.control.register(1).unwrap();
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        resource_state.control.change_mode(0, 0).test_value();
+        resource_state.control.register(0).test_value();
+        resource_state.control.register(1).test_value();
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(512, 2, 2, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
         let local = legacy_packet(1, 0, 0x22);
         command_tx
             .send(ClientCommand::SubmitControl(local))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             host_transport.read_message().await.unwrap(),
             ControlMessage::ForwardRequest(_)
@@ -1729,9 +1781,9 @@ mod tests {
                 nested_packet: crate::transport::encode_complete_control_packet(&host).unwrap(),
             }))
             .await
-            .unwrap();
+            .test_value();
 
-        let ready = match timeout(EVENT_WAIT, event_rx.recv()).await.unwrap() {
+        let ready = match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
             Some(ClientEvent::Ready { packet }) => packet,
             other => panic!("expected forwarded aggregate, got {other:?}"),
         };
@@ -1739,7 +1791,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1748,22 +1800,11 @@ mod tests {
         // this client retain their typed host-only route and do not close the
         // connection (src/C4Network2IO.cpp:1037-1045;
         // src/C4Network2Players.cpp:392-419).
-        let (client_stream, host_stream) = duplex(512);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(512, 1, 1, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
         let league_results = vec![0x17, 0x01, b'O', b'K', 0x00, 0x00];
 
         host_transport
@@ -1773,11 +1814,11 @@ mod tests {
                 nested_packet: league_results,
             }))
             .await
-            .unwrap();
+            .test_value();
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
-            .unwrap()
-            .expect("client event channel remains open");
+            .test_value()
+            .test_value();
         let ClientEvent::LeagueRoundResults { packet } = event else {
             panic!("expected typed forwarded league results, got {event:?}");
         };
@@ -1797,7 +1838,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Ping(ping))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             host_transport.read_message().await.unwrap(),
             ControlMessage::Pong(ping)
@@ -1805,7 +1846,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1814,22 +1855,11 @@ mod tests {
         // recursive PID_Fwd is bounded instead of reproducing C++'s unbounded
         // recursive HandlePacket call (pristine C++
         // src/C4Network2IO.cpp:1026-1033,1626-1636).
-        let (client_stream, host_stream) = duplex(512);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(2);
-        let (event_tx, mut event_rx) = mpsc::channel(2);
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        let (host_stream, _command_tx, mut event_rx, _shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(512, 2, 2, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
 
         host_transport
             .send_message(ControlMessage::Forward(crate::ForwardPacket {
@@ -1838,7 +1868,7 @@ mod tests {
                 nested_packet: vec![0x40],
             }))
             .await
-            .unwrap();
+            .test_value();
         let status = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: 0,
@@ -1847,7 +1877,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::Status(received))) if received == status
@@ -1860,7 +1890,7 @@ mod tests {
                 clients: Vec::new(),
                 nested_packet: vec![0xff],
             })
-            .unwrap(),
+            .test_value(),
         );
         host_transport
             .send_message(ControlMessage::Forward(crate::ForwardPacket {
@@ -1869,13 +1899,13 @@ mod tests {
                 nested_packet: recursive,
             }))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::Disconnected { reason: Some(reason) }))
                 if reason == "recursive forwarding packet is not accepted"
         ));
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1884,36 +1914,25 @@ mod tests {
         // no other direct peers in the negative list, and sends the complete
         // PID_Control inside PID_FwdReq (pristine C++
         // src/C4Network2Client.cpp:515-541; src/C4GameControlNetwork.cpp:156-174).
-        let (client_stream, mut host_stream) = duplex(128);
-        let (command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, _event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.change_mode(0, 0).unwrap();
-        resource_state.control.register(0).unwrap();
-        resource_state.control.register(1).unwrap();
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        resource_state.control.change_mode(0, 0).test_value();
+        resource_state.control.register(0).test_value();
+        resource_state.control.register(1).test_value();
+        let (mut host_stream, command_tx, _event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(128, 1, 1, BTreeMap::new(), resource_state);
 
         command_tx
             .send(ClientCommand::SubmitControl(
                 ControlPacket::builder(1, 0).payload(vec![0xff]),
             ))
             .await
-            .unwrap();
+            .test_value();
         let mut bytes = vec![0; 64];
         let count = timeout(EVENT_WAIT, host_stream.read(&mut bytes))
             .await
-            .expect("forward request send wait")
-            .unwrap();
+            .test_value()
+            .test_value();
         bytes.truncate(count);
         assert_eq!(
             bytes,
@@ -1922,7 +1941,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1931,17 +1950,9 @@ mod tests {
         // With no peer mesh, only the host FwdReq remains and its negative
         // list is empty (pristine C++ src/C4Network2Client.cpp:515-541;
         // src/C4GameControlNetwork.cpp:224-240).
-        let (client_stream, host_stream) = duplex(512);
+        let (host_stream, command_tx, _event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop(512, 2, 1);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(2);
-        let (event_tx, _event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_handle = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
 
         for delivery in [ControlDelivery::Direct, ControlDelivery::Private] {
             command_tx
@@ -1950,7 +1961,7 @@ mod tests {
                     data: vec![0xaa, 0xbb],
                 })
                 .await
-                .unwrap();
+                .test_value();
             assert_eq!(
                 timeout(EVENT_WAIT, host_transport.read_message())
                     .await
@@ -1972,7 +1983,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1980,22 +1991,11 @@ mod tests {
         // ReadyCheck uses includeHost=true: the host receives the raw packet
         // first and is then excluded from the fallback FwdReq (pristine C++
         // src/C4Network2Client.cpp:515-541; src/C4GameLobby.cpp:329-343).
-        let (client_stream, host_stream) = duplex(512);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, _event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.host_peer_id = 7;
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        let (host_stream, command_tx, _event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(512, 1, 1, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
         let packet = ReadyCheckPacket {
             client_id: 12,
             data: crate::ReadyCheckData::Ready,
@@ -2004,7 +2004,7 @@ mod tests {
         command_tx
             .send(ClientCommand::SubmitReadyCheck(packet))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, host_transport.read_message())
                 .await
@@ -2035,7 +2035,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2043,29 +2043,12 @@ mod tests {
         // The client now reaches the host only through FwdReq for direct
         // packets. Preserve Rust-host interoperability while the generic
         // opaque forwarding router remains separate work.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let source = connect_client(
-            address,
-            ClientConfig::new("Source", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
-        let mut observer_a = connect_client(
-            address,
-            ClientConfig::new("Observer A", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let source = connect_test_player(address, "Source").await;
+        let mut observer_a = connect_test_player(address, "Observer A").await;
         let mut observer_a_events = observer_a.take_event_receiver();
-        let mut observer_b = connect_client(
-            address,
-            ClientConfig::new("Observer B", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let mut observer_b = connect_test_player(address, "Observer B").await;
         let mut observer_b_events = observer_b.take_event_receiver();
         let source_id = source.client_id();
         let data =
@@ -2075,14 +2058,14 @@ mod tests {
                 data: 0x33,
                 by_client: i32::try_from(source_id).unwrap(),
             }))
-            .unwrap();
+            .test_value();
 
         source
             .submit_packet(ControlDelivery::Direct, data.clone())
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Direct {
                     client_id,
                     delivery: ControlDelivery::Direct,
@@ -2103,7 +2086,7 @@ mod tests {
             ("observer B", &mut observer_b_events),
         ] {
             loop {
-                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                     Some(ClientEvent::Direct {
                         delivery: ControlDelivery::Direct,
                         data: received,
@@ -2160,17 +2143,15 @@ mod tests {
             }
         }
 
-        source.shutdown().await.unwrap();
-        observer_a.shutdown().await.unwrap();
-        observer_b.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        source.shutdown().await.test_value();
+        observer_a.shutdown().await.test_value();
+        observer_b.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_ignores_client_originated_league_results_and_keeps_the_connection() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut client, _) = raw_client_transport(address, b"Source").await;
         drain_raw_client(&mut client).await;
 
@@ -2183,7 +2164,7 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         let ping = crate::PingPacket {
             sent_at: 31,
             packet_counter: 0,
@@ -2191,7 +2172,7 @@ mod tests {
         client
             .send_message(ControlMessage::Ping(ping))
             .await
-            .unwrap();
+            .test_value();
 
         assert_eq!(
             timeout(EVENT_WAIT, client.read_message())
@@ -2202,21 +2183,20 @@ mod tests {
         );
 
         drop(client);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_broadcasts_league_round_results_to_every_logical_client() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut alice, _) = raw_client_transport(address, b"Alice").await;
         let (mut bob, _) = raw_client_transport(address, b"Bob").await;
         drain_raw_client(&mut alice).await;
         drain_raw_client(&mut bob).await;
         let packet = crate::LeagueRoundResultsPacket {
             success: true,
-            result_string: clonk_engine::LegacyCString::from_bytes(b"Counted".to_vec()).unwrap(),
+            result_string: clonk_engine::LegacyCString::from_bytes(b"Counted".to_vec())
+                .test_value(),
             players: vec![crate::LeagueRoundResultsPlayer {
                 player_info_id: 17,
                 total_playing_time: 900,
@@ -2234,7 +2214,7 @@ mod tests {
 
         host.broadcast_league_round_results(packet.clone())
             .await
-            .unwrap();
+            .test_value();
 
         let expected = ControlMessage::LeagueRoundResults(packet);
         assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
@@ -2242,7 +2222,7 @@ mod tests {
 
         drop(alice);
         drop(bob);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     /// A restart notice is only meaningful from the host, and the client can
@@ -2253,9 +2233,7 @@ mod tests {
     /// could tear down another player's round.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_cannot_forge_a_restart_notice_through_the_forward_relay() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut attacker, _attacker_id) = raw_client_transport(address, b"Mallory").await;
         let (mut victim, _victim_id) = raw_client_transport(address, b"Alice").await;
         drain_raw_client(&mut attacker).await;
@@ -2268,7 +2246,7 @@ mod tests {
                 nested_packet: crate::encode_host_restart_notice(30),
             }))
             .await
-            .unwrap();
+            .test_value();
 
         let forged = ControlMessage::HostRestarting { rejoin_seconds: 30 };
         assert!(
@@ -2278,7 +2256,7 @@ mod tests {
 
         drop(attacker);
         drop(victim);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     /// The session-preserving notice is the more dangerous one to relay: it
@@ -2287,9 +2265,7 @@ mod tests {
     /// whole `0x7x` range is refused on the relay for exactly this reason.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_cannot_forge_a_lobby_restart_through_the_forward_relay() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut attacker, _attacker_id) = raw_client_transport(address, b"Mallory").await;
         let (mut victim, _victim_id) = raw_client_transport(address, b"Alice").await;
         drain_raw_client(&mut attacker).await;
@@ -2302,7 +2278,7 @@ mod tests {
                 nested_packet: crate::encode_host_restart_lobby_notice(),
             }))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(
             !raw_client_received_message(
@@ -2316,22 +2292,20 @@ mod tests {
 
         drop(attacker);
         drop(victim);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     /// Unlike the reconnect notice, this one is followed by the session staying
     /// up, so it has to reach every client on the connection it will keep using.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lobby_restart_notice_reaches_every_client_on_the_live_session() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut alice, _) = raw_client_transport(address, b"Alice").await;
         let (mut bob, _) = raw_client_transport(address, b"Bob").await;
         drain_raw_client(&mut alice).await;
         drain_raw_client(&mut bob).await;
 
-        host.broadcast_host_restart_lobby().await.unwrap();
+        host.broadcast_host_restart_lobby().await.test_value();
 
         let expected = ControlMessage::HostRestartLobby;
         assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
@@ -2339,7 +2313,7 @@ mod tests {
 
         drop(alice);
         drop(bob);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     /// The restart notice exists only to be read *before* the disconnect it
@@ -2350,16 +2324,14 @@ mod tests {
     /// that immediately follows it.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_restart_notice_outruns_the_host_shutdown_behind_it() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut alice, _) = raw_client_transport(address, b"Alice").await;
         let (mut bob, _) = raw_client_transport(address, b"Bob").await;
         drain_raw_client(&mut alice).await;
         drain_raw_client(&mut bob).await;
 
-        host.broadcast_host_restarting(30).await.unwrap();
-        host.shutdown().await.unwrap();
+        host.broadcast_host_restarting(30).await.test_value();
+        host.shutdown().await.test_value();
 
         let expected = ControlMessage::HostRestarting { rejoin_seconds: 30 };
         assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
@@ -2368,14 +2340,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_shutdown_does_not_report_a_client_connection_failure() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (client, client_id) = raw_client_transport(address, b"Alice").await;
         while host_events.try_recv().is_ok() {}
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
 
         let mut saw_left = false;
         while let Some(event) = host_events.recv().await {
@@ -2399,9 +2369,7 @@ mod tests {
         // contribution; only HandleFwdReq performs fallback fanout (pristine
         // C++ src/C4GameControlNetwork.cpp:517-529;
         // src/C4Network2IO.cpp:1066-1117).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         let (mut observer_a, _) = raw_client_transport(address, b"Observer A").await;
         let (mut observer_b, _) = raw_client_transport(address, b"Observer B").await;
@@ -2413,7 +2381,7 @@ mod tests {
         source
             .send_message(ControlMessage::Control(packet.clone()))
             .await
-            .unwrap();
+            .test_value();
         for observer in [&mut observer_a, &mut observer_b] {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
             let mut rebroadcast = false;
@@ -2429,14 +2397,12 @@ mod tests {
         drop(source);
         drop(observer_a);
         drop(observer_b);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_control_request_falls_back_to_unregistered_partial_packet() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         drain_raw_client(&mut source).await;
 
@@ -2444,18 +2410,18 @@ mod tests {
         source
             .send_message(ControlMessage::Control(partial.clone()))
             .await
-            .unwrap();
+            .test_value();
         raw_client_ping_barrier(&mut source).await;
         source
             .send_message(ControlMessage::Request { from_tick: 0 })
             .await
-            .unwrap();
+            .test_value();
 
         assert!(raw_client_received_control(&mut source, &partial, EVENT_WAIT).await);
         assert_ne!(partial.client_id(), BROADCAST_CLIENT_ID);
 
         drop(source);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2464,9 +2430,7 @@ mod tests {
         // nested packet directly when at most two remote clients remain, then
         // dispatches it locally when the negative list selects the host
         // (pristine C++ src/C4Network2IO.cpp:1066-1117).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         activate_joined_client(&host, &mut host_events, source_id).await;
@@ -2476,7 +2440,7 @@ mod tests {
 
         let host_packet = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
         let source_packet = legacy_packet(source_id, 0, 0x22);
-        host.submit_local_control(host_packet).await.unwrap();
+        host.submit_local_control(host_packet).await.test_value();
         source
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
                 negative_list: true,
@@ -2485,7 +2449,7 @@ mod tests {
                     .unwrap(),
             }))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(raw_client_received_control(&mut observer, &source_packet, EVENT_WAIT).await);
         assert!(
@@ -2498,7 +2462,7 @@ mod tests {
 
         drop(source);
         drop(observer);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2507,9 +2471,7 @@ mod tests {
         // self leg applies C4GameControlNetwork's ByClient check
         // (src/C4Network2IO.cpp:1077-1128;
         // src/C4GameControlNetwork.cpp:477-492).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         let (mut observer_a, _) = raw_client_transport(address, b"Observer A").await;
@@ -2525,7 +2487,7 @@ mod tests {
                 data: 0x33,
                 by_client: i32::try_from(source_id).unwrap(),
             }))
-            .unwrap();
+            .test_value();
         let mut nested_packet = vec![0x42, u8::from(ControlDelivery::Direct)];
         nested_packet.extend_from_slice(&direct_data);
         source
@@ -2535,7 +2497,7 @@ mod tests {
                 nested_packet,
             }))
             .await
-            .unwrap();
+            .test_value();
 
         let expected_direct = ControlMessage::Packet {
             delivery: ControlDelivery::Direct,
@@ -2551,7 +2513,10 @@ mod tests {
         }
         let host_deadline = tokio::time::Instant::now() + EVENT_WAIT;
         loop {
-            match timeout_at(host_deadline, host_events.recv()).await.unwrap() {
+            match timeout_at(host_deadline, host_events.recv())
+                .await
+                .test_value()
+            {
                 Some(HostEvent::Direct {
                     client_id,
                     delivery: ControlDelivery::Direct,
@@ -2573,7 +2538,7 @@ mod tests {
                 data: 0x55,
                 by_client: i32::try_from(source_id + 1).unwrap(),
             }))
-            .unwrap();
+            .test_value();
         let mut spoofed_nested = vec![0x42, u8::from(ControlDelivery::Direct)];
         spoofed_nested.extend_from_slice(&spoofed_data);
         source
@@ -2583,7 +2548,7 @@ mod tests {
                 nested_packet: spoofed_nested,
             }))
             .await
-            .unwrap();
+            .test_value();
 
         let expected_spoofed = ControlMessage::Packet {
             delivery: ControlDelivery::Direct,
@@ -2596,7 +2561,7 @@ mod tests {
         let error = loop {
             match timeout_at(error_deadline, host_events.recv())
                 .await
-                .unwrap()
+                .test_value()
             {
                 Some(HostEvent::Direct {
                     client_id,
@@ -2632,7 +2597,7 @@ mod tests {
         drop(source);
         drop(observer_a);
         drop(observer_b);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2640,9 +2605,7 @@ mod tests {
         // A ReadyCheck can be selected for remote peers while the negative
         // list excludes the host. Its trailing bytes survive the direct relay
         // (src/C4Network2IO.cpp:1077-1128; src/C4GameLobby.cpp:329-343).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         let (mut observer, _) = raw_client_transport(address, b"Observer").await;
@@ -2650,7 +2613,7 @@ mod tests {
         drain_raw_client(&mut observer).await;
         let mut observer = observer.into_inner();
         let ready = ReadyCheckPacket {
-            client_id: i32::try_from(source_id).unwrap(),
+            client_id: i32::try_from(source_id).test_value(),
             data: crate::ReadyCheckData::Ready,
         };
         let mut nested_packet = vec![0x21];
@@ -2665,7 +2628,7 @@ mod tests {
                 nested_packet: nested_packet.clone(),
             }))
             .await
-            .unwrap();
+            .test_value();
         assert!(raw_tcp_received_frame(&mut observer, &nested_packet, EVENT_WAIT).await);
         let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
         while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
@@ -2687,7 +2650,7 @@ mod tests {
 
         drop(source);
         drop(observer);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2697,9 +2660,7 @@ mod tests {
         // originated from an ordinary client, without closing that client's
         // connection (src/C4Network2IO.cpp:1077-1129;
         // src/C4Network2Players.cpp:392-419).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         drain_raw_client(&mut source).await;
@@ -2712,7 +2673,7 @@ mod tests {
                 nested_packet: league_results,
             }))
             .await
-            .unwrap();
+            .test_value();
         let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
         while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
             assert!(
@@ -2744,9 +2705,12 @@ mod tests {
         source
             .send_message(ControlMessage::Ping(ping))
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, source.read_message()).await.unwrap() {
+            match timeout(EVENT_WAIT, source.read_message())
+                .await
+                .test_value()
+            {
                 Ok(ControlMessage::Pong(received)) if received == ping => break,
                 Ok(_) => continue,
                 Err(error) => panic!("connection closed after league-results forwarding: {error}"),
@@ -2754,7 +2718,7 @@ mod tests {
         }
 
         drop(source);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2763,9 +2727,7 @@ mod tests {
         // packet unpacker. A compiler failure closes only pConn in release; the
         // network scheduler and unrelated routes remain live
         // (src/C4Network2IO.cpp:822-835,1041-1055,1088-1140).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         let (mut witness, witness_id) = raw_client_transport(address, b"Witness").await;
@@ -2777,7 +2739,7 @@ mod tests {
                 nested_packet: vec![0x40],
             }))
             .await
-            .unwrap();
+            .test_value();
         assert!(wait_for_host_error(&mut host_events, source_id)
             .await
             .contains("invalid forwarded packet"));
@@ -2806,7 +2768,7 @@ mod tests {
             }
         })
         .await
-        .expect("source route was not closed after malformed forwarding");
+        .test_value();
 
         let routes = host.accepted_routes().await;
         assert_eq!(routes.len(), 1);
@@ -2819,12 +2781,12 @@ mod tests {
             }
         })
         .await
-        .expect("malformed source TCP route remained open");
+        .test_value();
         raw_client_ping_barrier(&mut witness).await;
 
         drop(source);
         drop(witness);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2832,9 +2794,7 @@ mod tests {
         // HandleFwdReq switches from direct nested sends to one positive-list
         // PID_Fwd broadcast when more than two remote client IDs are selected
         // (pristine C++ src/C4Network2IO.cpp:1083-1112).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
         let (mut observer_a, observer_a_id) = raw_client_transport(address, b"A").await;
         let (mut observer_b, observer_b_id) = raw_client_transport(address, b"B").await;
@@ -2849,7 +2809,7 @@ mod tests {
         }
 
         let control = ControlPacket::builder(source_id, 0).payload(vec![0xff]);
-        let nested_packet = crate::transport::encode_complete_control_packet(&control).unwrap();
+        let nested_packet = crate::transport::encode_complete_control_packet(&control).test_value();
         source
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
                 negative_list: true,
@@ -2857,12 +2817,12 @@ mod tests {
                 nested_packet: nested_packet.clone(),
             }))
             .await
-            .unwrap();
+            .test_value();
         let expected = crate::ForwardPacket {
             negative_list: false,
             clients: vec![observer_c_id, observer_b_id, observer_a_id]
                 .into_iter()
-                .map(|client_id| i32::try_from(client_id).unwrap())
+                .map(|client_id| i32::try_from(client_id).test_value())
                 .collect(),
             nested_packet,
         };
@@ -2882,7 +2842,7 @@ mod tests {
         drop(observer_a);
         drop(observer_b);
         drop(observer_c);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test]
@@ -2907,17 +2867,14 @@ mod tests {
         let HostCommand::SetJoinAllowed {
             allowed,
             completion,
-        } = commands.recv().await.expect("gate command")
+        } = commands.recv().await.test_value()
         else {
             panic!("expected gate command");
         };
         assert!(allowed);
         assert!(!setter.is_finished(), "host state has not applied the gate");
-        completion.send(()).expect("acknowledge applied gate");
-        setter
-            .await
-            .expect("setter task")
-            .expect("gate acknowledgement");
+        completion.send(()).test_value();
+        setter.await.expect("setter task").test_value();
     }
 
     #[tokio::test]
@@ -2945,7 +2902,7 @@ mod tests {
             status: requested_status,
             join_allowed,
             completion,
-        } = commands.recv().await.expect("atomic Go command")
+        } = commands.recv().await.test_value()
         else {
             panic!("expected atomic Go command");
         };
@@ -2955,11 +2912,8 @@ mod tests {
             !starter.is_finished(),
             "caller must wait until both host states have been applied"
         );
-        completion.send(()).expect("acknowledge atomic transition");
-        starter
-            .await
-            .expect("starter task")
-            .expect("atomic transition acknowledgement");
+        completion.send(()).test_value();
+        starter.await.expect("starter task").test_value();
     }
 
     #[tokio::test]
@@ -2983,9 +2937,7 @@ mod tests {
         };
         let starter = tokio::spawn(async move { handle.begin_go(status, true).await });
 
-        let HostCommand::BeginGo { completion, .. } =
-            commands.recv().await.expect("atomic Go command")
-        else {
+        let HostCommand::BeginGo { completion, .. } = commands.recv().await.test_value() else {
             panic!("expected atomic Go command");
         };
         drop(completion);
@@ -2997,19 +2949,21 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn host_runtime_wait_uses_local_arrival_after_consumed_tick() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .test_value();
         let reached_at = tokio::time::Instant::now();
         host.control_tick_reached(0, 1, DEFAULT_CONTROL_TARGET_FPS, reached_at)
             .await
-            .unwrap();
+            .test_value();
         tokio::time::advance(Duration::from_millis(200)).await;
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
-            .unwrap();
+            .test_value();
         host.control_tick_consumed(0, tokio::time::Instant::now(), vec![HOST_CLIENT_ID], false)
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             host.control_send_time_ms(&[HOST_CLIENT_ID]),
             0,
@@ -3032,7 +2986,7 @@ mod tests {
             0,
             "CopyClientList-style resets clear the displayed EWMA"
         );
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test]
@@ -3048,7 +3002,7 @@ mod tests {
         host_event_tx
             .send(HostEvent::StatusCommitted(status))
             .await
-            .unwrap();
+            .test_value();
         let (host_shutdown_tx, _host_shutdown_rx) = oneshot::channel();
         let host = HostHandle {
             command_tx: host_command_tx,
@@ -3064,8 +3018,8 @@ mod tests {
             host.control_tick_consumed(7, tokio::time::Instant::now(), vec![HOST_CLIENT_ID], false),
         )
         .await
-        .expect("full undrained host event queue blocked enqueue-only API")
-        .unwrap();
+        .test_value()
+        .test_value();
         assert!(matches!(
             host_commands.recv().await,
             Some(HostCommand::ControlTickConsumed { tick: 7, .. })
@@ -3076,7 +3030,7 @@ mod tests {
         client_event_tx
             .send(ClientEvent::Status(status))
             .await
-            .unwrap();
+            .test_value();
         let (client_shutdown_tx, _client_shutdown_rx) = oneshot::channel();
         let client = ClientHandle {
             command_tx: client_command_tx,
@@ -3098,8 +3052,8 @@ mod tests {
             ),
         )
         .await
-        .expect("full undrained client event queue blocked enqueue-only API")
-        .unwrap();
+        .test_value()
+        .test_value();
         assert!(matches!(
             client_commands.recv().await,
             Some(ClientCommand::ControlTickConsumed { tick: 7, .. })
@@ -3108,9 +3062,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_commands_are_serviced_while_route_events_remain_saturated() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let (mut client, client_id) = raw_client_transport(address, b"Flood").await;
         drain_raw_client(&mut client).await;
         let (stop_tx, mut stop_rx) = watch::channel(false);
@@ -3140,30 +3092,25 @@ mod tests {
             }
         })
         .await
-        .expect("route-event flood never reached the host loop");
+        .test_value();
 
         timeout(Duration::from_millis(250), host.set_join_allowed(false))
             .await
-            .expect("unbounded route events starved an acknowledged host command")
-            .unwrap();
+            .test_value()
+            .test_value();
 
         stop_tx.send_replace(true);
-        flood.await.unwrap();
-        host.shutdown().await.unwrap();
+        flood.await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_commands_are_serviced_while_route_events_remain_saturated() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let host_event_drain =
             tokio::spawn(async move { while host_events.recv().await.is_some() {} });
-        let mut client =
-            connect_client(address, ClientConfig::new("Flood", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut client = connect_test_player(address, "Flood").await;
         let mut events = client.take_event_receiver();
         let flood_data =
             encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
@@ -3172,7 +3119,7 @@ mod tests {
                 data: 0,
                 by_client: HOST_CLIENT_ID as i32,
             }))
-            .unwrap();
+            .test_value();
         let (saturated_tx, saturated_rx) = oneshot::channel();
         let event_drain = tokio::spawn(async move {
             let mut direct_count = 0;
@@ -3181,7 +3128,7 @@ mod tests {
                 if matches!(event, ClientEvent::Direct { .. }) {
                     direct_count += 1;
                     if direct_count == 64 {
-                        let _ = saturated_tx.take().expect("one saturation signal").send(());
+                        let _ = saturated_tx.take().test_value().send(());
                     }
                 }
             }
@@ -3203,23 +3150,23 @@ mod tests {
         });
         timeout(EVENT_WAIT, saturated_rx)
             .await
-            .expect("host-to-client route-event flood never became active")
-            .unwrap();
+            .test_value()
+            .test_value();
 
         timeout(
             Duration::from_millis(250),
             client.runtime_client_states(0, false),
         )
         .await
-        .expect("route events starved an acknowledged client command")
-        .unwrap();
+        .test_value()
+        .test_value();
 
         flood.abort();
         let _ = flood.await;
-        client.shutdown().await.unwrap();
-        event_drain.await.unwrap();
-        host.shutdown().await.unwrap();
-        host_event_drain.await.unwrap();
+        client.shutdown().await.test_value();
+        event_drain.await.test_value();
+        host.shutdown().await.test_value();
+        host_event_drain.await.test_value();
     }
 
     #[tokio::test]
@@ -3236,13 +3183,13 @@ mod tests {
             udp_local_addr: None,
             io_statistics: crate::NetworkIoStatistics::new(0),
         };
-        let secret = clonk_engine::LegacyCString::from_bytes(b"secret".to_vec()).unwrap();
+        let secret = clonk_engine::LegacyCString::from_bytes(b"secret".to_vec()).test_value();
         let setter = tokio::spawn(async move { handle.set_password(Some(secret)).await });
 
         let HostCommand::SetPassword {
             password,
             completion,
-        } = commands.recv().await.expect("password command")
+        } = commands.recv().await.test_value()
         else {
             panic!("expected password command");
         };
@@ -3251,21 +3198,14 @@ mod tests {
             !setter.is_finished(),
             "host state has not applied the password"
         );
-        completion.send(()).expect("acknowledge applied password");
-        setter
-            .await
-            .expect("setter task")
-            .expect("password acknowledgement");
+        completion.send(()).test_value();
+        setter.await.expect("setter task").test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn runtime_handles_inspect_client_states_and_retire_the_live_tcp_route() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
-        let client = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
+        let client = connect_test_player(address, "Alice").await;
 
         assert_eq!(
             host.runtime_client_states(0, false).await.unwrap(),
@@ -3302,14 +3242,14 @@ mod tests {
             ]
         );
 
-        let host_connections = host.runtime_connections().await.unwrap();
+        let host_connections = host.runtime_connections().await.test_value();
         assert_eq!(host_connections.len(), 1);
         assert_eq!(host_connections[0].client_id, client.client_id());
         assert_eq!(host_connections[0].usage, "Data/Msg");
         assert_eq!(host_connections[0].protocol, crate::NetworkProtocol::Tcp);
         assert!(host_connections[0].peer_address.is_some());
 
-        let client_connections = client.runtime_connections().await.unwrap();
+        let client_connections = client.runtime_connections().await.test_value();
         assert_eq!(client_connections.len(), 1);
         assert_eq!(client_connections[0].client_id, HOST_CLIENT_ID);
         assert_eq!(client_connections[0].usage, "Data/Msg");
@@ -3319,7 +3259,7 @@ mod tests {
         let host_lobby_telemetry = host
             .lobby_client_telemetry(vec![client.client_id()])
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             host_lobby_telemetry
                 .connections
@@ -3337,7 +3277,7 @@ mod tests {
         let client_lobby_telemetry = client
             .lobby_client_telemetry(vec![HOST_CLIENT_ID])
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             client_lobby_telemetry
                 .connections
@@ -3354,48 +3294,45 @@ mod tests {
         client
             .disconnect_runtime_connection(client_connections[0].connection_id)
             .await
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
-                if host.runtime_connections().await.unwrap().is_empty() {
+                if host.runtime_connections().await.test_value().is_empty() {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("host did not retire the client-closed route");
+        .test_value();
 
-        client.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
 
-        let second_client =
-            connect_client(address, ClientConfig::new("Bob", ParticipantKind::Player))
-                .await
-                .unwrap();
-        let second_connections = host.runtime_connections().await.unwrap();
+        let second_client = connect_test_player(address, "Bob").await;
+        let second_connections = host.runtime_connections().await.test_value();
         assert_eq!(second_connections.len(), 1);
         assert_eq!(second_connections[0].client_id, second_client.client_id());
         host.disconnect_runtime_connection(second_connections[0].connection_id)
             .await
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
-                if host.runtime_connections().await.unwrap().is_empty() {
+                if host.runtime_connections().await.test_value().is_empty() {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("host did not retire its selected route");
-        second_client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        .test_value();
+        second_client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_queued_client_remove_projects_removing_before_sync_execution() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let config = HostConfig {
             initial_status: NetworkStatus {
                 state: NETWORK_STATE_GO,
@@ -3404,10 +3341,8 @@ mod tests {
             },
             ..HostConfig::default()
         };
-        let host = start_host(listener, config).await.unwrap();
-        let client = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let host = start_host(listener, config).await.test_value();
+        let client = connect_test_player(address, "Alice").await;
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
             clonk_engine::ClientRemoveControlData {
                 client_id: i32::try_from(client.client_id()).unwrap(),
@@ -3415,12 +3350,12 @@ mod tests {
                 by_client: HOST_CLIENT_ID as i32,
             },
         ))
-        .unwrap();
+        .test_value();
         host.submit_packet(ControlDelivery::Sync, remove)
             .await
-            .unwrap();
+            .test_value();
 
-        let states = host.runtime_client_states(0, false).await.unwrap();
+        let states = host.runtime_client_states(0, false).await.test_value();
         assert_eq!(
             states
                 .iter()
@@ -3436,13 +3371,13 @@ mod tests {
             Some(RemoteBarrierState::Removing)
         );
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reliable_udp_client_completes_session_admission_and_control() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -3451,26 +3386,24 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let udp_address = host
-            .udp_local_addr()
-            .expect("configured reliable-UDP listener");
+        .test_value();
+        let udp_address = host.udp_local_addr().test_value();
         let mut host_events = host.take_event_receiver();
         let client = connect_udp_client(
             udp_address,
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("reliable-UDP session admission");
+        .test_value();
 
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x12))
             .await
-            .unwrap();
+            .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x34))
             .await
-            .unwrap();
+            .test_value();
         let packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
@@ -3496,8 +3429,8 @@ mod tests {
             .iter()
             .all(|(key, _)| key.connection_id != u32::MAX));
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3508,41 +3441,41 @@ mod tests {
             ..HostConfig::default()
         };
         let udp_binding = HostUdpBinding::bind(&config);
-        let udp_address = udp_binding
-            .local_addr()
-            .expect("configured reliable-UDP listener");
+        let udp_address = udp_binding.local_addr().test_value();
         let mut host = start_host_with_bindings(None, config, udp_binding)
             .await
-            .expect("UDP-only host startup");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let client = connect_udp_client(
             udp_address,
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("reliable-UDP session admission");
+        .test_value();
 
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x12))
             .await
-            .unwrap();
+            .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x34))
             .await
-            .unwrap();
+            .test_value();
         let packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn occupied_udp_listener_falls_back_to_a_healthy_tcp_host() {
-        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let occupied_address = occupied.local_addr().unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
+        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .test_value();
+        let occupied_address = occupied.local_addr().test_value();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -3551,7 +3484,7 @@ mod tests {
             },
         )
         .await
-        .expect("TCP host survives optional UDP bind failure");
+        .test_value();
         assert_eq!(host.udp_local_addr(), None);
         let mut host_events = host.take_event_receiver();
         assert!(matches!(
@@ -3567,11 +3500,11 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("TCP fallback remains connectable");
+        .test_value();
         assert_eq!(host.accepted_routes().await.len(), 1);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3581,9 +3514,7 @@ mod tests {
         // thread keeps executing it (src/C4NetIO.cpp:610-625,1038-1053;
         // src/StdScheduler.cpp:160-191,229-244;
         // src/StdScheduler.h:95-98).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut witness, witness_id) = raw_client_transport(address, b"Witness").await;
         assert_eq!(host.accepted_routes().await.len(), 1);
@@ -3602,13 +3533,13 @@ mod tests {
             }
         })
         .await
-        .expect("host did not report the injected TCP accept failure");
+        .test_value();
 
         raw_client_ping_barrier(&mut witness).await;
         let (mut successor, successor_id) =
             timeout(EVENT_WAIT, raw_client_transport(address, b"Successor"))
                 .await
-                .expect("host did not retry TCP accept after the injected failure");
+                .test_value();
         assert_ne!(successor_id, witness_id);
         raw_client_ping_barrier(&mut successor).await;
         let accepted_client_ids = host
@@ -3624,16 +3555,14 @@ mod tests {
 
         drop(witness);
         drop(successor);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn occupied_client_udp_port_falls_back_to_a_healthy_tcp_route() {
-        let occupied = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
-        let occupied_port = occupied.local_addr().unwrap().port();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let occupied = tokio::net::UdpSocket::bind("[::]:0").await.test_value();
+        let occupied_port = occupied.local_addr().test_value().port();
+        let (tcp_address, host) = start_test_host(HostConfig::default()).await;
 
         let client = connect_client_addresses(
             [
@@ -3645,24 +3574,22 @@ mod tests {
                 .with_mesh_udp_bind_address(SocketAddr::from(([0_u16; 8], occupied_port))),
         )
         .await
-        .expect("an unavailable configured UDP port does not suppress TCP admission");
+        .test_value();
 
         assert_eq!(host.accepted_routes().await.len(), 1);
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_shutdown_releases_the_configured_shared_udp_port() {
-        let reservation = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
-        let configured_udp_port = reservation.local_addr().unwrap().port();
+        let reservation = tokio::net::UdpSocket::bind("[::]:0").await.test_value();
+        let configured_udp_port = reservation.local_addr().test_value().port();
         drop(reservation);
         let mut puncher =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let puncher_address = puncher.local_addr();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (tcp_address, host) = start_test_host(HostConfig::default()).await;
 
         let client = connect_client(
             tcp_address,
@@ -3674,20 +3601,20 @@ mod tests {
                 }]),
         )
         .await
-        .unwrap();
+        .test_value();
         let _puncher_stream = timeout(EVENT_WAIT, puncher.accept())
             .await
-            .expect("client reaches the puncher")
-            .unwrap();
+            .test_value()
+            .test_value();
 
-        client.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
         let rebound =
             tokio::net::UdpSocket::bind(SocketAddr::from(([0_u16; 8], configured_udp_port)))
                 .await
-                .expect("ClientHandle shutdown releases the shared UDP socket");
+                .test_value();
         drop(rebound);
-        host.shutdown().await.unwrap();
-        puncher.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
+        puncher.shutdown().await.test_value();
     }
 
     #[tokio::test]
@@ -3720,7 +3647,7 @@ mod tests {
         if first_route {
             dispatch_client_resource_peer_connected(7, &mut resource_state, &mut routes, &event_tx)
                 .await
-                .unwrap();
+                .test_value();
         }
         assert_eq!(
             timeout(EVENT_WAIT, tcp_peer.read_message())
@@ -3748,7 +3675,7 @@ mod tests {
         if second_route {
             dispatch_client_resource_peer_connected(7, &mut resource_state, &mut routes, &event_tx)
                 .await
-                .unwrap();
+                .test_value();
         }
         assert!(timeout(Duration::from_millis(50), udp_peer.read_message())
             .await
@@ -3787,7 +3714,7 @@ mod tests {
             &event_tx,
         )
         .await
-        .unwrap();
+        .test_value();
         assert_eq!(take_queued_resource(&mut host), status);
         assert_eq!(take_queued_resource(&mut peer_udp), status);
         assert_eq!(take_queued_resource(&mut second_peer), status);
@@ -3807,7 +3734,7 @@ mod tests {
             &event_tx,
         )
         .await
-        .unwrap();
+        .test_value();
         assert_eq!(take_queued_resource(&mut peer_udp), request);
         assert!(host.try_recv().is_err());
         assert!(second_peer.try_recv().is_err());
@@ -3827,7 +3754,7 @@ mod tests {
             &event_tx,
         )
         .await
-        .unwrap();
+        .test_value();
         assert_eq!(take_queued_resource(&mut peer_tcp), data);
         assert!(host.try_recv().is_err());
         assert!(peer_udp.try_recv().is_err());
@@ -3844,7 +3771,7 @@ mod tests {
             &event_tx,
         )
         .await
-        .expect("lost mesh resource source does not tear down the host route");
+        .test_value();
         assert!(routes.connected_peer_ids().contains(&HOST_CLIENT_ID));
         assert!(host.try_recv().is_err());
     }
@@ -3924,7 +3851,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         dispatch_client_resource_actions(actions, &mut resource_state, &mut routes, &event_tx)
             .await
-            .expect("an unavailable mesh source does not tear down the host route");
+            .test_value();
 
         let mut sent = Vec::new();
         for (peer_id, receiver) in &mut receivers {
@@ -3957,14 +3884,14 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let mut resource_state = ClientResourceState::empty();
         resource_state.backend =
-            Some(crate::ResourceTransferBackend::new(9, directories.client.clone()).unwrap());
+            Some(crate::ResourceTransferBackend::new(9, directories.client.clone()).test_value());
         let core = clonk_engine::NetworkResourceCore {
             resource_type: 2,
             id: 77,
             loadable: true,
             file_size: 512,
             chunk_size: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Swarm.bin".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Swarm.bin".to_vec()).test_value(),
             ..Default::default()
         };
         resource_state
@@ -3972,7 +3899,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .register_remote_loadable(core.clone())
-            .unwrap();
+            .test_value();
         let mut routes = ClientRouteManager::new();
         let mut receivers = BTreeMap::new();
         for peer_id in 0_i32..=6 {
@@ -4007,14 +3934,14 @@ mod tests {
                 &event_tx,
             )
             .await
-            .unwrap();
+            .test_value();
         }
 
         let mut outstanding = Vec::new();
         let mut fulfilled = None;
         for peer_id in 0_i32..=6 {
             let ResourcePacket::Request(request) =
-                take_queued_resource(receivers.get_mut(&peer_id).unwrap())
+                take_queued_resource(receivers.get_mut(&peer_id).test_value())
             else {
                 panic!("peer status did not schedule a resource request");
             };
@@ -4024,7 +3951,7 @@ mod tests {
                 outstanding.push((peer_id, request.chunk));
             }
         }
-        let fulfilled = fulfilled.unwrap();
+        let fulfilled = fulfilled.test_value();
         // One chunk is one stride, not the whole tail: C4Network2ResChunk::Set
         // sizes by the core's chunk size (src/C4Network2Res.cpp:1268-1269).
         let fulfilled_data = vec![
@@ -4046,7 +3973,7 @@ mod tests {
             &event_tx,
         )
         .await
-        .unwrap();
+        .test_value();
 
         for (peer_id, receiver) in &mut receivers {
             while let Ok(command) = receiver.try_recv() {
@@ -4064,7 +3991,7 @@ mod tests {
         // for a distinct chunk. Asserted through the constants because the port
         // scales them with its smaller chunk size; the byte window they buy is
         // pinned against C++ by `the_lobby_load_caps_hold_the_cpp_byte_window`.
-        let backend = resource_state.backend.as_ref().unwrap();
+        let backend = resource_state.backend.as_ref().test_value();
         let total = crate::RESOURCE_MAX_LOADS - 1;
         assert_eq!(backend.catalog().outstanding_load_count(core.id), total);
         assert_eq!(outstanding.len(), total);
@@ -4111,7 +4038,7 @@ mod tests {
             &event_tx,
         )
         .await
-        .unwrap();
+        .test_value();
         assert_eq!(
             take_queued_resource(receivers.get_mut(&2).unwrap()),
             ResourcePacket::Data(crate::ResourceDataPacket {
@@ -4129,7 +4056,7 @@ mod tests {
                 ControlMessage::PostMortem(packet) => {
                     for packet in packet.packets {
                         if let Some(message) =
-                            crate::transport::parse_complete_packet(&packet).unwrap()
+                            crate::transport::parse_complete_packet(&packet).test_value()
                         {
                             flatten_recovery(message, messages);
                         }
@@ -4165,7 +4092,7 @@ mod tests {
         routes
             .send_message(ControlMessage::LobbyCountdown(countdown))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, udp.read_message())
                 .await
@@ -4182,7 +4109,7 @@ mod tests {
         routes
             .send_message(ControlMessage::Resource(ResourcePacket::Data(data.clone())))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, tcp.read_message())
                 .await
@@ -4201,10 +4128,10 @@ mod tests {
         };
         tcp.send_message(ControlMessage::Ping(tcp_ping))
             .await
-            .unwrap();
+            .test_value();
         udp.send_message(ControlMessage::Ping(udp_ping))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, tcp.read_message())
                 .await
@@ -4234,7 +4161,7 @@ mod tests {
             }
         })
         .await
-        .expect("failed UDP route did not close its outbound channel");
+        .test_value();
         let status = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: 1,
@@ -4243,7 +4170,7 @@ mod tests {
         routes
             .send_message(ControlMessage::StatusAck(status))
             .await
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 if matches!(
@@ -4259,21 +4186,21 @@ mod tests {
             }
         })
         .await
-        .expect("failed UDP route was not removed");
+        .test_value();
         let mut recovered = Vec::new();
         timeout(EVENT_WAIT, async {
             while !recovered.contains(&ControlMessage::StatusAck(status)) {
-                match tcp.read_message().await.unwrap() {
+                match tcp.read_message().await.test_value() {
                     ControlMessage::Ping(packet) => tcp
                         .send_message(ControlMessage::Pong(packet))
                         .await
-                        .unwrap(),
+                        .test_value(),
                     message => flatten_recovery(message, &mut recovered),
                 }
             }
         })
         .await
-        .expect("status was not recovered over the TCP fallback");
+        .test_value();
 
         let (fallback_udp_client, fallback_udp_peer) = duplex(4096);
         let mut fallback_udp = crate::ControlTransport::new(fallback_udp_peer);
@@ -4299,7 +4226,7 @@ mod tests {
             }
         })
         .await
-        .expect("failed TCP route did not close its outbound channel");
+        .test_value();
         let fallback_data = crate::ResourceDataPacket {
             resource_id: 8,
             chunk: 4,
@@ -4310,7 +4237,7 @@ mod tests {
                 fallback_data.clone(),
             )))
             .await
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 if matches!(
@@ -4326,22 +4253,22 @@ mod tests {
             }
         })
         .await
-        .expect("failed TCP route was not removed");
+        .test_value();
         let expected = ControlMessage::Resource(ResourcePacket::Data(fallback_data));
         recovered.clear();
         timeout(EVENT_WAIT, async {
             while !recovered.contains(&expected) {
-                match fallback_udp.read_message().await.unwrap() {
+                match fallback_udp.read_message().await.test_value() {
                     ControlMessage::Ping(packet) => fallback_udp
                         .send_message(ControlMessage::Pong(packet))
                         .await
-                        .unwrap(),
+                        .test_value(),
                     message => flatten_recovery(message, &mut recovered),
                 }
             }
         })
         .await
-        .expect("resource data was not recovered over the UDP fallback");
+        .test_value();
         routes.shutdown().await;
     }
 
@@ -4363,17 +4290,17 @@ mod tests {
             client_id: 0,
             address: crate::NetworkAddress::new(
                 crate::NetworkProtocol::Udp,
-                "[::]:0".parse().unwrap(),
+                "[::]:0".parse().test_value(),
             ),
         };
         udp.send_message(ControlMessage::Address(address))
             .await
-            .unwrap();
+            .test_value();
 
         let (packet, ingress_peer_addr) = timeout(EVENT_WAIT, routes.read_packet())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         assert!(matches!(
             packet,
             crate::transport::InboundPacket::Message(ControlMessage::Address(received))
@@ -4409,13 +4336,11 @@ mod tests {
         };
 
         for _ in 0..128 {
-            routes.try_send_to(7, message.clone()).unwrap();
+            routes.try_send_to(7, message.clone()).test_value();
         }
         assert!(!routes.routes[&1].outbound.is_closed());
 
-        timeout(EVENT_WAIT, routes.shutdown())
-            .await
-            .expect("slow peer route did not shut down");
+        timeout(EVENT_WAIT, routes.shutdown()).await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4450,13 +4375,11 @@ mod tests {
             connect::send_client_route_address_announcements(&mut routes, announcements),
         )
         .await
-        .expect("address announcement waited for physical socket drainage")
-        .unwrap();
+        .test_value()
+        .test_value();
         assert!(!routes.routes[&1].outbound.is_closed());
 
-        timeout(EVENT_WAIT, routes.shutdown())
-            .await
-            .expect("backpressured address route did not shut down");
+        timeout(EVENT_WAIT, routes.shutdown()).await.test_value();
     }
 
     #[tokio::test]
@@ -4503,7 +4426,7 @@ mod tests {
         routes
             .send_to(9, ControlMessage::LobbyCountdown(countdown))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, winner_peer.read_message())
                 .await
@@ -4534,7 +4457,7 @@ mod tests {
         routes
             .send_to(9, ControlMessage::LobbyCountdown(countdown))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             peer.read_message().await.unwrap(),
             ControlMessage::LobbyCountdown(countdown)
@@ -4544,7 +4467,7 @@ mod tests {
         let event = timeout(EVENT_WAIT, routes.read_event())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         let ClientRouteRead::Disconnected {
             peer_id: 9,
             routes_remaining: false,
@@ -4591,12 +4514,12 @@ mod tests {
             },
         ))
         .await
-        .unwrap();
+        .test_value();
 
         let event = timeout(EVENT_WAIT, routes.read_event())
             .await
-            .expect("asymmetric UDP reconnect did not retire the stale route")
-            .unwrap();
+            .test_value()
+            .test_value();
         assert!(matches!(
             event,
             ClientRouteRead::Disconnected {
@@ -4642,7 +4565,7 @@ mod tests {
                 outgoing_data.clone(),
             )))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             tcp.read_message().await.unwrap(),
             ControlMessage::Resource(ResourcePacket::Data(outgoing_data))
@@ -4654,15 +4577,15 @@ mod tests {
         encoder
             .send_message(ControlMessage::LobbyCountdown(countdown))
             .await
-            .unwrap();
+            .test_value();
         let mut header = [0_u8; 5];
-        encoded_stream.read_exact(&mut header).await.unwrap();
+        encoded_stream.read_exact(&mut header).await.test_value();
         let mut complete_packet =
             vec![0_u8; u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize];
         encoded_stream
             .read_exact(&mut complete_packet)
             .await
-            .unwrap();
+            .test_value();
 
         udp.send_message(ControlMessage::PostMortem(crate::PostMortemPacket {
             connection_id: 1,
@@ -4670,11 +4593,11 @@ mod tests {
             packets: vec![complete_packet],
         }))
         .await
-        .unwrap();
+        .test_value();
         let (replayed, peer_addr) = timeout(EVENT_WAIT, routes.read_packet())
             .await
-            .expect("post-mortem replay stalled")
-            .unwrap();
+            .test_value()
+            .test_value();
         assert!(matches!(
             replayed,
             crate::transport::InboundPacket::Message(
@@ -4687,11 +4610,13 @@ mod tests {
             match timeout(EVENT_WAIT, udp.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::PostMortem(packet) => break packet,
                 ControlMessage::Ping(ping) => {
-                    udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    udp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 other => panic!("expected reciprocal post-mortem, got {other:?}"),
             }
@@ -4708,7 +4633,7 @@ mod tests {
         routes
             .send_message(ControlMessage::StatusAck(status))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, udp.read_message())
                 .await
@@ -4725,11 +4650,11 @@ mod tests {
         async fn complete_packet(message: ControlMessage) -> Vec<u8> {
             let (writer, mut reader) = duplex(2048);
             let mut transport = crate::ControlTransport::new(writer);
-            transport.send_message(message).await.unwrap();
+            transport.send_message(message).await.test_value();
             let mut header = [0_u8; 5];
-            reader.read_exact(&mut header).await.unwrap();
+            reader.read_exact(&mut header).await.test_value();
             let mut body = vec![0; u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize];
-            reader.read_exact(&mut body).await.unwrap();
+            reader.read_exact(&mut body).await.test_value();
             body
         }
 
@@ -4800,12 +4725,12 @@ mod tests {
         encoder
             .send_message(ControlMessage::LobbyCountdown(countdown))
             .await
-            .unwrap();
+            .test_value();
         let mut header = [0_u8; 5];
-        reader.read_exact(&mut header).await.unwrap();
+        reader.read_exact(&mut header).await.test_value();
         let mut complete_packet =
             vec![0; u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize];
-        reader.read_exact(&mut complete_packet).await.unwrap();
+        reader.read_exact(&mut complete_packet).await.test_value();
 
         let mut routes = ClientRouteManager::new();
         routes.closed_routes.retain(3, 9, 0);
@@ -4849,9 +4774,7 @@ mod tests {
         }
         tokio::task::yield_now().await;
 
-        timeout(EVENT_WAIT, routes.shutdown())
-            .await
-            .expect("route shutdown remained blocked behind socket output");
+        timeout(EVENT_WAIT, routes.shutdown()).await.test_value();
     }
 
     #[tokio::test]
@@ -4862,12 +4785,12 @@ mod tests {
             target_tick: 0,
         };
         let (command_tx, _command_rx) = mpsc::channel(1);
-        command_tx.send(HostCommand::Shutdown).await.unwrap();
+        command_tx.send(HostCommand::Shutdown).await.test_value();
         let (event_tx, event_rx) = mpsc::channel(1);
         event_tx
             .send(HostEvent::StatusCommitted(status))
             .await
-            .unwrap();
+            .test_value();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join_handle = tokio::spawn(async move {
             let _ = event_tx.send(HostEvent::StatusCommitted(status)).await;
@@ -4885,8 +4808,8 @@ mod tests {
 
         timeout(EVENT_WAIT, handle.shutdown())
             .await
-            .expect("host handle shutdown waited on a bounded queue")
-            .unwrap();
+            .test_value()
+            .test_value();
     }
 
     #[tokio::test]
@@ -4897,9 +4820,12 @@ mod tests {
             target_tick: 0,
         };
         let (command_tx, _command_rx) = mpsc::channel(1);
-        command_tx.send(ClientCommand::Shutdown).await.unwrap();
+        command_tx.send(ClientCommand::Shutdown).await.test_value();
         let (event_tx, event_rx) = mpsc::channel(1);
-        event_tx.send(ClientEvent::Status(status)).await.unwrap();
+        event_tx
+            .send(ClientEvent::Status(status))
+            .await
+            .test_value();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join_handle = tokio::spawn(async move {
             let _ = event_tx.send(ClientEvent::Status(status)).await;
@@ -4918,8 +4844,8 @@ mod tests {
 
         timeout(EVENT_WAIT, handle.shutdown())
             .await
-            .expect("client handle shutdown waited on a bounded queue")
-            .unwrap();
+            .test_value()
+            .test_value();
     }
 
     #[tokio::test]
@@ -4940,10 +4866,10 @@ mod tests {
         };
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(first)))
-            .unwrap();
+            .test_value();
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(second)))
-            .unwrap();
+            .test_value();
         drop(peer_stream);
 
         let task = tokio::spawn(run_client_route(
@@ -4960,7 +4886,7 @@ mod tests {
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("failed route did not report its recovery backlog")
-            .expect("failed route event channel closed");
+            .test_value();
         let ClientRouteEvent::Disconnected {
             post_mortem: Some(post_mortem),
             ..
@@ -4981,7 +4907,7 @@ mod tests {
                 Some(ControlMessage::Status(second)),
             ]
         );
-        task.await.unwrap();
+        task.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5028,7 +4954,7 @@ mod tests {
 
         routes
             .try_send_to(7, ControlMessage::Status(first))
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 if routes.routes[&1].outbound.sender.is_closed() {
@@ -5038,11 +4964,11 @@ mod tests {
             }
         })
         .await
-        .expect("forced writer failure did not close the route queue");
+        .test_value();
         routes.routes[&1].outbound.retire();
         routes
             .try_send_to(7, ControlMessage::Status(second))
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, routes.read_event())
                 .await
@@ -5059,14 +4985,14 @@ mod tests {
         while logical_order.len() < 2 {
             match timeout(EVENT_WAIT, fallback.read_message())
                 .await
-                .expect("fallback replay stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::PostMortem(packet) => {
                     logical_order.extend(packet.packets.into_iter().map(|packet| {
                         crate::transport::parse_complete_packet(&packet)
-                            .unwrap()
-                            .expect("post-mortem entry is typed")
+                            .test_value()
+                            .test_value()
                     }));
                 }
                 message => logical_order.push(message),
@@ -5109,7 +5035,7 @@ mod tests {
                 delivery: ControlDelivery::Direct,
                 data: vec![0x55; 1_024 * 1_024],
             }))
-            .unwrap();
+            .test_value();
         tokio::task::yield_now().await;
         let inbound = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
@@ -5118,7 +5044,7 @@ mod tests {
         };
         peer.send_message(ControlMessage::Status(inbound))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(matches!(
             timeout(Duration::from_millis(50), event_rx.recv())
@@ -5131,7 +5057,7 @@ mod tests {
         ));
 
         retire_tx.send_replace(true);
-        timeout(EVENT_WAIT, task).await.unwrap().unwrap();
+        timeout(EVENT_WAIT, task).await.unwrap().test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5162,7 +5088,7 @@ mod tests {
             };
             peer.send_message(ControlMessage::Status(status))
                 .await
-                .unwrap();
+                .test_value();
             assert!(matches!(
                 timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
                 Some(ClientRouteEvent::Packet {
@@ -5177,7 +5103,7 @@ mod tests {
         assert_eq!(liveness_timer_arms(), 1);
 
         retire_tx.send_replace(true);
-        timeout(EVENT_WAIT, task).await.unwrap().unwrap();
+        timeout(EVENT_WAIT, task).await.unwrap().test_value();
     }
 
     #[tokio::test]
@@ -5204,18 +5130,18 @@ mod tests {
         ));
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(status)))
-            .unwrap();
+            .test_value();
         let mut first_wire_byte = [0_u8; 1];
         timeout(EVENT_WAIT, peer_stream.read_exact(&mut first_wire_byte))
             .await
-            .expect("route write did not begin")
-            .unwrap();
+            .test_value()
+            .test_value();
         retire_tx.send_replace(true);
 
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("inflight route did not retire")
-            .expect("route event channel closed");
+            .test_value();
         let ClientRouteEvent::Disconnected {
             post_mortem: Some(post_mortem),
             ..
@@ -5228,7 +5154,7 @@ mod tests {
             crate::transport::parse_complete_packet(&post_mortem.packets[0]).unwrap(),
             Some(ControlMessage::Status(status))
         );
-        task.await.unwrap();
+        task.await.test_value();
     }
 
     #[test]
@@ -5301,7 +5227,7 @@ mod tests {
                 route_id: 2,
                 round_trip_ms: 37,
             })
-            .unwrap();
+            .test_value();
         assert!(matches!(
             routes.read_event().await.unwrap(),
             ClientRouteRead::PingMeasured {
@@ -5344,7 +5270,7 @@ mod tests {
             routes
                 .event_tx
                 .send(ClientRouteEvent::PingDispatched { route_id })
-                .unwrap();
+                .test_value();
         }
         routes
             .event_tx
@@ -5353,7 +5279,7 @@ mod tests {
                 peer_addr: Some(udp_peer_address),
                 packet: crate::transport::InboundPacket::Empty,
             })
-            .unwrap();
+            .test_value();
         assert!(matches!(
             routes.read_event().await.unwrap(),
             ClientRouteRead::Packet { .. }
@@ -5408,7 +5334,7 @@ mod tests {
         let tcp_ping = match timeout(EVENT_WAIT, tcp.read_message())
             .await
             .unwrap()
-            .unwrap()
+            .test_value()
         {
             ControlMessage::Ping(ping) => ping,
             other => panic!("expected TCP route liveness Ping, got {other:?}"),
@@ -5416,25 +5342,25 @@ mod tests {
         let udp_ping = match timeout(EVENT_WAIT, udp.read_message())
             .await
             .unwrap()
-            .unwrap()
+            .test_value()
         {
             ControlMessage::Ping(ping) => ping,
             other => panic!("expected UDP route liveness Ping, got {other:?}"),
         };
         tcp.send_message(ControlMessage::Pong(tcp_ping))
             .await
-            .unwrap();
+            .test_value();
         udp.send_message(ControlMessage::Pong(udp_ping))
             .await
-            .unwrap();
+            .test_value();
 
         routes.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dual_client_handle_adds_udp_route_without_duplicate_join() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -5443,8 +5369,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let udp_address = host.udp_local_addr().unwrap();
+        .test_value();
+        let udp_address = host.udp_local_addr().test_value();
         let mut host_events = host.take_event_receiver();
         let client = connect_dual_client(
             tcp_address,
@@ -5452,7 +5378,7 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("dual-route client admission");
+        .test_value();
 
         timeout(EVENT_WAIT, async {
             loop {
@@ -5463,7 +5389,7 @@ mod tests {
             }
         })
         .await
-        .expect("host retained both client routes");
+        .test_value();
 
         let mut joined = 0;
         while let Ok(event) = host_events.try_recv() {
@@ -5484,7 +5410,7 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        client.submit_status_ack(status).await.unwrap();
+        client.submit_status_ack(status).await.test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 if matches!(
@@ -5499,16 +5425,16 @@ mod tests {
             }
         })
         .await
-        .expect("dual client message traffic reached the host");
+        .test_value();
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dual_client_reconnects_a_missing_tcp_route() {
-        let host_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let host_tcp_address = host_listener.local_addr().unwrap();
+        let host_listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let host_tcp_address = host_listener.local_addr().test_value();
         let mut host = start_host(
             host_listener,
             HostConfig {
@@ -5517,16 +5443,16 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let host_udp_address = host.udp_local_addr().unwrap();
-        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_address = proxy_listener.local_addr().unwrap();
+        .test_value();
+        let host_udp_address = host.udp_local_addr().test_value();
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let proxy_address = proxy_listener.local_addr().test_value();
         let (cut_first, cut_first_rx) = oneshot::channel();
         let (first_cut, first_cut_rx) = oneshot::channel();
         let (resume_reconnect, resume_reconnect_rx) = oneshot::channel();
         let proxy = tokio::spawn(async move {
-            let (mut client, _) = proxy_listener.accept().await.unwrap();
-            let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
+            let (mut client, _) = proxy_listener.accept().await.test_value();
+            let mut host = TcpStream::connect(host_tcp_address).await.test_value();
             let first =
                 tokio::spawn(
                     async move { tokio::io::copy_bidirectional(&mut client, &mut host).await },
@@ -5537,8 +5463,8 @@ mod tests {
             let _ = first_cut.send(());
             let _ = resume_reconnect_rx.await;
 
-            let (mut client, _) = proxy_listener.accept().await.unwrap();
-            let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
+            let (mut client, _) = proxy_listener.accept().await.test_value();
+            let mut host = TcpStream::connect(host_tcp_address).await.test_value();
             let _ = tokio::io::copy_bidirectional(&mut client, &mut host).await;
         });
         let client = connect_dual_client(
@@ -5547,7 +5473,7 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .unwrap();
+        .test_value();
         let mut host_events = host.take_event_receiver();
         // This is a deadlock guard at native C4NetPingTimeout, not a
         // reconnect-performance assertion. Native retries are timer-driven
@@ -5560,12 +5486,12 @@ mod tests {
             host.wait_for_accepted_routes_change(BTreeSet::new(), 2),
         )
         .await
-        .expect("dual routes were not established");
+        .test_value();
         let initial_ids = initial_routes
             .iter()
             .map(|(connection_id, _, _)| *connection_id)
             .collect::<BTreeSet<_>>();
-        cut_first.send(()).unwrap();
+        cut_first.send(()).test_value();
         // C4Network2IO reports a disconnect only after the socket has closed,
         // then C4Network2 removes that route before recovery can reconnect it
         // (oracle-src-pinned src/C4Network2IO.cpp:533-567;
@@ -5575,14 +5501,14 @@ mod tests {
         timeout(route_lifecycle_wait, first_cut_rx)
             .await
             .expect("proxy did not cut the initial TCP route")
-            .expect("proxy dropped the route-cut acknowledgement");
+            .test_value();
 
         let surviving_routes = timeout(
             route_lifecycle_wait,
             host.wait_for_accepted_routes_change(initial_ids.clone(), 1),
         )
         .await
-        .expect("host did not retire the cut TCP route");
+        .test_value();
         assert_eq!(surviving_routes.len(), 1);
 
         while host_events.try_recv().is_ok() {}
@@ -5591,7 +5517,7 @@ mod tests {
             control_mode: 1,
             target_tick: 17,
         };
-        client.submit_status_ack(status).await.unwrap();
+        client.submit_status_ack(status).await.test_value();
         timeout(route_lifecycle_wait, async {
             loop {
                 if matches!(
@@ -5606,45 +5532,45 @@ mod tests {
             }
         })
         .await
-        .expect("the surviving UDP route did not carry message traffic");
+        .test_value();
 
-        resume_reconnect.send(()).unwrap();
+        resume_reconnect.send(()).test_value();
         let reconnected_routes = timeout(
             route_lifecycle_wait,
             host.wait_for_accepted_routes_change(initial_ids.clone(), 2),
         )
         .await
-        .expect("missing TCP protocol was not eventually reconnected");
+        .test_value();
         let reconnected_ids = reconnected_routes
             .iter()
             .map(|(connection_id, _, _)| *connection_id)
             .collect::<BTreeSet<_>>();
         assert_ne!(reconnected_ids, initial_ids);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
         proxy.abort();
         let _ = proxy.await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dual_client_keeps_the_healthy_tcp_route_when_udp_is_unreachable() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (tcp_address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let udp_blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp_blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .test_value();
         let client = timeout(
             Duration::from_secs(2),
             connect_dual_client(
                 tcp_address,
-                udp_blackhole.local_addr().unwrap(),
+                udp_blackhole.local_addr().test_value(),
                 ClientConfig::new("Alice", ParticipantKind::Player),
             ),
         )
         .await
         .expect("optional reliable-UDP attempt stayed bounded")
-        .expect("healthy TCP route remains usable");
+        .test_value();
         assert_eq!(host.accepted_routes().await.len(), 1);
 
         let status = NetworkStatus {
@@ -5652,7 +5578,7 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        client.submit_status_ack(status).await.unwrap();
+        client.submit_status_ack(status).await.test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 if matches!(
@@ -5667,10 +5593,10 @@ mod tests {
             }
         })
         .await
-        .expect("TCP fallback carried client message traffic");
+        .test_value();
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5678,7 +5604,7 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let source = directories.root.join("RouteSplit.c4d");
         let resource_bytes = b"resource data takes the TCP route";
-        fs::write(&source, resource_bytes).unwrap();
+        fs::write(&source, resource_bytes).test_value();
         let publication = crate::build_host_resource_core(
             &source,
             directories.host.clone(),
@@ -5689,17 +5615,13 @@ mod tests {
                 "",
             ),
         )
-        .unwrap();
+        .test_value();
         let core = publication.core.clone();
-        let hosted_path = publication
-            .standalone_path
-            .expect("loadable test resource has standalone bytes");
-        let hosted_ownership = publication
-            .standalone_ownership
-            .expect("loadable test resource has standalone ownership");
+        let hosted_path = publication.standalone_path.test_value();
+        let hosted_ownership = publication.standalone_ownership.test_value();
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -5718,10 +5640,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let udp_address = host
-            .udp_local_addr()
-            .expect("configured reliable-UDP listener");
+        .test_value();
+        let udp_address = host.udp_local_addr().test_value();
         let mut host_events = host.take_event_receiver();
         let (mut tcp, client_id) = raw_client_transport(tcp_address, b"Alice").await;
 
@@ -5731,7 +5651,9 @@ mod tests {
             match timeout_at(initial_deadline, tcp.read_message()).await {
                 Err(_) => break,
                 Ok(Ok(ControlMessage::Ping(ping))) => {
-                    tcp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    tcp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => panic!("TCP route closed while draining join setup: {error}"),
@@ -5739,27 +5661,29 @@ mod tests {
         }
 
         let udp_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let udp_stream = timeout(EVENT_WAIT, udp_hub.connect_owned(udp_address))
             .await
-            .expect("reliable-UDP connection attempt stalled")
-            .unwrap();
+            .test_value()
+            .test_value();
         let mut udp = crate::ControlTransport::new(udp_stream);
         let host_request = loop {
             match timeout(EVENT_WAIT, udp.read_message())
                 .await
-                .expect("host UDP connection request stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::ConnectionRequest(request) => break request,
                 ControlMessage::Ping(ping) => {
-                    udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    udp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 other => panic!("expected host UDP connection request, got {other:?}"),
             }
         };
         let remote_connection_id = 37;
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         udp.send_message(ControlMessage::ConnectionRequest(
             crate::ConnectionRequest {
                 core: clonk_engine::ClientCoreControlData {
@@ -5776,16 +5700,18 @@ mod tests {
             },
         ))
         .await
-        .unwrap();
+        .test_value();
         loop {
             match timeout(EVENT_WAIT, udp.read_message())
                 .await
-                .expect("host UDP connection reply stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
-                    udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    udp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 other => panic!("expected positive host UDP connection reply, got {other:?}"),
             }
@@ -5797,7 +5723,7 @@ mod tests {
             wrong_password: false,
         }))
         .await
-        .unwrap();
+        .test_value();
 
         let routes = timeout(EVENT_WAIT, async {
             loop {
@@ -5809,7 +5735,7 @@ mod tests {
             }
         })
         .await
-        .expect("TCP and reliable-UDP routes were not both retained");
+        .test_value();
         assert!(routes.contains(&(host_request.connection_id, client_id, remote_connection_id,)));
         while let Ok(event) = host_events.try_recv() {
             assert!(
@@ -5829,7 +5755,9 @@ mod tests {
             match timeout_at(quiet_deadline, udp.read_message()).await {
                 Err(_) => break,
                 Ok(Ok(ControlMessage::Ping(ping))) => {
-                    udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    udp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 Ok(Ok(message)) => {
                     panic!(
@@ -5841,16 +5769,18 @@ mod tests {
         }
 
         let countdown = crate::LobbyCountdownPacket::new(7);
-        host.submit_lobby_countdown(countdown).await.unwrap();
+        host.submit_lobby_countdown(countdown).await.test_value();
         loop {
             match timeout(EVENT_WAIT, udp.read_message())
                 .await
-                .expect("message traffic did not use reliable UDP")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::LobbyCountdown(packet) if packet == countdown => break,
                 ControlMessage::Ping(ping) => {
-                    udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    udp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 other => panic!("expected UDP lobby countdown, got {other:?}"),
             }
@@ -5860,7 +5790,9 @@ mod tests {
             match timeout_at(tcp_quiet_deadline, tcp.read_message()).await {
                 Err(_) => break,
                 Ok(Ok(ControlMessage::Ping(ping))) => {
-                    tcp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    tcp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 Ok(Ok(ControlMessage::LobbyCountdown(packet))) if packet == countdown => {
                     panic!("message traffic also used the TCP data route")
@@ -5877,12 +5809,12 @@ mod tests {
             },
         )))
         .await
-        .unwrap();
+        .test_value();
         loop {
             match timeout(EVENT_WAIT, tcp.read_message())
                 .await
-                .expect("resource data did not use TCP")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::Resource(ResourcePacket::Data(data))
                     if data.resource_id == core.id =>
@@ -5892,7 +5824,9 @@ mod tests {
                     break;
                 }
                 ControlMessage::Ping(ping) => {
-                    tcp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    tcp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 _ => {}
             }
@@ -5902,7 +5836,9 @@ mod tests {
             match timeout_at(udp_quiet_deadline, udp.read_message()).await {
                 Err(_) => break,
                 Ok(Ok(ControlMessage::Ping(ping))) => {
-                    udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    udp.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 Ok(Ok(ControlMessage::Resource(ResourcePacket::Data(data))))
                     if data.resource_id == core.id =>
@@ -5916,7 +5852,7 @@ mod tests {
 
         drop(udp);
         drop(tcp);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[test]
@@ -5948,7 +5884,7 @@ mod tests {
             &crate::ClientBootstrapLocalCandidates::default(),
             std::env::temp_dir(),
         )
-        .unwrap();
+        .test_value();
         let mut state = ClientResourceState::from_join_data(
             &join_data,
             0,
@@ -5958,7 +5894,7 @@ mod tests {
             &plan,
             None,
         )
-        .unwrap();
+        .test_value();
 
         assert_eq!(
             state.catalog.on_packet(
@@ -6018,7 +5954,7 @@ mod tests {
             &crate::ClientBootstrapLocalCandidates::default(),
             std::env::temp_dir(),
         )
-        .unwrap();
+        .test_value();
         let state = ClientResourceState::from_join_data(
             &join_data,
             0,
@@ -6028,7 +5964,7 @@ mod tests {
             &plan,
             None,
         )
-        .unwrap();
+        .test_value();
 
         assert_eq!(state.catalog.discovery_packet().resource_ids, vec![8, 7]);
     }
@@ -6040,7 +5976,7 @@ mod tests {
         // (src/C4Network2Res.cpp:441-493,1473-1516).
         let directories = SessionResourceDirectories::new();
         let local_dynamic = directories.root.join("local-dynamic.c4d");
-        fs::write(&local_dynamic, b"local").unwrap();
+        fs::write(&local_dynamic, b"local").test_value();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
         let core = clonk_engine::NetworkResourceCore {
@@ -6051,7 +5987,7 @@ mod tests {
             file_crc: 0x8bd6_88e8,
             chunk_size: 2,
             contents_crc: 0x8bd6_88e8,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.dynamic = core.clone();
@@ -6066,7 +6002,7 @@ mod tests {
         candidates.insert(core.id, vec![local_dynamic.clone()]);
         let plan =
             crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
-                .unwrap();
+                .test_value();
 
         let state = ClientResourceState::from_join_data(
             &join_data,
@@ -6077,9 +6013,9 @@ mod tests {
             &plan,
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
 
-        let backend = state.backend.expect("filesystem resource backend");
+        let backend = state.backend.test_value();
         assert_eq!(backend.path(core.id), Some(local_dynamic.as_path()));
         assert_eq!(backend.core(core.id), Some(&core));
     }
@@ -6093,7 +6029,7 @@ mod tests {
         // src/C4Network2Res.cpp:441-457,1473-1496).
         let directories = SessionResourceDirectories::new();
         let local_dynamic = directories.root.join("local-dynamic.c4d");
-        fs::write(&local_dynamic, b"local").unwrap();
+        fs::write(&local_dynamic, b"local").test_value();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
         let core = clonk_engine::NetworkResourceCore {
@@ -6104,7 +6040,7 @@ mod tests {
             file_crc: 0x8bd6_88e8,
             chunk_size: 2,
             contents_crc: 0x8bd6_88e8,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.dynamic = core.clone();
@@ -6119,7 +6055,7 @@ mod tests {
         candidates.insert(core.id, vec![local_dynamic.clone()]);
         let plan =
             crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
-                .unwrap();
+                .test_value();
         let state = ClientResourceState::from_join_data(
             &join_data,
             0,
@@ -6129,25 +6065,14 @@ mod tests {
             &plan,
             Some(directories.client.clone()),
         )
-        .unwrap();
-        let (client_stream, _host_stream) = duplex(4096);
-        let (_command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            state,
-        ));
+        .test_value();
+        let (_host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop_with_state(4096, 1, 1, BTreeMap::new(), state);
 
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("local resource completion event stalled")
-            .expect("client event stream closed");
+            .test_value();
         let ClientEvent::ResourceComplete {
             resource_id,
             core: completed_core,
@@ -6162,8 +6087,8 @@ mod tests {
         assert_eq!(path, local_dynamic);
         assert!(local);
 
-        shutdown_tx.send(()).unwrap();
-        client_loop.await.unwrap();
+        shutdown_tx.send(()).test_value();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6185,7 +6110,7 @@ mod tests {
             loadable: true,
             file_size: 5,
             chunk_size: 5,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.dynamic = core.clone();
@@ -6201,7 +6126,7 @@ mod tests {
             &crate::ClientBootstrapLocalCandidates::default(),
             directories.client.clone(),
         )
-        .unwrap();
+        .test_value();
         let initial_packets = vec![
             ResourcePacket::Status(crate::ResourceStatusPacket {
                 resource_id: core.id,
@@ -6233,25 +6158,14 @@ mod tests {
             &plan,
             Some(directories.client.clone()),
         )
-        .unwrap();
-        let (client_stream, _host_stream) = duplex(4096);
-        let (_command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            state,
-        ));
+        .test_value();
+        let (_host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop_with_state(4096, 1, 1, BTreeMap::new(), state);
 
         let progress = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("buffered resource progress stalled")
-            .expect("client event stream closed");
+            .test_value();
         assert!(matches!(
             progress,
             ClientEvent::ResourceProgress {
@@ -6262,7 +6176,7 @@ mod tests {
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("buffered resource completion stalled")
-            .expect("client event stream closed");
+            .test_value();
         let ClientEvent::ResourceComplete {
             resource_id,
             core: completed_core,
@@ -6278,10 +6192,8 @@ mod tests {
         assert!(path.is_file());
         assert!(!local);
 
-        shutdown_tx
-            .send(())
-            .expect("bad resource chunk did not disconnect the client loop");
-        client_loop.await.unwrap();
+        shutdown_tx.send(()).test_value();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6293,7 +6205,7 @@ mod tests {
         // src/C4Network2Res.cpp:825-829,1677-1688).
         let directories = SessionResourceDirectories::new();
         let local_dynamic = directories.root.join("local-dynamic.c4d");
-        fs::write(&local_dynamic, b"local").unwrap();
+        fs::write(&local_dynamic, b"local").test_value();
         let host = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
         let dynamic = clonk_engine::NetworkResourceCore {
@@ -6304,7 +6216,7 @@ mod tests {
             file_crc: 0x8bd6_88e8,
             chunk_size: 2,
             contents_crc: 0x8bd6_88e8,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.dynamic = dynamic.clone();
@@ -6320,7 +6232,7 @@ mod tests {
         candidates.insert(dynamic.id, vec![local_dynamic]);
         let plan =
             crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
-                .unwrap();
+                .test_value();
         let state = ClientResourceState::from_join_data(
             &join_data,
             0,
@@ -6330,7 +6242,7 @@ mod tests {
             &plan,
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
         let (client_stream, host_stream) = duplex(4096);
         let (command_tx, command_rx) = mpsc::channel(1);
         let (event_tx, event_rx) = mpsc::channel(2);
@@ -6358,22 +6270,19 @@ mod tests {
             state,
         ));
 
-        removal
-            .await
-            .expect("resource-removal task")
-            .expect("registered dynamic removal");
+        removal.await.expect("resource-removal task").test_value();
         let mut host_transport = crate::ControlTransport::new(host_stream);
         let message = timeout(EVENT_WAIT, host_transport.read_message())
             .await
             .expect("post-removal discovery stalled")
-            .expect("post-removal discovery transport");
+            .test_value();
         let ControlMessage::Resource(ResourcePacket::Discover(discovery)) = message else {
             panic!("unexpected post-removal message: {message:?}");
         };
         assert_eq!(discovery.resource_ids, vec![scenario_id]);
 
-        shutdown_tx.send(()).unwrap();
-        client_loop.await.unwrap();
+        shutdown_tx.send(()).test_value();
+        client_loop.await.test_value();
     }
 
     #[test]
@@ -6388,8 +6297,8 @@ mod tests {
         let mut group = MutableGroup::new("Shared.c4p");
         group
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
-            .unwrap();
-        fs::write(&player, group.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&player, group.pack().unwrap()).test_value();
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
         let join_data = JoinDataEnvelope {
@@ -6407,19 +6316,19 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
         let request = |wire_name: &[u8], maker: &[u8]| crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: clonk_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
-            group_maker: clonk_engine::LegacyCString::from_bytes(maker.to_vec()).unwrap(),
+            wire_name: clonk_engine::LegacyCString::from_bytes(wire_name.to_vec()).test_value(),
+            group_maker: clonk_engine::LegacyCString::from_bytes(maker.to_vec()).test_value(),
         };
 
         let original = state
             .publish_player_resource(request(b"First.c4p", b"First maker"))
-            .unwrap();
+            .test_value();
         let reused = state
             .publish_player_resource(request(b"Second.c4p", b"Second maker"))
-            .unwrap();
+            .test_value();
 
         assert_eq!(reused, original);
         assert_eq!(state.catalog.allocate_resource_id(), (7 << 16) + 1);
@@ -6437,8 +6346,8 @@ mod tests {
         let mut group = MutableGroup::new("Shared.c4p");
         group
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
-            .unwrap();
-        fs::write(&player, group.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&player, group.pack().unwrap()).test_value();
         let publication = crate::build_host_resource_core(
             &player,
             directories.host.clone(),
@@ -6449,7 +6358,7 @@ mod tests {
                 "",
             ),
         )
-        .unwrap();
+        .test_value();
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
         let join_data = JoinDataEnvelope {
@@ -6467,7 +6376,7 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(publication.core.id, vec![player.clone()]);
         let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -6479,7 +6388,7 @@ mod tests {
                 crate::ClientBootstrapResourceRole::Player,
                 &publication.core,
             )
-            .unwrap();
+            .test_value();
         assert_eq!(
             state.add_bootstrap_resource(&resource).unwrap(),
             ClientBootstrapRegistration::Registered
@@ -6493,7 +6402,7 @@ mod tests {
                 group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
                     .unwrap(),
             })
-            .unwrap();
+            .test_value();
 
         assert_eq!(reused, publication.core);
         assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
@@ -6513,13 +6422,13 @@ mod tests {
         let mut player = MutableGroup::new("Shared.c4p");
         player
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
-            .unwrap();
+            .test_value();
         let contents_crc = player.contents_crc();
         let mut mother = MutableGroup::new("Players.c4f");
         mother
             .add_child_with_metadata("Shared.c4p", player, 1, false)
-            .unwrap();
-        fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&mother_path, mother.pack().unwrap()).test_value();
         // The core describes the child image the mother actually stored,
         // gzipped. Packing the player a second time would restamp
         // Head.Creation with the current time and disagree across a second
@@ -6530,7 +6439,7 @@ mod tests {
                 .read_file("Shared.c4p")
                 .unwrap(),
         )
-        .unwrap();
+        .test_value();
         let nested_player = mother_path.join("Shared.c4p");
         let core = clonk_engine::NetworkResourceCore {
             resource_type: crate::HostResourceType::Player as u8,
@@ -6542,7 +6451,7 @@ mod tests {
             chunk_size: 100 * 1024,
             contents_crc,
             filename: clonk_engine::LegacyCString::from_bytes(b"Players.c4f/Shared.c4p".to_vec())
-                .unwrap(),
+                .test_value(),
             ..Default::default()
         };
         let host = HostConfig::default();
@@ -6562,7 +6471,7 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(core.id, vec![nested_player.clone()]);
         let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -6571,7 +6480,7 @@ mod tests {
         );
         let resource = resolver
             .resolve(crate::ClientBootstrapResourceRole::Player, &core)
-            .unwrap();
+            .test_value();
         let standalone_path = match &resource.source {
             crate::ClientBootstrapResourceSource::Local(local) => {
                 assert!(local.binary_compatible());
@@ -6602,8 +6511,8 @@ mod tests {
         // src/C4Network2Res.cpp:431-449,516-588,1397-1417,1443-1477).
         let directories = SessionResourceDirectories::new();
         let player = directories.root.join("Shared.c4p");
-        fs::create_dir(&player).unwrap();
-        fs::write(player.join("Player.txt"), b"player core").unwrap();
+        fs::create_dir(&player).test_value();
+        fs::write(player.join("Player.txt"), b"player core").test_value();
         let publication = crate::build_host_resource_core(
             &player,
             directories.host.clone(),
@@ -6614,7 +6523,7 @@ mod tests {
                 "Host maker",
             ),
         )
-        .unwrap();
+        .test_value();
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
         let join_data = JoinDataEnvelope {
@@ -6632,7 +6541,7 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(publication.core.id, vec![player.clone()]);
         let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -6644,7 +6553,7 @@ mod tests {
                 crate::ClientBootstrapResourceRole::Player,
                 &publication.core,
             )
-            .unwrap();
+            .test_value();
         assert_eq!(
             state.add_bootstrap_resource(&resource).unwrap(),
             ClientBootstrapRegistration::Registered
@@ -6657,7 +6566,7 @@ mod tests {
                 group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
                     .unwrap(),
             })
-            .unwrap();
+            .test_value();
 
         assert_ne!(published, publication.core);
         assert_eq!(published.id, 7 << 16);
@@ -6676,8 +6585,8 @@ mod tests {
         let mut group = MutableGroup::new("Shared.c4p");
         group
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
-            .unwrap();
-        fs::write(&player, group.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&player, group.pack().unwrap()).test_value();
         let publication = crate::build_host_resource_core(
             &player,
             directories.host.clone(),
@@ -6688,7 +6597,7 @@ mod tests {
                 "",
             ),
         )
-        .unwrap();
+        .test_value();
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
         let join_data = JoinDataEnvelope {
@@ -6706,7 +6615,7 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(directories.client.clone()),
         )
-        .unwrap();
+        .test_value();
         let mut candidates = crate::ClientBootstrapLocalCandidates::default();
         candidates.insert(publication.core.id, vec![player.clone()]);
         state.retain_resource_resolver(crate::client_bootstrap::ClientBootstrapResolver::new(
@@ -6732,7 +6641,7 @@ mod tests {
                 group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
                     .unwrap(),
             })
-            .unwrap();
+            .test_value();
 
         assert_eq!(reused, publication.core);
         assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
@@ -6751,17 +6660,17 @@ mod tests {
         let mut group = MutableGroup::new("Alice.c4p");
         group
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
-            .unwrap();
+            .test_value();
         group
             .add_file_with_metadata("Portrait.png", b"portrait".to_vec(), 2, false)
-            .unwrap();
-        let original = group.pack().unwrap();
-        fs::write(&player, &original).unwrap();
+            .test_value();
+        let original = group.pack().test_value();
+        fs::write(&player, &original).test_value();
         let request = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
             wire_name: clonk_engine::LegacyCString::from_bytes(b"Players.c4f/Alice.c4p".to_vec())
-                .unwrap(),
-            group_maker: clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                .test_value(),
+            group_maker: clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value(),
         };
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
@@ -6782,21 +6691,16 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(direct_directory),
         )
-        .unwrap();
+        .test_value();
         let direct_core = direct_state
             .publish_player_resource(request.clone())
-            .unwrap();
+            .test_value();
         assert_eq!(direct_core.id, 7 << 16);
         assert!(direct_state.catalog.contains_resource(direct_core.id));
-        let direct_backend = direct_state.backend.as_ref().unwrap();
+        let direct_backend = direct_state.backend.as_ref().test_value();
         assert_eq!(direct_backend.core(direct_core.id), Some(&direct_core));
         assert!(direct_backend.path(direct_core.id).unwrap().is_file());
 
-        let (client_stream, host_stream) = duplex(4096);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(4);
-        let (event_tx, event_rx) = mpsc::channel(4);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let loop_directory = directories.root.join("loop");
         let resource_state = ClientResourceState::new(
             &join_data,
@@ -6806,16 +6710,10 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(loop_directory),
         )
-        .unwrap();
-        let join_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        .test_value();
+        let (host_stream, command_tx, event_rx, shutdown_tx, join_handle) =
+            start_test_client_loop_with_state(4096, 4, 4, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
         let handle = ClientHandle {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
@@ -6827,7 +6725,7 @@ mod tests {
             io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
-        let core = handle.publish_player_resource(request).await.unwrap();
+        let core = handle.publish_player_resource(request).await.test_value();
         assert_eq!(core.id, 7 << 16);
         assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
         assert_eq!(fs::read(&player).unwrap(), original);
@@ -6839,12 +6737,12 @@ mod tests {
                 },
             )))
             .await
-            .unwrap();
+            .test_value();
         loop {
             match timeout(EVENT_WAIT, host_transport.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::Resource(ResourcePacket::Status(status))
                     if status.resource_id == core.id =>
@@ -6856,7 +6754,7 @@ mod tests {
                     host_transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 _ => {}
             }
@@ -6869,12 +6767,12 @@ mod tests {
                 },
             )))
             .await
-            .unwrap();
+            .test_value();
         loop {
             match timeout(EVENT_WAIT, host_transport.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::Resource(ResourcePacket::Data(data))
                     if data.resource_id == core.id =>
@@ -6887,13 +6785,13 @@ mod tests {
                     host_transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 _ => {}
             }
         }
 
-        handle.shutdown().await.unwrap();
+        handle.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6909,11 +6807,11 @@ mod tests {
         let mut initial_group = MutableGroup::new("HostInitial.c4p");
         initial_group
             .add_file_with_metadata("Player.txt", b"host initial player".to_vec(), 1, false)
-            .unwrap();
-        fs::write(&initial_player, initial_group.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&initial_player, initial_group.pack().unwrap()).test_value();
         let initial_wire =
-            clonk_engine::LegacyCString::from_bytes(b"HostInitial.c4p".to_vec()).unwrap();
-        let maker = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            clonk_engine::LegacyCString::from_bytes(b"HostInitial.c4p".to_vec()).test_value();
+        let maker = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
         let initial_request = crate::ClientPlayerResourceRequest {
             source_path: initial_player.clone(),
             wire_name: initial_wire.clone(),
@@ -6927,25 +6825,25 @@ mod tests {
                 network_directory: directories.host.clone(),
                 group_maker: maker.clone(),
             })
-            .unwrap();
+            .test_value();
         let initial_core = initial_publication.core.clone();
 
         let player = directories.root.join("HostRuntime.c4p");
         let mut group = MutableGroup::new("HostRuntime.c4p");
         group
             .add_file_with_metadata("Player.txt", b"host runtime player".to_vec(), 1, false)
-            .unwrap();
-        let original = group.pack().unwrap();
-        fs::write(&player, &original).unwrap();
+            .test_value();
+        let original = group.pack().test_value();
+        fs::write(&player, &original).test_value();
         let publication = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
             wire_name: clonk_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec())
-                .unwrap(),
+                .test_value(),
             group_maker: maker,
         };
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host = start_host(
             listener,
             HostConfig {
@@ -6957,10 +6855,10 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let stream = TcpStream::connect(address).await.unwrap();
+        .test_value();
+        let stream = TcpStream::connect(address).await.test_value();
         let mut peer = crate::ControlTransport::new(stream);
-        let peer_name = clonk_engine::LegacyCString::from_bytes(b"Peer".to_vec()).unwrap();
+        let peer_name = clonk_engine::LegacyCString::from_bytes(b"Peer".to_vec()).test_value();
         run_client_connection_handshake(
             &mut peer,
             crate::ConnectionRequest {
@@ -6976,7 +6874,7 @@ mod tests {
             },
         )
         .await
-        .expect("peer joins before runtime publication");
+        .test_value();
 
         assert_eq!(
             host.publish_player_resource(initial_request).await.unwrap(),
@@ -6986,8 +6884,8 @@ mod tests {
         let core = host
             .publish_player_resource(publication.clone())
             .await
-            .unwrap();
-        let reused = host.publish_player_resource(publication).await.unwrap();
+            .test_value();
+        let reused = host.publish_player_resource(publication).await.test_value();
         assert_eq!(reused, core, "the same source path reuses one resource");
         assert_eq!(core.id, 1);
         assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
@@ -6999,12 +6897,12 @@ mod tests {
             },
         )))
         .await
-        .unwrap();
+        .test_value();
         loop {
             match timeout(EVENT_WAIT, peer.read_message())
                 .await
-                .expect("host runtime resource discovery stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::Resource(ResourcePacket::Status(status))
                     if status.resource_id == core.id =>
@@ -7013,7 +6911,9 @@ mod tests {
                     break;
                 }
                 ControlMessage::Ping(ping) => {
-                    peer.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    peer.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 _ => {}
             }
@@ -7025,12 +6925,12 @@ mod tests {
             },
         )))
         .await
-        .unwrap();
+        .test_value();
         loop {
             match timeout(EVENT_WAIT, peer.read_message())
                 .await
-                .expect("host runtime resource chunk stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::Resource(ResourcePacket::Data(data))
                     if data.resource_id == core.id =>
@@ -7040,13 +6940,15 @@ mod tests {
                     break;
                 }
                 ControlMessage::Ping(ping) => {
-                    peer.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                    peer.send_message(ControlMessage::Pong(ping))
+                        .await
+                        .test_value();
                 }
                 _ => {}
             }
         }
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7063,8 +6965,8 @@ mod tests {
         let mut group = MutableGroup::new("Alice.c4p");
         group
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
-            .unwrap();
-        fs::write(&source, group.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&source, group.pack().unwrap()).test_value();
         let publication = crate::build_host_resource_core(
             &source,
             directories.root.join("published"),
@@ -7075,9 +6977,9 @@ mod tests {
                 "Host",
             ),
         )
-        .unwrap();
+        .test_value();
         let valid_core = publication.core.clone();
-        let hosted_path = publication.standalone_path.unwrap();
+        let hosted_path = publication.standalone_path.test_value();
         let mut removed_core = valid_core.clone();
         removed_core.id += 1;
         let mut scenario_core = valid_core.clone();
@@ -7106,7 +7008,7 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
             Some(local_work_path.clone()),
         )
-        .unwrap();
+        .test_value();
         let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
         local_candidates.extend_search_roots([directories.root.clone()]);
         local_state.retain_resource_resolver(
@@ -7126,9 +7028,9 @@ mod tests {
         let local_sources = local_state.load_authoritative_player_resources(&mut local_info);
         assert_eq!(local_sources, vec![(source.clone(), valid_core.clone())]);
         assert!(local_state.catalog.contains_resource(valid_core.id));
-        let local_backend = local_state.backend.as_ref().unwrap();
+        let local_backend = local_state.backend.as_ref().test_value();
         assert_eq!(local_backend.core(valid_core.id), Some(&valid_core));
-        let local_standalone = local_backend.path(valid_core.id).unwrap();
+        let local_standalone = local_backend.path(valid_core.id).test_value();
         assert_ne!(local_standalone, source);
         assert_eq!(local_standalone.parent(), Some(local_work_path.as_path()));
         assert_eq!(
@@ -7141,8 +7043,8 @@ mod tests {
             .unwrap()
             .is_complete());
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host_config = HostConfig {
             resource_directory: Some(directories.host.clone()),
             resource_registrations: vec![crate::ResourceRegistration::from_core(
@@ -7158,14 +7060,14 @@ mod tests {
             }],
             ..HostConfig::default()
         };
-        let host = start_host(listener, host_config).await.unwrap();
+        let host = start_host(listener, host_config).await.test_value();
         let mut client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
                 .with_resource_directory(directories.client.clone()),
         )
         .await
-        .unwrap();
+        .test_value();
         let mut client_events = client.take_event_receiver();
 
         let resource_player = |id: i32, flags: u16, core: clonk_engine::NetworkResourceCore| {
@@ -7208,15 +7110,15 @@ mod tests {
         let encoded = crate::encode_control_entry_payload(
             &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
         )
-        .unwrap();
+        .test_value();
         host.submit_packet(ControlDelivery::Direct, encoded.clone())
             .await
-            .unwrap();
+            .test_value();
 
         let mut delivered = None;
         let mut completed = None;
         while delivered.is_none() || completed.is_none() {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Direct { data, .. }) => {
                     if let Ok(clonk_engine::ControlPacket::PlayerInfo(actual)) =
                         decode_control_entry_payload(&data)
@@ -7239,7 +7141,7 @@ mod tests {
                 None => panic!("client event stream ended"),
             }
         }
-        let delivered = delivered.unwrap();
+        let delivered = delivered.test_value();
         assert_ne!(
             delivered.players[0].flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
             0
@@ -7256,16 +7158,16 @@ mod tests {
             );
             assert_eq!(player.resource, None);
         }
-        let (completed_core, completed_path, local) = completed.unwrap();
+        let (completed_core, completed_path, local) = completed.test_value();
         assert_eq!(completed_core, valid_core);
         assert!(completed_path.is_file());
         assert!(!local);
 
         host.submit_packet(ControlDelivery::Direct, encoded)
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
@@ -7287,8 +7189,8 @@ mod tests {
             }
         }
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7303,13 +7205,13 @@ mod tests {
         // src/C4Network2Res.cpp:1397-1417,1443-1516).
         let directories = SessionResourceDirectories::new();
         let local_root = directories.root.join("local");
-        fs::create_dir_all(&local_root).unwrap();
+        fs::create_dir_all(&local_root).test_value();
         let source = local_root.join("Alice.c4p");
         let mut group = MutableGroup::new("Alice.c4p");
         group
             .add_file_with_metadata("Player.txt", b"host-local player".to_vec(), 1, false)
-            .unwrap();
-        fs::write(&source, group.pack().unwrap()).unwrap();
+            .test_value();
+        fs::write(&source, group.pack().unwrap()).test_value();
         let core = crate::build_host_resource_core(
             &source,
             directories.root.join("core"),
@@ -7320,17 +7222,17 @@ mod tests {
                 "Host",
             ),
         )
-        .unwrap()
+        .test_value()
         .core;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host_config = HostConfig {
             resource_directory: Some(directories.host.clone()),
             local_resource_roots: vec![local_root],
             ..HostConfig::default()
         };
-        let mut host = start_host(listener, host_config).await.unwrap();
+        let mut host = start_host(listener, host_config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(
             address,
@@ -7338,7 +7240,7 @@ mod tests {
                 .with_resource_directory(directories.client.clone()),
         )
         .await
-        .unwrap();
+        .test_value();
         let mut client_events = client.take_event_receiver();
         let info = clonk_engine::PlayerInfoControlData {
             client_id: 1,
@@ -7357,10 +7259,10 @@ mod tests {
                 .unwrap(),
         )
         .await
-        .unwrap();
+        .test_value();
 
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ResourceComplete {
                     resource_id,
                     core: completed,
@@ -7388,7 +7290,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
@@ -7406,7 +7308,7 @@ mod tests {
         }
 
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::ResourceComplete {
                     resource_id,
                     core: completed,
@@ -7435,14 +7337,14 @@ mod tests {
                     .unwrap(),
             })
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             reused, core,
             "AddByFile reuses the locally resolved authoritative resource"
         );
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7450,17 +7352,17 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let host_root = directories.root.join("host-local");
         let client_root = directories.root.join("client-local");
-        fs::create_dir_all(&host_root).unwrap();
-        fs::create_dir_all(&client_root).unwrap();
+        fs::create_dir_all(&host_root).test_value();
+        fs::create_dir_all(&client_root).test_value();
         let host_source = host_root.join("Alice.c4p");
         let client_source = client_root.join("Alice.c4p");
         let mut group = MutableGroup::new("Alice.c4p");
         group
             .add_file_with_metadata("Player.txt", b"shared local player".to_vec(), 1, false)
-            .unwrap();
-        let player_bytes = group.pack().unwrap();
-        fs::write(&host_source, &player_bytes).unwrap();
-        fs::write(&client_source, player_bytes).unwrap();
+            .test_value();
+        let player_bytes = group.pack().test_value();
+        fs::write(&host_source, &player_bytes).test_value();
+        fs::write(&client_source, player_bytes).test_value();
         let core = crate::build_host_resource_core(
             &host_source,
             directories.root.join("core"),
@@ -7471,17 +7373,17 @@ mod tests {
                 "Host",
             ),
         )
-        .unwrap()
+        .test_value()
         .core;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host_config = HostConfig {
             resource_directory: Some(directories.host.clone()),
             local_resource_roots: vec![host_root],
             ..HostConfig::default()
         };
-        let host = start_host(listener, host_config).await.unwrap();
+        let host = start_host(listener, host_config).await.test_value();
         let mut client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -7489,7 +7391,7 @@ mod tests {
                 .with_local_resource_roots([client_root]),
         )
         .await
-        .unwrap();
+        .test_value();
         let mut client_events = client.take_event_receiver();
         let info = clonk_engine::PlayerInfoControlData {
             client_id: 1,
@@ -7508,10 +7410,10 @@ mod tests {
                 .unwrap(),
         )
         .await
-        .unwrap();
+        .test_value();
 
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::ResourceComplete {
                     resource_id,
                     core: completed,
@@ -7539,7 +7441,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
@@ -7556,8 +7458,8 @@ mod tests {
             }
         }
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7570,7 +7472,7 @@ mod tests {
         // src/C4Network2Res.cpp:831-940,1017-1122,1546-1620).
         let directories = SessionResourceDirectories::new();
         let source = directories.host.join("Dynamic.c4d");
-        fs::write(&source, b"local").unwrap();
+        fs::write(&source, b"local").test_value();
         let core = clonk_engine::NetworkResourceCore {
             resource_type: 2,
             id: 7,
@@ -7578,7 +7480,7 @@ mod tests {
             file_size: 5,
             file_crc: 0x8bd6_88e8,
             chunk_size: 2,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         let mut host_config = HostConfig::default();
@@ -7593,20 +7495,15 @@ mod tests {
             binary_compatible: true,
         }];
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
-        let mut client =
-            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let (address, host) = start_test_host(host_config).await;
+        let mut client = connect_test_player(address, "Alice").await;
 
         let mut progress = Vec::new();
         let completed_path = loop {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
                 .expect("resource transfer stalled")
-                .expect("client event stream closed")
+                .test_value()
             {
                 ClientEvent::ResourceComplete {
                     resource_id,
@@ -7635,8 +7532,8 @@ mod tests {
 
         assert_eq!(progress, vec![33, 66, 100]);
         assert_eq!(fs::read(&completed_path).unwrap(), b"local");
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7647,7 +7544,7 @@ mod tests {
         // (src/C4Player.cpp:452-461; src/C4Network2Res.cpp:718-823,1584-1594).
         let directories = SessionResourceDirectories::new();
         let host_source = directories.host.join("Dynamic.c4d");
-        fs::write(&host_source, b"local").unwrap();
+        fs::write(&host_source, b"local").test_value();
         let parent = clonk_engine::NetworkResourceCore {
             resource_type: crate::HostResourceType::Dynamic as u8,
             id: 7,
@@ -7655,7 +7552,7 @@ mod tests {
             file_size: 5,
             file_crc: 0x8bd6_88e8,
             chunk_size: 2,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         let mut host_config = HostConfig::default();
@@ -7672,9 +7569,7 @@ mod tests {
             binary_compatible: true,
         }];
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, host_config).await.unwrap();
+        let (address, mut host) = start_test_host(host_config).await;
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(
             address,
@@ -7682,13 +7577,13 @@ mod tests {
                 .with_resource_directory(directories.client.clone()),
         )
         .await
-        .unwrap();
+        .test_value();
 
         let client_source = loop {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
                 .expect("parent resource transfer stalled")
-                .expect("client event stream closed")
+                .test_value()
             {
                 ClientEvent::ResourceComplete {
                     resource_id, path, ..
@@ -7707,7 +7602,7 @@ mod tests {
                 crate::ResourceFileOwnership::Persistent,
             )
             .await
-            .unwrap();
+            .test_value();
         let _client_derivation = client
             .begin_resource_derive(
                 parent.id,
@@ -7715,18 +7610,21 @@ mod tests {
                 crate::ResourceFileOwnership::Temporary,
             )
             .await
-            .unwrap();
-        fs::write(&host_source, b"changed").unwrap();
-        fs::write(&client_source, b"changed").unwrap();
+            .test_value();
+        fs::write(&host_source, b"changed").test_value();
+        fs::write(&client_source, b"changed").test_value();
 
-        let derived = host.finish_resource_derive(host_derivation).await.unwrap();
+        let derived = host
+            .finish_resource_derive(host_derivation)
+            .await
+            .test_value();
         assert_ne!(derived.id, parent.id);
         assert_eq!(derived.derived_id, parent.id);
         loop {
             match timeout(EVENT_WAIT, host_events.recv())
                 .await
                 .expect("host derive completion stalled")
-                .expect("host event stream closed")
+                .test_value()
             {
                 HostEvent::ResourceComplete {
                     resource_id,
@@ -7746,7 +7644,7 @@ mod tests {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
                 .expect("derive announcement stalled")
-                .expect("client event stream closed")
+                .test_value()
             {
                 ClientEvent::ResourceComplete {
                     resource_id,
@@ -7767,8 +7665,8 @@ mod tests {
         assert_eq!(completed_path, client_source);
         assert_eq!(fs::read(completed_path).unwrap(), b"changed");
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7781,8 +7679,8 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let system_path = directories.host.join("System.c4g");
         let mismatched_system_path = directories.client.join("System.c4g");
-        fs::write(&system_path, b"host system").unwrap();
-        fs::write(&mismatched_system_path, b"different client system").unwrap();
+        fs::write(&system_path, b"host system").test_value();
+        fs::write(&mismatched_system_path, b"different client system").test_value();
         let publication = crate::build_host_resource_core(
             &system_path,
             &directories.host,
@@ -7793,7 +7691,7 @@ mod tests {
                 "Test host",
             ),
         )
-        .unwrap();
+        .test_value();
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
         snapshot.dynamic = clonk_engine::NetworkResourceCore {
@@ -7803,7 +7701,7 @@ mod tests {
             file_size: 1,
             file_crc: 1,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
@@ -7813,7 +7711,8 @@ mod tests {
             file_size: 1,
             file_crc: 1,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
+                .test_value(),
             ..Default::default()
         };
         snapshot
@@ -7829,9 +7728,7 @@ mod tests {
             binary_compatible: false,
         }];
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
         let result = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -7839,7 +7736,7 @@ mod tests {
                 .with_local_system_path(mismatched_system_path),
         )
         .await;
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
 
         let error = result.expect_err("client must fail before entering the lobby");
         assert!(
@@ -7860,10 +7757,10 @@ mod tests {
         let directories = SessionResourceDirectories::new();
         let host_system_path = directories.host.join("System.c4g");
         let client_system_path = directories.client.join("System.c4g");
-        fs::create_dir(&host_system_path).unwrap();
-        fs::create_dir(&client_system_path).unwrap();
-        fs::write(host_system_path.join("Host.c"), b"C++ host system").unwrap();
-        fs::write(client_system_path.join("Client.c"), b"Rust client system").unwrap();
+        fs::create_dir(&host_system_path).test_value();
+        fs::create_dir(&client_system_path).test_value();
+        fs::write(host_system_path.join("Host.c"), b"C++ host system").test_value();
+        fs::write(client_system_path.join("Client.c"), b"Rust client system").test_value();
         let publication = crate::build_host_resource_core(
             &host_system_path,
             &directories.host,
@@ -7874,7 +7771,7 @@ mod tests {
                 "C++ host",
             ),
         )
-        .unwrap();
+        .test_value();
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
         snapshot.dynamic.id = 3;
@@ -7892,9 +7789,7 @@ mod tests {
             binary_compatible: false,
         }];
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
         let mut client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -7902,7 +7797,7 @@ mod tests {
                 .with_trusted_local_system_path(client_system_path.clone()),
         )
         .await
-        .expect("a trusted Rust System permits C++ cross-build bootstrap");
+        .test_value();
 
         assert_eq!(
             client.take_join_data().unwrap().status.state,
@@ -7910,7 +7805,7 @@ mod tests {
         );
         let mut events = client.take_event_receiver();
         loop {
-            match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                 Some(ClientEvent::ResourceComplete {
                     resource_id: 2,
                     core,
@@ -7930,8 +7825,8 @@ mod tests {
             }
         }
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7950,7 +7845,7 @@ mod tests {
             file_size: u32::MAX,
             file_crc: u32::MAX,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
@@ -7960,22 +7855,21 @@ mod tests {
             file_size: 1,
             file_crc: 1,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
+                .test_value(),
             ..Default::default()
         };
         assert!(snapshot.parameters.game_resources.is_empty());
         host_config.initial_join_snapshot = Some(snapshot);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
         let result = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
                 .with_resource_directory(directories.client.clone()),
         )
         .await;
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
 
         let error = result.expect_err("missing non-loadable dynamic must abort bootstrap");
         assert!(
@@ -7996,8 +7890,8 @@ mod tests {
         let system_bytes = b"shared system";
         let host_system_path = directories.host.join("System.c4g");
         let client_system_path = directories.client.join("System.c4g");
-        fs::write(&host_system_path, system_bytes).unwrap();
-        fs::write(&client_system_path, system_bytes).unwrap();
+        fs::write(&host_system_path, system_bytes).test_value();
+        fs::write(&client_system_path, system_bytes).test_value();
         let publication = crate::build_host_resource_core(
             &host_system_path,
             &directories.host,
@@ -8008,7 +7902,7 @@ mod tests {
                 "Test host",
             ),
         )
-        .unwrap();
+        .test_value();
         let mut host_config = HostConfig::default();
         let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
         snapshot.dynamic = clonk_engine::NetworkResourceCore {
@@ -8018,7 +7912,7 @@ mod tests {
             file_size: 1,
             file_crc: 1,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).test_value(),
             ..Default::default()
         };
         snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
@@ -8028,7 +7922,8 @@ mod tests {
             file_size: 1,
             file_crc: 1,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
+                .test_value(),
             ..Default::default()
         };
         snapshot
@@ -8043,9 +7938,7 @@ mod tests {
             ownership: crate::ResourceFileOwnership::Persistent,
             binary_compatible: false,
         }];
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
         let client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -8053,10 +7946,10 @@ mod tests {
                 .with_local_system_path(client_system_path),
         )
         .await
-        .expect("contents-identical local System permits client bootstrap");
+        .test_value();
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8073,10 +7966,10 @@ mod tests {
         let client_system_path = directories.client.join("System.c4g");
         let host_definitions_path = directories.host.join("Objects.c4d");
         let client_definitions_path = directories.client.join("Objects.c4d");
-        fs::write(&host_system_path, system_bytes).unwrap();
-        fs::write(&client_system_path, system_bytes).unwrap();
-        fs::write(&host_definitions_path, definitions_bytes).unwrap();
-        fs::write(&client_definitions_path, definitions_bytes).unwrap();
+        fs::write(&host_system_path, system_bytes).test_value();
+        fs::write(&client_system_path, system_bytes).test_value();
+        fs::write(&host_definitions_path, definitions_bytes).test_value();
+        fs::write(&client_definitions_path, definitions_bytes).test_value();
         let system = crate::build_host_resource_core(
             &host_system_path,
             &directories.host,
@@ -8087,7 +7980,7 @@ mod tests {
                 "Test host",
             ),
         )
-        .unwrap();
+        .test_value();
         let mut definitions = crate::build_host_resource_core(
             &host_definitions_path,
             &directories.host,
@@ -8098,7 +7991,7 @@ mod tests {
                 "Test host",
             ),
         )
-        .unwrap();
+        .test_value();
         definitions.core.resource_type = crate::HostResourceType::Definitions as u8;
 
         let mut host_config = HostConfig::default();
@@ -8121,9 +8014,7 @@ mod tests {
             },
         ];
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
         let client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -8132,10 +8023,10 @@ mod tests {
                 .with_local_resource_roots([directories.client.clone()]),
         )
         .await
-        .expect("contents-identical non-loadable definitions permit bootstrap");
+        .test_value();
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8161,15 +8052,13 @@ mod tests {
         };
         host_config.initial_join_snapshot = Some(snapshot);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
         let mut client =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
                 .await
-                .expect("an unavailable player resource must not abort the join");
+                .test_value();
 
-        let join_data = client.take_join_data().expect("initial JoinData");
+        let join_data = client.take_join_data().test_value();
         let player = &join_data.parameters.player_infos.clients[0].players[0];
         assert_eq!(
             player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
@@ -8177,8 +8066,8 @@ mod tests {
         );
         assert_eq!(player.resource, None);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     static NEXT_RESOURCE_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -8199,8 +8088,8 @@ mod tests {
             let host = root.join("host");
             let client = root.join("client");
             let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(&host).unwrap();
-            fs::create_dir_all(&client).unwrap();
+            fs::create_dir_all(&host).test_value();
+            fs::create_dir_all(&client).test_value();
             Self { root, host, client }
         }
     }
@@ -8227,7 +8116,7 @@ mod tests {
                 by_client: 0,
             },
         ))
-        .expect("encode ClientJoin");
+        .test_value();
 
         assert!(authenticated_single_control(&payload, 0).is_ok());
         assert!(authenticated_single_control(&payload, 3).is_err());
@@ -8240,9 +8129,8 @@ mod tests {
             reason: clonk_engine::LegacyCString::default(),
             by_client: 7,
         });
-        let direct = encode_control_entry_payload(&remove).expect("encode ClientRemove");
-        let authenticated =
-            authenticated_single_control(&direct, 7).expect("embedded peer author matches");
+        let direct = encode_control_entry_payload(&remove).test_value();
+        let authenticated = authenticated_single_control(&direct, 7).test_value();
         assert!(control_requires_host_ingress(&authenticated));
 
         let queued = encode_control_packet(&LegacyControlFrame {
@@ -8251,7 +8139,7 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![remove],
         })
-        .expect("encode queued ClientRemove");
+        .test_value();
         assert!(validate_peer_control_packet(&queued, 7)
             .expect_err("peer membership control must be rejected")
             .contains("host-authority"));
@@ -8270,7 +8158,7 @@ mod tests {
                 by_client: 8,
             })],
         })
-        .expect("encode peer contribution");
+        .test_value();
 
         assert!(validate_peer_control_packet(&queued, 8).is_ok());
         assert!(validate_peer_control_packet(&queued, 7).is_err());
@@ -8319,7 +8207,7 @@ mod tests {
                 by_client: 7,
             },
         ))
-        .expect("encode InitScenarioPlayer");
+        .test_value();
 
         assert!(authenticated_single_control(&payload, 7).is_ok());
         assert!(authenticated_single_control(&payload, 3).is_err());
@@ -8333,7 +8221,7 @@ mod tests {
             by_client: 7,
         }
         .into_control_packet();
-        let payload = encode_control_entry_payload(&control).expect("encode CID_Set");
+        let payload = encode_control_entry_payload(&control).test_value();
 
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching author"),
@@ -8358,10 +8246,10 @@ mod tests {
                 }
                 .into_control_packet()],
             })
-            .expect("encode queued CID_Set")
+            .test_value()
         };
 
-        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        validate_queued_control_authors(&packet(7)).test_value();
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_Set");
         assert!(error.contains("claimed author 0"));
@@ -8404,10 +8292,10 @@ mod tests {
                 timestamp_ms: 0,
                 controls,
             })
-            .expect("encode queued controls")
+            .test_value()
         };
 
-        validate_queued_control_authors(&packet(controls(7))).expect("matching queued authors");
+        validate_queued_control_authors(&packet(controls(7))).test_value();
 
         for (name, forged) in [
             "CID_Vote",
@@ -8436,7 +8324,7 @@ mod tests {
             disconnected: false,
             by_client: 0,
         });
-        let payload = encode_control_entry_payload(&control).expect("encode CID_RemovePlr");
+        let payload = encode_control_entry_payload(&control).test_value();
         assert_eq!(
             authenticated_single_control(&payload, 0).expect("host author matches"),
             control
@@ -8449,7 +8337,7 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control],
         })
-        .expect("encode queued CID_RemovePlr");
+        .test_value();
         let error = validate_queued_control_authors(&packet)
             .expect_err("queued client may not forge host CID_RemovePlr");
         assert!(error.contains("queued CID_RemovePlr"));
@@ -8462,11 +8350,10 @@ mod tests {
         let control = EngineControlPacket::Script(clonk_engine::ScriptControlData {
             target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
             strictness: clonk_engine::ScriptStrictness::Strict3,
-            script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec())
-                .expect("fixture is NUL-free"),
+            script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec()).test_value(),
             by_client: 7,
         });
-        let payload = encode_control_entry_payload(&control).expect("encode CID_Script");
+        let payload = encode_control_entry_payload(&control).test_value();
 
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching author"),
@@ -8495,10 +8382,10 @@ mod tests {
                     },
                 )],
             })
-            .expect("encode queued CID_Script")
+            .test_value()
         };
 
-        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        validate_queued_control_authors(&packet(7)).test_value();
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_Script");
         assert!(error.contains("queued CID_Script"));
@@ -8511,13 +8398,11 @@ mod tests {
         let control =
             EngineControlPacket::MessageBoardAnswer(clonk_engine::MessageBoardAnswerControlData {
                 object: 42,
-                answer: clonk_engine::LegacyCString::from_bytes(b"answer".to_vec())
-                    .expect("fixture is NUL-free"),
+                answer: clonk_engine::LegacyCString::from_bytes(b"answer".to_vec()).test_value(),
                 player: 3,
                 by_client: 7,
             });
-        let payload =
-            encode_control_entry_payload(&control).expect("encode CID_MessageBoardAnswer");
+        let payload = encode_control_entry_payload(&control).test_value();
 
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching author"),
@@ -8535,11 +8420,10 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_PRIVATE,
             player: 3,
             to_player: 5,
-            message: clonk_engine::LegacyCString::from_bytes(b"secret".to_vec())
-                .expect("fixture is NUL-free"),
+            message: clonk_engine::LegacyCString::from_bytes(b"secret".to_vec()).test_value(),
             by_client: 7,
         });
-        let payload = encode_control_entry_payload(&control).expect("encode CID_Message");
+        let payload = encode_control_entry_payload(&control).test_value();
 
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching author"),
@@ -8562,11 +8446,10 @@ mod tests {
             message_type: clonk_engine::MESSAGE_TYPE_TEAM,
             player: -1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(b"team secret".to_vec())
-                .expect("fixture is NUL-free"),
+            message: clonk_engine::LegacyCString::from_bytes(b"team secret".to_vec()).test_value(),
             by_client: HOST_CLIENT_ID as i32,
         });
-        let data = encode_control_entry_payload(&control).expect("encode CID_Message");
+        let data = encode_control_entry_payload(&control).test_value();
 
         broadcast_packet(ControlDelivery::Private, data, None, &mut state).await;
 
@@ -8585,10 +8468,10 @@ mod tests {
             player: -1,
             to_player: -1,
             message: clonk_engine::LegacyCString::from_bytes(b"network notice".to_vec())
-                .expect("fixture is NUL-free"),
+                .test_value(),
             by_client: HOST_CLIENT_ID as i32,
         });
-        let data = encode_control_entry_payload(&control).expect("encode CID_Message");
+        let data = encode_control_entry_payload(&control).test_value();
 
         broadcast_packet(ControlDelivery::Private, data, None, &mut state).await;
 
@@ -8628,10 +8511,10 @@ mod tests {
                 message: clonk_engine::LegacyCString::from_bytes(
                     format!("message {index}").into_bytes(),
                 )
-                .expect("fixture is NUL-free"),
+                .test_value(),
                 by_client: HOST_CLIENT_ID as i32,
             });
-            let data = encode_control_entry_payload(&control).expect("encode CID_Message");
+            let data = encode_control_entry_payload(&control).test_value();
             broadcast_packet(ControlDelivery::Private, data, None, &mut state).await;
         }
 
@@ -8654,11 +8537,10 @@ mod tests {
                 message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
                 player: -1,
                 to_player: -1,
-                message: clonk_engine::LegacyCString::from_bytes(text)
-                    .expect("fixture is NUL-free"),
+                message: clonk_engine::LegacyCString::from_bytes(text).test_value(),
                 by_client: HOST_CLIENT_ID as i32,
             });
-            newest = encode_control_entry_payload(&control).expect("encode CID_Message");
+            newest = encode_control_entry_payload(&control).test_value();
             broadcast_packet(ControlDelivery::Private, newest.clone(), None, &mut state).await;
         }
 
@@ -8683,10 +8565,10 @@ mod tests {
                     },
                 )],
             })
-            .expect("encode queued CID_MessageBoardAnswer")
+            .test_value()
         };
 
-        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        validate_queued_control_authors(&packet(7)).test_value();
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_MessageBoardAnswer");
         assert!(error.contains("queued CID_MessageBoardAnswer"));
@@ -8697,14 +8579,12 @@ mod tests {
     #[test]
     fn single_custom_command_authenticates_embedded_author() {
         let control = EngineControlPacket::CustomCommand(clonk_engine::CustomCommandControlData {
-            command: clonk_engine::LegacyCString::from_bytes(b"push".to_vec())
-                .expect("fixture is NUL-free"),
-            argument: clonk_engine::LegacyCString::from_bytes(b"argument".to_vec())
-                .expect("fixture is NUL-free"),
+            command: clonk_engine::LegacyCString::from_bytes(b"push".to_vec()).test_value(),
+            argument: clonk_engine::LegacyCString::from_bytes(b"argument".to_vec()).test_value(),
             player: 3,
             by_client: 7,
         });
-        let payload = encode_control_entry_payload(&control).expect("encode CID_CustomCommand");
+        let payload = encode_control_entry_payload(&control).test_value();
 
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching author"),
@@ -8734,10 +8614,10 @@ mod tests {
                     },
                 )],
             })
-            .expect("encode queued CID_CustomCommand")
+            .test_value()
         };
 
-        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        validate_queued_control_authors(&packet(7)).test_value();
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_CustomCommand");
         assert!(error.contains("queued CID_CustomCommand"));
@@ -8756,13 +8636,13 @@ mod tests {
                 objects: vec![7, 9],
                 strictness: clonk_engine::ScriptStrictness::Strict2,
                 script: clonk_engine::LegacyCString::from_bytes(b"SetXDir(0)".to_vec())
-                    .expect("fixture is NUL-free"),
+                    .test_value(),
                 by_client,
             })
         };
 
         let direct = control(7);
-        let payload = encode_control_entry_payload(&direct).expect("encode CID_EMMoveObj");
+        let payload = encode_control_entry_payload(&direct).test_value();
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching direct author"),
             direct
@@ -8778,8 +8658,8 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control(7)],
         })
-        .expect("encode queued CID_EMMoveObj");
-        validate_queued_control_authors(&packet).expect("matching queued author");
+        .test_value();
+        validate_queued_control_authors(&packet).test_value();
 
         let forged_packet = encode_control_packet(&LegacyControlFrame {
             client_id: 7,
@@ -8787,7 +8667,7 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control(0)],
         })
-        .expect("encode forged queued CID_EMMoveObj");
+        .test_value();
         let queued_error = validate_queued_control_authors(&forged_packet)
             .expect_err("queued editor control may not forge the host author");
         assert!(queued_error.contains("queued CID_EMMoveObj"));
@@ -8807,16 +8687,14 @@ mod tests {
                 y2: -78,
                 grade: 9,
                 ift: true,
-                material: clonk_engine::LegacyCString::from_bytes(b"Earth".to_vec())
-                    .expect("fixture is NUL-free"),
-                texture: clonk_engine::LegacyCString::from_bytes(b"Rough".to_vec())
-                    .expect("fixture is NUL-free"),
+                material: clonk_engine::LegacyCString::from_bytes(b"Earth".to_vec()).test_value(),
+                texture: clonk_engine::LegacyCString::from_bytes(b"Rough".to_vec()).test_value(),
                 by_client,
             })
         };
 
         let direct = control(7);
-        let payload = encode_control_entry_payload(&direct).expect("encode CID_EMDrawTool");
+        let payload = encode_control_entry_payload(&direct).test_value();
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching direct author"),
             direct
@@ -8832,8 +8710,8 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control(7)],
         })
-        .expect("encode queued CID_EMDrawTool");
-        validate_queued_control_authors(&packet).expect("matching queued author");
+        .test_value();
+        validate_queued_control_authors(&packet).test_value();
 
         let forged_packet = encode_control_packet(&LegacyControlFrame {
             client_id: 7,
@@ -8841,7 +8719,7 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control(0)],
         })
-        .expect("encode forged queued CID_EMDrawTool");
+        .test_value();
         let queued_error = validate_queued_control_authors(&forged_packet)
             .expect_err("queued editor draw control may not forge the host author");
         assert!(queued_error.contains("queued CID_EMDrawTool"));
@@ -8861,7 +8739,7 @@ mod tests {
         };
 
         let direct = control(7);
-        let payload = encode_control_entry_payload(&direct).expect("encode CID_EMDropDef");
+        let payload = encode_control_entry_payload(&direct).test_value();
         assert_eq!(
             authenticated_single_control(&payload, 7).expect("matching direct author"),
             direct
@@ -8877,8 +8755,8 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control(7)],
         })
-        .expect("encode queued CID_EMDropDef");
-        validate_queued_control_authors(&packet).expect("matching queued author");
+        .test_value();
+        validate_queued_control_authors(&packet).test_value();
 
         let forged_packet = encode_control_packet(&LegacyControlFrame {
             client_id: 7,
@@ -8886,7 +8764,7 @@ mod tests {
             timestamp_ms: 0,
             controls: vec![control(0)],
         })
-        .expect("encode forged queued CID_EMDropDef");
+        .test_value();
         let queued_error = validate_queued_control_authors(&forged_packet)
             .expect_err("queued editor drop control may not forge the host author");
         assert!(queued_error.contains("queued CID_EMDropDef"));
@@ -8936,7 +8814,7 @@ mod tests {
             "CID_EliminatePlayer",
         ];
         for (name, control) in names.into_iter().zip(controls(7)) {
-            let payload = encode_control_entry_payload(&control).expect("encode direct control");
+            let payload = encode_control_entry_payload(&control).test_value();
             assert_eq!(
                 authenticated_single_control(&payload, 7).expect("matching direct author"),
                 control
@@ -8954,8 +8832,8 @@ mod tests {
                 timestamp_ms: 0,
                 controls: vec![control],
             })
-            .expect("encode queued control");
-            validate_queued_control_authors(&packet).expect("matching queued author");
+            .test_value();
+            validate_queued_control_authors(&packet).test_value();
 
             let forged = controls(0)
                 .into_iter()
@@ -8963,14 +8841,14 @@ mod tests {
                 .find_map(|(candidate, candidate_name)| {
                     (candidate_name == name).then_some(candidate)
                 })
-                .expect("fixture name exists");
+                .test_value();
             let forged_packet = encode_control_packet(&LegacyControlFrame {
                 client_id: 7,
                 tick: 12,
                 timestamp_ms: 0,
                 controls: vec![forged],
             })
-            .expect("encode forged queued control");
+            .test_value();
             let queued_error = validate_queued_control_authors(&forged_packet)
                 .expect_err("queued author spoof must fail");
             assert!(queued_error.contains(name), "{name}: {queued_error}");
@@ -9011,12 +8889,12 @@ mod tests {
         // its own (oracle-src-pinned src/C4Network2.cpp:1291-1299;
         // src/C4Network2Reference.cpp:79,100-102;
         // src/C4GameVersion.h:35-37).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            match transport.read_message().await.unwrap() {
+            match transport.read_message().await.test_value() {
                 ControlMessage::ConnectionRequest(request) => request.build,
                 other => panic!("expected client connection request, got {other:?}"),
             }
@@ -9046,10 +8924,10 @@ mod tests {
             clonk_engine::LegacyCString::default(),
         );
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let tcp_peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             read_compatibility_request(stream).await
         });
         let tcp_result = connect_secondary_tcp_route(
@@ -9064,14 +8942,14 @@ mod tests {
             tcp_result.is_err(),
             "the probe peer deliberately stops early"
         );
-        let tcp_request = tcp_peer.await.unwrap();
+        let tcp_request = tcp_peer.await.test_value();
         assert_eq!(tcp_request.build, CPP_COMPATIBILITY_BUILD);
         assert_eq!(tcp_request.connection_id, 41);
 
         let local_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let mut peer_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let udp_task = tokio::spawn(connect_secondary_udp_route(
             local_hub.handle(),
             peer_hub.local_addr(),
@@ -9082,7 +8960,7 @@ mod tests {
         let udp_stream = timeout(EVENT_WAIT, peer_hub.accept())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         let udp_request = read_compatibility_request(udp_stream).await;
         assert_eq!(udp_request.build, CPP_COMPATIBILITY_BUILD);
         assert_eq!(udp_request.connection_id, 42);
@@ -9091,8 +8969,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .is_err());
-        local_hub.shutdown().await.unwrap();
-        peer_hub.shutdown().await.unwrap();
+        local_hub.shutdown().await.test_value();
+        peer_hub.shutdown().await.test_value();
     }
 
     #[tokio::test]
@@ -9107,12 +8985,12 @@ mod tests {
             CPP_COMPATIBILITY_BUILD,
             clonk_engine::LegacyCString::default(),
         );
-        let bob_id = ClientId::try_from(bob.client_id).unwrap();
+        let bob_id = ClientId::try_from(bob.client_id).test_value();
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let tcp_peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             read_compatibility_request(stream).await
         });
         let tcp_result = connect_mesh_tcp_route(
@@ -9128,14 +9006,14 @@ mod tests {
             tcp_result.is_err(),
             "the probe peer deliberately stops early"
         );
-        let tcp_request = tcp_peer.await.unwrap();
+        let tcp_request = tcp_peer.await.test_value();
         assert_eq!(tcp_request.build, CPP_COMPATIBILITY_BUILD);
         assert_eq!(tcp_request.connection_id, 51);
 
         let local_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let mut peer_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let udp_task = tokio::spawn(connect_mesh_udp_route(
             local_hub.handle(),
             bob_id,
@@ -9147,7 +9025,7 @@ mod tests {
         let udp_stream = timeout(EVENT_WAIT, peer_hub.accept())
             .await
             .unwrap()
-            .unwrap();
+            .test_value();
         let udp_request = read_compatibility_request(udp_stream).await;
         assert_eq!(udp_request.build, CPP_COMPATIBILITY_BUILD);
         assert_eq!(udp_request.connection_id, 52);
@@ -9156,8 +9034,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .is_err());
-        local_hub.shutdown().await.unwrap();
-        peer_hub.shutdown().await.unwrap();
+        local_hub.shutdown().await.test_value();
+        peer_hub.shutdown().await.test_value();
     }
 
     #[tokio::test]
@@ -9174,11 +9052,11 @@ mod tests {
         );
         let known_peers = BTreeMap::from([(bob.client_id, bob)]);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let (peer_stream, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
-        let peer_stream = peer_stream.unwrap();
-        let (accepted_stream, peer_addr) = accepted.unwrap();
+        let peer_stream = peer_stream.test_value();
+        let (accepted_stream, peer_addr) = accepted.test_value();
         let tcp_task = tokio::spawn(accept_mesh_tcp_route(
             accepted_stream,
             peer_addr,
@@ -9197,16 +9075,16 @@ mod tests {
             .is_err());
 
         let mut local_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let peer_hub =
-            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let peer_handle = peer_hub.handle();
         let (peer_stream, accepted_stream) = tokio::join!(
             peer_handle.connect(local_hub.local_addr()),
             local_hub.accept()
         );
-        let peer_stream = peer_stream.unwrap();
-        let accepted_stream = accepted_stream.unwrap();
+        let peer_stream = peer_stream.test_value();
+        let accepted_stream = accepted_stream.test_value();
         let udp_task = tokio::spawn(accept_mesh_udp_route(
             accepted_stream,
             request_template,
@@ -9221,8 +9099,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .is_err());
-        local_hub.shutdown().await.unwrap();
-        peer_hub.shutdown().await.unwrap();
+        local_hub.shutdown().await.test_value();
+        peer_hub.shutdown().await.test_value();
     }
 
     #[tokio::test]
@@ -9231,22 +9109,24 @@ mod tests {
         // the exact build check (oracle-src-pinned src/C4Network2.cpp:1291-1299).
         let alice = compatibility_test_core(1, b"Alice");
         let bob = compatibility_test_core(2, b"Bob");
-        let alice_id = ClientId::try_from(alice.client_id).unwrap();
+        let alice_id = ClientId::try_from(alice.client_id).test_value();
         let request_template = ClientHandshakeRequestTemplate::new(
             alice,
             CPP_COMPATIBILITY_BUILD,
             clonk_engine::LegacyCString::default(),
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             read_compatibility_request(stream).await
         });
-        let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().test_value();
+        socket
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .test_value();
         let result = connect_mesh_tcp_socket_route(
-            ClientId::try_from(bob.client_id).unwrap(),
+            ClientId::try_from(bob.client_id).test_value(),
             alice_id,
             socket,
             address,
@@ -9258,7 +9138,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "the probe peer deliberately stops early");
-        let request = peer.await.unwrap();
+        let request = peer.await.test_value();
         assert_eq!(request.build, CPP_COMPATIBILITY_BUILD);
         assert_eq!(request.connection_id, 71);
     }
@@ -9354,10 +9234,10 @@ mod tests {
         // InitClient opens every prepared route together, but exclusive mode
         // permits only one outstanding PID_Conn. OnDisconn promotes the next
         // already-open socket (src/C4Network2IO.cpp:523-563,1223-1255).
-        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let first_address = first_listener.local_addr().unwrap();
-        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let second_address = second_listener.local_addr().unwrap();
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let first_address = first_listener.local_addr().test_value();
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let second_address = second_listener.local_addr().test_value();
         let client = tokio::spawn(connect_client_addresses(
             [
                 crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, first_address),
@@ -9367,10 +9247,10 @@ mod tests {
         ));
         let (first, second) = timeout(EVENT_WAIT, async {
             let (first, second) = tokio::join!(first_listener.accept(), second_listener.accept());
-            (first.unwrap().0, second.unwrap().0)
+            (first.test_value().0, second.test_value().0)
         })
         .await
-        .expect("both transport sockets open together");
+        .test_value();
 
         let mut first_probe = [0_u8; 1];
         let mut second_probe = [0_u8; 1];
@@ -9391,7 +9271,7 @@ mod tests {
             (second, first)
         };
         let mut header_and_pid = [0_u8; 6];
-        active.read_exact(&mut header_and_pid).await.unwrap();
+        active.read_exact(&mut header_and_pid).await.test_value();
         assert_eq!(header_and_pid[0], 0xff);
         assert_eq!(header_and_pid[5], 0x02, "active route sends PID_Conn");
 
@@ -9409,8 +9289,8 @@ mod tests {
         drop(active);
         timeout(EVENT_WAIT, deferred.read_exact(&mut header_and_pid))
             .await
-            .expect("active failure promotes the deferred route")
-            .unwrap();
+            .test_value()
+            .test_value();
         assert_eq!(header_and_pid[0], 0xff);
         assert_eq!(header_and_pid[5], 0x02, "promoted route sends PID_Conn");
 
@@ -9424,17 +9304,19 @@ mod tests {
         // for admission. Exclusive connection mode advances to another live
         // route when the first transport drops during Conn/ConnRe
         // (src/C4Network2.cpp:347-443; src/C4Network2IO.cpp:873-894).
-        let stale = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let stale_address = stale.local_addr().unwrap();
+        let stale = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let stale_address = stale.local_addr().test_value();
         let stale_route = tokio::spawn(async move {
-            let (mut stream, _) = stale.accept().await.unwrap();
+            let (mut stream, _) = stale.accept().await.test_value();
             let mut header_and_pid = [0; 6];
-            stream.read_exact(&mut header_and_pid).await.unwrap();
+            stream.read_exact(&mut header_and_pid).await.test_value();
             header_and_pid
         });
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let live_address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let live_address = listener.local_addr().test_value();
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .test_value();
 
         let mut client = connect_client_addresses(
             [
@@ -9444,7 +9326,7 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("the live route wins the transport race");
+        .test_value();
 
         assert_eq!(
             client
@@ -9453,16 +9335,16 @@ mod tests {
                 .client_id,
             client.client_id() as i32
         );
-        let stale_request = stale_route.await.unwrap();
+        let stale_request = stale_route.await.test_value();
         assert_eq!(stale_request[0], 0xff);
         assert_eq!(stale_request[5], 0x02, "the first route reached PID_Conn");
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_join_flow_accepts_a_udp_only_address_list() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let host = start_host(
             listener,
             HostConfig {
@@ -9471,10 +9353,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let udp_address = host
-            .udp_local_addr()
-            .expect("configured reliable-UDP listener");
+        .test_value();
+        let udp_address = host.udp_local_addr().test_value();
         let mut client = connect_client_addresses(
             [crate::NetworkAddress::new(
                 crate::NetworkProtocol::Udp,
@@ -9483,7 +9363,7 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("the UDP route completes admission");
+        .test_value();
 
         assert_eq!(
             client
@@ -9492,14 +9372,14 @@ mod tests {
                 .client_id,
             client.client_id() as i32
         );
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_join_flow_retains_a_prepared_opposite_transport_route() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let tcp_address = listener.local_addr().test_value();
         let host = start_host(
             listener,
             HostConfig {
@@ -9508,10 +9388,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let udp_address = host
-            .udp_local_addr()
-            .expect("configured reliable-UDP listener");
+        .test_value();
+        let udp_address = host.udp_local_addr().test_value();
         let client = connect_client_addresses(
             [
                 crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, tcp_address),
@@ -9520,7 +9398,7 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("one prepared transport completes primary admission");
+        .test_value();
 
         let routes = timeout(EVENT_WAIT, async {
             loop {
@@ -9532,13 +9410,13 @@ mod tests {
             }
         })
         .await
-        .expect("the prepared opposite transport was not retained");
+        .test_value();
         assert!(routes
             .iter()
             .all(|(_, client_id, _)| *client_id == client.client_id()));
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9546,19 +9424,19 @@ mod tests {
         // A negative ConnRe with WrongPassword set drives the outer password
         // prompt loop; ordinary admission failures remain terminal
         // (src/C4Network2.cpp:281-345,1448-1469).
-        let secret = clonk_engine::LegacyCString::from_bytes(b"correct horse".to_vec()).unwrap();
+        let secret =
+            clonk_engine::LegacyCString::from_bytes(b"correct horse".to_vec()).test_value();
         let host_config = HostConfig {
             password: secret.clone(),
             ..HostConfig::default()
         };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
 
         let error = connect_client(
             address,
-            ClientConfig::new("Alice", ParticipantKind::Player)
-                .with_password(clonk_engine::LegacyCString::from_bytes(b"wrong".to_vec()).unwrap()),
+            ClientConfig::new("Alice", ParticipantKind::Player).with_password(
+                clonk_engine::LegacyCString::from_bytes(b"wrong".to_vec()).test_value(),
+            ),
         )
         .await
         .expect_err("the first password is rejected");
@@ -9572,9 +9450,9 @@ mod tests {
             ClientConfig::new("Alice", ParticipantKind::Player).with_password(secret),
         )
         .await
-        .expect("a fresh attempt with the replacement password succeeds");
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        .test_value();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9585,9 +9463,7 @@ mod tests {
             allow_join: false,
             ..HostConfig::default()
         };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let (address, host) = start_test_host(host_config).await;
 
         let error = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
@@ -9596,21 +9472,19 @@ mod tests {
             error.to_string(),
             "handshake rejected: the peer rejected the local connection: join denied"
         );
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_begin_go_acknowledgement_closes_admission_before_return() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, host) = start_test_host(HostConfig::default()).await;
         let status = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
             target_tick: 0,
         };
 
-        host.begin_go(status, false).await.unwrap();
+        host.begin_go(status, false).await.test_value();
         let error = connect_client(
             address,
             ClientConfig::new("Late join", ParticipantKind::Player),
@@ -9618,7 +9492,7 @@ mod tests {
         .await
         .expect_err("the acknowledged Go transition already closed admission");
         assert!(matches!(error, ClientError::Handshake(_)));
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -9626,15 +9500,15 @@ mod tests {
         // C4Network2IO sends PID_Conn through the ordinary C4NetIOTCP frame as
         // soon as the socket opens (src/C4Network2IO.cpp:478-525,1223-1252;
         // src/C4NetIO.cpp:1287-1323).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let client = tokio::spawn(connect_client_from(
             TcpStream::connect(addr),
             ClientConfig::new("Alice", ParticipantKind::Player),
         ));
-        let (mut peer, _) = listener.accept().await.unwrap();
+        let (mut peer, _) = listener.accept().await.test_value();
         let mut header_and_pid = [0; 6];
-        peer.read_exact(&mut header_and_pid).await.unwrap();
+        peer.read_exact(&mut header_and_pid).await.test_value();
 
         assert_eq!(header_and_pid[0], 0xff);
         assert_eq!(header_and_pid[5], 0x02);
@@ -9646,19 +9520,17 @@ mod tests {
         // An accepted C++ TCP socket sends its own PID_Conn immediately; the
         // listener/main loop does not wait for the peer's request first
         // (src/C4Network2IO.cpp:479-530,1223-1252).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
-        let mut peer = TcpStream::connect(addr).await.unwrap();
+        let (addr, host) = start_test_host(HostConfig::default()).await;
+        let mut peer = TcpStream::connect(addr).await.test_value();
         let mut header_and_pid = [0; 6];
         timeout(Duration::from_secs(1), peer.read_exact(&mut header_and_pid))
             .await
-            .expect("host must not wait for a client JSON/request prefix")
-            .unwrap();
+            .test_value()
+            .test_value();
 
         assert_eq!(header_and_pid[0], 0xff);
         assert_eq!(header_and_pid[5], 0x02);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9667,13 +9539,9 @@ mod tests {
         // CheckConn accepts status-only core differences and replies
         // "connection accepted" (src/C4Network2.cpp:1286-1334,1366-1380;
         // src/C4Client.cpp:58-70).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
-        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
-        let stream = TcpStream::connect(addr).await.unwrap();
+        let (addr, host) = start_test_host(HostConfig::default()).await;
+        let client = connect_test_player(addr, "Alice").await;
+        let stream = TcpStream::connect(addr).await.test_value();
         let mut transport = crate::ControlTransport::new(stream);
 
         assert!(matches!(
@@ -9683,7 +9551,7 @@ mod tests {
                 .unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         transport
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -9701,14 +9569,14 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
 
         let reply = timeout(EVENT_WAIT, transport.read_message())
             .await
-            .expect("host existing-client admission stalled")
-            .unwrap();
+            .test_value()
+            .test_value();
         let accepted_message =
-            clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).unwrap();
+            clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).test_value();
         assert_eq!(
             reply,
             ControlMessage::ConnectionReply(crate::ConnectionReply {
@@ -9718,8 +9586,8 @@ mod tests {
             })
         );
 
-        host.shutdown().await.unwrap();
-        client.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
+        client.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -9727,9 +9595,7 @@ mod tests {
         // DeleteClient closes every route with a negative PID_ConnRe carrying
         // the fixed "removing client" reason before removing the logical
         // network client (src/C4Network2Client.cpp:104-119,457-465).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut canonical, client_id) = raw_client_transport(addr, b"Alice").await;
         let mut secondary = raw_existing_client_transport(addr, client_id, 29, b"Alice").await;
@@ -9743,25 +9609,26 @@ mod tests {
             }
         })
         .await
-        .expect("both routes were not retained");
+        .test_value();
         assert_eq!(host.connected_clients().await, vec![client_id]);
         while host_events.try_recv().is_ok() {}
 
         let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
-            client_id: i32::try_from(client_id).unwrap(),
-            reason: clonk_engine::LegacyCString::from_bytes(b"voted out".to_vec()).unwrap(),
-            by_client: i32::try_from(HOST_CLIENT_ID).unwrap(),
+            client_id: i32::try_from(client_id).test_value(),
+            reason: clonk_engine::LegacyCString::from_bytes(b"voted out".to_vec()).test_value(),
+            by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
         });
         host.submit_packet(
             ControlDelivery::Sync,
             encode_control_entry_payload(&remove).unwrap(),
         )
         .await
-        .unwrap();
+        .test_value();
 
         let close = ControlMessage::ConnectionReply(crate::ConnectionReply {
             ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                .test_value(),
             wrong_password: false,
         });
         for route in [&mut canonical, &mut secondary] {
@@ -9785,35 +9652,35 @@ mod tests {
                 "synchronized removal was reported as a failed connection"
             );
         }
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn synchronized_remove_rejects_a_route_that_finishes_handshaking_late() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, host) = start_test_host(HostConfig::default()).await;
         let (mut canonical, client_id) = raw_client_transport(addr, b"Alice").await;
 
-        let mut delayed = crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
-        let admission = request_route(&mut delayed, i32::try_from(client_id).unwrap(), 29).await;
+        let mut delayed = crate::ControlTransport::new(TcpStream::connect(addr).await.test_value());
+        let admission =
+            request_route(&mut delayed, i32::try_from(client_id).test_value(), 29).await;
         assert!(admission.ok);
 
         let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
-            client_id: i32::try_from(client_id).unwrap(),
-            reason: clonk_engine::LegacyCString::from_bytes(b"voted out".to_vec()).unwrap(),
-            by_client: i32::try_from(HOST_CLIENT_ID).unwrap(),
+            client_id: i32::try_from(client_id).test_value(),
+            reason: clonk_engine::LegacyCString::from_bytes(b"voted out".to_vec()).test_value(),
+            by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
         });
         host.submit_packet(
             ControlDelivery::Sync,
             encode_control_entry_payload(&remove).unwrap(),
         )
         .await
-        .unwrap();
+        .test_value();
 
         let close = ControlMessage::ConnectionReply(crate::ConnectionReply {
             ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                .test_value(),
             wrong_password: false,
         });
         assert!(raw_client_received_message(&mut canonical, &close, EVENT_WAIT).await);
@@ -9826,7 +9693,7 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
         let deadline = tokio::time::Instant::now() + EVENT_WAIT;
         loop {
             match timeout_at(deadline, delayed.read_message()).await {
@@ -9846,26 +9713,20 @@ mod tests {
 
         assert!(host.accepted_routes().await.is_empty());
         assert!(host.connected_clients().await.is_empty());
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn last_route_loss_invalidates_pending_handshake_before_sync_remove() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
 
-        let mut alice = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut alice = connect_test_player(addr, "Alice").await;
         let alice_id = alice.client_id();
         let mut alice_events = alice.take_event_receiver();
         activate_joined_client(&host, &mut host_events, alice_id).await;
 
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut beta = connect_test_player(addr, "Beta").await;
         let beta_id = beta.client_id();
         let mut beta_events = beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, beta_id).await;
@@ -9875,41 +9736,41 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        host.change_status(running).await.unwrap();
+        host.change_status(running).await.test_value();
         for events in [&mut alice_events, &mut beta_events] {
             loop {
-                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                     Some(ClientEvent::Status(status)) if status == running => break,
                     Some(_) => continue,
                     None => panic!("client event stream ended before initial Go"),
                 }
             }
         }
-        alice.submit_status_ack(running).await.unwrap();
-        beta.submit_status_ack(running).await.unwrap();
+        alice.submit_status_ack(running).await.test_value();
+        beta.submit_status_ack(running).await.test_value();
         host.status_reached(running, running.target_tick)
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before initial Go committed"),
             }
         }
 
-        let mut delayed = crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
-        let admission = request_route(&mut delayed, i32::try_from(alice_id).unwrap(), 31).await;
+        let mut delayed = crate::ControlTransport::new(TcpStream::connect(addr).await.test_value());
+        let admission = request_route(&mut delayed, i32::try_from(alice_id).test_value(), 31).await;
         assert!(admission.ok);
 
         let unreachable = NetworkStatus {
             target_tick: 2,
             ..running
         };
-        host.change_status(unreachable).await.unwrap();
+        host.change_status(unreachable).await.test_value();
         for events in [&mut alice_events, &mut beta_events] {
             loop {
-                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                     Some(ClientEvent::Status(status)) if status == unreachable => break,
                     Some(_) => continue,
                     None => panic!("client event stream ended before unreached Go"),
@@ -9917,10 +9778,10 @@ mod tests {
             }
         }
 
-        alice.shutdown().await.unwrap();
+        alice.shutdown().await.test_value();
         let mut connection_failed = false;
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ClientConnectionFailed { client_id }) if client_id == alice_id => {
                     connection_failed = true;
                 }
@@ -9944,7 +9805,7 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
         let deadline = tokio::time::Instant::now() + EVENT_WAIT;
         loop {
             match timeout_at(deadline, delayed.read_message()).await {
@@ -9962,8 +9823,10 @@ mod tests {
             }
         }
 
-        let mut new_route = crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
-        let rejection = request_route(&mut new_route, i32::try_from(alice_id).unwrap(), 32).await;
+        let mut new_route =
+            crate::ControlTransport::new(TcpStream::connect(addr).await.test_value());
+        let rejection =
+            request_route(&mut new_route, i32::try_from(alice_id).test_value(), 32).await;
         assert!(!rejection.ok);
         assert_eq!(rejection.message.as_bytes(), b"removing client");
 
@@ -9973,14 +9836,14 @@ mod tests {
             .await
             .iter()
             .all(|(_, client_id, _)| *client_id == beta_id));
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn secondary_route_from_a_different_peer_host_is_rejected() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let host = start_host(
             listener,
             HostConfig {
@@ -9989,34 +9852,32 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        .test_value();
+        let client = connect_test_player(addr, "Alice").await;
 
-        let udp_hub = crate::ReliableUdpSessionHub::bind("[::1]:0".parse().unwrap()).unwrap();
+        let udp_hub = crate::ReliableUdpSessionHub::bind("[::1]:0".parse().unwrap()).test_value();
         let stream = udp_hub
             .connect_owned(host.udp_local_addr().unwrap())
             .await
-            .unwrap();
+            .test_value();
         let mut transport = crate::ControlTransport::new(stream);
         loop {
             match timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("host connection request stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::ConnectionRequest(_) => break,
                 ControlMessage::Ping(ping) => {
                     transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 other => panic!("expected host connection request, got {other:?}"),
             }
         }
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         transport
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -10034,20 +9895,20 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
 
         let rejection = loop {
             match timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("host secondary-route decision stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::ConnectionReply(reply) => break reply,
                 ControlMessage::Ping(ping) => {
                     transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 other => panic!("expected host connection reply, got {other:?}"),
             }
@@ -10060,14 +9921,14 @@ mod tests {
         assert_eq!(host.accepted_routes().await.len(), 1);
 
         drop(transport);
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn different_peer_host_is_rejected_while_same_client_route_is_pending() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp_address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let tcp_address = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -10076,11 +9937,11 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .test_value();
         let mut host_events = host.take_event_receiver();
 
         let mut pending_tcp =
-            crate::ControlTransport::new(TcpStream::connect(tcp_address).await.unwrap());
+            crate::ControlTransport::new(TcpStream::connect(tcp_address).await.test_value());
         let pending_reply = request_route(&mut pending_tcp, -1, 51).await;
         assert!(
             pending_reply.ok,
@@ -10096,7 +9957,7 @@ mod tests {
                         if let Ok(EngineControlPacket::ClientJoin(join)) =
                             decode_control_entry_payload(&data)
                         {
-                            break ClientId::try_from(join.core.client_id).unwrap();
+                            break ClientId::try_from(join.core.client_id).test_value();
                         }
                     }
                     Some(_) => {}
@@ -10105,16 +9966,20 @@ mod tests {
             }
         })
         .await
-        .expect("provisional ClientJoin was not emitted");
+        .test_value();
 
-        let udp_hub = crate::ReliableUdpSessionHub::bind("[::1]:0".parse().unwrap()).unwrap();
+        let udp_hub = crate::ReliableUdpSessionHub::bind("[::1]:0".parse().unwrap()).test_value();
         let udp_stream = udp_hub
             .connect_owned(host.udp_local_addr().unwrap())
             .await
-            .unwrap();
+            .test_value();
         let mut different_host = crate::ControlTransport::new(udp_stream);
-        let rejection =
-            request_route(&mut different_host, i32::try_from(client_id).unwrap(), 52).await;
+        let rejection = request_route(
+            &mut different_host,
+            i32::try_from(client_id).test_value(),
+            52,
+        )
+        .await;
         assert!(!rejection.ok);
         assert_eq!(
             rejection.message.as_bytes(),
@@ -10124,7 +9989,7 @@ mod tests {
 
         drop(different_host);
         drop(pending_tcp);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -10133,8 +9998,8 @@ mod tests {
         // only that first connection runs OnClientConnect and its JoinData,
         // lobby, and resource setup (src/C4Network2.cpp:1479-1498,1734-1743,
         // 1768-1783).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -10148,26 +10013,23 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .test_value();
         let mut host_events = host.take_event_receiver();
-        let mut canonical =
-            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut canonical = connect_test_player(addr, "Alice").await;
         let canonical_id = canonical.client_id();
         let mut canonical_events = canonical.take_event_receiver();
         while host_events.try_recv().is_ok() {}
         while canonical_events.try_recv().is_ok() {}
 
-        let stream = TcpStream::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.test_value();
         let mut secondary = crate::ControlTransport::new(stream);
-        let host_request = match secondary.read_message().await.unwrap() {
+        let host_request = match secondary.read_message().await.test_value() {
             ControlMessage::ConnectionRequest(request) => request,
             other => panic!("expected host connection request, got {other:?}"),
         };
         let local_connection_id = host_request.connection_id;
         let remote_connection_id = 29;
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         secondary
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -10185,15 +10047,15 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match secondary.read_message().await.unwrap() {
+            match secondary.read_message().await.test_value() {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
                     secondary
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 other => panic!("expected positive host connection reply, got {other:?}"),
             }
@@ -10206,7 +10068,7 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
 
         let routes = timeout(EVENT_WAIT, async {
             loop {
@@ -10218,7 +10080,7 @@ mod tests {
             }
         })
         .await
-        .expect("secondary accepted route was not retained");
+        .test_value();
         assert!(routes.contains(&(local_connection_id, canonical_id, remote_connection_id,)));
 
         while let Ok(event) = host_events.try_recv() {
@@ -10239,7 +10101,7 @@ mod tests {
                     secondary
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 Ok(Ok(message)) => {
                     panic!("secondary route received duplicate first-connect setup: {message:?}")
@@ -10249,7 +10111,7 @@ mod tests {
         }
 
         let countdown = crate::LobbyCountdownPacket::new(7);
-        host.submit_lobby_countdown(countdown).await.unwrap();
+        host.submit_lobby_countdown(countdown).await.test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 match canonical_events.recv().await {
@@ -10263,7 +10125,7 @@ mod tests {
             }
         })
         .await
-        .expect("secondary route replaced the logical client's primary sender");
+        .test_value();
 
         // RemoveConn clears only the failed route. OnDisconnect removes the
         // logical client only when no message route remains
@@ -10281,7 +10143,7 @@ mod tests {
             }
         })
         .await
-        .expect("secondary route was not removed");
+        .test_value();
         assert!(routes.iter().all(|(connection_id, client_id, _)| {
             *connection_id != local_connection_id && *client_id == canonical_id
         }));
@@ -10310,7 +10172,9 @@ mod tests {
         }
 
         let after_disconnect = crate::LobbyCountdownPacket::new(6);
-        host.submit_lobby_countdown(after_disconnect).await.unwrap();
+        host.submit_lobby_countdown(after_disconnect)
+            .await
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 match canonical_events.recv().await {
@@ -10337,10 +10201,10 @@ mod tests {
             }
         })
         .await
-        .expect("primary route stopped receiving after secondary disconnect");
+        .test_value();
 
-        host.shutdown().await.unwrap();
-        canonical.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
+        canonical.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -10354,13 +10218,13 @@ mod tests {
             client_id: ClientId,
             remote_connection_id: u32,
         ) -> (crate::ControlTransport<TcpStream>, u32) {
-            let stream = TcpStream::connect(addr).await.unwrap();
+            let stream = TcpStream::connect(addr).await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_request = match transport.read_message().await.unwrap() {
+            let host_request = match transport.read_message().await.test_value() {
                 ControlMessage::ConnectionRequest(request) => request,
                 other => panic!("expected host connection request, got {other:?}"),
             };
-            let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+            let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
             transport
                 .send_message(ControlMessage::ConnectionRequest(
                     crate::ConnectionRequest {
@@ -10378,15 +10242,15 @@ mod tests {
                     },
                 ))
                 .await
-                .unwrap();
+                .test_value();
             loop {
-                match transport.read_message().await.unwrap() {
+                match transport.read_message().await.test_value() {
                     ControlMessage::ConnectionReply(reply) if reply.ok => break,
                     ControlMessage::Ping(ping) => {
                         transport
                             .send_message(ControlMessage::Pong(ping))
                             .await
-                            .unwrap();
+                            .test_value();
                     }
                     other => panic!("expected positive host connection reply, got {other:?}"),
                 }
@@ -10401,18 +10265,13 @@ mod tests {
                     wrong_password: false,
                 }))
                 .await
-                .unwrap();
+                .test_value();
             (transport, host_request.connection_id)
         }
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut canonical =
-            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut canonical = connect_test_player(addr, "Alice").await;
         let canonical_id = canonical.client_id();
         let mut canonical_events = canonical.take_event_receiver();
         let remote_connection_id = 31;
@@ -10428,13 +10287,13 @@ mod tests {
             }
         })
         .await
-        .expect("secondary route was not accepted");
+        .test_value();
         while host_events.try_recv().is_ok() {}
 
         let dead_route_countdown = crate::LobbyCountdownPacket::new(9);
         host.submit_lobby_countdown(dead_route_countdown)
             .await
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 match canonical_events.recv().await {
@@ -10452,9 +10311,9 @@ mod tests {
             }
         })
         .await
-        .expect("dead route did not receive the recoverable test packet");
+        .test_value();
 
-        canonical.shutdown().await.unwrap();
+        canonical.shutdown().await.test_value();
         let routes = timeout(EVENT_WAIT, async {
             loop {
                 let routes = host.accepted_routes().await;
@@ -10465,7 +10324,7 @@ mod tests {
             }
         })
         .await
-        .expect("primary route was not removed");
+        .test_value();
         assert_eq!(
             routes,
             vec![(secondary_connection_id, canonical_id, remote_connection_id,)]
@@ -10484,7 +10343,7 @@ mod tests {
                         secondary
                             .send_message(ControlMessage::Pong(ping))
                             .await
-                            .unwrap();
+                            .test_value();
                     }
                     Ok(_) => continue,
                     Err(error) => panic!("surviving route closed unexpectedly: {error}"),
@@ -10492,7 +10351,7 @@ mod tests {
             }
         })
         .await
-        .expect("dead route backlog was not rerouted over the promoted survivor");
+        .test_value();
         assert_eq!(recovery.connection_id, 0);
         assert!(recovery.packets.iter().any(|packet| {
             matches!(
@@ -10522,7 +10381,7 @@ mod tests {
         }
 
         let countdown = crate::LobbyCountdownPacket::new(5);
-        host.submit_lobby_countdown(countdown).await.unwrap();
+        host.submit_lobby_countdown(countdown).await.test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 match secondary.read_message().await {
@@ -10531,7 +10390,7 @@ mod tests {
                         secondary
                             .send_message(ControlMessage::Pong(ping))
                             .await
-                            .unwrap();
+                            .test_value();
                     }
                     Ok(ControlMessage::Packet { data, .. })
                         if matches!(
@@ -10548,9 +10407,9 @@ mod tests {
             }
         })
         .await
-        .expect("host traffic did not use the promoted secondary route");
+        .test_value();
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -10565,13 +10424,13 @@ mod tests {
             client_id: ClientId,
             remote_connection_id: u32,
         ) -> (crate::ControlTransport<TcpStream>, u32) {
-            let stream = TcpStream::connect(addr).await.unwrap();
+            let stream = TcpStream::connect(addr).await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_request = match transport.read_message().await.unwrap() {
+            let host_request = match transport.read_message().await.test_value() {
                 ControlMessage::ConnectionRequest(request) => request,
                 other => panic!("expected host connection request, got {other:?}"),
             };
-            let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+            let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
             transport
                 .send_message(ControlMessage::ConnectionRequest(
                     crate::ConnectionRequest {
@@ -10589,15 +10448,15 @@ mod tests {
                     },
                 ))
                 .await
-                .unwrap();
+                .test_value();
             loop {
-                match transport.read_message().await.unwrap() {
+                match transport.read_message().await.test_value() {
                     ControlMessage::ConnectionReply(reply) if reply.ok => break,
                     ControlMessage::Ping(ping) => {
                         transport
                             .send_message(ControlMessage::Pong(ping))
                             .await
-                            .unwrap();
+                            .test_value();
                     }
                     other => panic!("expected positive host connection reply, got {other:?}"),
                 }
@@ -10612,30 +10471,26 @@ mod tests {
                     wrong_password: false,
                 }))
                 .await
-                .unwrap();
+                .test_value();
             (transport, host_request.connection_id)
         }
 
         async fn encode_nested(message: ControlMessage) -> Vec<u8> {
             let (writer, mut reader) = duplex(256);
             let mut transport = crate::ControlTransport::new(writer);
-            transport.send_message(message).await.unwrap();
+            transport.send_message(message).await.test_value();
             let mut header = [0; 5];
-            reader.read_exact(&mut header).await.unwrap();
+            reader.read_exact(&mut header).await.test_value();
             assert_eq!(header[0], 0xff);
-            let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let length = u32::from_ne_bytes(header[1..].try_into().test_value()) as usize;
             let mut packet = vec![0; length];
-            reader.read_exact(&mut packet).await.unwrap();
+            reader.read_exact(&mut packet).await.test_value();
             packet
         }
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let canonical = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let canonical = connect_test_player(addr, "Alice").await;
         let client_id = canonical.client_id();
         let (mut dead_route, dead_connection_id) =
             connect_existing_route(addr, client_id, 29).await;
@@ -10648,14 +10503,14 @@ mod tests {
             }
         })
         .await
-        .expect("additional routes were not accepted");
+        .test_value();
         while host_events.try_recv().is_ok() {}
 
         for tick in [100, 101] {
             dead_route
                 .send_message(ControlMessage::ActivationRequest { tick })
                 .await
-                .unwrap();
+                .test_value();
         }
         let mut received_before_close = Vec::new();
         timeout(EVENT_WAIT, async {
@@ -10672,7 +10527,7 @@ mod tests {
             }
         })
         .await
-        .expect("host did not dispatch the pre-close packets");
+        .test_value();
         assert_eq!(received_before_close, vec![100, 101]);
 
         let recovery = crate::PostMortemPacket {
@@ -10688,7 +10543,7 @@ mod tests {
         surviving_route
             .send_message(ControlMessage::PostMortem(recovery.clone()))
             .await
-            .unwrap();
+            .test_value();
         raw_client_ping_barrier(&mut surviving_route).await;
         timeout(EVENT_WAIT, async {
             while host.accepted_routes().await.len() != 2 {
@@ -10696,7 +10551,7 @@ mod tests {
             }
         })
         .await
-        .expect("post-mortem did not retire the referenced live route");
+        .test_value();
         drop(dead_route);
 
         let mut recovered = Vec::new();
@@ -10717,17 +10572,17 @@ mod tests {
             }
         })
         .await
-        .expect("host did not dispatch the recovered suffix");
+        .test_value();
         assert_eq!(recovered, vec![102, 103]);
 
         surviving_route
             .send_message(ControlMessage::PostMortem(recovery))
             .await
-            .unwrap();
+            .test_value();
         surviving_route
             .send_message(ControlMessage::ActivationRequest { tick: 104 })
             .await
-            .unwrap();
+            .test_value();
         timeout(EVENT_WAIT, async {
             loop {
                 match host_events.recv().await {
@@ -10748,24 +10603,22 @@ mod tests {
             }
         })
         .await
-        .expect("host did not process the duplicate-recovery barrier");
+        .test_value();
 
         drop(surviving_route);
-        canonical.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        canonical.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
     async fn nonresponsive_server_handshake_times_out() {
         // C4Network2IO::CheckTimeout closes connections which do not reach the
         // accepted state after C4NetAcceptTimeout (src/C4Network2IO.cpp:1155-1170).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let (connection, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
-        let client_stream = connection.expect("connect client socket");
-        let (_server_stream, _) = accepted.expect("accept client socket");
+        let client_stream = connection.test_value();
+        let (_server_stream, _) = accepted.test_value();
 
         let result = timeout(
             HANDSHAKE_TIMEOUT + Duration::from_secs(1),
@@ -10787,10 +10640,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_emits_one_decodable_ready_packet_for_host_and_client() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -10799,29 +10650,29 @@ mod tests {
             },
         )
         .await
-        .expect("start host");
+        .test_value();
 
         let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
         let mut events = host.take_event_receiver();
         activate_joined_client(&host, &mut events, client.client_id()).await;
 
         client
             .submit_control(legacy_packet(1, 0, 0x12))
             .await
-            .expect("submit client control");
+            .test_value();
         host.submit_local_control(legacy_packet(0, 0, 0x34))
             .await
-            .expect("submit host control");
+            .test_value();
 
         let packet = wait_for_host_ready(&mut events, EVENT_WAIT).await;
         assert_eq!(packet.tick(), 0);
         assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     fn take_queued_host_ready(events: &mut mpsc::Receiver<HostEvent>) -> Option<ControlPacket> {
@@ -10858,18 +10709,18 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn async_host_forces_and_broadcasts_incomplete_tick_after_strict_budget() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         config.initial_status.control_mode = 2;
         config.async_max_wait_frames = 2;
         config
             .initial_join_snapshot
             .as_mut()
-            .expect("default JoinData")
+            .test_value()
             .parameters
             .control_rate = 2;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         // Keep one task runnable while live loopback setup completes. Without
         // this guard Tokio may auto-advance paused time to the dial timeout
@@ -10879,10 +10730,7 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         });
-        let mut client =
-            connect_client(address, ClientConfig::new("Slow", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut client = connect_test_player(address, "Slow").await;
         let mut client_events = client.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
         frozen_time_guard.abort();
@@ -10895,16 +10743,16 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await
-        .unwrap();
+        .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
-            .unwrap();
-        host.set_join_allowed(true).await.unwrap();
+            .test_value();
+        host.set_join_allowed(true).await.test_value();
 
         // floor(2 * 2 * 1000 / 38) = 105ms. Native still waits at
         // equality and first permits the incomplete packet at 106ms.
         tokio::time::advance(Duration::from_millis(105)).await;
-        host.set_join_allowed(true).await.unwrap();
+        host.set_join_allowed(true).await.test_value();
         settle_paused_network().await;
         assert!(take_queued_host_ready(&mut host_events).is_none());
         assert!(take_queued_client_ready(&mut client_events).is_none());
@@ -10912,9 +10760,8 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         // This completion is a host-loop barrier. Because the deadline branch
         // is biased above commands, the expired tick is forced first.
-        host.set_join_allowed(true).await.unwrap();
-        let host_ready = take_queued_host_ready(&mut host_events)
-            .expect("async host did not force the expired tick");
+        host.set_join_allowed(true).await.test_value();
+        let host_ready = take_queued_host_ready(&mut host_events).test_value();
         assert_eq!(host_ready.client_id(), BROADCAST_CLIENT_ID);
         assert_eq!(host_ready.tick(), 0);
         assert_eq!(control_commands(&host_ready), vec![0xA0]);
@@ -10925,32 +10772,32 @@ mod tests {
         let client_ready = wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
         assert_eq!(client_ready, host_ready);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
     async fn central_and_decentral_never_force_incomplete_ticks() {
         for mode in [0, 1] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+            let address = listener.local_addr().test_value();
             let mut config = HostConfig::default();
             config.initial_status.control_mode = mode;
             config.async_max_wait_frames = 2;
             config
                 .initial_join_snapshot
                 .as_mut()
-                .expect("default JoinData")
+                .test_value()
                 .parameters
                 .control_rate = 2;
-            let mut host = start_host(listener, config).await.unwrap();
+            let mut host = start_host(listener, config).await.test_value();
             let mut host_events = host.take_event_receiver();
             let mut client = connect_client(
                 address,
                 ClientConfig::new(format!("Slow-{mode}"), ParticipantKind::Player),
             )
             .await
-            .unwrap();
+            .test_value();
             let mut client_events = client.take_event_receiver();
             activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
@@ -10961,13 +10808,13 @@ mod tests {
                 tokio::time::Instant::now(),
             )
             .await
-            .unwrap();
+            .test_value();
             host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0 + mode))
                 .await
-                .unwrap();
-            host.set_join_allowed(true).await.unwrap();
+                .test_value();
+            host.set_join_allowed(true).await.test_value();
             tokio::time::advance(Duration::from_secs(1)).await;
-            host.set_join_allowed(true).await.unwrap();
+            host.set_join_allowed(true).await.test_value();
             settle_paused_network().await;
 
             assert!(
@@ -10979,30 +10826,27 @@ mod tests {
                 "mode {mode} broadcast an incomplete complete packet"
             );
 
-            client.shutdown().await.unwrap();
-            host.shutdown().await.unwrap();
+            client.shutdown().await.test_value();
+            host.shutdown().await.test_value();
         }
     }
 
     #[tokio::test(start_paused = true)]
     async fn async_mode_commit_uses_tick_reach_stamped_in_central_mode() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         config.initial_status.control_mode = 1;
         config.async_max_wait_frames = 2;
         config
             .initial_join_snapshot
             .as_mut()
-            .expect("default JoinData")
+            .test_value()
             .parameters
             .control_rate = 2;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
-        let mut client =
-            connect_client(address, ClientConfig::new("Slow", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut client = connect_test_player(address, "Slow").await;
         let mut client_events = client.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
@@ -11013,13 +10857,13 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await
-        .unwrap();
+        .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
-            .unwrap();
-        host.set_join_allowed(true).await.unwrap();
+            .test_value();
+        host.set_join_allowed(true).await.test_value();
         tokio::time::advance(Duration::from_secs(1)).await;
-        host.set_join_allowed(true).await.unwrap();
+        host.set_join_allowed(true).await.test_value();
         settle_paused_network().await;
         assert!(take_queued_host_ready(&mut host_events).is_none());
 
@@ -11028,22 +10872,22 @@ mod tests {
             control_mode: 2,
             target_tick: 0,
         };
-        host.change_status(asynchronous).await.unwrap();
+        host.change_status(asynchronous).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) if status == asynchronous => break,
                 Some(_) => continue,
                 None => panic!("client event stream ended before async status"),
             }
         }
-        client.submit_status_ack(asynchronous).await.unwrap();
+        client.submit_status_ack(asynchronous).await.test_value();
         host.status_reached(asynchronous, asynchronous.target_tick)
             .await
-            .unwrap();
+            .test_value();
 
         let mut ready = None;
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(status)) if status == asynchronous => break,
                 Some(HostEvent::Ready { packet }) => ready = Some(packet),
                 Some(_) => continue,
@@ -11057,12 +10901,12 @@ mod tests {
                 break;
             }
         }
-        let ready = ready.expect("expired pre-async tick reach did not force after mode commit");
+        let ready = ready.test_value();
         assert_eq!(ready.tick(), 0);
         assert_eq!(control_commands(&ready), vec![0xA0]);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11071,32 +10915,25 @@ mod tests {
         // client's contribution through direct/forwarded broadcast, and runs
         // PackCompleteCtrl in client-ID order (pristine C++
         // src/C4GameControlNetwork.cpp:156-179,741-783).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut alpha =
-            connect_client(address, ClientConfig::new("Alpha", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut alpha = connect_test_player(address, "Alpha").await;
         let mut alpha_events = alpha.take_event_receiver();
         activate_joined_client(&host, &mut host_events, alpha.client_id()).await;
-        let mut beta = connect_client(address, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut beta = connect_test_player(address, "Beta").await;
         let mut beta_events = beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, beta.client_id()).await;
 
         host.submit_local_control(legacy_packet(0, 0, 0x10))
             .await
-            .unwrap();
+            .test_value();
         alpha
             .submit_control(legacy_packet(alpha.client_id(), 0, 0x20))
             .await
-            .unwrap();
+            .test_value();
         beta.submit_control(legacy_packet(beta.client_id(), 0, 0x30))
             .await
-            .unwrap();
+            .test_value();
 
         let host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         let alpha_ready = wait_for_client_ready(&mut alpha_events, EVENT_WAIT).await;
@@ -11113,9 +10950,9 @@ mod tests {
             }
         }
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11124,15 +10961,11 @@ mod tests {
         // client then rebinds its unknown local object to the assigned ID
         // (src/C4Network2.cpp:1395-1445,1574-1604;
         // src/C4Client.cpp:284-290,321-350).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut client = connect_test_player(addr, "Alice").await;
         let client_id = client.client_id();
-        let join_data = client.take_join_data().expect("bootstrap is retained once");
+        let join_data = client.take_join_data().test_value();
 
         assert_eq!(join_data.client_id, i32::try_from(client_id).unwrap());
         assert_eq!(
@@ -11166,8 +10999,8 @@ mod tests {
             }) if joined == client_id
         ));
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11176,8 +11009,8 @@ mod tests {
         // accepted message connection before resource discovery begins
         // (src/C4Network2.cpp:1810-1850;
         // src/C4Network2Client.cpp:319-337,616-621).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let host = start_host(
             listener,
             HostConfig {
@@ -11199,10 +11032,10 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let stream = TcpStream::connect(addr).await.unwrap();
+        .test_value();
+        let stream = TcpStream::connect(addr).await.test_value();
         let mut transport = crate::ControlTransport::new(stream);
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         let request = crate::ConnectionRequest {
             core: clonk_engine::ClientCoreControlData {
                 client_id: -1,
@@ -11217,13 +11050,13 @@ mod tests {
 
         let bootstrap = run_client_connection_handshake(&mut transport, request)
             .await
-            .expect("binary admission and JoinData");
+            .test_value();
         assert_eq!(bootstrap.join_data.client_id, 1);
 
         let packet = timeout(EVENT_WAIT, transport.read_message())
             .await
-            .expect("host must follow JoinData with PID_Addr")
-            .unwrap();
+            .test_value()
+            .test_value();
         match packet {
             ControlMessage::Address(crate::AddressPacket {
                 client_id: 0,
@@ -11241,8 +11074,8 @@ mod tests {
         loop {
             match timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("resource discovery follows JoinData addresses")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::Address(crate::AddressPacket { client_id: 0, .. }) => continue,
                 ControlMessage::Resource(ResourcePacket::Discover(discover)) => {
@@ -11257,19 +11090,19 @@ mod tests {
             client_id: 1,
             address: crate::NetworkAddress::new(
                 crate::NetworkProtocol::Tcp,
-                "0.0.0.0:11112".parse().unwrap(),
+                "0.0.0.0:11112".parse().test_value(),
             ),
         };
         transport
             .send_message(ControlMessage::Address(client_address))
             .await
-            .unwrap();
+            .test_value();
         let mut saw_reannouncement = false;
         for _ in 0..8 {
             let message = timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("host address propagation stalled")
-                .unwrap();
+                .test_value()
+                .test_value();
             if message == ControlMessage::Address(client_address) {
                 saw_reannouncement = true;
                 break;
@@ -11280,7 +11113,7 @@ mod tests {
             "host did not re-announce the newly learned client address"
         );
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11294,7 +11127,7 @@ mod tests {
         let mut host = crate::ControlTransport::new(host_stream);
         let host_address = crate::NetworkAddress::new(
             crate::NetworkProtocol::Tcp,
-            "192.0.2.4:11112".parse().unwrap(),
+            "192.0.2.4:11112".parse().test_value(),
         );
 
         send_client_post_join_packets(
@@ -11306,7 +11139,7 @@ mod tests {
             }],
         )
         .await
-        .unwrap();
+        .test_value();
 
         assert_eq!(
             host.read_message().await.unwrap(),
@@ -11338,7 +11171,7 @@ mod tests {
 
         let result =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
-        let probe = server.await.unwrap();
+        let probe = server.await.test_value();
         let messages = probe.messages;
 
         let error = result.expect_err("missing non-loadable Dynamic must abort bootstrap");
@@ -11374,7 +11207,7 @@ mod tests {
 
         let result =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
-        let probe = server.await.unwrap();
+        let probe = server.await.test_value();
         let messages = probe.messages;
 
         let error = result.expect_err("missing non-loadable Scenario must abort bootstrap");
@@ -11414,7 +11247,7 @@ mod tests {
 
         let result =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
-        let probe = server.await.unwrap();
+        let probe = server.await.test_value();
         let messages = probe.messages;
 
         let error = result.expect_err("final GameRes retry must fail bootstrap");
@@ -11446,7 +11279,7 @@ mod tests {
             file_size: u32::MAX,
             file_crc: u32::MAX,
             contents_crc: 1,
-            filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).test_value(),
             ..Default::default()
         }
     }
@@ -11462,12 +11295,12 @@ mod tests {
         SocketAddr,
         tokio::task::JoinHandle<ClientBootstrapProbeResult>,
     ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
             let host_core = clonk_engine::ClientCoreControlData {
                 client_id: 0,
                 activated: true,
@@ -11483,7 +11316,7 @@ mod tests {
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.unwrap();
+                let request = admission_rx.recv().await.test_value();
                 let mut assigned = request.request.core.clone();
                 assigned.client_id = 1;
                 request
@@ -11494,13 +11327,13 @@ mod tests {
                         message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
                             .unwrap(),
                     })
-                    .unwrap();
+                    .test_value();
                 assigned
             });
             run_host_connection_handshake(&mut transport, request, &admission_tx)
                 .await
-                .unwrap();
-            let assigned = admission.await.unwrap();
+                .test_value();
+            let assigned = admission.await.test_value();
             snapshot.parameters.clients =
                 JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
             transport
@@ -11516,7 +11349,7 @@ mod tests {
                     parameters: snapshot.parameters,
                 })))
                 .await
-                .unwrap();
+                .test_value();
 
             let mut messages = Vec::new();
             let mut disconnected = false;
@@ -11543,57 +11376,45 @@ mod tests {
         // C4Network2IO's 500 ms timer and strict one-second ping gate continue
         // on the accepted connection after JoinData
         // (src/C4Network2IO.cpp:605-617,1141-1151).
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop(512, 4, 4);
         let mut host = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel(4);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
 
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(1_500)).await;
-        let ping = match host.read_message().await.unwrap() {
+        let ping = match host.read_message().await.test_value() {
             ControlMessage::Ping(ping) => ping,
             other => panic!("expected accepted-session PID_Ping, got {other:?}"),
         };
         assert_eq!(ping.packet_counter, 0);
         tokio::time::advance(Duration::from_millis(37)).await;
-        host.send_message(ControlMessage::Pong(ping)).await.unwrap();
+        host.send_message(ControlMessage::Pong(ping))
+            .await
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::PingMeasured { round_trip_ms: 37 }))
         ));
 
-        shutdown_tx.send(()).unwrap();
+        shutdown_tx.send(()).test_value();
         drop(command_tx);
-        task.await.unwrap();
+        task.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn established_host_link_accepts_cpp_tcp_sim_open_frame_without_disconnect() {
-        let (client_stream, mut host_stream) = duplex(512);
-        let (command_tx, command_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel(4);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
+        let (mut host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop(512, 4, 4);
 
         // C++ body: packed client 7, TCP, [2001:db8::7]:11112.
         let payload = [
             0x14, 0x07, 0x01, b'[', b'2', b'0', b'0', b'1', b':', b'd', b'b', b'8', b':', b':',
             b'7', b']', b':', b'1', b'1', b'1', b'1', b'2', 0x00,
         ];
-        host_stream.write_all(&tcp_frame(&payload)).await.unwrap();
+        host_stream
+            .write_all(&tcp_frame(&payload))
+            .await
+            .test_value();
 
         let status = NetworkStatus {
             state: NETWORK_STATE_PAUSE,
@@ -11603,7 +11424,7 @@ mod tests {
         let mut host = crate::ControlTransport::new(host_stream);
         host.send_message(ControlMessage::Status(status))
             .await
-            .unwrap();
+            .test_value();
         match timeout(EVENT_WAIT, event_rx.recv()).await {
             Ok(Some(ClientEvent::Status(received))) => assert_eq!(received, status),
             Ok(Some(ClientEvent::Disconnected { reason })) => {
@@ -11612,9 +11433,9 @@ mod tests {
             other => panic!("status after PID_TCPSimOpen was not delivered: {other:?}"),
         }
 
-        shutdown_tx.send(()).unwrap();
+        shutdown_tx.send(()).test_value();
         drop(command_tx);
-        task.await.unwrap();
+        task.await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
@@ -11643,14 +11464,14 @@ mod tests {
 
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(1_500)).await;
-        let ping = match client.read_message().await.unwrap() {
+        let ping = match client.read_message().await.test_value() {
             ControlMessage::Ping(ping) => ping,
             other => panic!("expected host accepted-session PID_Ping, got {other:?}"),
         };
         client
             .send_message(ControlMessage::Pong(ping))
             .await
-            .unwrap();
+            .test_value();
         // The task mirrors its ping bookkeeping to the host loop so the
         // route can reproduce getPingTime/getLag: the dispatched probe, then
         // the measured pong. Neither is a ClientMessage.
@@ -11675,7 +11496,7 @@ mod tests {
 
         drop(client);
         drop(outbound_tx);
-        task.await.unwrap();
+        task.await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11692,7 +11513,7 @@ mod tests {
         spawn_host_transport(
             &mut route_tasks,
             host_stream,
-            "127.0.0.1:11112".parse().unwrap(),
+            "127.0.0.1:11112".parse().test_value(),
             crate::NetworkProtocol::Tcp,
             host_core,
             7,
@@ -11702,7 +11523,7 @@ mod tests {
             None,
         );
         let admission = tokio::spawn(async move {
-            let request = admission_rx.recv().await.unwrap();
+            let request = admission_rx.recv().await.test_value();
             let mut assigned = request.request.core.clone();
             assigned.client_id = 1;
             request
@@ -11712,7 +11533,7 @@ mod tests {
                     before_reply: Vec::new(),
                     message: clonk_engine::LegacyCString::default(),
                 })
-                .unwrap();
+                .test_value();
         });
 
         let mut client = crate::ControlTransport::new(client_stream);
@@ -11730,7 +11551,7 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         client
             .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                 ok: true,
@@ -11738,13 +11559,13 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             client.read_message().await.unwrap(),
             ControlMessage::ConnectionReply(crate::ConnectionReply { ok: true, .. })
         ));
 
-        let _delayed_setup = match timeout(EVENT_WAIT, host_rx.recv()).await.unwrap() {
+        let _delayed_setup = match timeout(EVENT_WAIT, host_rx.recv()).await.test_value() {
             Some(HostLoopMessage::ClientAccepted { setup_tx, .. }) => setup_tx,
             Some(other) => panic!("unexpected host route event: {other:?}"),
             None => panic!("host route stopped before acceptance"),
@@ -11756,7 +11577,7 @@ mod tests {
         client
             .send_message(ControlMessage::Ping(ping))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(Duration::from_millis(100), client.read_message())
                 .await
@@ -11767,7 +11588,7 @@ mod tests {
 
         route_tasks.abort_all();
         while route_tasks.join_next().await.is_some() {}
-        admission.await.unwrap();
+        admission.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11799,7 +11620,7 @@ mod tests {
                 data: vec![0x55; 1_024 * 1_024],
             })
             .await
-            .unwrap();
+            .test_value();
         tokio::task::yield_now().await;
         let inbound = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
@@ -11808,7 +11629,7 @@ mod tests {
         };
         peer.send_message(ControlMessage::Status(inbound))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(matches!(
             timeout(Duration::from_millis(50), host_rx.recv())
@@ -11821,7 +11642,7 @@ mod tests {
         ));
 
         outbound_tx.retire();
-        timeout(EVENT_WAIT, task).await.unwrap().unwrap();
+        timeout(EVENT_WAIT, task).await.unwrap().test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11867,7 +11688,9 @@ mod tests {
             sent_at: 0x1020_3040,
             packet_counter: PACKET_COUNT as u32,
         };
-        peer.send_message(ControlMessage::Ping(ping)).await.unwrap();
+        peer.send_message(ControlMessage::Ping(ping))
+            .await
+            .test_value();
         assert_eq!(
             timeout(Duration::from_millis(100), peer.read_message())
                 .await
@@ -11888,10 +11711,7 @@ mod tests {
         }
 
         outbound_tx.retire();
-        timeout(EVENT_WAIT, task)
-            .await
-            .expect("saturated host route did not shut down")
-            .unwrap();
+        timeout(EVENT_WAIT, task).await.test_value().test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11918,7 +11738,7 @@ mod tests {
             outbound_tx
                 .send(ControlMessage::Address(*address))
                 .await
-                .unwrap();
+                .test_value();
         }
         let (host_tx, _host_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(
@@ -11938,7 +11758,9 @@ mod tests {
             sent_at: 0x1020_3040,
             packet_counter: 0,
         };
-        peer.send_message(ControlMessage::Ping(ping)).await.unwrap();
+        peer.send_message(ControlMessage::Ping(ping))
+            .await
+            .test_value();
 
         for address in addresses {
             assert_eq!(
@@ -11958,10 +11780,7 @@ mod tests {
         );
 
         outbound_tx.retire();
-        timeout(EVENT_WAIT, task)
-            .await
-            .expect("FIFO host route did not shut down")
-            .unwrap();
+        timeout(EVENT_WAIT, task).await.test_value().test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11994,7 +11813,7 @@ mod tests {
                     data: vec![0x55; 1_024],
                 })
                 .await
-                .unwrap();
+                .test_value();
         }
         tokio::task::yield_now().await;
         outbound_tx
@@ -12004,12 +11823,12 @@ mod tests {
                     .unwrap(),
                 wrong_password: false,
             })
-            .unwrap();
+            .test_value();
 
         timeout(Duration::from_millis(100), &mut task)
             .await
-            .expect("controlled close waited behind the stale outbound backlog")
-            .unwrap();
+            .test_value()
+            .test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12041,7 +11860,7 @@ mod tests {
         client_stream
             .write_all(&tcp_frame(&tcp_sim_open))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(matches!(
             timeout(EVENT_WAIT, host_rx.recv()).await.unwrap(),
@@ -12067,7 +11886,7 @@ mod tests {
         client
             .send_message(ControlMessage::Ping(ping))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             client.read_message().await.unwrap(),
             ControlMessage::Pong(ping),
@@ -12076,7 +11895,7 @@ mod tests {
 
         drop(client);
         drop(outbound_tx);
-        task.await.unwrap();
+        task.await.test_value();
         assert!(matches!(
             host_rx.recv().await,
             Some(HostLoopMessage::ClientDisconnected {
@@ -12090,16 +11909,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn accepted_client_reports_league_results_and_keeps_the_connection() {
-        let (client_stream, mut host_stream) = duplex(512);
-        let (command_tx, command_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel(4);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
+        let (mut host_stream, command_tx, mut event_rx, shutdown_tx, task) =
+            start_test_client_loop(512, 4, 4);
 
         // Success, "OK", and zero result players, matching the native
         // C4PacketLeagueRoundResults binary layout.
@@ -12107,12 +11918,12 @@ mod tests {
         host_stream
             .write_all(&tcp_frame(&league_results))
             .await
-            .unwrap();
+            .test_value();
 
         let event = timeout(Duration::from_millis(100), event_rx.recv())
             .await
-            .unwrap()
-            .expect("client event channel remains open");
+            .test_value()
+            .test_value();
         let ClientEvent::LeagueRoundResults { packet } = event else {
             panic!("expected typed league round-results event, got {event:?}");
         };
@@ -12130,7 +11941,9 @@ mod tests {
             sent_at: 23,
             packet_counter: 0,
         };
-        host.send_message(ControlMessage::Ping(ping)).await.unwrap();
+        host.send_message(ControlMessage::Ping(ping))
+            .await
+            .test_value();
         assert_eq!(
             host.read_message().await.unwrap(),
             ControlMessage::Pong(ping),
@@ -12138,7 +11951,7 @@ mod tests {
         );
 
         tokio::time::advance(Duration::from_millis(1_500)).await;
-        let liveness_ping = match host.read_message().await.unwrap() {
+        let liveness_ping = match host.read_message().await.test_value() {
             ControlMessage::Ping(ping) => ping,
             other => panic!("expected accepted-session PID_Ping, got {other:?}"),
         };
@@ -12148,11 +11961,11 @@ mod tests {
         );
         host.send_message(ControlMessage::Pong(liveness_ping))
             .await
-            .unwrap();
+            .test_value();
 
-        shutdown_tx.send(()).unwrap();
+        shutdown_tx.send(()).test_value();
         drop(command_tx);
-        task.await.unwrap();
+        task.await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -12164,13 +11977,13 @@ mod tests {
         // src/C4Network2IO.cpp:117-197; src/C4Packet2.cpp:51-73).
         let client_name = b"CurrentThreadBootstrap";
         let (probe_paused, resume_probe) = pause_client_resource_bootstrap_probe(client_name);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let (ping_result_tx, ping_result_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
             let host_core = clonk_engine::ClientCoreControlData {
                 client_id: 0,
                 activated: true,
@@ -12186,7 +11999,7 @@ mod tests {
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.unwrap();
+                let request = admission_rx.recv().await.test_value();
                 let mut assigned = request.request.core.clone();
                 assigned.client_id = 1;
                 request
@@ -12197,13 +12010,13 @@ mod tests {
                         message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
                             .unwrap(),
                     })
-                    .unwrap();
+                    .test_value();
                 assigned
             });
             run_host_connection_handshake(&mut transport, request, &admission_tx)
                 .await
-                .unwrap();
-            let assigned = admission.await.unwrap();
+                .test_value();
+            let assigned = admission.await.test_value();
             let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
             snapshot.parameters.clients =
                 JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
@@ -12220,7 +12033,7 @@ mod tests {
                     parameters: snapshot.parameters,
                 })))
                 .await
-                .unwrap();
+                .test_value();
             assert_eq!(
                 transport.read_message().await.unwrap(),
                 ControlMessage::Request { from_tick: 0 }
@@ -12233,16 +12046,16 @@ mod tests {
             transport
                 .send_message(ControlMessage::Ping(ping))
                 .await
-                .unwrap();
+                .test_value();
             let serviced = timeout(Duration::from_millis(500), async {
                 loop {
-                    match transport.read_message().await.unwrap() {
+                    match transport.read_message().await.test_value() {
                         ControlMessage::Pong(reply) if reply == ping => break,
                         ControlMessage::Ping(probe) => {
                             transport
                                 .send_message(ControlMessage::Pong(probe))
                                 .await
-                                .unwrap();
+                                .test_value();
                         }
                         _ => {}
                     }
@@ -12259,12 +12072,12 @@ mod tests {
             }
         });
 
-        let client_name = String::from_utf8(client_name.to_vec()).unwrap();
+        let client_name = String::from_utf8(client_name.to_vec()).test_value();
         let client_thread = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap()
+                .test_value()
                 .block_on(async move {
                     let client = connect_client(
                         address,
@@ -12275,21 +12088,15 @@ mod tests {
                 })
         });
 
-        probe_paused
-            .await
-            .expect("client did not enter synchronous resource probing");
-        let ping_serviced = ping_result_rx
-            .await
-            .expect("probe server stopped before reporting Ping service");
-        resume_probe
-            .send(())
-            .expect("resource bootstrap worker disappeared");
+        probe_paused.await.test_value();
+        let ping_serviced = ping_result_rx.await.test_value();
+        resume_probe.send(()).test_value();
         let client_result = tokio::task::spawn_blocking(move || client_thread.join())
             .await
-            .unwrap()
-            .expect("current-thread client runtime panicked");
-        client_result.expect("client should complete bootstrap after probe release");
-        server.await.unwrap();
+            .test_value()
+            .test_value();
+        client_result.test_value();
+        server.await.test_value();
 
         assert!(
             ping_serviced,
@@ -12308,14 +12115,14 @@ mod tests {
         const QUEUED_PACKETS: i32 = 96;
         let client_name = b"BootstrapRouteLiveness";
         let (bootstrap_paused, resume_bootstrap) = pause_client_post_join_bootstrap(client_name);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let (probe_complete_tx, probe_complete_rx) = oneshot::channel();
         let (finish_server_tx, finish_server_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
             let host_core = clonk_engine::ClientCoreControlData {
                 client_id: 0,
                 activated: true,
@@ -12331,7 +12138,7 @@ mod tests {
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.unwrap();
+                let request = admission_rx.recv().await.test_value();
                 let mut assigned = request.request.core.clone();
                 assigned.client_id = 1;
                 request
@@ -12342,13 +12149,13 @@ mod tests {
                         message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
                             .unwrap(),
                     })
-                    .unwrap();
+                    .test_value();
                 assigned
             });
             run_host_connection_handshake(&mut transport, request, &admission_tx)
                 .await
-                .unwrap();
-            let assigned = admission.await.unwrap();
+                .test_value();
+            let assigned = admission.await.test_value();
             let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
             snapshot.parameters.clients =
                 JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
@@ -12365,7 +12172,7 @@ mod tests {
                     parameters: snapshot.parameters,
                 })))
                 .await
-                .unwrap();
+                .test_value();
             assert_eq!(
                 transport.read_message().await.unwrap(),
                 ControlMessage::Request { from_tick: 0 }
@@ -12377,7 +12184,7 @@ mod tests {
                         countdown,
                     )))
                     .await
-                    .unwrap();
+                    .test_value();
             }
             let ping = crate::PingPacket {
                 sent_at: 0x1020_3040,
@@ -12386,16 +12193,16 @@ mod tests {
             transport
                 .send_message(ControlMessage::Ping(ping))
                 .await
-                .unwrap();
+                .test_value();
             timeout(Duration::from_millis(500), async {
                 loop {
-                    match transport.read_message().await.unwrap() {
+                    match transport.read_message().await.test_value() {
                         ControlMessage::Pong(reply) if reply == ping => break,
                         ControlMessage::Ping(probe) => {
                             transport
                                 .send_message(ControlMessage::Pong(probe))
                                 .await
-                                .unwrap();
+                                .test_value();
                         }
                         other => panic!(
                             "client started post-bootstrap traffic before release: {other:?}"
@@ -12404,37 +12211,33 @@ mod tests {
                 }
             })
             .await
-            .expect("accepted primary route did not service Ping during bootstrap");
+            .test_value();
             let _ = probe_complete_tx.send(());
             let _ = finish_server_rx.await;
         });
 
         let config = ClientConfig::new(
-            String::from_utf8(client_name.to_vec()).unwrap(),
+            String::from_utf8(client_name.to_vec()).test_value(),
             ParticipantKind::Player,
         );
         let connect = tokio::spawn(connect_client(address, config));
-        bootstrap_paused
-            .await
-            .expect("client did not reach the post-JoinData bootstrap pause");
+        bootstrap_paused.await.test_value();
         timeout(Duration::from_secs(1), probe_complete_rx)
             .await
             .expect("bootstrap route did not answer the host's probe")
-            .expect("probe server stopped before observing Pong");
+            .test_value();
         assert!(
             !connect.is_finished(),
             "the main client loop must not start before resource bootstrap completes"
         );
-        resume_bootstrap
-            .send(())
-            .expect("paused client bootstrap disappeared");
+        resume_bootstrap.send(()).test_value();
 
-        let mut client = connect.await.unwrap().unwrap();
+        let mut client = connect.await.unwrap().test_value();
         for expected in 0..QUEUED_PACKETS {
             let event = timeout(EVENT_WAIT, client.events().recv())
                 .await
                 .expect("queued post-JoinData packet stalled")
-                .expect("client event stream ended");
+                .test_value();
             let ClientEvent::LobbyCountdown { packet } = event else {
                 panic!("expected queued lobby countdown, got {event:?}");
             };
@@ -12446,8 +12249,8 @@ mod tests {
         }
 
         let _ = finish_server_tx.send(());
-        server.await.unwrap();
-        client.shutdown().await.unwrap();
+        server.await.test_value();
+        client.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12457,12 +12260,12 @@ mod tests {
         // known, so it is re-announced as a host-owned PID_Addr
         // (src/C4Network2.cpp:1448-1499,1574-1623;
         // src/C4Network2Client.cpp:319-337,616-621).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.test_value();
             let mut transport = crate::ControlTransport::new(stream);
-            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value();
             let host_core = clonk_engine::ClientCoreControlData {
                 client_id: 0,
                 activated: true,
@@ -12478,7 +12281,7 @@ mod tests {
             };
             let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
             let admission = tokio::spawn(async move {
-                let request = admission_rx.recv().await.unwrap();
+                let request = admission_rx.recv().await.test_value();
                 let mut assigned = request.request.core.clone();
                 assigned.client_id = 1;
                 request
@@ -12489,13 +12292,13 @@ mod tests {
                         message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
                             .unwrap(),
                     })
-                    .unwrap();
+                    .test_value();
                 assigned
             });
             run_host_connection_handshake(&mut transport, request, &admission_tx)
                 .await
-                .unwrap();
-            let assigned = admission.await.unwrap();
+                .test_value();
+            let assigned = admission.await.test_value();
             let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
             snapshot.parameters.clients =
                 JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
@@ -12512,46 +12315,44 @@ mod tests {
                     parameters: snapshot.parameters,
                 })))
                 .await
-                .unwrap();
+                .test_value();
 
             let control_request = timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("client must request its JoinData control tick")
-                .unwrap();
+                .test_value()
+                .test_value();
             let initial = timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("client must announce addresses after JoinData")
-                .unwrap();
+                .test_value()
+                .test_value();
             let learned = crate::AddressPacket {
                 client_id: 0,
                 address: crate::NetworkAddress::new(
                     crate::NetworkProtocol::Tcp,
-                    "198.51.100.7:11112".parse().unwrap(),
+                    "198.51.100.7:11112".parse().test_value(),
                 ),
             };
             transport
                 .send_message(ControlMessage::Address(learned))
                 .await
-                .unwrap();
+                .test_value();
             let mut echoed = None;
             for _ in 0..8 {
                 let message = timeout(EVENT_WAIT, transport.read_message())
                     .await
-                    .expect("client must re-announce a newly learned address")
-                    .unwrap();
+                    .test_value()
+                    .test_value();
                 if message == ControlMessage::Address(learned) {
                     echoed = Some(message);
                     break;
                 }
             }
-            let echoed = echoed.expect("client never re-announced the newly learned address");
+            let echoed = echoed.test_value();
             (control_request, initial, learned, echoed)
         });
 
-        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
-        let (control_request, packet, learned, echoed) = server.await.unwrap();
+        let client = connect_test_player(addr, "Alice").await;
+        let (control_request, packet, learned, echoed) = server.await.test_value();
         assert_eq!(control_request, ControlMessage::Request { from_tick: 0 });
         assert_eq!(
             packet,
@@ -12562,7 +12363,7 @@ mod tests {
         );
         assert_eq!(echoed, ControlMessage::Address(learned));
 
-        client.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12571,12 +12372,12 @@ mod tests {
         // dynamic exists. OnGameSynchronized later publishes the fresh
         // dynamic and sends JoinData/Addr without re-running admission
         // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let mut client_task = tokio::spawn(connect_client(
             addr,
@@ -12585,7 +12386,7 @@ mod tests {
 
         let mut needed = false;
         for _ in 0..4 {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::JoinDataNeeded {
                     client_id: 1,
                     current_control_tick: 0,
@@ -12605,18 +12406,20 @@ mod tests {
             .await
             .is_err());
 
-        host.publish_join_snapshot(snapshot.clone()).await.unwrap();
+        host.publish_join_snapshot(snapshot.clone())
+            .await
+            .test_value();
         let mut client = timeout(EVENT_WAIT, client_task)
             .await
-            .expect("published JoinData did not release the client")
+            .test_value()
             .unwrap()
-            .unwrap();
-        let join_data = client.take_join_data().unwrap();
+            .test_value();
+        let join_data = client.take_join_data().test_value();
         assert_eq!(join_data.dynamic, snapshot.dynamic);
         assert_eq!(join_data.start_control_tick, snapshot.dynamic_tick);
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12625,19 +12428,19 @@ mod tests {
         // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849). The
         // presentation-only transcript extension must follow that delayed
         // JoinData just as it follows an immediately available one.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let client_task = tokio::spawn(connect_client(
             addr,
             ClientConfig::new("Alice", ParticipantKind::Player),
         ));
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before JoinData was requested"),
@@ -12649,15 +12452,16 @@ mod tests {
             player: -1,
             to_player: -1,
             message: clonk_engine::LegacyCString::from_bytes(b"during delayed join".to_vec())
-                .unwrap(),
+                .test_value(),
             by_client: HOST_CLIENT_ID as i32,
         };
-        let data = encode_control_entry_payload(&EngineControlPacket::Message(message)).unwrap();
+        let data =
+            encode_control_entry_payload(&EngineControlPacket::Message(message)).test_value();
         host.submit_packet(ControlDelivery::Private, data.clone())
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Direct {
                     client_id: BROADCAST_CLIENT_ID,
                     delivery: ControlDelivery::Private,
@@ -12668,12 +12472,12 @@ mod tests {
             }
         }
 
-        host.publish_join_snapshot(snapshot).await.unwrap();
+        host.publish_join_snapshot(snapshot).await.test_value();
         let mut client = timeout(EVENT_WAIT, client_task)
             .await
-            .expect("published JoinData did not release the client")
+            .test_value()
             .unwrap()
-            .unwrap();
+            .test_value();
         let mut client_events = client.take_event_receiver();
         let replayed = timeout(EVENT_WAIT, async {
             loop {
@@ -12691,8 +12495,8 @@ mod tests {
         .ok()
         .flatten();
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
         assert_eq!(replayed, Some(data));
     }
 
@@ -12702,12 +12506,12 @@ mod tests {
         // accepted connection while SendJoinData waits for a fresh dynamic
         // (src/C4Network2IO.cpp:611-623,1155-1191;
         // src/C4Network2.cpp:1107-1133,1836-1865).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let client_task = tokio::spawn(connect_client(
             addr,
@@ -12715,7 +12519,7 @@ mod tests {
         ));
 
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before JoinData was requested"),
@@ -12724,7 +12528,7 @@ mod tests {
 
         let ping_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let measured_ping = loop {
-            let connections = host.runtime_connections().await.unwrap();
+            let connections = host.runtime_connections().await.test_value();
             if let Some(ping_ms) = connections
                 .iter()
                 .find(|connection| connection.client_id == 1)
@@ -12747,15 +12551,15 @@ mod tests {
             "client must still be waiting for the delayed JoinData"
         );
 
-        host.publish_join_snapshot(snapshot).await.unwrap();
+        host.publish_join_snapshot(snapshot).await.test_value();
         let client = timeout(EVENT_WAIT, client_task)
             .await
-            .expect("published JoinData did not release the live client")
+            .test_value()
             .unwrap()
-            .unwrap();
+            .test_value();
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
@@ -12772,11 +12576,11 @@ mod tests {
         let parameters = config
             .initial_join_snapshot
             .as_ref()
-            .unwrap()
+            .test_value()
             .parameters
             .clone();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut host = start_host(listener, config).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let mut host = start_host(listener, config).await.test_value();
         let mut events = host.take_event_receiver();
         // Tokio intervals are initially ready. Drain that startup tick before
         // publishing a dynamic so this test isolates the control-tick handler
@@ -12785,7 +12589,7 @@ mod tests {
 
         host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters.clone())
             .await
-            .unwrap();
+            .test_value();
         host.control_tick_reached(
             0,
             1,
@@ -12793,7 +12597,7 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await
-        .unwrap();
+        .test_value();
         assert!(
             host.remove_runtime_dynamic().await.unwrap(),
             "the dynamic must remain available at its exact control tick"
@@ -12801,10 +12605,10 @@ mod tests {
 
         host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters)
             .await
-            .unwrap();
+            .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x34))
             .await
-            .unwrap();
+            .test_value();
         wait_for_host_ready_tick(&mut events, 0).await;
         host.control_tick_reached(
             1,
@@ -12813,13 +12617,13 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await
-        .unwrap();
+        .test_value();
         assert!(
             host.remove_runtime_dynamic().await.unwrap(),
             "the control-tick handler must not synchronously remove a stale runtime dynamic"
         );
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
@@ -12836,20 +12640,20 @@ mod tests {
         let parameters = config
             .initial_join_snapshot
             .as_ref()
-            .unwrap()
+            .test_value()
             .parameters
             .clone();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut host = start_host(listener, config).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let mut host = start_host(listener, config).await.test_value();
         let mut events = host.take_event_receiver();
         settle_paused_network().await;
 
         host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters)
             .await
-            .unwrap();
+            .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x35))
             .await
-            .unwrap();
+            .test_value();
         wait_for_host_ready_tick(&mut events, 0).await;
         host.control_tick_reached(
             1,
@@ -12858,7 +12662,7 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await
-        .unwrap();
+        .test_value();
 
         tokio::time::advance(Duration::from_secs(1)).await;
         settle_paused_network().await;
@@ -12867,7 +12671,7 @@ mod tests {
             "the second timer must remove an already stale runtime dynamic"
         );
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[test]
@@ -12917,7 +12721,7 @@ mod tests {
                         client_id: client_id as i32,
                         ..Default::default()
                     },
-                    peer_addr: "127.0.0.1:1111".parse().unwrap(),
+                    peer_addr: "127.0.0.1:1111".parse().test_value(),
                     join_data_sent,
                     join_data_needed_emitted: false,
                 },
@@ -12943,7 +12747,7 @@ mod tests {
                 payload: b"[Game]\r\nControlTick=0\r\n".to_vec(),
             }],
         })
-        .unwrap()
+        .test_value()
     }
 
     #[tokio::test(start_paused = true)]
@@ -12957,18 +12761,18 @@ mod tests {
         assert!(!task.is_finished());
 
         tokio::time::advance(Duration::from_millis(1)).await;
-        task.await.unwrap();
+        task.await.test_value();
         assert_eq!(tokio::time::Instant::now(), deadline);
     }
 
     #[tokio::test(start_paused = true)]
     async fn chase_target_timer_arms_only_when_delayed_join_data_is_sent() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let mut client_task = tokio::spawn(connect_client(
             addr,
@@ -12976,7 +12780,7 @@ mod tests {
         ));
 
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before JoinData was requested"),
@@ -12993,13 +12797,13 @@ mod tests {
         );
 
         let chase_deadline = tokio::time::Instant::now() + CHASE_TARGET_UPDATE_INTERVAL;
-        host.publish_join_snapshot(snapshot).await.unwrap();
+        host.publish_join_snapshot(snapshot).await.test_value();
         let mut client = timeout(EVENT_WAIT, &mut client_task)
             .await
-            .expect("published JoinData did not release the client")
+            .test_value()
             .unwrap()
-            .unwrap();
-        let initial_status = client.take_join_data().unwrap().status;
+            .test_value();
+        let initial_status = client.take_join_data().test_value().status;
         let mut client_events = client.take_event_receiver();
 
         let remaining = chase_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -13020,8 +12824,8 @@ mod tests {
             }
         );
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13030,19 +12834,13 @@ mod tests {
         // sends positive ConnRe, so every existing client learns the newcomer
         // before normal synchronized traffic continues
         // (src/C4Network2.cpp:1395-1445; src/C4Control.cpp:554-573).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
-        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let (addr, host) = start_test_host(HostConfig::default()).await;
+        let mut alpha = connect_test_player(addr, "Alpha").await;
         let mut alpha_events = alpha.take_event_receiver();
-        let beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let beta = connect_test_player(addr, "Beta").await;
 
         let data = loop {
-            match timeout(EVENT_WAIT, alpha_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, alpha_events.recv()).await.test_value() {
                 Some(ClientEvent::Direct {
                     delivery: ControlDelivery::Direct,
                     data,
@@ -13052,7 +12850,7 @@ mod tests {
             }
         };
         let clonk_engine::ControlPacket::ClientJoin(join) =
-            decode_control_entry_payload(&data).unwrap()
+            decode_control_entry_payload(&data).test_value()
         else {
             panic!("direct packet was not ClientJoin");
         };
@@ -13062,9 +12860,9 @@ mod tests {
         );
         assert_eq!(join.core.name.as_bytes(), b"Beta");
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13074,29 +12872,26 @@ mod tests {
         // src/C4GameControlNetwork.cpp:225-237). Retaining those same raw
         // controls for post-JoinData replay fixes the presentation-only gap
         // without changing synchronized state or recipient-side filtering.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let source = connect_client(addr, ClientConfig::new("Source", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let source = connect_test_player(addr, "Source").await;
         let source_id = source.client_id();
         let message = clonk_engine::MessageControlData {
             message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
             player: -1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(b"before join".to_vec()).unwrap(),
-            by_client: i32::try_from(source_id).unwrap(),
+            message: clonk_engine::LegacyCString::from_bytes(b"before join".to_vec()).test_value(),
+            by_client: i32::try_from(source_id).test_value(),
         };
-        let data = encode_control_entry_payload(&EngineControlPacket::Message(message)).unwrap();
+        let data =
+            encode_control_entry_payload(&EngineControlPacket::Message(message)).test_value();
 
         source
             .submit_packet(ControlDelivery::Private, data.clone())
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Direct {
                     client_id,
                     delivery: ControlDelivery::Private,
@@ -13107,9 +12902,7 @@ mod tests {
             }
         }
 
-        let mut client = connect_client(addr, ClientConfig::new("Late", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut client = connect_test_player(addr, "Late").await;
         let mut client_events = client.take_event_receiver();
         let replayed = timeout(EVENT_WAIT, async {
             loop {
@@ -13127,33 +12920,30 @@ mod tests {
         .ok()
         .flatten();
 
-        client.shutdown().await.unwrap();
-        source.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        source.shutdown().await.test_value();
+        host.shutdown().await.test_value();
         assert_eq!(replayed, Some(data));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn two_rust_clients_form_a_known_peer_tcp_mesh_and_keep_host_forwarding_as_fallback() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+    #[derive(Clone, Copy)]
+    enum TestMeshTransport {
+        Tcp,
+        Udp,
+    }
+
+    async fn known_peer_mesh_keeps_host_forwarding_as_fallback(transport: TestMeshTransport) {
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let mesh_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        let alpha = connect_client(
-            addr,
-            ClientConfig::new("Alpha", ParticipantKind::Player)
+        let config = |name| match transport {
+            TestMeshTransport::Tcp => ClientConfig::new(name, ParticipantKind::Player)
                 .with_mesh_tcp_bind_address(mesh_bind),
-        )
-        .await
-        .unwrap();
-        let mut beta = connect_client(
-            addr,
-            ClientConfig::new("Beta", ParticipantKind::Player)
-                .with_mesh_tcp_bind_address(mesh_bind),
-        )
-        .await
-        .unwrap();
+            TestMeshTransport::Udp => ClientConfig::new(name, ParticipantKind::Player)
+                .with_mesh_udp_bind_address(mesh_bind),
+        };
+        let alpha = connect_client(addr, config("Alpha")).await.test_value();
+        let mut beta = connect_client(addr, config("Beta")).await.test_value();
 
         // Each live PID_Addr invokes DoConnectAttempt. The leading wildcard
         // address is intentionally undialable and enters the native 10-second
@@ -13171,9 +12961,11 @@ mod tests {
             }
         })
         .await
-        .expect("host did not propagate both clients' mesh addresses");
+        .test_value();
         beta.force_mesh_attempt(alpha.client_id()).await;
-        tokio::task::yield_now().await;
+        if matches!(transport, TestMeshTransport::Tcp) {
+            tokio::task::yield_now().await;
+        }
 
         let deadline = tokio::time::Instant::now() + EVENT_WAIT;
         loop {
@@ -13184,7 +12976,15 @@ mod tests {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "clients did not establish their direct known-peer route"
+                "{}",
+                match transport {
+                    TestMeshTransport::Tcp => {
+                        "clients did not establish their direct known-peer route"
+                    }
+                    TestMeshTransport::Udp => {
+                        "clients did not establish their direct known-peer UDP route"
+                    }
+                }
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -13192,30 +12992,41 @@ mod tests {
 
         let mut beta_events = beta.take_event_receiver();
         let alpha_id = alpha.client_id();
+        let (command, command_data) = match transport {
+            TestMeshTransport::Tcp => (0x44, 0x55),
+            TestMeshTransport::Udp => (0x66, 0x77),
+        };
         let data =
             encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
                 player: i32::try_from(alpha_id).unwrap(),
-                command: 0x44,
-                data: 0x55,
+                command,
+                data: command_data,
                 by_client: i32::try_from(alpha_id).unwrap(),
             }))
-            .unwrap();
+            .test_value();
         alpha
             .submit_packet(ControlDelivery::Direct, data.clone())
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::Direct {
                     delivery: ControlDelivery::Direct,
                     data: received,
                 }) if received == data => break,
                 Some(_) => continue,
-                None => panic!("beta event stream ended before direct mesh delivery"),
+                None => panic!(
+                    "beta event stream ended before direct {}mesh delivery",
+                    if matches!(transport, TestMeshTransport::Udp) {
+                        "UDP "
+                    } else {
+                        ""
+                    }
+                ),
             }
         }
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Direct {
                     client_id,
                     delivery: ControlDelivery::Direct,
@@ -13224,9 +13035,23 @@ mod tests {
                 Some(HostEvent::TransportError {
                     client_id: Some(client_id),
                     error,
-                }) if client_id == alpha_id => panic!("mesh fallback failed: {error}"),
+                }) if client_id == alpha_id => panic!(
+                    "{}mesh fallback failed: {error}",
+                    if matches!(transport, TestMeshTransport::Udp) {
+                        "UDP "
+                    } else {
+                        ""
+                    }
+                ),
                 Some(_) => continue,
-                None => panic!("host event stream ended before mesh fallback"),
+                None => panic!(
+                    "host event stream ended before {}mesh fallback",
+                    if matches!(transport, TestMeshTransport::Udp) {
+                        "UDP "
+                    } else {
+                        ""
+                    }
+                ),
             }
         }
         while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
@@ -13238,121 +13063,28 @@ mod tests {
                         data: ref received,
                     } if *received == data
                 ),
-                "host fallback duplicated a directly delivered mesh packet"
+                "host fallback duplicated a directly delivered {}mesh packet",
+                if matches!(transport, TestMeshTransport::Udp) {
+                    "UDP "
+                } else {
+                    ""
+                }
             );
         }
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_rust_clients_form_a_known_peer_tcp_mesh_and_keep_host_forwarding_as_fallback() {
+        known_peer_mesh_keeps_host_forwarding_as_fallback(TestMeshTransport::Tcp).await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn two_rust_clients_form_a_known_peer_udp_mesh_and_keep_host_forwarding_as_fallback() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
-        let mut host_events = host.take_event_receiver();
-        let mesh_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        let alpha = connect_client(
-            addr,
-            ClientConfig::new("Alpha", ParticipantKind::Player)
-                .with_mesh_udp_bind_address(mesh_bind),
-        )
-        .await
-        .unwrap();
-        let mut beta = connect_client(
-            addr,
-            ClientConfig::new("Beta", ParticipantKind::Player)
-                .with_mesh_udp_bind_address(mesh_bind),
-        )
-        .await
-        .unwrap();
-
-        timeout(EVENT_WAIT, async {
-            loop {
-                if alpha.mesh_address_count(beta.client_id()).await >= 2
-                    && beta.mesh_address_count(alpha.client_id()).await >= 2
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("host did not propagate both clients' UDP mesh addresses");
-        beta.force_mesh_attempt(alpha.client_id()).await;
-
-        let deadline = tokio::time::Instant::now() + EVENT_WAIT;
-        loop {
-            let alpha_connected = alpha.mesh_peer_ids().await.contains(&beta.client_id());
-            let beta_connected = beta.mesh_peer_ids().await.contains(&alpha.client_id());
-            if alpha_connected && beta_connected {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "clients did not establish their direct known-peer UDP route"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(host.accepted_routes().await.len(), 2);
-
-        let mut beta_events = beta.take_event_receiver();
-        let alpha_id = alpha.client_id();
-        let data =
-            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
-                player: i32::try_from(alpha_id).unwrap(),
-                command: 0x66,
-                data: 0x77,
-                by_client: i32::try_from(alpha_id).unwrap(),
-            }))
-            .unwrap();
-        alpha
-            .submit_packet(ControlDelivery::Direct, data.clone())
-            .await
-            .unwrap();
-        loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
-                Some(ClientEvent::Direct {
-                    delivery: ControlDelivery::Direct,
-                    data: received,
-                }) if received == data => break,
-                Some(_) => continue,
-                None => panic!("beta event stream ended before direct UDP mesh delivery"),
-            }
-        }
-        loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::Direct {
-                    client_id,
-                    delivery: ControlDelivery::Direct,
-                    data: received,
-                }) if client_id == alpha_id && received == data => break,
-                Some(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error,
-                }) if client_id == alpha_id => panic!("UDP mesh fallback failed: {error}"),
-                Some(_) => continue,
-                None => panic!("host event stream ended before UDP mesh fallback"),
-            }
-        }
-        while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
-            assert!(
-                !matches!(
-                    event,
-                    ClientEvent::Direct {
-                        delivery: ControlDelivery::Direct,
-                        data: ref received,
-                    } if *received == data
-                ),
-                "host fallback duplicated a directly delivered UDP mesh packet"
-            );
-        }
-
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        known_peer_mesh_keeps_host_forwarding_as_fallback(TestMeshTransport::Udp).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13360,24 +13092,22 @@ mod tests {
         // PID_ExecSyncCtrl is emitted only when SyncControl is non-empty;
         // connection establishment is not a synchronization release
         // (src/C4GameControlNetwork.cpp:260-276).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
         let mut events = client.take_event_receiver();
 
         assert!(timeout(Duration::from_millis(50), events.recv())
             .await
             .is_err());
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13385,17 +13115,15 @@ mod tests {
         // PID_Status is host-authored; a client answers with PID_StatusAck and
         // the host later broadcasts the final ACK
         // (src/C4Network2.cpp:1501-1534,1994-2012,2062-2077).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
         let client_id = client.client_id();
         let mut client_events = client.take_event_receiver();
         let status = NetworkStatus {
@@ -13404,12 +13132,9 @@ mod tests {
             target_tick: 195_995,
         };
 
-        host.change_status(status).await.expect("broadcast status");
+        host.change_status(status).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host status request wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusChanged(requested)) => {
                     assert_eq!(requested, status);
                     break;
@@ -13419,10 +13144,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client status wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(received)) => {
                     assert_eq!(received, status);
                     break;
@@ -13432,15 +13154,9 @@ mod tests {
             }
         }
 
-        client
-            .submit_status_ack(status)
-            .await
-            .expect("submit status ack");
+        client.submit_status_ack(status).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host status ack wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck {
                     client_id: received_id,
                     status: received,
@@ -13460,19 +13176,13 @@ mod tests {
             .is_err());
         host.status_reached(status, status.target_tick)
             .await
-            .expect("host reached status target");
-        match timeout(EVENT_WAIT, client_events.recv())
-            .await
-            .expect("client final status ack wait")
-        {
+            .test_value();
+        match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
             Some(ClientEvent::StatusAck(received)) => assert_eq!(received, status),
             other => panic!("expected client final status ack, got {other:?}"),
         }
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host status commit wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(committed)) => {
                     assert_eq!(committed, status);
                     break;
@@ -13482,18 +13192,18 @@ mod tests {
             }
         }
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
     async fn host_chase_target_updates_only_chasing_clients_and_stops_after_ack() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
         config.initial_join_snapshot = None;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let alpha_task = tokio::spawn(connect_client(
             addr,
@@ -13505,7 +13215,7 @@ mod tests {
         ));
         let mut waiting_clients = BTreeSet::new();
         while waiting_clients.len() < 2 {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::JoinDataNeeded { client_id, .. }) => {
                     waiting_clients.insert(client_id);
                 }
@@ -13515,27 +13225,27 @@ mod tests {
         }
 
         let first_deadline = tokio::time::Instant::now() + CHASE_TARGET_UPDATE_INTERVAL;
-        host.publish_join_snapshot(snapshot).await.unwrap();
+        host.publish_join_snapshot(snapshot).await.test_value();
         let mut alpha = timeout(EVENT_WAIT, alpha_task)
             .await
             .unwrap()
             .unwrap()
-            .unwrap();
+            .test_value();
         let mut beta = timeout(EVENT_WAIT, beta_task)
             .await
             .unwrap()
             .unwrap()
-            .unwrap();
+            .test_value();
         let alpha_id = alpha.client_id();
-        let initial_status = alpha.take_join_data().unwrap().status;
+        let initial_status = alpha.take_join_data().test_value().status;
         let mut alpha_events = alpha.take_event_receiver();
         let beta_id = beta.client_id();
         assert_eq!(beta.take_join_data().unwrap().status, initial_status);
         let mut beta_events = beta.take_event_receiver();
 
-        beta.submit_status_ack(initial_status).await.unwrap();
+        beta.submit_status_ack(initial_status).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck { client_id, status })
                     if client_id == beta_id && status == initial_status =>
                 {
@@ -13549,7 +13259,7 @@ mod tests {
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x31))
             .await
-            .unwrap();
+            .test_value();
         wait_for_host_ready_tick(&mut host_events, 0).await;
 
         let remaining = first_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -13574,12 +13284,12 @@ mod tests {
             client_id: HOST_CLIENT_ID as i32,
             data: crate::ReadyCheckData::Other(101),
         };
-        host.submit_ready_check(beta_barrier).await.unwrap();
+        host.submit_ready_check(beta_barrier).await.test_value();
         assert_no_client_status_through_ready_check(&mut beta_events, beta_barrier).await;
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0x32))
             .await
-            .unwrap();
+            .test_value();
         wait_for_host_ready_tick(&mut host_events, 1).await;
         let second_deadline = first_deadline + CHASE_TARGET_UPDATE_INTERVAL;
         let remaining = second_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -13604,12 +13314,14 @@ mod tests {
             client_id: HOST_CLIENT_ID as i32,
             data: crate::ReadyCheckData::Other(102),
         };
-        host.submit_ready_check(second_beta_barrier).await.unwrap();
+        host.submit_ready_check(second_beta_barrier)
+            .await
+            .test_value();
         assert_no_client_status_through_ready_check(&mut beta_events, second_beta_barrier).await;
 
-        alpha.submit_status_ack(second_update).await.unwrap();
+        alpha.submit_status_ack(second_update).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck { client_id, status })
                     if client_id == alpha_id && status == second_update =>
                 {
@@ -13629,13 +13341,13 @@ mod tests {
             client_id: HOST_CLIENT_ID as i32,
             data: crate::ReadyCheckData::Other(103),
         };
-        host.submit_ready_check(stopped_barrier).await.unwrap();
+        host.submit_ready_check(stopped_barrier).await.test_value();
         assert_no_client_status_through_ready_check(&mut alpha_events, stopped_barrier).await;
         assert_no_client_status_through_ready_check(&mut beta_events, stopped_barrier).await;
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13644,11 +13356,11 @@ mod tests {
         // resends the host's own stored controls from ControlTick until the
         // first gap (src/C4Network2.cpp:2062-2110;
         // src/C4GameControlNetwork.cpp:360-374).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut config = HostConfig::default();
         config.initial_status.control_mode = 1;
-        let mut host = start_host(listener, config).await.unwrap();
+        let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
         let (mut client, client_id) = raw_client_transport(addr, b"Alice").await;
         activate_joined_client(&host, &mut host_events, client_id).await;
@@ -13668,20 +13380,22 @@ mod tests {
 
         let first = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
         let after_gap = legacy_packet(HOST_CLIENT_ID, 2, 0x13);
-        host.submit_local_control(first.clone()).await.unwrap();
-        host.submit_local_control(after_gap.clone()).await.unwrap();
+        host.submit_local_control(first.clone()).await.test_value();
+        host.submit_local_control(after_gap.clone())
+            .await
+            .test_value();
 
         let decentral = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 0,
             target_tick: 0,
         };
-        host.change_status(decentral).await.unwrap();
+        host.change_status(decentral).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::Status(status) if status == decentral => break,
                 _ => continue,
@@ -13690,17 +13404,17 @@ mod tests {
         client
             .send_message(ControlMessage::StatusAck(decentral))
             .await
-            .unwrap();
+            .test_value();
         host.status_reached(decentral, decentral.target_tick)
             .await
-            .unwrap();
+            .test_value();
 
         let mut saw_final_ack = false;
         loop {
             match timeout(EVENT_WAIT, client.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::StatusAck(status) if status == decentral => {
                     saw_final_ack = true;
@@ -13729,7 +13443,7 @@ mod tests {
         );
 
         drop(client);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13738,9 +13452,7 @@ mod tests {
         // resends stored complete C4ClientIDAll controls, not one participant's
         // contribution (src/C4Network2.cpp:2062-2110;
         // src/C4GameControlNetwork.cpp:360-374).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let (mut client, client_id) = raw_client_transport(addr, b"Alice").await;
         activate_joined_client(&host, &mut host_events, client_id).await;
@@ -13761,13 +13473,13 @@ mod tests {
         let host_packet = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
         host.submit_local_control(host_packet.clone())
             .await
-            .unwrap();
+            .test_value();
         assert!(raw_client_received_control(&mut client, &host_packet, EVENT_WAIT,).await);
         let client_packet = legacy_packet(client_id, 0, 0x21);
         client
             .send_message(ControlMessage::Control(client_packet))
             .await
-            .unwrap();
+            .test_value();
         let complete = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(complete.client_id(), BROADCAST_CLIENT_ID);
         assert_eq!(control_commands(&complete), vec![0x11, 0x21]);
@@ -13778,12 +13490,12 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        host.change_status(central).await.unwrap();
+        host.change_status(central).await.test_value();
         loop {
             match timeout(EVENT_WAIT, client.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::Status(status) if status == central => break,
                 _ => continue,
@@ -13792,17 +13504,17 @@ mod tests {
         client
             .send_message(ControlMessage::StatusAck(central))
             .await
-            .unwrap();
+            .test_value();
         host.status_reached(central, central.target_tick)
             .await
-            .unwrap();
+            .test_value();
 
         let mut saw_final_ack = false;
         loop {
             match timeout(EVENT_WAIT, client.read_message())
                 .await
                 .unwrap()
-                .unwrap()
+                .test_value()
             {
                 ControlMessage::StatusAck(status) if status == central => {
                     saw_final_ack = true;
@@ -13816,7 +13528,7 @@ mod tests {
         }
 
         drop(client);
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13825,32 +13537,24 @@ mod tests {
         // current control tick. HandleStatusAck must rebroadcast that higher
         // target before the barrier can commit
         // (src/C4Network2.cpp:1994-2012,2062-2077).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
         let client_id = client.client_id();
-        let initial_status = client.take_join_data().expect("client JoinData").status;
+        let initial_status = client.take_join_data().test_value().status;
         let mut client_events = client.take_event_receiver();
 
         // Send the JoinData status acknowledgement first so the host advances
         // this client from Chasing to Ready before opening a fresh barrier.
-        client
-            .submit_status_ack(initial_status)
-            .await
-            .expect("acknowledge JoinData status");
+        client.submit_status_ack(initial_status).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host initial status ack wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck {
                     client_id: received_id,
                     status,
@@ -13860,10 +13564,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client initial status ack wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::StatusAck(status)) if status == initial_status => break,
                 Some(_) => continue,
                 None => panic!("client event stream ended before initial status ack"),
@@ -13875,24 +13576,16 @@ mod tests {
             control_mode: 1,
             target_tick: 41,
         };
-        host.change_status(requested)
-            .await
-            .expect("broadcast requested Pause");
+        host.change_status(requested).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host requested Pause event wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusChanged(status)) if status == requested => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before requested Pause event"),
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client requested Pause wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) if status == requested => break,
                 Some(_) => continue,
                 None => panic!("client event stream ended before requested Pause"),
@@ -13903,15 +13596,9 @@ mod tests {
             target_tick: 44,
             ..requested
         };
-        client
-            .submit_status_ack(retargeted)
-            .await
-            .expect("submit retargeted Pause acknowledgement");
+        client.submit_status_ack(retargeted).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host retargeted status ack wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck {
                     client_id: received_id,
                     status,
@@ -13921,20 +13608,14 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host retargeted Pause event wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusChanged(status)) if status == retargeted => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before retargeted Pause event"),
             }
         }
 
-        match timeout(EVENT_WAIT, client_events.recv())
-            .await
-            .expect("client retargeted Pause wait")
-        {
+        match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
             Some(ClientEvent::Status(status)) => assert_eq!(status, retargeted),
             other => panic!("expected retargeted Pause before final ack, got {other:?}"),
         }
@@ -13955,12 +13636,9 @@ mod tests {
 
         host.status_reached(retargeted, retargeted.target_tick)
             .await
-            .expect("host reached retargeted Pause");
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client final retargeted status ack wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::StatusAck(status)) => {
                     assert_eq!(status, retargeted);
                     break;
@@ -13970,10 +13648,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host retargeted status commit wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(status)) => {
                     assert_eq!(status, retargeted);
                     break;
@@ -13983,8 +13658,8 @@ mod tests {
             }
         }
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13992,17 +13667,15 @@ mod tests {
         // In running games, CDT_Sync packets accumulate in SyncControl and do
         // not execute until PID_ExecSyncCtrl is emitted after the status
         // barrier (src/C4GameControlNetwork.cpp:181-220,260-297,558-588).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
         let mut client_events = client.take_event_receiver();
 
         let running = NetworkStatus {
@@ -14010,14 +13683,9 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        host.change_status(running)
-            .await
-            .expect("enter running status");
+        host.change_status(running).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("initial Go status wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) => {
                     assert_eq!(status, running);
                     break;
@@ -14026,21 +13694,15 @@ mod tests {
                 None => panic!("client event stream ended before initial Go"),
             }
         }
-        client
-            .submit_status_ack(running)
-            .await
-            .expect("acknowledge initial Go");
+        client.submit_status_ack(running).await.test_value();
         host.status_reached(running, running.target_tick)
             .await
-            .expect("host reached initial Go");
+            .test_value();
         let mut host_running = false;
         let mut client_running = false;
         while !host_running || !client_running {
             if !host_running {
-                match timeout(EVENT_WAIT, host_events.recv())
-                    .await
-                    .expect("host initial Go commit wait")
-                {
+                match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                     Some(HostEvent::StatusCommitted(status)) => {
                         assert_eq!(status, running);
                         host_running = true;
@@ -14050,10 +13712,7 @@ mod tests {
                 }
             }
             if !client_running {
-                match timeout(EVENT_WAIT, client_events.recv())
-                    .await
-                    .expect("client initial Go ack wait")
-                {
+                match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                     Some(ClientEvent::StatusAck(status)) => {
                         assert_eq!(status, running);
                         client_running = true;
@@ -14082,14 +13741,11 @@ mod tests {
                 encode_control_entry_payload(control).expect("encode sync control"),
             )
             .await
-            .expect("submit sync control");
+            .test_value();
         }
 
         let sync_status = loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client synchronization status wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) => break status,
                 Some(ClientEvent::SyncScheduled { .. }) => {
                     panic!("client released Sync before the status barrier")
@@ -14104,15 +13760,12 @@ mod tests {
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x11))
             .await
-            .expect("submit client tick");
+            .test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x22))
             .await
-            .expect("submit host tick");
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host ready wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Ready { .. }) => break,
                 Some(HostEvent::SyncScheduled { .. }) => {
                     panic!("host released Sync before the status barrier")
@@ -14122,10 +13775,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client ready wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Ready { .. }) => break,
                 Some(ClientEvent::SyncScheduled { .. }) => {
                     panic!("client released Sync before the status barrier")
@@ -14135,20 +13785,14 @@ mod tests {
             }
         }
 
-        client
-            .submit_status_ack(sync_status)
-            .await
-            .expect("acknowledge synchronization status");
+        client.submit_status_ack(sync_status).await.test_value();
         host.status_reached(sync_status, sync_status.target_tick)
             .await
-            .expect("host reached synchronization target");
+            .test_value();
         let mut host_controls = None;
         let mut host_committed = false;
         while host_controls.is_none() || !host_committed {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host sync release wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::SyncScheduled {
                     control_tick,
                     controls,
@@ -14170,10 +13814,7 @@ mod tests {
         let mut client_controls = None;
         let mut client_committed = false;
         while client_controls.is_none() || !client_committed {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client sync release wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::SyncScheduled {
                     control_tick,
                     controls,
@@ -14195,9 +13836,7 @@ mod tests {
         assert_eq!(host_controls, Some(vec![first.clone(), second.clone()]));
         assert_eq!(client_controls, Some(vec![first, second]));
 
-        host.submit_exec_sync(2)
-            .await
-            .expect("empty sync release is accepted");
+        host.submit_exec_sync(2).await.test_value();
         // ExecSyncControl returns before sending PID_ExecSyncCtrl when the
         // synchronized queue is empty (src/C4GameControlNetwork.cpp:267-269,
         // 281-283). ReadyCheck is an ordered message-stream sentinel: seeing
@@ -14210,12 +13849,9 @@ mod tests {
         };
         host.submit_ready_check(empty_release_barrier)
             .await
-            .expect("submit empty-release barrier");
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client empty-release barrier wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::ReadyCheck { packet }) if packet == empty_release_barrier => {
                     break;
                 }
@@ -14236,8 +13872,8 @@ mod tests {
             );
         }
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14246,17 +13882,15 @@ mod tests {
         // CDT_Sync control immediately and then emits PID_ExecSyncCtrl
         // (src/C4Network2.cpp:1982-1991;
         // src/C4GameControlNetwork.cpp:204-213).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
         let mut client_events = client.take_event_receiver();
         let control = EngineControlPacket::PlayerControl(PlayerControlData {
             player: 0,
@@ -14270,13 +13904,10 @@ mod tests {
             encode_control_entry_payload(&control).expect("encode lobby sync control"),
         )
         .await
-        .expect("submit lobby sync control");
+        .test_value();
 
         loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host frozen sync wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::SyncScheduled {
                     control_tick,
                     controls,
@@ -14293,10 +13924,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv())
-                .await
-                .expect("client frozen sync wait")
-            {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::SyncScheduled {
                     control_tick,
                     controls,
@@ -14313,19 +13941,17 @@ mod tests {
             }
         }
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_matches_cpp_pid_control_source_id_semantics() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let (mut client, client_id) = raw_client_transport(addr, b"spoof-check").await;
         activate_joined_client(&host, &mut host_events, client_id).await;
@@ -14335,30 +13961,28 @@ mod tests {
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
                 negative_list: true,
                 clients: Vec::new(),
-                nested_packet: crate::transport::encode_complete_control_packet(&spoofed).unwrap(),
+                nested_packet: crate::transport::encode_complete_control_packet(&spoofed)
+                    .test_value(),
             }))
             .await
-            .expect("submit spoofed host control");
+            .test_value();
         raw_client_ping_barrier(&mut client).await;
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
-            .expect("submit real host control");
+            .test_value();
         let contribution = legacy_packet(client_id, 0, 0x22);
         client
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
                 negative_list: true,
                 clients: Vec::new(),
                 nested_packet: crate::transport::encode_complete_control_packet(&contribution)
-                    .unwrap(),
+                    .test_value(),
             }))
             .await
-            .expect("submit real client control");
+            .test_value();
 
         let ready = loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host event wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::TransportError { error, .. }) => {
                     panic!(
                         "C++ accepts PID_Control independently of its source connection: {error}"
@@ -14376,18 +14000,16 @@ mod tests {
         );
 
         drop(client);
-        host.shutdown().await.expect("host shutdown");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_silently_ignores_valid_control_from_an_unregistered_client() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let (mut client, client_id) = raw_client_transport(addr, b"inactive-control").await;
         loop {
@@ -14409,15 +14031,15 @@ mod tests {
                 .send_message(ControlMessage::Control(legacy_packet(
                     client_id,
                     tick,
-                    0x60 + i32::try_from(tick).unwrap(),
+                    0x60 + i32::try_from(tick).test_value(),
                 )))
                 .await
-                .expect("submit inactive control");
+                .test_value();
         }
         raw_client_ping_barrier(&mut client).await;
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
-            .expect("submit host control");
+            .test_value();
 
         let ready = loop {
             match timeout(EVENT_WAIT, host_events.recv()).await {
@@ -14434,7 +14056,7 @@ mod tests {
         assert_eq!(control_commands(&ready), vec![0x11]);
 
         drop(client);
-        host.shutdown().await.expect("host shutdown");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14444,13 +14066,11 @@ mod tests {
         // scheduler remains available for later clients
         // (src/C4GameControlNetwork.cpp:867-872;
         // src/C4Network2IO.cpp:822-835).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let (mut client, client_id) = raw_client_transport(addr, b"inactive-malformed").await;
         loop {
@@ -14469,7 +14089,7 @@ mod tests {
                 ControlPacket::builder(client_id, 0).payload(vec![0x42]),
             ))
             .await
-            .expect("submit malformed inactive control");
+            .test_value();
         let mut connection_failed = false;
         let mut client_left = false;
         let mut diagnostic = false;
@@ -14498,34 +14118,32 @@ mod tests {
             }
         })
         .await
-        .expect("timed out waiting for malformed-route cleanup");
+        .test_value();
 
         drop(client);
         let (mut successor, _) = raw_client_transport(addr, b"after-malformed").await;
         raw_client_ping_barrier(&mut successor).await;
         drop(successor);
-        host.shutdown().await.expect("host shutdown");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn forged_queued_control_set_author_does_not_consume_the_tick() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let client = connect_client(
             addr,
             ClientConfig::new("set-spoof-check", ParticipantKind::Player),
         )
         .await
-        .expect("connect client");
+        .test_value();
         let client_id = client.client_id();
         activate_joined_client(&host, &mut host_events, client_id).await;
-        let client_author = i32::try_from(client_id).expect("test client id fits i32");
+        let client_author = i32::try_from(client_id).test_value();
         let queued_set = |by_client| {
             encode_control_packet(&LegacyControlFrame {
                 client_id,
@@ -14538,27 +14156,21 @@ mod tests {
                 }
                 .into_control_packet()],
             })
-            .expect("encode queued CID_Set")
+            .test_value()
         };
 
-        client
-            .submit_control(queued_set(0))
-            .await
-            .expect("submit forged host-authored Set");
+        client.submit_control(queued_set(0)).await.test_value();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
-            .expect("submit host contribution");
+            .test_value();
         client
             .submit_control(queued_set(client_author))
             .await
-            .expect("replace with authenticated Set");
+            .test_value();
 
         let mut saw_rejection = false;
         let ready = loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host event wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::TransportError {
                     client_id: Some(rejected_id),
                     error,
@@ -14576,7 +14188,7 @@ mod tests {
             saw_rejection,
             "forged CID_Set contribution was not rejected"
         );
-        let frame = decode_control_packet(&ready).expect("ready packet remains decodable");
+        let frame = decode_control_packet(&ready).test_value();
         let sets = frame
             .controls
             .iter()
@@ -14591,48 +14203,39 @@ mod tests {
             }]
         );
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn malformed_contribution_does_not_consume_the_synchronized_tick() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let client = connect_client(
             addr,
             ClientConfig::new("validation-check", ParticipantKind::Player),
         )
         .await
-        .expect("connect client");
+        .test_value();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x22))
             .await
-            .expect("submit valid client control");
+            .test_value();
         let valid_host = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
         let mut malformed_payload = valid_host.payload().to_vec();
-        *malformed_payload.last_mut().expect("control terminator") = 0x7f;
+        *malformed_payload.last_mut().test_value() = 0x7f;
         let malformed_host = ControlPacket::builder(HOST_CLIENT_ID, 0).payload(malformed_payload);
-        host.submit_local_control(malformed_host)
-            .await
-            .expect("submit malformed host control");
-        host.submit_local_control(valid_host)
-            .await
-            .expect("replace malformed host control");
+        host.submit_local_control(malformed_host).await.test_value();
+        host.submit_local_control(valid_host).await.test_value();
 
         let mut saw_validation_error = false;
         let ready = loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host event wait")
-            {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::TransportError { error, .. }) => {
                     assert!(error.contains("invalid control packet"));
                     assert!(error.contains("0x7f"));
@@ -14646,27 +14249,23 @@ mod tests {
         assert!(saw_validation_error, "malformed input was not diagnosed");
         assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn control_sync_and_reconnect_smoke() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let config = HostConfig {
             max_players: 4,
             ..Default::default()
         };
-        let mut host = start_host(listener, config.clone())
-            .await
-            .expect("start host");
+        let mut host = start_host(listener, config.clone()).await.test_value();
 
         let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
 
         let mut host_events = host.take_event_receiver();
         let mut client_events = client.take_event_receiver();
@@ -14680,18 +14279,18 @@ mod tests {
         let first_client_ready = wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
         assert_eq!(first_client_ready.tick(), 0);
 
-        client.shutdown().await.expect("client shutdown");
+        client.shutdown().await.test_value();
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
-        let mut fresh_snapshot = config.initial_join_snapshot.unwrap();
+        let mut fresh_snapshot = config.initial_join_snapshot.test_value();
         fresh_snapshot.dynamic_tick = 1;
         host.publish_join_snapshot(fresh_snapshot)
             .await
-            .expect("publish runtime-join dynamic");
+            .test_value();
 
         let mut client_beta =
             connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
                 .await
-                .expect("connect second client");
+                .test_value();
         let mut client_beta_events = client_beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
@@ -14703,21 +14302,16 @@ mod tests {
         let second_client_ready = wait_for_client_ready(&mut client_beta_events, EVENT_WAIT).await;
         assert_eq!(second_client_ready.tick(), 1);
 
-        client_beta
-            .shutdown()
-            .await
-            .expect("second client shutdown");
+        client_beta.shutdown().await.test_value();
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
-        host.shutdown().await.expect("host shutdown");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_continues_ready_after_client_disconnect() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let mut host = start_host(
             listener,
             HostConfig {
@@ -14726,11 +14320,11 @@ mod tests {
             },
         )
         .await
-        .expect("start host");
+        .test_value();
 
         let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
             .await
-            .expect("connect client");
+            .test_value();
 
         let mut host_events = host.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
@@ -14740,18 +14334,16 @@ mod tests {
         assert_eq!(control_commands(&ready0), vec![0xA0, 0xB0]);
 
         let host_packet = legacy_packet(0, 1, 0xC0);
-        host.submit_local_control(host_packet)
-            .await
-            .expect("host submit control");
+        host.submit_local_control(host_packet).await.test_value();
 
-        client.shutdown().await.expect("client shutdown");
+        client.shutdown().await.test_value();
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         let ready1 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready1.tick(), 1);
         assert_eq!(control_commands(&ready1), vec![0xC0]);
 
-        host.shutdown().await.expect("host shutdown");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -14762,13 +14354,9 @@ mod tests {
         // client's buffered contribution is no longer part of the batch
         // (src/C4Network2.cpp:1786-1807;
         // src/C4GameControlNetwork.cpp:260-297,329-345,741-783).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut client = connect_test_player(addr, "Alpha").await;
         let mut client_events = client.take_event_receiver();
         let client_id = client.client_id();
         activate_joined_client(&host, &mut host_events, client_id).await;
@@ -14778,20 +14366,20 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        host.change_status(running).await.unwrap();
+        host.change_status(running).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) if status == running => break,
                 Some(_) => continue,
                 None => panic!("client event stream ended before Go"),
             }
         }
-        client.submit_status_ack(running).await.unwrap();
+        client.submit_status_ack(running).await.test_value();
         host.status_reached(running, running.target_tick)
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before Go committed"),
@@ -14801,10 +14389,10 @@ mod tests {
         client
             .submit_control(legacy_packet(client_id, 0, 0xB0))
             .await
-            .unwrap();
-        client.graceful_part().await.unwrap();
+            .test_value();
+        client.graceful_part().await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before client departure"),
@@ -14812,12 +14400,12 @@ mod tests {
         }
         host.status_reached(running, running.target_tick)
             .await
-            .unwrap();
+            .test_value();
 
         let mut synchronized_remove = None;
         let mut committed = false;
         while synchronized_remove.is_none() || !committed {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::SyncScheduled {
                     control_tick: 0,
                     controls,
@@ -14836,7 +14424,7 @@ mod tests {
                 None => panic!("host event stream ended during disconnect recovery"),
             }
         }
-        let controls = synchronized_remove.unwrap();
+        let controls = synchronized_remove.test_value();
         let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
             panic!("expected one synchronized ClientRemove, got {controls:?}");
         };
@@ -14845,19 +14433,19 @@ mod tests {
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
-            .unwrap();
+            .test_value();
         let boundary = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(boundary.tick(), 0);
         assert_eq!(control_commands(&boundary), vec![0xA0]);
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
             .await
-            .unwrap();
+            .test_value();
         let released = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(released.tick(), 1);
         assert_eq!(control_commands(&released), vec![0xA1]);
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     #[test]
@@ -14966,21 +14554,15 @@ mod tests {
         // execute even when the departed client was the only participant that
         // had not supplied the original target's preceding control
         // (src/C4Network2.cpp:1786-1807).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
 
-        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut alpha = connect_test_player(addr, "Alpha").await;
         let alpha_id = alpha.client_id();
         let mut alpha_events = alpha.take_event_receiver();
         activate_joined_client(&host, &mut host_events, alpha_id).await;
 
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut beta = connect_test_player(addr, "Beta").await;
         let beta_id = beta.client_id();
         let mut beta_events = beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, beta_id).await;
@@ -14990,10 +14572,10 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        host.change_status(running).await.unwrap();
+        host.change_status(running).await.test_value();
         for events in [&mut alpha_events, &mut beta_events] {
             loop {
-                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                     Some(ClientEvent::Status(status)) if status == running => break,
                     Some(ClientEvent::Disconnected { reason }) => {
                         panic!("client disconnected before initial Go: {reason:?}")
@@ -15003,13 +14585,13 @@ mod tests {
                 }
             }
         }
-        alpha.submit_status_ack(running).await.unwrap();
-        beta.submit_status_ack(running).await.unwrap();
+        alpha.submit_status_ack(running).await.test_value();
+        beta.submit_status_ack(running).await.test_value();
         host.status_reached(running, running.target_tick)
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before initial Go committed"),
@@ -15018,14 +14600,14 @@ mod tests {
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
-            .unwrap();
+            .test_value();
         alpha
             .submit_control(legacy_packet(alpha_id, 0, 0xB0))
             .await
-            .unwrap();
+            .test_value();
         beta.submit_control(legacy_packet(beta_id, 0, 0xC0))
             .await
-            .unwrap();
+            .test_value();
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready.tick(), 0);
         assert_eq!(control_commands(&ready), vec![0xA0, 0xB0, 0xC0]);
@@ -15034,10 +14616,10 @@ mod tests {
             target_tick: 2,
             ..running
         };
-        host.change_status(unreachable).await.unwrap();
+        host.change_status(unreachable).await.test_value();
         for events in [&mut alpha_events, &mut beta_events] {
             loop {
-                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                     Some(ClientEvent::Status(status)) if status == unreachable => break,
                     Some(ClientEvent::Disconnected { reason }) => {
                         panic!("client disconnected before unreached Go: {reason:?}")
@@ -15048,9 +14630,9 @@ mod tests {
             }
         }
 
-        beta.submit_status_ack(unreachable).await.unwrap();
+        beta.submit_status_ack(unreachable).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck { client_id, status })
                     if client_id == beta_id && status == unreachable =>
                 {
@@ -15062,14 +14644,14 @@ mod tests {
         }
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
             .await
-            .unwrap();
+            .test_value();
         beta.submit_control(legacy_packet(beta_id, 1, 0xC1))
             .await
-            .unwrap();
+            .test_value();
 
-        alpha.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ClientLeft { client_id }) if client_id == alpha_id => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before Alpha departed"),
@@ -15081,7 +14663,7 @@ mod tests {
             ..unreachable
         };
         loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::Status(status)) if status == retargeted => break,
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("Beta disconnected before the retry: {reason:?}")
@@ -15091,16 +14673,16 @@ mod tests {
             }
         }
 
-        beta.submit_status_ack(retargeted).await.unwrap();
+        beta.submit_status_ack(retargeted).await.test_value();
         host.status_reached(retargeted, retargeted.target_tick)
             .await
-            .unwrap();
+            .test_value();
 
         let mut released = None;
         let mut synchronized_remove = None;
         let mut committed = false;
         while released.is_none() || synchronized_remove.is_none() || !committed {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::Ready { packet }) if packet.tick() == 1 => {
                     assert!(released.replace(packet).is_none(), "tick released twice");
                 }
@@ -15121,9 +14703,9 @@ mod tests {
             }
         }
 
-        let released = released.unwrap();
+        let released = released.test_value();
         assert_eq!(control_commands(&released), vec![0xA1, 0xC1]);
-        let controls = synchronized_remove.unwrap();
+        let controls = synchronized_remove.test_value();
         let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
             panic!("expected one synchronized ClientRemove, got {controls:?}");
         };
@@ -15132,16 +14714,16 @@ mod tests {
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 2, 0xA2))
             .await
-            .unwrap();
+            .test_value();
         beta.submit_control(legacy_packet(beta_id, 2, 0xC2))
             .await
-            .unwrap();
+            .test_value();
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready.tick(), 2);
         assert_eq!(control_commands(&ready), vec![0xA2, 0xC2]);
 
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15151,21 +14733,15 @@ mod tests {
         // synchronization boundary (src/C4Network2.cpp:1786-1802;
         // src/C4Client.cpp:293-303;
         // src/C4GameControlNetwork.cpp:181-220).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
-        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let (addr, host) = start_test_host(HostConfig::default()).await;
+        let alpha = connect_test_player(addr, "Alpha").await;
         let alpha_id = alpha.client_id();
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = beta.take_event_receiver();
 
-        alpha.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
         let remove = loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::SyncScheduled { controls, .. }) => {
                     let Some(EngineControlPacket::ClientRemove(remove)) =
                         controls.into_iter().next()
@@ -15187,8 +14763,8 @@ mod tests {
         // verbatim (planet/System.c4g/LanguageUS.txt:831).
         assert_eq!(remove.reason.as_bytes(), b"disconnected");
 
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15198,21 +14774,19 @@ mod tests {
         // through the same synchronized CtrlRemove path
         // (src/C4Network2.cpp:1395-1445,1745-1755;
         // src/C4Client.cpp:293-303).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, host) = start_test_host(HostConfig::default()).await;
         let mut witness = connect_client(
             addr,
             ClientConfig::new("Witness", ParticipantKind::Observer),
         )
         .await
-        .unwrap();
+        .test_value();
         let mut witness_events = witness.take_event_receiver();
 
-        let stream = TcpStream::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.test_value();
         let mut failed = crate::ControlTransport::new(stream);
-        let _ = failed.read_message().await.unwrap();
-        let name = clonk_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).unwrap();
+        let _ = failed.read_message().await.test_value();
+        let name = clonk_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).test_value();
         failed
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -15228,15 +14802,15 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match failed.read_message().await.unwrap() {
+            match failed.read_message().await.test_value() {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
                     failed
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 _ => continue,
             }
@@ -15245,7 +14819,10 @@ mod tests {
 
         let mut provisional_id = None;
         loop {
-            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, witness_events.recv())
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Direct { data, .. }) => {
                     if let Ok(EngineControlPacket::ClientJoin(join)) =
                         decode_control_entry_payload(&data)
@@ -15270,8 +14847,8 @@ mod tests {
             }
         }
 
-        witness.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        witness.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15281,14 +14858,9 @@ mod tests {
         // ClientRemove and performs the same unreached Go/Pause retry as an
         // established-client disconnect (src/C4Network2.cpp:1745-1755,
         // 1786-1807; src/C4Client.cpp:293-303).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut witness =
-            connect_client(addr, ClientConfig::new("Witness", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut witness = connect_test_player(addr, "Witness").await;
         let witness_id = witness.client_id();
         let mut witness_events = witness.take_event_receiver();
         activate_joined_client(&host, &mut host_events, witness_id).await;
@@ -15298,9 +14870,12 @@ mod tests {
             control_mode: 1,
             target_tick: 0,
         };
-        host.change_status(running).await.unwrap();
+        host.change_status(running).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, witness_events.recv())
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Status(status)) if status == running => break,
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("witness disconnected before initial Go: {reason:?}")
@@ -15309,12 +14884,12 @@ mod tests {
                 None => panic!("witness event stream ended before initial Go"),
             }
         }
-        witness.submit_status_ack(running).await.unwrap();
+        witness.submit_status_ack(running).await.test_value();
         host.status_reached(running, running.target_tick)
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before initial Go committed"),
@@ -15323,11 +14898,11 @@ mod tests {
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
-            .unwrap();
+            .test_value();
         witness
             .submit_control(legacy_packet(witness_id, 0, 0xB0))
             .await
-            .unwrap();
+            .test_value();
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready.tick(), 0);
         assert_eq!(control_commands(&ready), vec![0xA0, 0xB0]);
@@ -15336,9 +14911,12 @@ mod tests {
             target_tick: 2,
             ..running
         };
-        host.change_status(unreachable).await.unwrap();
+        host.change_status(unreachable).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, witness_events.recv())
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Status(status)) if status == unreachable => break,
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("witness disconnected before unreached Go: {reason:?}")
@@ -15347,9 +14925,9 @@ mod tests {
                 None => panic!("witness event stream ended before unreached Go"),
             }
         }
-        witness.submit_status_ack(unreachable).await.unwrap();
+        witness.submit_status_ack(unreachable).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::StatusAck { client_id, status })
                     if client_id == witness_id && status == unreachable =>
                 {
@@ -15360,13 +14938,13 @@ mod tests {
             }
         }
 
-        let stream = TcpStream::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.test_value();
         let mut failed = crate::ControlTransport::new(stream);
         assert!(matches!(
             failed.read_message().await.unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).test_value();
         failed
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -15382,22 +14960,25 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match failed.read_message().await.unwrap() {
+            match failed.read_message().await.test_value() {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
                     failed
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 _ => continue,
             }
         }
 
         let provisional_id = loop {
-            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, witness_events.recv())
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Direct { data, .. }) => {
                     if let Ok(EngineControlPacket::ClientJoin(join)) =
                         decode_control_entry_payload(&data)
@@ -15419,7 +15000,10 @@ mod tests {
             ..unreachable
         };
         loop {
-            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, witness_events.recv())
+                .await
+                .test_value()
+            {
                 Some(ClientEvent::Status(status)) if status == retargeted => break,
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("witness disconnected before admission retry: {reason:?}")
@@ -15428,17 +15012,17 @@ mod tests {
                 None => panic!("witness event stream ended before admission retry"),
             }
         }
-        witness.submit_status_ack(retargeted).await.unwrap();
+        witness.submit_status_ack(retargeted).await.test_value();
         host.status_reached(retargeted, retargeted.target_tick)
             .await
-            .unwrap();
+            .test_value();
 
         let mut synchronized_remove = None;
         let mut committed = false;
         let mut connection_failed = false;
         let mut diagnostic = false;
         while synchronized_remove.is_none() || !committed || !connection_failed || !diagnostic {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ClientConnectionFailed { client_id })
                     if i32::try_from(client_id).ok() == Some(provisional_id) =>
                 {
@@ -15473,7 +15057,7 @@ mod tests {
                 None => panic!("host event stream ended during admission recovery"),
             }
         }
-        let controls = synchronized_remove.unwrap();
+        let controls = synchronized_remove.test_value();
         let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
             panic!("expected one synchronized provisional ClientRemove, got {controls:?}");
         };
@@ -15482,17 +15066,17 @@ mod tests {
 
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
             .await
-            .unwrap();
+            .test_value();
         witness
             .submit_control(legacy_packet(witness_id, 1, 0xB1))
             .await
-            .unwrap();
+            .test_value();
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready.tick(), 1);
         assert_eq!(control_commands(&ready), vec![0xA1, 0xB1]);
 
-        witness.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        witness.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15501,24 +15085,19 @@ mod tests {
         // no other connection. Losing a secondary route therefore leaves the
         // already-connected canonical client registered
         // (src/C4Network2.cpp:1366-1380,1745-1765).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut canonical =
-            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut canonical = connect_test_player(addr, "Alice").await;
         let canonical_id = canonical.client_id();
         let mut canonical_events = canonical.take_event_receiver();
 
-        let stream = TcpStream::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.test_value();
         let mut secondary = crate::ControlTransport::new(stream);
         assert!(matches!(
             secondary.read_message().await.unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         secondary
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -15536,15 +15115,15 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match secondary.read_message().await.unwrap() {
+            match secondary.read_message().await.test_value() {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
                     secondary
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 _ => continue,
             }
@@ -15552,7 +15131,7 @@ mod tests {
         drop(secondary);
 
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::SyncScheduled { controls, .. }) => assert!(
                     !controls.iter().any(|control| matches!(
                         control,
@@ -15596,8 +15175,8 @@ mod tests {
             }
         }
 
-        canonical.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        canonical.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15640,23 +15219,19 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_client_starts_at_fresh_dynamic_tick_without_old_backlog() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let addr = listener.local_addr().test_value();
         let config = HostConfig {
             max_players: 4,
             ..Default::default()
         };
-        let mut host = start_host(listener, config.clone())
-            .await
-            .expect("start host");
+        let mut host = start_host(listener, config.clone()).await.test_value();
 
         let mut host_events = host.take_event_receiver();
         let client_alpha =
             connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
                 .await
-                .expect("connect alpha client");
+                .test_value();
         activate_joined_client(&host, &mut host_events, client_alpha.client_id()).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
@@ -15668,18 +15243,18 @@ mod tests {
         // snapshot tick, so controls already represented by the dynamic must
         // not replay (src/C4Network2.cpp:1820-1850;
         // src/C4GameControlNetwork.cpp:46-62,531-555).
-        client_alpha.shutdown().await.expect("alpha shutdown");
+        client_alpha.shutdown().await.test_value();
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
-        let mut fresh_snapshot = config.initial_join_snapshot.unwrap();
+        let mut fresh_snapshot = config.initial_join_snapshot.test_value();
         fresh_snapshot.dynamic_tick = 1;
         host.publish_join_snapshot(fresh_snapshot)
             .await
-            .expect("publish fresh dynamic");
+            .test_value();
 
         let mut client_beta =
             connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
                 .await
-                .expect("connect beta client");
+                .test_value();
         let mut beta_events = client_beta.take_event_receiver();
         assert!(timeout(Duration::from_millis(50), beta_events.recv())
             .await
@@ -15695,40 +15270,25 @@ mod tests {
             ready
         );
 
-        client_beta.shutdown().await.expect("beta shutdown");
+        client_beta.shutdown().await.test_value();
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
-        host.shutdown().await.expect("host shutdown");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn client_resends_backlog_when_requested() {
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let client_handle = tokio::spawn(super::run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
 
         let packet = legacy_packet(7, 42, 0xDE);
         command_tx
             .send(ClientCommand::SubmitControl(packet.clone()))
             .await
-            .expect("submit control");
+            .test_value();
 
-        match host_transport
-            .read_message()
-            .await
-            .expect("receive control")
-        {
+        match host_transport.read_message().await.test_value() {
             ControlMessage::Control(received) => {
                 assert_eq!(received.client_id(), packet.client_id());
                 assert_eq!(received.tick(), packet.tick());
@@ -15768,9 +15328,9 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Request { from_tick: 42 })
             .await
-            .expect("send request");
+            .test_value();
 
-        match host_transport.read_message().await.expect("receive resend") {
+        match host_transport.read_message().await.test_value() {
             ControlMessage::Control(resend) => {
                 assert_eq!(resend.client_id(), packet.client_id());
                 assert_eq!(resend.tick(), packet.tick());
@@ -15780,7 +15340,7 @@ mod tests {
         }
 
         shutdown_tx.send(()).ok();
-        client_handle.await.expect("client loop exited");
+        client_handle.await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
@@ -15790,30 +15350,22 @@ mod tests {
             S: AsyncRead + AsyncWrite + Unpin,
         {
             loop {
-                match transport.read_message().await.unwrap() {
+                match transport.read_message().await.test_value() {
                     request @ ControlMessage::Request { .. } => return request,
                     ControlMessage::Ping(ping) => {
                         transport
                             .send_message(ControlMessage::Pong(ping))
                             .await
-                            .unwrap();
+                            .test_value();
                     }
                     other => panic!("expected control request, got {other:?}"),
                 }
             }
         }
 
-        let (client_stream, host_stream) = duplex(512);
+        let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
         let status = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
@@ -15823,7 +15375,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
-            .unwrap();
+            .test_value();
         assert!(
             matches!(event_rx.recv().await, Some(ClientEvent::Status(value)) if value == status)
         );
@@ -15833,7 +15385,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Control(future.clone()))
             .await
-            .unwrap();
+            .test_value();
         assert!(
             matches!(event_rx.recv().await, Some(ClientEvent::Ready { packet }) if packet == future)
         );
@@ -15865,7 +15417,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::StatusAck(status))
             .await
-            .unwrap();
+            .test_value();
         loop {
             match event_rx.recv().await {
                 Some(ClientEvent::StatusAck(value)) if value == status => break,
@@ -15881,7 +15433,7 @@ mod tests {
         );
 
         shutdown_tx.send(()).ok();
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(start_paused = true)]
@@ -15891,13 +15443,13 @@ mod tests {
             S: AsyncRead + AsyncWrite + Unpin,
         {
             loop {
-                match transport.read_message().await.unwrap() {
+                match transport.read_message().await.test_value() {
                     request @ ControlMessage::Request { .. } => return request,
                     ControlMessage::Ping(ping) => {
                         transport
                             .send_message(ControlMessage::Pong(ping))
                             .await
-                            .unwrap();
+                            .test_value();
                     }
                     other => panic!("expected control request, got {other:?}"),
                 }
@@ -15911,23 +15463,12 @@ mod tests {
         // src/C4GameControlNetwork.cpp:329-337). Rust extends that liveness into
         // the asynchronous runtime worker, but only through the latest control
         // tick the application has actually reached.
-        let (client_stream, host_stream) = duplex(512);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.register(1).unwrap();
-        let client_loop = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        resource_state.control.register(1).test_value();
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop_with_state(512, 8, 8, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
         let running = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
@@ -15937,7 +15478,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Status(running))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             event_rx.recv().await,
             Some(ClientEvent::Status(status)) if status == running
@@ -15945,7 +15486,7 @@ mod tests {
         command_tx
             .send(ClientCommand::SubmitStatusAck(running))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             host_transport.read_message().await.unwrap(),
             ControlMessage::StatusAck(running)
@@ -15953,7 +15494,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::StatusAck(running))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             event_rx.recv().await,
             Some(ClientEvent::StatusAck(status)) if status == running
@@ -15963,7 +15504,7 @@ mod tests {
         command_tx
             .send(ClientCommand::SubmitControl(local.clone()))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             host_transport.read_message().await.unwrap(),
             ControlMessage::Control(local)
@@ -15976,7 +15517,7 @@ mod tests {
                 reached_at,
             })
             .await
-            .unwrap();
+            .test_value();
         tokio::time::advance(CONTROL_REQUEST_INTERVAL).await;
         assert_eq!(
             timeout(Duration::from_millis(1), next_request(&mut host_transport))
@@ -15989,7 +15530,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Control(recovered.clone()))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             event_rx.recv().await,
             Some(ClientEvent::Ready { packet }) if packet == recovered
@@ -16004,7 +15545,7 @@ mod tests {
         );
 
         shutdown_tx.send(()).ok();
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16012,30 +15553,23 @@ mod tests {
         // C4Network2ClientList::DeleteClient asks CloseConns to send a negative
         // PID_ConnRe with "removing client" before closing the connection
         // (src/C4Network2Client.cpp:104-119,457-492).
-        let (client_stream, mut host_stream) = duplex(128);
-        let (command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (mut host_stream, command_tx, event_rx, shutdown_tx, join_handle) =
+            start_test_client_loop(128, 1, 1);
         let handle = ClientHandle {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
-            join_handle: tokio::spawn(run_client_loop(
-                crate::ControlTransport::new(client_stream),
-                command_rx,
-                event_tx,
-                shutdown_rx,
-            )),
+            join_handle,
             client_id: 1,
             join_data: None,
             io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
-        handle.graceful_part().await.expect("graceful client part");
+        handle.graceful_part().await.test_value();
 
         let mut bytes = Vec::new();
-        host_stream.read_to_end(&mut bytes).await.unwrap();
+        host_stream.read_to_end(&mut bytes).await.test_value();
         assert_eq!(
             bytes,
             [
@@ -16050,16 +15584,8 @@ mod tests {
         // CloseConns sends the same negative PID_ConnRe on an already accepted
         // connection so the peer can report the removal reason before EOF
         // (src/C4Network2Client.cpp:104-119).
-        let (client_stream, host_stream) = duplex(128);
-        let (_command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
+        let (host_stream, _command_tx, mut event_rx, _shutdown_tx, client_loop) =
+            start_test_client_loop(128, 1, 1);
         let mut host_transport = crate::ControlTransport::new(host_stream);
 
         host_transport
@@ -16070,7 +15596,7 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
@@ -16079,8 +15605,8 @@ mod tests {
         ));
         timeout(EVENT_WAIT, client_loop)
             .await
-            .expect("client loop did not close after host removal")
-            .unwrap();
+            .test_value()
+            .test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16088,16 +15614,8 @@ mod tests {
         // A positive ConnRe only completes connection admission. Receiving a
         // second positive reply after admission is not the CloseConns removal
         // signal (src/C4Network2.cpp:1448-1474).
-        let (client_stream, host_stream) = duplex(128);
-        let (_command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
+        let (host_stream, _command_tx, mut event_rx, _shutdown_tx, client_loop) =
+            start_test_client_loop(128, 1, 1);
         let mut host_transport = crate::ControlTransport::new(host_stream);
 
         host_transport
@@ -16107,14 +15625,14 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
 
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::Disconnected { reason: Some(reason) })
                 if reason == "host sent a duplicate connection reply"
         ));
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16150,9 +15668,9 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
         drop(client_transport);
-        task.await.unwrap();
+        task.await.test_value();
 
         let mut messages = Vec::new();
         while let Some(message) = host_rx.recv().await {
@@ -16206,13 +15724,13 @@ mod tests {
         outbound_tx
             .send(ControlMessage::Status(status))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             client_transport.read_message().await.unwrap(),
             ControlMessage::Status(status)
         );
         drop(client_transport);
-        task.await.unwrap();
+        task.await.test_value();
 
         let Some(HostLoopMessage::ClientDisconnected {
             connection_id: 3,
@@ -16253,11 +15771,11 @@ mod tests {
         outbound_tx
             .send(ControlMessage::Status(first))
             .await
-            .unwrap();
+            .test_value();
         outbound_tx
             .send(ControlMessage::Status(second))
             .await
-            .unwrap();
+            .test_value();
         drop(client_stream);
 
         let task = tokio::spawn(
@@ -16273,7 +15791,7 @@ mod tests {
             }
             .run(),
         );
-        task.await.unwrap();
+        task.await.test_value();
         let Some(HostLoopMessage::ClientDisconnected {
             post_mortem: Some(post_mortem),
             ..
@@ -16310,7 +15828,7 @@ mod tests {
         let retire_rx = failed.subscribe_retire();
         let (fallback, mut fallback_rx) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(client_id, failed.clone());
-        let failed_route = state.accepted_routes.get_mut(&1).unwrap();
+        let failed_route = state.accepted_routes.get_mut(&1).test_value();
         failed_route.remote_connection_id = 11;
         failed_route.protocol = crate::NetworkProtocol::Udp;
         state.accepted_routes.insert(
@@ -16318,7 +15836,7 @@ mod tests {
             AcceptedConnectionRoute {
                 client_id,
                 remote_connection_id: 12,
-                peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                peer_addr: "127.0.0.1:11112".parse().test_value(),
                 protocol: crate::NetworkProtocol::Tcp,
                 ping: RoutePingLag::default(),
                 outbound: fallback,
@@ -16364,7 +15882,7 @@ mod tests {
             }
         })
         .await
-        .expect("forced host writer failure did not close its route queue");
+        .test_value();
         failed.retire();
         assert!(try_send_host_message(
             &state,
@@ -16380,9 +15898,7 @@ mod tests {
             next_outbound_packet,
             post_mortem,
             reason,
-        }) = timeout(EVENT_WAIT, host_rx.recv())
-            .await
-            .expect("failed host route did not report disconnection")
+        }) = timeout(EVENT_WAIT, host_rx.recv()).await.test_value()
         else {
             panic!("failed host route did not publish its post-mortem");
         };
@@ -16402,21 +15918,21 @@ mod tests {
             match timeout(EVENT_WAIT, fallback_rx.recv())
                 .await
                 .expect("host fallback replay stalled")
-                .expect("host fallback route closed")
+                .test_value()
             {
                 HostOutboundMessage::Message(ControlMessage::PostMortem(packet)) => {
                     logical_order.extend(packet.packets.into_iter().map(|packet| {
                         crate::transport::parse_complete_packet(&packet)
-                            .unwrap()
-                            .expect("post-mortem entry is typed")
+                            .test_value()
+                            .test_value()
                     }));
                 }
                 HostOutboundMessage::Message(message) => logical_order.push(message),
                 HostOutboundMessage::Raw(packet) => {
                     logical_order.push(
                         crate::transport::parse_complete_packet(&packet)
-                            .unwrap()
-                            .expect("raw fallback entry is typed"),
+                            .test_value()
+                            .test_value(),
                     );
                 }
             }
@@ -16429,7 +15945,7 @@ mod tests {
             ]
         );
 
-        route_task.await.unwrap();
+        route_task.await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16437,21 +15953,17 @@ mod tests {
         // DeleteClient closes the accepted peer with "removing client"; the
         // receiving network owns one disconnect notification even though EOF
         // follows the ConnRe frame (src/C4Network2Client.cpp:104-119,457-492).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let client = connect_test_player(addr, "Alpha").await;
         let client_id = client.client_id();
 
-        client.graceful_part().await.unwrap();
+        client.graceful_part().await.test_value();
 
         let mut departures = 0;
         let mut saw_reason = false;
         while departures == 0 || !saw_reason {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => {
                     departures += 1;
                 }
@@ -16472,7 +15984,7 @@ mod tests {
         }
         assert_eq!(departures, 1);
 
-        host.shutdown().await.unwrap();
+        host.shutdown().await.test_value();
     }
 
     /// The notice has to reach the app as its own event while the connection
@@ -16480,23 +15992,14 @@ mod tests {
     /// client could act on.
     #[tokio::test(flavor = "current_thread")]
     async fn client_surfaces_a_host_restart_notice_before_the_disconnect() {
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, _command_tx, mut event_rx, _shutdown_tx, client_loop) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
 
         host_transport
             .send_message(ControlMessage::HostRestarting { rejoin_seconds: 30 })
             .await
-            .unwrap();
+            .test_value();
 
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
@@ -16512,24 +16015,15 @@ mod tests {
         // MainDlg receives every PID_LobbyCountdown and updates its local
         // countdown state; the packet does not close the connection
         // (src/C4GameLobby.cpp:392-418,695-701).
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
         let packet = crate::LobbyCountdownPacket::new(5);
 
         host_transport
             .send_message(ControlMessage::LobbyCountdown(packet))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::LobbyCountdown { packet: received }) if received == packet
@@ -16543,14 +16037,14 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::Status(received)) if received == status
         ));
 
         shutdown_tx.send(()).ok();
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16558,19 +16052,15 @@ mod tests {
         // Countdown construction broadcasts the packet to clients while the
         // host applies the same packet directly to its local MainDlg
         // (src/C4GameLobby.cpp:1111-1131).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut client = connect_test_player(addr, "Alpha").await;
         let mut client_events = client.take_event_receiver();
         let packet = crate::LobbyCountdownPacket::new(5);
 
-        host.submit_lobby_countdown(packet).await.unwrap();
+        host.submit_lobby_countdown(packet).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::LobbyCountdown { packet: received }) => {
                     assert_eq!(received, packet);
                     break;
@@ -16580,7 +16070,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::LobbyCountdown { packet: received }) => {
                     assert_eq!(received, packet);
                     break;
@@ -16593,8 +16083,8 @@ mod tests {
             }
         }
 
-        client.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16602,18 +16092,9 @@ mod tests {
         // Accepted PID_ReadyCheck packets are dispatched through
         // C4Network2::HandlePacket/HandleReadyCheck and do not close the
         // connection (src/C4Network2.cpp:949-953,1625-1707).
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
         let packet = ReadyCheckPacket {
             client_id: 0,
             data: crate::ReadyCheckData::Request,
@@ -16622,7 +16103,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::ReadyCheck(packet))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::ReadyCheck { packet: received }) if received == packet
@@ -16636,14 +16117,14 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Status(status))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::Status(received)) if received == status
         ));
 
         shutdown_tx.send(()).ok();
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16651,18 +16132,9 @@ mod tests {
         // HandleReadyCheck accepts a Request only when packet.Client resolves
         // to the host; a rejected request returns without closing the network
         // connection (src/C4Network2.cpp:1625-1646).
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
         let rejected = ReadyCheckPacket {
             client_id: 1,
             data: crate::ReadyCheckData::Request,
@@ -16671,7 +16143,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::ReadyCheck(rejected))
             .await
-            .unwrap();
+            .test_value();
         assert!(timeout(Duration::from_millis(50), event_rx.recv())
             .await
             .is_err());
@@ -16683,14 +16155,14 @@ mod tests {
         host_transport
             .send_message(ControlMessage::ReadyCheck(accepted))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::ReadyCheck { packet }) if packet == accepted
         ));
 
         shutdown_tx.send(()).ok();
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16698,11 +16170,6 @@ mod tests {
         // Packets buffered until JoinData must still pass through the same
         // HandleReadyCheck host-request validation as live packets
         // (src/C4Network2.cpp:949-953,1625-1646).
-        let (client_stream, _host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let rejected = ReadyCheckPacket {
             client_id: 1,
             data: crate::ReadyCheckData::Request,
@@ -16713,15 +16180,8 @@ mod tests {
         };
         let mut resource_state = ClientResourceState::empty();
         resource_state.initial_ready_checks = vec![rejected, accepted];
-        let client_loop = tokio::spawn(run_client_loop_with_addresses(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        let (_host_stream, _command_tx, mut event_rx, shutdown_tx, client_loop) =
+            start_test_client_loop_with_state(512, 8, 8, BTreeMap::new(), resource_state);
 
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
@@ -16732,7 +16192,7 @@ mod tests {
             .is_err());
 
         shutdown_tx.send(()).ok();
-        client_loop.await.unwrap();
+        client_loop.await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16743,23 +16203,17 @@ mod tests {
         // select packet.Client without checking the transport origin
         // (src/C4Network2IO.cpp:1077-1129;
         // src/C4Network2.cpp:1625-1654,1700-1703).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let alpha = connect_test_player(addr, "Alpha").await;
+        let mut beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = beta.take_event_receiver();
         let request = ReadyCheckPacket {
             client_id: HOST_CLIENT_ID as i32,
             data: crate::ReadyCheckData::Request,
         };
 
-        alpha.submit_ready_check(request).await.unwrap();
+        alpha.submit_ready_check(request).await.test_value();
         while let Ok(Some(event)) = timeout(Duration::from_millis(50), host_events.recv()).await {
             assert!(
                 !matches!(event, HostEvent::ReadyCheck { packet } if packet == request),
@@ -16767,7 +16221,7 @@ mod tests {
             );
         }
         loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::ReadyCheck { packet }) => {
                     assert_eq!(packet, request);
                     break;
@@ -16784,9 +16238,9 @@ mod tests {
             client_id: HOST_CLIENT_ID as i32,
             data: crate::ReadyCheckData::Ready,
         };
-        alpha.submit_ready_check(spoofed_ready).await.unwrap();
+        alpha.submit_ready_check(spoofed_ready).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ReadyCheck { packet }) => {
                     assert_eq!(packet, spoofed_ready);
                     break;
@@ -16796,7 +16250,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::ReadyCheck { packet }) => {
                     assert_eq!(packet, spoofed_ready);
                     break;
@@ -16809,9 +16263,9 @@ mod tests {
             }
         }
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16820,26 +16274,20 @@ mod tests {
         // BroadcastMsgToClients; HandleReadyCheck looks that client up without
         // comparing it to the transport origin (src/C4GameLobby.cpp:329-343,
         // 1072-1088; src/C4Network2.cpp:1625-1635).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut alpha = connect_test_player(addr, "Alpha").await;
         let mut alpha_events = alpha.take_event_receiver();
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut beta = connect_test_player(addr, "Beta").await;
         let mut beta_events = beta.take_event_receiver();
         let relayed = ReadyCheckPacket {
             client_id: 0,
             data: crate::ReadyCheckData::Ready,
         };
 
-        alpha.submit_ready_check(relayed).await.unwrap();
+        alpha.submit_ready_check(relayed).await.test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ReadyCheck { packet }) => {
                     assert_eq!(packet, relayed);
                     break;
@@ -16849,7 +16297,7 @@ mod tests {
             }
         }
         loop {
-            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.test_value() {
                 Some(ClientEvent::ReadyCheck { packet }) => {
                     assert_eq!(packet, relayed);
                     break;
@@ -16890,10 +16338,10 @@ mod tests {
             client_id: 0,
             data: crate::ReadyCheckData::Request,
         };
-        host.submit_ready_check(local).await.unwrap();
+        host.submit_ready_check(local).await.test_value();
         for events in [&mut alpha_events, &mut beta_events] {
             loop {
-                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                match timeout(EVENT_WAIT, events.recv()).await.test_value() {
                     Some(ClientEvent::ReadyCheck { packet }) => {
                         assert_eq!(packet, local);
                         break;
@@ -16907,9 +16355,9 @@ mod tests {
             }
         }
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -16917,32 +16365,26 @@ mod tests {
         // HandleReadyCheck mutates the C4Client selected by packet.Client;
         // later JoinData serializes that same Game.Clients registry
         // (src/C4Network2.cpp:1625-1635,1721-1729,1810-1850).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (addr, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
-        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let alpha = connect_test_player(addr, "Alpha").await;
         alpha
             .submit_ready_check(ReadyCheckPacket {
                 client_id: 0,
                 data: crate::ReadyCheckData::Ready,
             })
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
                 Some(HostEvent::ReadyCheck { .. }) => break,
                 Some(_) => continue,
                 None => panic!("host event stream ended before ready-check"),
             }
         }
 
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .unwrap();
-        let join_data = beta.take_join_data().expect("beta receives JoinData");
+        let mut beta = connect_test_player(addr, "Beta").await;
+        let join_data = beta.take_join_data().test_value();
         assert!(
             join_data
                 .parameters
@@ -16954,9 +16396,9 @@ mod tests {
                 .lobby_ready
         );
 
-        alpha.shutdown().await.unwrap();
-        beta.shutdown().await.unwrap();
-        host.shutdown().await.unwrap();
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16966,22 +16408,16 @@ mod tests {
         // new owner before handling its address packets
         // (src/C4Network2.cpp:1395-1445;
         // src/C4Network2Client.cpp:581-621).
-        let (client_stream, host_stream) = duplex(2048);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(
+                2048,
+                8,
+                8,
+                BTreeMap::from([(0, Vec::new()), (1, Vec::new())]),
+                ClientResourceState::empty(),
+            );
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::from([(0, Vec::new()), (1, Vec::new())]),
-            ClientResourceState::empty(),
-        ));
-        let name = clonk_engine::LegacyCString::from_bytes(b"Beta".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Beta".to_vec()).test_value();
         let direct = encode_control_entry_payload(&EngineControlPacket::ClientJoin(
             clonk_engine::ClientJoinControlData {
                 core: clonk_engine::ClientCoreControlData {
@@ -16993,14 +16429,14 @@ mod tests {
                 by_client: 0,
             },
         ))
-        .unwrap();
+        .test_value();
         host_transport
             .send_message(ControlMessage::Packet {
                 delivery: ControlDelivery::Direct,
                 data: direct,
             })
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::Direct { .. })
@@ -17010,13 +16446,13 @@ mod tests {
             client_id: 2,
             address: crate::NetworkAddress::new(
                 crate::NetworkProtocol::Tcp,
-                "198.51.100.22:11112".parse().unwrap(),
+                "198.51.100.22:11112".parse().test_value(),
             ),
         };
         host_transport
             .send_message(ControlMessage::Address(address))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, host_transport.read_message())
                 .await
@@ -17027,7 +16463,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17036,21 +16472,15 @@ mod tests {
         // until PID_ExecSyncCtrl executes the queued removal
         // (src/C4Client.cpp:293-304;
         // src/C4GameControlNetwork.cpp:181-220,558-588).
-        let (client_stream, host_stream) = duplex(2048);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(
+                2048,
+                8,
+                8,
+                BTreeMap::from([(0, Vec::new()), (1, Vec::new()), (2, Vec::new())]),
+                ClientResourceState::empty(),
+            );
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::from([(0, Vec::new()), (1, Vec::new()), (2, Vec::new())]),
-            ClientResourceState::empty(),
-        ));
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
             clonk_engine::ClientRemoveControlData {
                 client_id: 2,
@@ -17058,26 +16488,26 @@ mod tests {
                 by_client: 0,
             },
         ))
-        .unwrap();
+        .test_value();
         host_transport
             .send_message(ControlMessage::Packet {
                 delivery: ControlDelivery::Sync,
                 data: remove,
             })
             .await
-            .unwrap();
+            .test_value();
 
         let before_execution = crate::AddressPacket {
             client_id: 2,
             address: crate::NetworkAddress::new(
                 crate::NetworkProtocol::Tcp,
-                "198.51.100.22:11112".parse().unwrap(),
+                "198.51.100.22:11112".parse().test_value(),
             ),
         };
         host_transport
             .send_message(ControlMessage::Address(before_execution))
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             timeout(EVENT_WAIT, host_transport.read_message())
                 .await
@@ -17089,7 +16519,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::ExecSync { control_tick: 7 })
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
             Some(ClientEvent::SyncScheduled {
@@ -17107,7 +16537,7 @@ mod tests {
                 ),
             }))
             .await
-            .unwrap();
+            .test_value();
         assert!(
             timeout(Duration::from_millis(50), host_transport.read_message())
                 .await
@@ -17116,7 +16546,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17126,31 +16556,20 @@ mod tests {
         // control from that tick before resuming (pristine C++
         // src/C4Network2.cpp:2062-2110;
         // src/C4GameControlNetwork.cpp:360-374).
-        let (client_stream, host_stream) = duplex(4096);
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.register(0).unwrap();
-        resource_state.control.register(1).unwrap();
-        let client_handle = tokio::spawn(run_client_loop_with_addresses(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-            None,
-            BTreeMap::new(),
-            resource_state,
-        ));
+        resource_state.control.register(0).test_value();
+        resource_state.control.register(1).test_value();
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop_with_state(4096, 8, 8, BTreeMap::new(), resource_state);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
         let live_tick = 137;
 
         let central_history = legacy_packet(BROADCAST_CLIENT_ID, live_tick - 1, 0x10);
         host_transport
             .send_message(ControlMessage::Control(central_history.clone()))
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::Ready { packet })) if packet == central_history
@@ -17165,7 +16584,7 @@ mod tests {
             command_tx
                 .send(ClientCommand::SubmitControl(packet.clone()))
                 .await
-                .unwrap();
+                .test_value();
             assert_eq!(
                 timeout(EVENT_WAIT, host_transport.read_message())
                     .await
@@ -17178,12 +16597,12 @@ mod tests {
         let decentral = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 0,
-            target_tick: i32::try_from(live_tick).unwrap(),
+            target_tick: i32::try_from(live_tick).test_value(),
         };
         host_transport
             .send_message(ControlMessage::StatusAck(decentral))
             .await
-            .unwrap();
+            .test_value();
         for packet in &local_packets[..2] {
             assert_eq!(
                 timeout(EVENT_WAIT, host_transport.read_message())
@@ -17207,8 +16626,8 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Control(legacy_packet(0, live_tick, 0x11)))
             .await
-            .unwrap();
-        let aggregate = match timeout(EVENT_WAIT, event_rx.recv()).await.unwrap() {
+            .test_value();
+        let aggregate = match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
             Some(ClientEvent::Ready { packet }) => packet,
             other => panic!("expected live decentralized aggregate, got {other:?}"),
         };
@@ -17217,7 +16636,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.unwrap();
+        client_handle.await.test_value();
     }
 
     #[test]
@@ -17273,9 +16692,9 @@ mod tests {
     #[test]
     fn decentral_recovery_tick_is_derived_from_coordinator_missing_ranges() {
         let mut control = ClientControlState::central(0);
-        control.register(0).unwrap();
-        control.register(1).unwrap();
-        control.change_mode(0, 0).unwrap();
+        control.register(0).test_value();
+        control.register(1).test_value();
+        control.change_mode(0, 0).test_value();
         control.set_status_target(NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 0,
@@ -17297,9 +16716,9 @@ mod tests {
     #[test]
     fn decentral_complete_recovery_advances_and_drains_future_ticks() {
         let mut control = ClientControlState::central(0);
-        control.register(0).unwrap();
-        control.register(1).unwrap();
-        control.change_mode(0, 0).unwrap();
+        control.register(0).test_value();
+        control.register(1).test_value();
+        control.change_mode(0, 0).test_value();
         control.set_status_target(NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 0,
@@ -17325,7 +16744,7 @@ mod tests {
     fn active_client_recovery_waits_until_own_control_was_sent() {
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.register(1).unwrap();
+        resource_state.control.register(1).test_value();
         resource_state.control.set_status_target(NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
@@ -17365,7 +16784,7 @@ mod tests {
     #[test]
     fn central_mode_reentry_consumes_a_retained_future_complete_tick() {
         let mut control = ClientControlState::central(0);
-        control.register(0).unwrap();
+        control.register(0).test_value();
         assert_eq!(
             control
                 .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 1, 0x21))
@@ -17373,7 +16792,7 @@ mod tests {
                 .len(),
             1
         );
-        control.change_mode(0, 0).unwrap();
+        control.change_mode(0, 0).test_value();
         assert_eq!(
             control
                 .ingest_contribution(legacy_packet(0, 0, 0x11))
@@ -17381,7 +16800,7 @@ mod tests {
                 .len(),
             1
         );
-        control.change_mode(1, 1).unwrap();
+        control.change_mode(1, 1).test_value();
 
         assert_eq!(control.expected_tick(), 2);
         assert!(control
@@ -17393,14 +16812,14 @@ mod tests {
     #[test]
     fn central_mode_switch_does_not_pack_buffered_partials() {
         let mut control = ClientControlState::central(0);
-        control.register(0).unwrap();
-        control.change_mode(0, 0).unwrap();
+        control.register(0).test_value();
+        control.change_mode(0, 0).test_value();
         assert!(control
             .ingest_contribution(legacy_packet(0, 1, 0x11))
             .unwrap()
             .is_empty());
 
-        let (changed, ready) = control.change_mode(1, 1).unwrap();
+        let (changed, ready) = control.change_mode(1, 1).test_value();
         assert!(changed);
         assert!(ready.is_empty());
         assert_eq!(control.expected_tick(), 1);
@@ -17416,9 +16835,9 @@ mod tests {
     #[test]
     fn central_replay_does_not_repeat_a_locally_assembled_tick() {
         let mut control = ClientControlState::central(0);
-        control.register(0).unwrap();
-        control.register(1).unwrap();
-        control.change_mode(0, 37).unwrap();
+        control.register(0).test_value();
+        control.register(1).test_value();
+        control.change_mode(0, 37).test_value();
         assert!(control
             .ingest_contribution(legacy_packet(0, 37, 0x11))
             .unwrap()
@@ -17430,7 +16849,7 @@ mod tests {
                 .len(),
             1
         );
-        control.change_mode(1, 37).unwrap();
+        control.change_mode(1, 37).test_value();
 
         assert!(control
             .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 37, 0x31))
@@ -17445,18 +16864,9 @@ mod tests {
         // C4ClientIDAll packet after all active clients contributed. Packing is
         // in client-ID order (pristine C++ src/C4GameControlNetwork.cpp:156-179,
         // 679-718,741-783).
-        let (client_stream, host_stream) = duplex(2048);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop(2048, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_handle = tokio::spawn(super::run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
         let decentral = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 0,
@@ -17466,14 +16876,14 @@ mod tests {
         host_transport
             .send_message(ControlMessage::StatusAck(decentral))
             .await
-            .expect("send decentralized status");
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::StatusAck(status))) if status == decentral
         ));
 
         for (client_id, name) in [(0, b"Host".as_slice()), (1, b"Local".as_slice())] {
-            let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+            let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
             let join = EngineControlPacket::ClientJoin(clonk_engine::ClientJoinControlData {
                 core: clonk_engine::ClientCoreControlData {
                     client_id,
@@ -17491,7 +16901,7 @@ mod tests {
                     data: encode_control_entry_payload(&join).expect("encode client join"),
                 })
                 .await
-                .expect("send active client join");
+                .test_value();
             assert!(matches!(
                 timeout(EVENT_WAIT, event_rx.recv()).await,
                 Ok(Some(ClientEvent::Direct {
@@ -17506,7 +16916,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Control(host.clone()))
             .await
-            .expect("send host contribution");
+            .test_value();
         assert!(
             timeout(Duration::from_millis(50), event_rx.recv())
                 .await
@@ -17517,8 +16927,8 @@ mod tests {
         command_tx
             .send(ClientCommand::SubmitControl(local.clone()))
             .await
-            .expect("submit local contribution");
-        let nested_packet = crate::transport::encode_complete_control_packet(&local).unwrap();
+            .test_value();
+        let nested_packet = crate::transport::encode_complete_control_packet(&local).test_value();
         assert_eq!(
             timeout(EVENT_WAIT, host_transport.read_message())
                 .await
@@ -17530,10 +16940,7 @@ mod tests {
                 nested_packet,
             })
         );
-        let aggregate = match timeout(EVENT_WAIT, event_rx.recv())
-            .await
-            .expect("aggregate wait")
-        {
+        let aggregate = match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
             Some(ClientEvent::Ready { packet }) => packet,
             other => panic!("expected one aggregate ready event, got {other:?}"),
         };
@@ -17553,7 +16960,7 @@ mod tests {
             host_transport
                 .send_message(ControlMessage::Control(duplicate))
                 .await
-                .expect("echo duplicate contribution");
+                .test_value();
         }
         assert!(
             timeout(Duration::from_millis(50), event_rx.recv())
@@ -17564,7 +16971,7 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         drop(command_tx);
-        client_handle.await.expect("client loop exited");
+        client_handle.await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17572,18 +16979,9 @@ mod tests {
         // A non-host in CNM_Central cannot pack per-client contributions and
         // waits for the host's C4ClientIDAll packet instead (pristine C++
         // src/C4GameControlNetwork.cpp:679-718,775-777).
-        let (client_stream, host_stream) = duplex(512);
-        let transport = crate::ControlTransport::new(client_stream);
+        let (host_stream, _command_tx, mut event_rx, shutdown_tx, client_handle) =
+            start_test_client_loop(512, 8, 8);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_handle = tokio::spawn(super::run_client_loop(
-            transport,
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
         let central = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
@@ -17594,7 +16992,7 @@ mod tests {
         host_transport
             .send_message(ControlMessage::StatusAck(central))
             .await
-            .expect("send central status");
+            .test_value();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::StatusAck(status))) if status == central
@@ -17602,16 +17000,13 @@ mod tests {
         host_transport
             .send_message(ControlMessage::Control(complete.clone()))
             .await
-            .expect("send complete tick");
+            .test_value();
         host_transport
             .send_message(ControlMessage::Control(complete.clone()))
             .await
-            .expect("retransmit complete tick");
+            .test_value();
 
-        match timeout(EVENT_WAIT, event_rx.recv())
-            .await
-            .expect("ready wait")
-        {
+        match timeout(EVENT_WAIT, event_rx.recv()).await.test_value() {
             Some(ClientEvent::Ready { packet }) => assert_eq!(packet, complete),
             other => panic!("expected one ready event, got {other:?}"),
         }
@@ -17623,7 +17018,7 @@ mod tests {
         );
 
         shutdown_tx.send(()).ok();
-        client_handle.await.expect("client loop exited");
+        client_handle.await.test_value();
     }
 
     async fn submit_control_pair(
@@ -17634,15 +17029,10 @@ mod tests {
         client_command: i32,
     ) {
         let host_packet = legacy_packet(0, tick, host_command);
-        host.submit_local_control(host_packet)
-            .await
-            .expect("host submit control");
+        host.submit_local_control(host_packet).await.test_value();
 
         let client_packet = legacy_packet(client.client_id(), tick, client_command);
-        client
-            .submit_control(client_packet)
-            .await
-            .expect("client submit control");
+        client.submit_control(client_packet).await.test_value();
     }
 
     async fn activate_joined_client(
@@ -17676,9 +17066,9 @@ mod tests {
 
         let update = ClientUpdateControlData {
             update_type: CLIENT_UPDATE_ACTIVATE,
-            client_id: i32::try_from(client_id).expect("test client ID fits i32"),
+            client_id: i32::try_from(client_id).test_value(),
             data: 1,
-            by_client: i32::try_from(HOST_CLIENT_ID).expect("host client ID fits i32"),
+            by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
         };
         host.submit_packet(
             ControlDelivery::Sync,
@@ -17686,7 +17076,7 @@ mod tests {
                 .expect("encode activation control"),
         )
         .await
-        .expect("submit activation control");
+        .test_value();
 
         loop {
             match timeout(EVENT_WAIT, events.recv()).await {
@@ -17721,7 +17111,7 @@ mod tests {
                 by_client: i32::try_from(client_id).unwrap_or(i32::MAX),
             })],
         })
-        .expect("test legacy control encodes")
+        .test_value()
     }
 
     fn assert_no_queued_client_status(events: &mut mpsc::Receiver<ClientEvent>) {
@@ -17825,9 +17215,9 @@ mod tests {
         address: SocketAddr,
         name: &[u8],
     ) -> (crate::ControlTransport<TcpStream>, ClientId) {
-        let stream = TcpStream::connect(address).await.unwrap();
+        let stream = TcpStream::connect(address).await.test_value();
         let mut transport = crate::ControlTransport::new(stream);
-        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
         let request = crate::ConnectionRequest {
             core: clonk_engine::ClientCoreControlData {
                 client_id: -1,
@@ -17843,8 +17233,8 @@ mod tests {
         };
         let handshake = run_client_connection_handshake(&mut transport, request)
             .await
-            .unwrap();
-        let client_id = ClientId::try_from(handshake.join_data.client_id).unwrap();
+            .test_value();
+        let client_id = ClientId::try_from(handshake.join_data.client_id).test_value();
         (transport, client_id)
     }
 
@@ -17854,13 +17244,13 @@ mod tests {
         remote_connection_id: u32,
         name: &[u8],
     ) -> crate::ControlTransport<TcpStream> {
-        let stream = TcpStream::connect(address).await.unwrap();
+        let stream = TcpStream::connect(address).await.test_value();
         let mut transport = crate::ControlTransport::new(stream);
         assert!(matches!(
             transport.read_message().await.unwrap(),
             ControlMessage::ConnectionRequest(_)
         ));
-        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value();
         transport
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -17878,15 +17268,15 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         loop {
-            match transport.read_message().await.unwrap() {
+            match transport.read_message().await.test_value() {
                 ControlMessage::ConnectionReply(reply) if reply.ok => break,
                 ControlMessage::Ping(ping) => {
                     transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 other => panic!("expected positive host connection reply, got {other:?}"),
             }
@@ -17899,7 +17289,7 @@ mod tests {
                 wrong_password: false,
             }))
             .await
-            .unwrap();
+            .test_value();
         transport
     }
 
@@ -17914,20 +17304,20 @@ mod tests {
         loop {
             match timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("host connection request stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::ConnectionRequest(_) => break,
                 ControlMessage::Ping(ping) => {
                     transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 other => panic!("expected host connection request, got {other:?}"),
             }
         }
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).test_value();
         transport
             .send_message(ControlMessage::ConnectionRequest(
                 crate::ConnectionRequest {
@@ -17945,19 +17335,19 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .test_value();
         loop {
             match timeout(EVENT_WAIT, transport.read_message())
                 .await
-                .expect("host route-admission decision stalled")
-                .unwrap()
+                .test_value()
+                .test_value()
             {
                 ControlMessage::ConnectionReply(reply) => return reply,
                 ControlMessage::Ping(ping) => {
                     transport
                         .send_message(ControlMessage::Pong(ping))
                         .await
-                        .unwrap();
+                        .test_value();
                 }
                 other => panic!("expected host connection reply, got {other:?}"),
             }
@@ -17979,7 +17369,7 @@ mod tests {
         transport
             .send_message(ControlMessage::Ping(ping))
             .await
-            .unwrap();
+            .test_value();
         let deadline = tokio::time::Instant::now() + EVENT_WAIT;
         loop {
             match timeout_at(deadline, transport.read_message()).await {
@@ -18020,7 +17410,7 @@ mod tests {
                 return false;
             }
             assert_eq!(header[0], 0xff, "invalid TCP packet frame prefix");
-            let size = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let size = u32::from_ne_bytes(header[1..].try_into().test_value()) as usize;
             let mut body = vec![0; size];
             if !matches!(
                 timeout_at(deadline, stream.read_exact(&mut body)).await,
@@ -18043,7 +17433,7 @@ mod tests {
         transport
             .send_message(ControlMessage::StatusAck(status))
             .await
-            .expect("send raw status acknowledgement");
+            .test_value();
         loop {
             match timeout(EVENT_WAIT, events.recv()).await {
                 Ok(Some(HostEvent::StatusAck {
@@ -18112,7 +17502,7 @@ mod tests {
 
     fn control_commands(packet: &ControlPacket) -> Vec<i32> {
         decode_control_packet(packet)
-            .expect("complete control decodes")
+            .test_value()
             .controls
             .into_iter()
             .map(|control| match control {

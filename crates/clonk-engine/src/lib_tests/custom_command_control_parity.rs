@@ -2,8 +2,8 @@ use super::*;
 
 fn command(name: &[u8], argument: &[u8], player: i32, by_client: i32) -> CustomCommandControlData {
     CustomCommandControlData {
-        command: LegacyCString::from_bytes(name.to_vec()).expect("name is NUL-free"),
-        argument: LegacyCString::from_bytes(argument.to_vec()).expect("argument is NUL-free"),
+        command: crate::TestValueExt::test_value(LegacyCString::from_bytes(name.to_vec())),
+        argument: crate::TestValueExt::test_value(LegacyCString::from_bytes(argument.to_vec())),
         player,
         by_client,
     }
@@ -36,27 +36,25 @@ fn probe_engine() -> Engine {
 }
 
 fn probe(engine: &Engine) -> Value {
-    let cell = engine
-        .script_globals
-        .borrow()
-        .get("CustomCommandProbe")
-        .cloned()
-        .expect("probe global is linked");
+    let cell = crate::TestValueExt::test_value(
+        engine
+            .script_globals
+            .borrow()
+            .get("CustomCommandProbe")
+            .cloned(),
+    );
     let value = cell.borrow().clone();
     value
 }
 
 fn execute(engine: &mut Engine, control: &CustomCommandControlData, game_running: bool) -> bool {
-    engine
-        .execute_custom_command_control(control, game_running)
-        .expect("custom-command execution is not a fatal engine error")
+    crate::TestValueExt::test_value(engine.execute_custom_command_control(control, game_running))
 }
 
 fn call_script(engine: &mut Engine, function: &str) -> Value {
-    engine
-        .call_scenario_script_value(function, &[])
-        .expect("message-board registration script executes")
-        .expect("message-board registration function exists")
+    crate::TestValueExt::test_value(crate::TestValueExt::test_value(
+        engine.call_scenario_script_value(function, &[]),
+    ))
 }
 
 #[test]
@@ -85,23 +83,17 @@ fn custom_command_registry_is_first_wins_and_enters_join_data() {
         MessageBoardCommandRestriction::Identifier,
     )));
 
-    let snapshot = InitialNetworkGameData::from_engine(&engine)
-        .expect("command-only engine is representable in JoinData");
+    let snapshot = crate::TestValueExt::test_value(InitialNetworkGameData::from_engine(&engine));
     assert_eq!(
         snapshot.message_board_commands,
         engine.message_board_commands()
     );
     assert_eq!(snapshot.message_board_commands[1].script, "Capture(1)");
 
-    let encoded = engine
-        .capture_state()
-        .to_json_string()
-        .expect("command registry serializes");
-    let state = EngineState::from_json_str(&encoded).expect("command registry deserializes");
+    let encoded = crate::TestValueExt::test_value(engine.capture_state().to_json_string());
+    let state = crate::TestValueExt::test_value(EngineState::from_json_str(&encoded));
     let mut restored = Engine::new();
-    restored
-        .restore_state(&state)
-        .expect("command registry restores");
+    crate::TestValueExt::test_value(restored.restore_state(&state));
     assert_eq!(
         restored.message_board_commands(),
         engine.message_board_commands()
@@ -151,12 +143,11 @@ fn add_msg_board_cmd_validates_the_caller_and_drives_custom_command_execution() 
         .iter()
         .all(|command| { command.name != "direct-escaped" && command.name != "direct-plain" }));
 
-    engine
-        .load_scenario_script_with_convention(
-            "AddMsgBoardCmd.c",
-            r#"#strict 2
-func RegisterCommands()
-{
+    crate::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "AddMsgBoardCmd.c",
+        r#"#strict 2
+    func RegisterCommands()
+    {
     var unset;
     return [
         AddMsgBoardCmd(unset, "Capture(1)", C4MSGCMDR_Identifier),
@@ -166,16 +157,15 @@ func RegisterCommands()
         AddMsgBoardCmd("probe", "Capture(%d)", C4MSGCMDR_Escaped),
         AddMsgBoardCmd("probe", "Capture(999)", C4MSGCMDR_Identifier)
     ];
-}
+    }
 
-func RegisterFromEval()
-{
+    func RegisterFromEval()
+    {
     return eval("AddMsgBoardCmd(\"eval-command\", \"Capture(8)\", C4MSGCMDR_Plain)");
-}
-"#,
-            true,
-        )
-        .expect("AddMsgBoardCmd scenario probe compiles");
+    }
+    "#,
+        true,
+    ));
     assert_eq!(
         call_script(&mut engine, "RegisterCommands"),
         Value::Array(vec![
@@ -216,13 +206,8 @@ func RegisterFromEval()
 #[test]
 fn custom_command_checks_player_running_and_exact_registration_before_execution() {
     let mut engine = probe_engine();
-    engine
-        .register_player(PlayerConfig::new(3, "Owner"))
-        .expect("host player registers");
-    engine
-        .player_mut(3)
-        .expect("player remains registered")
-        .set_at_client(PlayerAtClient::HOST);
+    crate::TestValueExt::test_value(engine.register_player(PlayerConfig::new(3, "Owner")));
+    crate::TestValueExt::test_value(engine.player_mut(3)).set_at_client(PlayerAtClient::HOST);
     assert!(engine.add_message_board_command(registered(
         "who",
         "Capture(\"%player%/%player%\")",

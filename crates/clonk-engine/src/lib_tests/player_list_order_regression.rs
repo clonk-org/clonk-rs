@@ -36,9 +36,9 @@ fn register_joining_player(engine: &mut Engine, name: &str) -> i32 {
 fn engine_with_player_count(count: i32) -> Engine {
     let mut engine = Engine::new();
     for player in 0..count {
-        engine
-            .register_player(PlayerConfig::new(player, format!("Player {player}")))
-            .expect("player registers");
+        crate::TestValueExt::test_value(
+            engine.register_player(PlayerConfig::new(player, format!("Player {player}"))),
+        );
     }
     engine
 }
@@ -121,12 +121,10 @@ fn untyped_get_player_by_index_reads_only_the_requested_list_link() {
 fn callback_worlds_share_the_reloadable_definition_table_between_definition_changes() {
     // ReloadDef resolves the definition and its stored Filename only after
     // the network gate (C4Game.cpp:2310-2325); neither changes per callback.
-    let mut definition = Definition::from_script("TEST", "Test", "").expect("definition compiles");
+    let mut definition = test_definition("TEST", "Test", "");
     definition.set_source_path(Some(std::path::PathBuf::from("Test.c4d")));
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("definition registers");
+    crate::TestValueExt::test_value(engine.register_definition(definition));
 
     RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS.with(|count| count.set(0));
     assert!(engine
@@ -141,11 +139,9 @@ fn callback_worlds_share_the_reloadable_definition_table_between_definition_chan
         "unchanged definition metadata must build one shared reload table"
     );
 
-    let mut added = Definition::from_script("NEXT", "Next", "").expect("definition compiles");
+    let mut added = test_definition("NEXT", "Next", "");
     added.set_source_path(Some(std::path::PathBuf::from("Next.c4d")));
-    engine
-        .register_definition(added)
-        .expect("new definition registers");
+    crate::TestValueExt::test_value(engine.register_definition(added));
     assert!(engine
         .host_world_context()
         .definition_reload_accepted("NEXT"));
@@ -159,9 +155,9 @@ fn callback_worlds_share_the_reloadable_definition_table_between_definition_chan
 #[test]
 fn replay_player_info_counter_install_preserves_exact_persisted_value() {
     let mut engine = Engine::new();
-    engine
-        .register_player(PlayerConfig::new(0, "Existing").with_player_info_id(41))
-        .expect("existing player registers");
+    crate::TestValueExt::test_value(
+        engine.register_player(PlayerConfig::new(0, "Existing").with_player_info_id(41)),
+    );
     assert_eq!(engine.last_player_info_id(), 41);
 
     engine.set_last_player_info_id(12);
@@ -207,7 +203,7 @@ fn player_list_order_preserves_native_id_reuse_recheck_edges() {
     let mut two_players = Engine::new();
     assert_eq!(register_joining_player(&mut two_players, "Zero"), 0);
     assert_eq!(register_joining_player(&mut two_players, "One"), 1);
-    two_players.remove_player(0).expect("remove player zero");
+    crate::TestValueExt::test_value(two_players.remove_player(0));
     assert_eq!(register_joining_player(&mut two_players, "Zero again"), 0);
     assert_eq!(two_players.first_player_id(), Some(1));
     assert_eq!(
@@ -259,25 +255,21 @@ fn player_list_order_preserves_native_id_reuse_recheck_edges() {
 
     let state = two_players.capture_state();
     let mut restored = Engine::new();
-    restored
-        .restore_state(&state)
-        .expect("restore player order");
+    crate::TestValueExt::test_value(restored.restore_state(&state));
     assert_eq!(restored.first_player_id(), Some(1));
     restored.retain_restored_players([0]);
     assert_eq!(restored.first_player_id(), Some(0));
 
     let mut three_players = Engine::new();
     for number in 0..3 {
-        three_players
-            .register_player(PlayerConfig::new(number, format!("Player {number}")))
-            .expect("register player");
+        crate::TestValueExt::test_value(
+            three_players.register_player(PlayerConfig::new(number, format!("Player {number}"))),
+        );
     }
-    three_players
-        .remove_player(0)
-        .expect("remove first of three players");
-    three_players
-        .register_player(PlayerConfig::new(0, "Zero again"))
-        .expect("reuse player zero");
+    crate::TestValueExt::test_value(three_players.remove_player(0));
+    crate::TestValueExt::test_value(
+        three_players.register_player(PlayerConfig::new(0, "Zero again")),
+    );
     assert_eq!(three_players.first_player_id(), Some(0));
     assert_eq!(
         three_players
@@ -310,9 +302,9 @@ fn player_list_order_preserves_native_id_reuse_recheck_edges() {
     );
 
     let mut partial_ledger_fixture = Engine::new();
-    partial_ledger_fixture
-        .register_player(PlayerConfig::new(1, "Tracked"))
-        .expect("register tracked player");
+    crate::TestValueExt::test_value(
+        partial_ledger_fixture.register_player(PlayerConfig::new(1, "Tracked")),
+    );
     partial_ledger_fixture
         .players
         .insert(4, PlayerConfig::new(4, "Direct map addition four").build());
@@ -342,72 +334,61 @@ fn player_list_order_preserves_native_id_reuse_recheck_edges() {
 #[test]
 fn clear_pointer_callbacks_follow_native_player_list_order() {
     let mut engine = Engine::new();
-    engine
-        .register_player(PlayerConfig::new(1, "First"))
-        .expect("register first player");
-    engine
-        .register_player(PlayerConfig::new(0, "Appended lower number"))
-        .expect("register appended lower-number player");
+    crate::TestValueExt::test_value(engine.register_player(PlayerConfig::new(1, "First")));
+    crate::TestValueExt::test_value(
+        engine.register_player(PlayerConfig::new(0, "Appended lower number")),
+    );
     assert_eq!(
         engine.players().map(Player::id).collect::<Vec<_>>(),
         vec![1, 0]
     );
 
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "PORD",
         "Player-order callback probe",
         r#"#strict 2
-static callback_log;
+    static callback_log;
 
-func CrewSelection(bool unselect, bool cursor)
-{
-    if (!unselect) callback_log = callback_log * 10 + GetOwner() + 1;
-    return true;
-}
+    func CrewSelection(bool unselect, bool cursor)
+    {
+        if (!unselect) callback_log = callback_log * 10 + GetOwner() + 1;
+        return true;
+    }
 
-func ResetCallbackLog() { callback_log = 0; return true; }
-func ReadCallbackLog() { return callback_log; }
-"#,
-    )
-    .expect("compile callback-order probe");
+    func ResetCallbackLog() { callback_log = 0; return true; }
+    func ReadCallbackLog() { return callback_log; }
+    "#,
+    );
     definition.set_crew_member(true);
-    engine
-        .register_definition(definition)
-        .expect("register callback-order probe");
+    crate::TestValueExt::test_value(engine.register_definition(definition));
 
-    let target = engine
-        .spawn_object(
+    let target = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("PORD")
                 .with_owner(1)
                 .with_alive(true)
                 .with_crew_member(true),
-        )
-        .expect("spawn shared cursor target");
-    let replacement_one = engine
-        .spawn_object(
+        ),
+    );
+    let replacement_one = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("PORD")
                 .with_owner(1)
                 .with_alive(true)
                 .with_crew_member(true),
-        )
-        .expect("spawn player-one replacement");
-    let replacement_zero = engine
-        .spawn_object(
+        ),
+    );
+    let replacement_zero = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("PORD")
                 .with_owner(0)
                 .with_alive(true)
                 .with_crew_member(true),
-        )
-        .expect("spawn player-zero replacement");
-    engine
-        .players
-        .get_mut(&1)
-        .expect("player one remains")
+        ),
+    );
+    crate::TestValueExt::test_value(engine.players.get_mut(&1))
         .set_crew(vec![target, replacement_one]);
-    engine
-        .players
-        .get_mut(&0)
-        .expect("player zero remains")
+    crate::TestValueExt::test_value(engine.players.get_mut(&0))
         .set_crew(vec![target, replacement_zero]);
     engine.crew_selection.insert(
         1,
@@ -422,15 +403,14 @@ func ReadCallbackLog() { return callback_log; }
         },
     );
 
-    let replacement_index = engine
-        .find_object_index(replacement_one)
-        .expect("replacement remains live");
-    engine
-        .call_object_function(replacement_index, "ResetCallbackLog", Vec::new())
-        .expect("reset callback order");
-    engine
-        .clear_object_references_for_removal(target)
-        .expect("clear shared cursor in player-list order");
+    let replacement_index =
+        crate::TestValueExt::test_value(engine.find_object_index(replacement_one));
+    crate::TestValueExt::test_value(engine.call_object_function(
+        replacement_index,
+        "ResetCallbackLog",
+        Vec::new(),
+    ));
+    crate::TestValueExt::test_value(engine.clear_object_references_for_removal(target));
     assert_eq!(
         engine
             .call_object_function(replacement_index, "ReadCallbackLog", Vec::new())
@@ -443,17 +423,17 @@ func ReadCallbackLog() { return callback_log; }
 #[test]
 fn player_list_remove_snapshots_without_running_player_evaluation() {
     let mut engine = Engine::new();
-    engine
-        .register_player(
+    crate::TestValueExt::test_value(
+        engine.register_player(
             PlayerConfig::new(7, "Departing")
                 .with_player_info_id(41)
                 .with_score(123)
                 .with_rounds(8, 3, 5)
                 .with_total_playing_time(456),
-        )
-        .expect("player registers");
+        ),
+    );
 
-    let removed = engine.remove_player(7).expect("player removes");
+    let removed = crate::TestValueExt::test_value(engine.remove_player(7));
     let removed_state = removed.to_state();
     assert!(!removed_state.evaluated);
     assert_eq!(removed_state.score, 123);
@@ -478,25 +458,19 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
         (3, PlayerAtClient::UNKNOWN),
         (4, PlayerAtClient::UNKNOWN),
     ] {
-        engine
-            .register_player(
+        crate::TestValueExt::test_value(
+            engine.register_player(
                 PlayerConfig::new(number, format!("Player {number}"))
                     .with_player_info_id(100 + number)
                     .with_team(Some(1))
                     .with_score(10 + number)
                     .with_rounds(7, 3, 4)
                     .with_total_playing_time(20 + number),
-            )
-            .expect("player registers");
-        engine
-            .player_mut(number)
-            .expect("player remains")
-            .set_at_client(client);
+            ),
+        );
+        crate::TestValueExt::test_value(engine.player_mut(number)).set_at_client(client);
     }
-    engine
-        .player_mut(4)
-        .expect("unknown-client player remains")
-        .set_script_player(true);
+    crate::TestValueExt::test_value(engine.player_mut(4)).set_script_player(true);
 
     // A direct legacy fixture supplies the GetInfo()==nullptr case. It
     // is remote in the second pass and must not create a result row.
@@ -509,51 +483,40 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
     // is non-local despite being a user at the replay client id.
     engine.set_local_players([3, 1]);
 
-    let mut crew_definition =
-        Definition::from_script("CLNK", "Crew", "").expect("crew definition compiles");
+    let mut crew_definition = test_definition("CLNK", "Crew", "");
     crew_definition.set_crew_member(true);
-    engine
-        .register_definition(crew_definition)
-        .expect("crew definition registers");
-    engine
-        .register_script_definition("OWND", "Owned", "")
-        .expect("owned definition registers");
-    engine
-        .load_scenario_script_with_convention(
-            "AbortCallbacks",
-            "#strict 3\n\
+    crate::TestValueExt::test_value(engine.register_definition(crew_definition));
+    crate::TestValueExt::test_value(engine.register_script_definition("OWND", "Owned", ""));
+    crate::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "AbortCallbacks",
+        "#strict 3\n\
                  static RemoveCalls, GameOverCalls;\n\
                  func Initialize() { RemoveCalls = 0; GameOverCalls = 0; }\n\
                  func RemovePlayer() { RemoveCalls = RemoveCalls + 1; }\n\
                  func OnGameOver() { GameOverCalls = GameOverCalls + 1; }\n\
                  func ReadAbortCalls() { return RemoveCalls * 10 + GameOverCalls; }",
-            true,
-        )
-        .expect("callback probe loads");
+        true,
+    ));
 
-    let crew = engine
-        .spawn_object(
+    let crew = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("CLNK")
                 .with_owner(3)
                 .with_alive(true)
                 .with_crew_member(false)
                 .with_loaded(true),
-        )
-        .expect("crew object spawns");
+        ),
+    );
     engine.crew_rosters.insert(3, vec![crew_info("Retained")]);
     engine.crew_info_order.insert(3, vec![0]);
     engine.remember_legacy_object_info(crew, Some("Retained".to_string()));
-    engine
-        .initialize_scenario_script()
-        .expect("crew info attaches and callback counters initialize");
+    crate::TestValueExt::test_value(engine.initialize_scenario_script());
     assert!(engine.crew_object_info(crew).is_some());
 
-    let owned = engine
-        .spawn_object(SpawnConfig::new("OWND").with_owner(3))
-        .expect("owned object spawns");
-    let removed = engine
-        .abort_players_without_callbacks(-1)
-        .expect("hard abort succeeds");
+    let owned = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("OWND").with_owner(3)),
+    );
+    let removed = crate::TestValueExt::test_value(engine.abort_players_without_callbacks(-1));
 
     assert_eq!(
         removed.iter().map(Player::id).collect::<Vec<_>>(),
@@ -573,7 +536,7 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
         Some(Value::Int(0))
     );
 
-    let crew_index = engine.find_object_index(crew).expect("crew object remains");
+    let crew_index = crate::TestValueExt::test_value(engine.find_object_index(crew));
     assert!(!engine.objects[crew_index].destroyed);
     assert_eq!(engine.objects[crew_index].state.owner, OWNER_NONE);
     assert!(engine.objects[crew_index].state.crew_member);
@@ -581,9 +544,7 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
     assert!(engine.crew_object_info(crew).is_none());
     assert!(!engine.crew_info_links.contains_key(&crew));
 
-    let owned_index = engine
-        .find_object_index(owned)
-        .expect("owned object remains");
+    let owned_index = crate::TestValueExt::test_value(engine.find_object_index(owned));
     assert_eq!(engine.objects[owned_index].state.owner, OWNER_NONE);
     assert_ne!(
         engine.objects[owned_index].state.owner, 4,
@@ -608,34 +569,17 @@ fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
 fn hard_abort_derives_local_control_when_no_projection_is_installed() {
     let mut engine = Engine::new();
     for number in 0..3 {
-        engine
-            .register_player(
-                PlayerConfig::new(number, format!("Player {number}"))
-                    .with_player_info_id(20 + number),
-            )
-            .expect("player registers");
+        crate::TestValueExt::test_value(engine.register_player(
+            PlayerConfig::new(number, format!("Player {number}")).with_player_info_id(20 + number),
+        ));
     }
-    engine
-        .player_mut(0)
-        .expect("user player remains")
-        .set_at_client(PlayerAtClient::UNKNOWN);
-    engine
-        .player_mut(1)
-        .expect("script player remains")
-        .set_at_client(PlayerAtClient::UNKNOWN);
-    engine
-        .player_mut(1)
-        .expect("script player remains")
-        .set_script_player(true);
-    engine
-        .player_mut(2)
-        .expect("remote player remains")
-        .set_at_client(PlayerAtClient::new(7));
+    crate::TestValueExt::test_value(engine.player_mut(0)).set_at_client(PlayerAtClient::UNKNOWN);
+    crate::TestValueExt::test_value(engine.player_mut(1)).set_at_client(PlayerAtClient::UNKNOWN);
+    crate::TestValueExt::test_value(engine.player_mut(1)).set_script_player(true);
+    crate::TestValueExt::test_value(engine.player_mut(2)).set_at_client(PlayerAtClient::new(7));
     engine.player_order = vec![2, 1, 0];
 
-    let removed = engine
-        .abort_players_without_callbacks(-1)
-        .expect("derived hard abort succeeds");
+    let removed = crate::TestValueExt::test_value(engine.abort_players_without_callbacks(-1));
     assert_eq!(
         removed.iter().map(Player::id).collect::<Vec<_>>(),
         vec![0, 2]
@@ -651,29 +595,22 @@ fn initialized_join_player_can_repeat_scenario_and_team_init() {
     let mut engine = Engine::new();
     engine.set_landscape(Landscape::flat(100, 100));
     engine.set_teams(vec![TeamInfo::new(1, "One", 0), TeamInfo::new(2, "Two", 0)]);
-    engine
-        .load_scenario_script_with_convention(
-            "RepeatedScenarioInit",
-            "#strict 3\n\
+    crate::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "RepeatedScenarioInit",
+        "#strict 3\n\
                  static InitCalls;\n\
                  func Initialize() { InitCalls = 0; }\n\
                  func InitializePlayer() { InitCalls = InitCalls + 1; }\n\
                  func RepeatInit(plr, team) { return InitScenarioPlayer(plr, team); }\n\
                  func ReadInitCalls() { return InitCalls; }",
-            true,
-        )
-        .expect("scenario probe loads");
-    engine
-        .initialize_scenario_script()
-        .expect("scenario probe initializes");
+        true,
+    ));
+    crate::TestValueExt::test_value(engine.initialize_scenario_script());
 
     let mut config = joining_player("Repeatable");
     config.player_info_id = 41;
     config.team = Some(1);
-    let number = engine
-        .join_player(config)
-        .expect("initial join succeeds")
-        .number();
+    let number = crate::TestValueExt::test_value(engine.join_player(config)).number();
     assert_eq!(
         engine
             .call_scenario_script_value("RepeatInit", &[Value::Int(number), Value::Int(2)],)
@@ -713,23 +650,19 @@ fn initialized_join_player_can_repeat_scenario_and_team_init() {
 #[test]
 fn control_game_over_request_does_not_remove_a_player() {
     let mut engine = Engine::new();
-    engine
-        .register_player(PlayerConfig::new(0, "Replay").with_player_info_id(17))
-        .expect("player registers");
-    engine
-        .load_scenario_script_with_convention(
-            "ControlGameOver",
-            "#strict 3\n\
+    crate::TestValueExt::test_value(
+        engine.register_player(PlayerConfig::new(0, "Replay").with_player_info_id(17)),
+    );
+    crate::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "ControlGameOver",
+        "#strict 3\n\
                  static Calls;\n\
                  func Initialize() { Calls = 0; }\n\
                  func OnGameOver() { Calls = Calls + 1; }\n\
                  func ReadCalls() { return Calls; }",
-            true,
-        )
-        .expect("game-over probe loads");
-    engine
-        .initialize_scenario_script()
-        .expect("game-over probe initializes");
+        true,
+    ));
+    crate::TestValueExt::test_value(engine.initialize_scenario_script());
 
     assert!(engine
         .request_game_over_from_control()

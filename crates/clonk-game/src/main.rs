@@ -3133,6 +3133,42 @@ mod tests {
     use zip::write::SimpleFileOptions;
     use zip::{ZipArchive, ZipWriter};
 
+    macro_rules! assert_true {
+        ($condition:expr $(, $($arg:tt)+)?) => {
+            assert!($condition $(, $($arg)+)?);
+        };
+    }
+
+    macro_rules! assert_same {
+        ($actual:expr => $expected:expr $(, $($arg:tt)+)?) => {
+            assert_eq!($actual, $expected $(, $($arg)+)?);
+        };
+    }
+
+    macro_rules! checks {
+        ($($check:expr);+ $(;)?) => {
+            $($check;)+
+        };
+    }
+
+    macro_rules! ok {
+        ($result:expr) => {
+            ($result).unwrap()
+        };
+        ($result:expr => $message:literal) => {
+            ($result).expect($message)
+        };
+    }
+
+    macro_rules! err {
+        ($result:expr) => {
+            ($result).unwrap_err()
+        };
+        ($result:expr => $message:literal) => {
+            ($result).expect_err($message)
+        };
+    }
+
     fn test_logger(dir: &TempDir) -> LauncherLogger {
         let log_path = dir.path().join("test.log");
         let file = File::create(&log_path).unwrap();
@@ -3142,6 +3178,75 @@ mod tests {
                 path: log_path,
             }),
         }
+    }
+
+    struct AppFixture {
+        _guard: EnvGuard,
+        install_dir: TempDir,
+        user_dir: TempDir,
+        cache_dir: Option<TempDir>,
+        paths: AppPaths,
+    }
+
+    impl AppFixture {
+        fn new() -> Self {
+            Self::with_system(b"stub")
+        }
+
+        fn with_system(system: &[u8]) -> Self {
+            Self::build(system, false, &[])
+        }
+
+        fn cached() -> Self {
+            Self::build(b"stub", true, &[])
+        }
+
+        fn with_env(system: &[u8], vars: &[(&str, Option<&Path>)]) -> Self {
+            Self::build(system, false, vars)
+        }
+
+        fn build(system: &[u8], cached: bool, vars: &[(&str, Option<&Path>)]) -> Self {
+            let install_dir = ok!(TempDir::new());
+            let planet_dir = install_dir.path().join("planet");
+            ok!(fs::create_dir_all(&planet_dir));
+            ok!(fs::write(planet_dir.join("System.c4g"), system));
+            let user_dir = ok!(TempDir::new());
+            let cache_dir = cached.then(|| ok!(TempDir::new()));
+            let mut env = vec![
+                ("LC_INSTALL_ROOT", Some(install_dir.path())),
+                ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ];
+            env.extend(
+                cache_dir
+                    .as_ref()
+                    .map(|cache_dir| ("LC_CACHE_DIR", Some(cache_dir.path()))),
+            );
+            env.extend_from_slice(vars);
+            let guard = EnvGuard::set(&env);
+            let paths = ok!(AppPaths::discover());
+            Self {
+                _guard: guard,
+                install_dir,
+                user_dir,
+                cache_dir,
+                paths,
+            }
+        }
+
+        fn logger(&self) -> LauncherLogger {
+            ok!(self.paths.ensure_user_dirs());
+            ok!(LauncherLogger::new(&self.paths))
+        }
+
+        fn cache_dir(&self) -> &Path {
+            self.cache_dir.as_ref().expect("cached fixture").path()
+        }
+    }
+
+    fn migrate_config(path: &Path, logger: &LauncherLogger, contents: &str) -> Config {
+        ok!(fs::write(path, contents));
+        ok!(adapt_config_to_current_version(path, logger));
+        ok!(Config::load(path))
     }
 
     struct EnvGuard {
@@ -3257,240 +3362,96 @@ mod tests {
 
     #[test]
     fn update_apply_cli_requires_an_explicit_plan_root_and_accepts_each_wait_pid() {
-        let cli = Cli::try_parse_from([
-            "clonk-game",
-            "--apply-update",
-            "pending-plan.json",
-            "--install-root",
-            "/opt/clonk",
-            "--wait-pid",
-            "41",
-            "--wait-pid",
-            "42",
-            "--relaunch",
-        ])
-        .expect("parse update apply mode");
+        let cli = ok!(Cli::try_parse_from(["clonk-game", "--apply-update", "pending-plan.json", "--install-root", "/opt/clonk", "--wait-pid", "41", "--wait-pid", "42", "--relaunch",]) => "parse update apply mode");
 
-        assert_eq!(cli.apply_update, Some(PathBuf::from("pending-plan.json")));
-        assert_eq!(cli.install_root, Some(PathBuf::from("/opt/clonk")));
-        assert_eq!(cli.wait_pids, [41, 42]);
-        assert!(cli.relaunch);
-        assert!(
-            Cli::try_parse_from(["clonk-game", "--apply-update", "pending-plan.json"]).is_err(),
-            "apply mode must not infer an install root from its temporary executable"
-        );
-        assert!(
-            Cli::try_parse_from(["clonk-game", "--install-root", "/opt/clonk"]).is_err(),
-            "an install root is meaningful only in apply mode"
-        );
+        checks!(assert_eq!(cli.apply_update, Some(PathBuf::from("pending-plan.json"))); assert_eq!(cli.install_root, Some(PathBuf::from("/opt/clonk"))); assert_eq!(cli.wait_pids, [41, 42]); assert!(cli.relaunch); assert_true!(Cli::try_parse_from(["clonk-game", "--apply-update", "pending-plan.json"]).is_err(), "apply mode must not infer an install root from its temporary executable"); assert_true!(Cli::try_parse_from(["clonk-game", "--install-root", "/opt/clonk"]).is_err(), "an install root is meaningful only in apply mode"));
     }
 
     #[test]
     fn finish_update_cli_carries_the_staging_result_and_helper_process() {
-        let cli = Cli::try_parse_from([
-            "clonk-game",
-            "--finish-update",
-            "/cache/Updates/pending-abc",
-            "--update-result",
-            "/cache/Updates/pending-abc/update-result.json",
-            "--update-helper-pid",
-            "73",
-        ])
-        .expect("parse hidden finish mode");
+        let cli = ok!(Cli::try_parse_from(["clonk-game", "--finish-update", "/cache/Updates/pending-abc", "--update-result", "/cache/Updates/pending-abc/update-result.json", "--update-helper-pid", "73",]) => "parse hidden finish mode");
 
-        assert_eq!(
-            cli.finish_update,
-            Some(PathBuf::from("/cache/Updates/pending-abc"))
-        );
-        assert_eq!(
-            cli.update_result,
-            Some(PathBuf::from(
-                "/cache/Updates/pending-abc/update-result.json"
-            ))
-        );
-        assert_eq!(cli.update_helper_pid, Some(73));
+        checks!(assert_same!(cli.finish_update => Some(PathBuf::from("/cache/Updates/pending-abc"))); assert_same!(cli.update_result => Some(PathBuf::from("/cache/Updates/pending-abc/update-result.json"))); assert_eq!(cli.update_helper_pid, Some(73)));
     }
 
     #[test]
     fn finish_update_waits_reports_failure_and_removes_the_whole_pending_directory() {
-        let install = TempDir::new().expect("install root");
-        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
-        let user = TempDir::new().expect("user data");
-        let cache = TempDir::new().expect("cache");
-        let updates = cache.path().join("Updates");
+        let fixture = AppFixture::cached();
+        let updates = fixture.cache_dir().join("Updates");
         let pending = updates.join("pending-failed-apply");
         fs::create_dir_all(&pending).expect("pending directory");
         fs::write(pending.join("plan.json"), b"plan").expect("plan");
         fs::write(pending.join("0-content.zip"), b"archive").expect("archive");
         fs::write(pending.join("clonk-game"), b"helper").expect("helper");
         let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
-        write_update_result(
-            &result_path,
-            &UpdateResultDocument {
-                schema: UPDATE_RESULT_SCHEMA,
-                status: UpdateResultStatus::Failed {
-                    message: "digest mismatch".to_string(),
-                },
-            },
-        )
-        .expect("write result");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install.path())),
-            ("LC_USER_DATA_DIR", Some(user.path())),
-            ("LC_CACHE_DIR", Some(cache.path())),
-        ]);
+        ok!(write_update_result(&result_path, &UpdateResultDocument {schema: UPDATE_RESULT_SCHEMA, status: UpdateResultStatus::Failed {message: "digest mismatch".to_string(),},},) => "write result");
         let platform = FakePlatform::new();
-        let paths = AppPaths::discover().expect("discover paths");
+        let paths = fixture.paths;
 
-        let notice = finish_update_mode(&paths, &pending, &result_path, 73, &platform)
-            .expect("finish failed update");
+        let notice = ok!(finish_update_mode(&paths, &pending, &result_path, 73, &platform) => "finish failed update");
 
-        assert_eq!(platform.calls(), [PlatformCall::WaitForProcess { pid: 73 }]);
-        assert_eq!(notice.as_deref(), Some("digest mismatch"));
-        assert!(!pending.exists(), "finisher must remove every staged file");
+        checks!(assert_eq!(platform.calls(), [PlatformCall::WaitForProcess {pid: 73}]); assert_eq!(notice.as_deref(), Some("digest mismatch")); assert!(!pending.exists(), "finisher must remove every staged file"));
     }
 
     #[test]
     fn finish_update_rejects_a_pending_directory_outside_the_discovered_cache() {
-        let install = TempDir::new().expect("install root");
-        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
-        let user = TempDir::new().expect("user data");
-        let cache = TempDir::new().expect("cache");
-        fs::create_dir(cache.path().join("Updates")).expect("updates directory");
+        let fixture = AppFixture::cached();
+        fs::create_dir(fixture.cache_dir().join("Updates")).expect("updates directory");
         let outside = TempDir::new().expect("outside directory");
         let pending = outside.path().join("pending-escape");
         fs::create_dir(&pending).expect("pending directory");
         let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
-        write_update_result(
-            &result_path,
-            &UpdateResultDocument {
-                schema: UPDATE_RESULT_SCHEMA,
-                status: UpdateResultStatus::Applied {
-                    version: "0.7.0".to_string(),
-                    components: Vec::new(),
-                },
-            },
-        )
-        .expect("result");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install.path())),
-            ("LC_USER_DATA_DIR", Some(user.path())),
-            ("LC_CACHE_DIR", Some(cache.path())),
-        ]);
+        ok!(write_update_result(&result_path, &UpdateResultDocument {schema: UPDATE_RESULT_SCHEMA, status: UpdateResultStatus::Applied {version: "0.7.0".to_string(), components: Vec::new(),},},) => "result");
         let platform = FakePlatform::new();
-        let paths = AppPaths::discover().expect("discover paths");
+        let paths = fixture.paths;
 
-        let error = finish_update_mode(&paths, &pending, &result_path, 73, &platform)
-            .expect_err("outside pending directory must be rejected");
+        let error = err!(finish_update_mode(&paths, &pending, &result_path, 73, &platform) => "outside pending directory must be rejected");
 
-        assert!(error.to_string().contains("not a direct child"));
-        assert!(
-            platform.calls().is_empty(),
-            "untrusted paths must be rejected before process interaction"
-        );
-        assert!(pending.exists(), "rejected paths must never be removed");
+        checks!(assert!(error.to_string().contains("not a direct child")); assert_true!(platform.calls().is_empty(), "untrusted paths must be rejected before process interaction"); assert!(pending.exists(), "rejected paths must never be removed"));
     }
 
     #[test]
     fn successful_update_does_not_become_a_failure_notice_when_cleanup_exhausts_retries() {
-        let install = TempDir::new().expect("install root");
-        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
-        let user = TempDir::new().expect("user data");
-        let cache = TempDir::new().expect("cache");
-        let pending = cache.path().join("Updates/pending-cleanup-busy");
+        let fixture = AppFixture::cached();
+        let pending = fixture.cache_dir().join("Updates/pending-cleanup-busy");
         fs::create_dir_all(&pending).expect("pending directory");
         let result_path = pending.join(UPDATE_RESULT_FILE_NAME);
-        write_update_result(
-            &result_path,
-            &UpdateResultDocument {
-                schema: UPDATE_RESULT_SCHEMA,
-                status: UpdateResultStatus::Applied {
-                    version: "0.7.0".to_string(),
-                    components: vec!["engine".to_string()],
-                },
-            },
-        )
-        .expect("result");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install.path())),
-            ("LC_USER_DATA_DIR", Some(user.path())),
-            ("LC_CACHE_DIR", Some(cache.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover paths");
+        ok!(write_update_result(&result_path, &UpdateResultDocument {schema: UPDATE_RESULT_SCHEMA, status: UpdateResultStatus::Applied {version: "0.7.0".to_string(), components: vec!["engine".to_string()],},},) => "result");
+        let paths = fixture.paths;
 
-        let notice = finish_update_mode_with_cleanup(
-            &paths,
-            &pending,
-            &result_path,
-            73,
-            &FakePlatform::new(),
-            |_| bail!("directory is still busy"),
-        )
-        .expect("cleanup exhaustion is nonfatal");
+        let notice = ok!(finish_update_mode_with_cleanup(&paths, &pending, &result_path, 73, &FakePlatform::new(), |_| bail!("directory is still busy"),) => "cleanup exhaustion is nonfatal");
 
-        assert_eq!(notice, None);
-        assert!(pending.exists());
+        checks!(assert_eq!(notice, None); assert!(pending.exists()));
     }
 
     #[test]
     fn startup_recovery_never_removes_staging_owned_by_a_live_process() {
-        let install = TempDir::new().expect("install root");
-        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
-        let user = TempDir::new().expect("user data");
-        let cache = TempDir::new().expect("cache");
-        let pending = cache.path().join("Updates/pending-active-download");
+        let fixture = AppFixture::cached();
+        let pending = fixture.cache_dir().join("Updates/pending-active-download");
         fs::create_dir_all(&pending).expect("pending directory");
         fs::write(pending.join(".owner-41"), b"").expect("owner marker");
         fs::write(pending.join("plan.json"), b"active").expect("active plan");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install.path())),
-            ("LC_USER_DATA_DIR", Some(user.path())),
-            ("LC_CACHE_DIR", Some(cache.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover paths");
+        let paths = fixture.paths;
         let platform = LivenessPlatform::new(vec![41]);
 
         let notice = recover_abandoned_pending_updates(&paths, &platform);
 
-        assert_eq!(notice, None);
-        assert!(pending.exists(), "live staging must never be reclaimed");
-        assert_eq!(
-            *platform
-                .waited
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            [41]
-        );
+        checks!(assert_eq!(notice, None); assert!(pending.exists(), "live staging must never be reclaimed"); assert_same!(*platform.waited.lock().unwrap_or_else(std::sync::PoisonError::into_inner) => [41]));
     }
 
     #[test]
     fn startup_recovery_reports_and_reclaims_staging_after_its_owner_crashes() {
-        let install = TempDir::new().expect("install root");
-        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group");
-        let user = TempDir::new().expect("user data");
-        let cache = TempDir::new().expect("cache");
-        let pending = cache.path().join("Updates/pending-crashed-download");
+        let fixture = AppFixture::cached();
+        let pending = fixture.cache_dir().join("Updates/pending-crashed-download");
         fs::create_dir_all(&pending).expect("pending directory");
         fs::write(pending.join(".owner-41"), b"").expect("owner marker");
         fs::write(pending.join("0-engine.zip"), b"partial").expect("partial archive");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install.path())),
-            ("LC_USER_DATA_DIR", Some(user.path())),
-            ("LC_CACHE_DIR", Some(cache.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover paths");
+        let paths = fixture.paths;
         let platform = LivenessPlatform::new(Vec::new());
 
-        let notice = recover_abandoned_pending_updates(&paths, &platform)
-            .expect("interrupted update notice");
+        let notice = ok!(recover_abandoned_pending_updates(&paths, &platform) => "interrupted update notice");
 
-        assert!(notice.contains("interrupted before it could report"));
-        assert!(!pending.exists(), "dead staging must be reclaimed");
+        checks!(assert!(notice.contains("interrupted before it could report")); assert!(!pending.exists(), "dead staging must be reclaimed"));
     }
 
     #[test]
@@ -3504,40 +3465,11 @@ mod tests {
         let platform = FailingWaitPlatform::new();
         let relaunched = Cell::new(false);
 
-        let error = apply_update_plan_with_relauncher(
-            &missing_plan,
-            &install_root,
-            &[41, 42],
-            true,
-            &platform,
-            73,
-            |_, _, _, _| {
-                relaunched.set(true);
-                Ok(())
-            },
-        )
-        .expect_err("wait failure must stop the helper");
+        let error = err!(apply_update_plan_with_relauncher(&missing_plan, &install_root, &[41, 42], true, &platform, 73, |_, _, _, _| {relaunched.set(true); Ok(())},) => "wait failure must stop the helper");
 
-        assert!(error.to_string().contains("waiting for process 41"));
-        assert_eq!(
-            *platform
-                .waited
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            [41, 42]
-        );
-        assert!(pending.exists(), "staging must remain for diagnosis/retry");
-        let result = read_update_result(&pending.join(UPDATE_RESULT_FILE_NAME))
-            .expect("wait failure result");
-        assert!(matches!(
-            result.status,
-            UpdateResultStatus::Failed { message }
-                if message.contains("waiting for process 41")
-        ));
-        assert!(
-            !relaunched.get(),
-            "a live old process makes relaunch unsafe"
-        );
+        checks!(assert!(error.to_string().contains("waiting for process 41")); assert_same!(*platform.waited.lock().unwrap_or_else(std::sync::PoisonError::into_inner) => [41, 42]); assert!(pending.exists(), "staging must remain for diagnosis/retry"));
+        let result = ok!(read_update_result(&pending.join(UPDATE_RESULT_FILE_NAME)) => "wait failure result");
+        checks!(assert_true!(matches!(result.status, UpdateResultStatus::Failed {message} if message.contains("waiting for process 41"))); assert_true!(!relaunched.get(), "a live old process makes relaunch unsafe"));
     }
 
     #[test]
@@ -3552,22 +3484,9 @@ mod tests {
         fs::create_dir(&install_root).expect("install root");
         let platform = FakePlatform::new();
 
-        let error = apply_update_plan_with_relauncher(
-            &plan_path,
-            &install_root,
-            &[41],
-            true,
-            &platform,
-            73,
-            |_, _, _, _| Ok(()),
-        )
-        .expect_err("an invalid ownership marker must fail closed");
+        let error = err!(apply_update_plan_with_relauncher(&plan_path, &install_root, &[41], true, &platform, 73, |_, _, _, _| Ok(()),) => "an invalid ownership marker must fail closed");
 
-        assert!(error
-            .to_string()
-            .contains("record the active update helper"));
-        assert!(platform.calls().is_empty(), "waiting must not begin");
-        assert!(!pending.join(UPDATE_RESULT_FILE_NAME).exists());
+        checks!(assert_true!(error.to_string().contains("record the active update helper")); assert!(platform.calls().is_empty(), "waiting must not begin"); assert!(!pending.join(UPDATE_RESULT_FILE_NAME).exists()));
     }
 
     #[test]
@@ -3583,38 +3502,9 @@ mod tests {
         fs::create_dir(&install_root).expect("install root");
         let relaunched = Cell::new(false);
 
-        let error = apply_update_plan_with_relauncher(
-            &plan_path,
-            &install_root,
-            &[],
-            true,
-            &FakePlatform::new(),
-            73,
-            |layout, finish_pending, result_path, helper_pid| {
-                assert_eq!(layout, &InstallLayout::plain(&install_root));
-                assert_eq!(finish_pending, pending);
-                assert_eq!(result_path, pending.join("update-result.json"));
-                assert_eq!(helper_pid, 73);
-                let result: Value = serde_json::from_slice(
-                    &fs::read(result_path).expect("read typed update result"),
-                )
-                .expect("parse typed update result");
-                assert_eq!(result["schema"], 1);
-                assert_eq!(result["status"], "failed");
-                assert!(result["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("parse update plan")));
-                relaunched.set(true);
-                Ok(())
-            },
-        )
-        .expect_err("malformed plan remains the helper's result");
+        let error = err!(apply_update_plan_with_relauncher(&plan_path, &install_root, &[], true, &FakePlatform::new(), 73, |layout, finish_pending, result_path, helper_pid| {assert_eq!(layout, &InstallLayout::plain(&install_root)); assert_eq!(finish_pending, pending); assert_eq!(result_path, pending.join("update-result.json")); assert_eq!(helper_pid, 73); let result: Value = serde_json::from_slice(&fs::read(result_path).expect("read typed update result"),).expect("parse typed update result"); assert_eq!(result["schema"], 1); assert_eq!(result["status"], "failed"); assert_true!(result["message"].as_str().is_some_and(|message| message.contains("parse update plan"))); relaunched.set(true); Ok(())},) => "malformed plan remains the helper's result");
 
-        assert!(error.to_string().contains("parse update plan"));
-        assert!(relaunched.get(), "parse failure must relaunch the game");
-        assert!(pending.exists());
-        assert!(plan_path.exists());
-        assert!(archive.exists());
+        checks!(assert!(error.to_string().contains("parse update plan")); assert!(relaunched.get(), "parse failure must relaunch the game"); assert!(pending.exists()); assert!(plan_path.exists()); assert!(archive.exists()));
     }
 
     #[test]
@@ -3635,34 +3525,14 @@ mod tests {
                 destination: PathBuf::from("content"),
             }],
         };
-        fs::write(
-            &plan_path,
-            serde_json::to_vec(&plan).expect("serialize plan"),
-        )
-        .expect("plan");
+        ok!(fs::write(&plan_path, serde_json::to_vec(&plan).expect("serialize plan"),) => "plan");
         let install_root = directory.path().join("install");
         fs::create_dir_all(install_root.join("content")).expect("install content");
         let relaunched = Cell::new(false);
 
-        let error = apply_update_plan_with_relauncher(
-            &plan_path,
-            &install_root,
-            &[],
-            true,
-            &FakePlatform::new(),
-            73,
-            |_, _, result_path, _| {
-                relaunched.set(true);
-                assert!(result_path.exists(), "failure result must precede relaunch");
-                bail!("synthetic relaunch failure")
-            },
-        )
-        .expect_err("apply must fail");
+        let error = err!(apply_update_plan_with_relauncher(&plan_path, &install_root, &[], true, &FakePlatform::new(), 73, |_, _, result_path, _| {relaunched.set(true); assert!(result_path.exists(), "failure result must precede relaunch"); bail!("synthetic relaunch failure")},) => "apply must fail");
 
-        assert!(relaunched.get());
-        assert!(error.to_string().contains("failed to apply update plan"));
-        assert!(!error.to_string().contains("synthetic relaunch failure"));
-        assert!(pending.exists(), "finisher owns failed staging cleanup");
+        checks!(assert!(relaunched.get()); assert!(error.to_string().contains("failed to apply update plan")); assert!(!error.to_string().contains("synthetic relaunch failure")); assert!(pending.exists(), "finisher owns failed staging cleanup"));
     }
 
     #[test]
@@ -3677,7 +3547,7 @@ mod tests {
             "0",
         ]);
 
-        assert!(
+        assert_true!(
             parsed.is_err(),
             "PID zero addresses the current process group"
         );
@@ -3700,7 +3570,7 @@ mod tests {
             vec!["Scenario.c4s"],
         ] {
             let parsed = Cli::try_parse_from(apply.into_iter().chain(incompatible.iter().copied()));
-            assert!(
+            assert_true!(
                 parsed.is_err(),
                 "apply mode accepted normal launcher arguments {incompatible:?}"
             );
@@ -3709,54 +3579,27 @@ mod tests {
 
     #[test]
     fn runtime_command_names_the_launcher_process_for_update_handoff() {
-        let install_dir = TempDir::new().expect("install root");
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).expect("create planet directory");
-        fs::write(planet_dir.join("System.c4g"), b"stub").expect("write system group");
-        let user_dir = TempDir::new().expect("user data");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover paths");
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
 
         let command = runtime_command(
             Path::new("clonk-app"),
-            &paths,
+            paths,
             &paths.config_file(),
             &[],
             Some("digest mismatch"),
         );
-        let launcher_pid = command
-            .get_envs()
-            .find_map(|(name, value)| {
-                (name == LAUNCHER_PID_ENV)
-                    .then(|| value.map(std::ffi::OsStr::to_os_string))
-                    .flatten()
-            })
-            .expect("launcher PID environment variable");
+        let launcher_pid = ok!(command.get_envs().find_map(|(name, value)| {(name == LAUNCHER_PID_ENV).then(|| value.map(std::ffi::OsStr::to_os_string)).flatten()}) => "launcher PID environment variable");
 
-        assert_eq!(launcher_pid, OsString::from(std::process::id().to_string()));
-        assert_eq!(
-            command
-                .get_envs()
-                .find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value).flatten()),
-            Some(std::ffi::OsStr::new("digest mismatch"))
-        );
+        checks!(assert_eq!(launcher_pid, OsString::from(std::process::id().to_string())); assert_same!(command.get_envs().find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value).flatten()) => Some(std::ffi::OsStr::new("digest mismatch"))));
         let no_notice = runtime_command(
             Path::new("clonk-app"),
-            &paths,
+            paths,
             &paths.config_file(),
             &[],
             None,
         );
-        assert_eq!(
-            no_notice
-                .get_envs()
-                .find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value)),
-            Some(None),
-            "ordinary launches must clear a stale update notice"
-        );
+        assert_same!(no_notice.get_envs().find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value)) => Some(None), "ordinary launches must clear a stale update notice");
     }
 
     #[test]
@@ -3768,30 +3611,11 @@ mod tests {
         fs::write(&plan_path, br#"{"version":"0.7.0","components":[]}"#).expect("write apply plan");
         let platform = FakePlatform::new();
 
-        let outcome = apply_update_plan(&plan_path, &install_root, &[41, 42], false, &platform)
-            .expect("apply empty plan");
+        let outcome = ok!(apply_update_plan(&plan_path, &install_root, &[41, 42], false, &platform) => "apply empty plan");
 
-        assert_eq!(outcome.version, "0.7.0");
-        assert!(outcome.applied.is_empty());
-        assert_eq!(
-            platform.calls(),
-            [
-                PlatformCall::WaitForProcess { pid: 41 },
-                PlatformCall::WaitForProcess { pid: 42 },
-            ]
-        );
-        assert!(plan_path.exists(), "the finisher owns staging cleanup");
-        let result: UpdateResultDocument = serde_json::from_slice(
-            &fs::read(directory.path().join(UPDATE_RESULT_FILE_NAME)).expect("read result"),
-        )
-        .expect("parse result");
-        assert_eq!(
-            result.status,
-            UpdateResultStatus::Applied {
-                version: "0.7.0".to_string(),
-                components: Vec::new(),
-            }
-        );
+        checks!(assert_eq!(outcome.version, "0.7.0"); assert!(outcome.applied.is_empty()); assert_same!(platform.calls() => [PlatformCall::WaitForProcess {pid: 41}, PlatformCall::WaitForProcess {pid: 42},]); assert!(plan_path.exists(), "the finisher owns staging cleanup"));
+        let result: UpdateResultDocument = ok!(serde_json::from_slice(&fs::read(directory.path().join(UPDATE_RESULT_FILE_NAME)).expect("read result"),) => "parse result");
+        assert_same!(result.status => UpdateResultStatus::Applied {version: "0.7.0".to_string(), components: Vec::new(),});
     }
 
     #[test]
@@ -3804,9 +3628,7 @@ mod tests {
         let archive_path = directory.path().join("content.zip");
         let archive_file = File::create(&archive_path).expect("create archive");
         let mut archive = ZipWriter::new(archive_file);
-        archive
-            .start_file("new.txt", SimpleFileOptions::default())
-            .expect("start archive entry");
+        ok!(archive.start_file("new.txt", SimpleFileOptions::default()) => "start archive entry");
         archive.write_all(b"new").expect("write archive entry");
         archive.finish().expect("finish archive");
 
@@ -3822,29 +3644,14 @@ mod tests {
             }],
         };
         let plan_path = directory.path().join("pending-plan.json");
-        fs::write(
-            &plan_path,
-            serde_json::to_vec(&plan).expect("serialize plan"),
-        )
-        .expect("write plan");
+        ok!(fs::write(&plan_path, serde_json::to_vec(&plan).expect("serialize plan"),) => "write plan");
 
-        let outcome =
-            apply_update_plan(&plan_path, &install_root, &[], false, &FakePlatform::new())
-                .expect("apply content plan");
+        let outcome = ok!(apply_update_plan(&plan_path, &install_root, &[], false, &FakePlatform::new()) => "apply content plan");
 
-        assert_eq!(outcome.applied, ["content"]);
-        assert_eq!(
-            fs::read(install_root.join("content/new.txt")).expect("read installed content"),
-            b"new"
-        );
-        let state = InstalledState::load(&install_root)
-            .expect("load installed state")
-            .expect("successful apply records installed state");
+        checks!(assert_eq!(outcome.applied, ["content"]); assert_same!(fs::read(install_root.join("content/new.txt")).expect("read installed content") => b"new"));
+        let state = ok!(InstalledState::load(&install_root).expect("load installed state") => "successful apply records installed state");
         let content = state.component("content").expect("content state");
-        assert_eq!(content.version, "0.7.0");
-        assert_eq!(content.sha256, digest);
-        assert!(archive_path.exists(), "the finisher owns archive cleanup");
-        assert!(plan_path.exists(), "the finisher owns plan cleanup");
+        checks!(assert_eq!(content.version, "0.7.0"); assert_eq!(content.sha256, digest); assert!(archive_path.exists(), "the finisher owns archive cleanup"); assert!(plan_path.exists(), "the finisher owns plan cleanup"));
     }
 
     #[test]
@@ -3854,21 +3661,11 @@ mod tests {
         fs::create_dir(&install_root).expect("create install root");
         let plan_path = directory.path().join("pending-plan.json");
         fs::write(&plan_path, b"{ not json").expect("write malformed plan");
-        let cli = Cli::try_parse_from([
-            OsString::from("clonk-game"),
-            OsString::from("--apply-update"),
-            plan_path.clone().into_os_string(),
-            OsString::from("--install-root"),
-            install_root.into_os_string(),
-            OsString::from("--relaunch"),
-        ])
-        .expect("parse apply command");
+        let cli = ok!(Cli::try_parse_from([OsString::from("clonk-game"), OsString::from("--apply-update"), plan_path.clone().into_os_string(), OsString::from("--install-root"), install_root.into_os_string(), OsString::from("--relaunch"),]) => "parse apply command");
 
         let error = run_cli(cli).expect_err("malformed plan must fail after early dispatch");
 
-        assert!(error.to_string().contains("parse update plan"));
-        assert!(plan_path.exists(), "finish mode owns staging cleanup");
-        assert!(directory.path().join(UPDATE_RESULT_FILE_NAME).exists());
+        checks!(assert!(error.to_string().contains("parse update plan")); assert!(plan_path.exists(), "finish mode owns staging cleanup"); assert!(directory.path().join(UPDATE_RESULT_FILE_NAME).exists()));
     }
 
     #[test]
@@ -3878,58 +3675,11 @@ mod tests {
         let result = pending.join(UPDATE_RESULT_FILE_NAME);
         let plain = InstallLayout::plain(directory.path().join("plain"));
         let plain_command = updated_launcher_command(&plain, &pending, &result, 73);
-        assert_eq!(
-            plain_command.get_program(),
-            plain
-                .binaries_dir()
-                .join(format!("clonk-game{}", env::consts::EXE_SUFFIX))
-        );
-        assert_eq!(plain_command.get_current_dir(), pending.parent());
-        assert_eq!(
-            plain_command.get_args().collect::<Vec<_>>(),
-            [
-                OsString::from("--finish-update"),
-                pending.as_os_str().to_os_string(),
-                OsString::from("--update-result"),
-                result.as_os_str().to_os_string(),
-                OsString::from("--update-helper-pid"),
-                OsString::from("73"),
-            ]
-        );
-        assert_eq!(
-            plain_command
-                .get_envs()
-                .find_map(|(name, value)| (name == LAUNCHER_PID_ENV).then_some(value)),
-            Some(None),
-            "the finisher must not inherit the old launcher's PID"
-        );
-        assert_eq!(
-            plain_command
-                .get_envs()
-                .find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value)),
-            Some(None),
-            "the finisher must not inherit an earlier update notice"
-        );
+        checks!(assert_same!(plain_command.get_program() => plain.binaries_dir().join(format!("clonk-game{}", env::consts::EXE_SUFFIX))); assert_eq!(plain_command.get_current_dir(), pending.parent()); assert_same!(plain_command.get_args().collect::<Vec<_>>() => [OsString::from("--finish-update"), pending.as_os_str().to_os_string(), OsString::from("--update-result"), result.as_os_str().to_os_string(), OsString::from("--update-helper-pid"), OsString::from("73"),]); assert_same!(plain_command.get_envs().find_map(|(name, value)| (name == LAUNCHER_PID_ENV).then_some(value)) => Some(None), "the finisher must not inherit the old launcher's PID"); assert_same!(plain_command.get_envs().find_map(|(name, value)| (name == UPDATE_NOTICE_ENV).then_some(value)) => Some(None), "the finisher must not inherit an earlier update notice"));
 
         let bundle = InstallLayout::macos_bundle(directory.path().join("Clonk Rust.app"));
         let bundle_command = updated_launcher_command(&bundle, &pending, &result, 73);
-        assert_eq!(
-            bundle_command.get_program(),
-            bundle
-                .binaries_dir()
-                .join(format!("clonk-game{}", env::consts::EXE_SUFFIX))
-        );
-        assert_eq!(
-            bundle_command.get_args().collect::<Vec<_>>(),
-            [
-                OsString::from("--finish-update"),
-                pending.as_os_str().to_os_string(),
-                OsString::from("--update-result"),
-                result.as_os_str().to_os_string(),
-                OsString::from("--update-helper-pid"),
-                OsString::from("73"),
-            ]
-        );
+        checks!(assert_same!(bundle_command.get_program() => bundle.binaries_dir().join(format!("clonk-game{}", env::consts::EXE_SUFFIX))); assert_same!(bundle_command.get_args().collect::<Vec<_>>() => [OsString::from("--finish-update"), pending.as_os_str().to_os_string(), OsString::from("--update-result"), result.as_os_str().to_os_string(), OsString::from("--update-helper-pid"), OsString::from("73"),]));
     }
 
     #[test]
@@ -3941,25 +3691,7 @@ mod tests {
         fs::write(&plan_path, br#"{"version":"0.7.0","components":[]}"#).expect("write plan");
         let relaunched = Cell::new(false);
 
-        apply_update_plan_with_relauncher(
-            &plan_path,
-            &install_root,
-            &[],
-            true,
-            &FakePlatform::new(),
-            73,
-            |layout, pending, result_path, helper_pid| {
-                assert_eq!(layout, &InstallLayout::plain(&install_root));
-                assert_eq!(pending, directory.path());
-                assert_eq!(result_path, directory.path().join(UPDATE_RESULT_FILE_NAME));
-                assert_eq!(helper_pid, 73);
-                assert!(result_path.exists(), "result must precede relaunch");
-                assert!(plan_path.exists(), "the helper must not clean itself up");
-                relaunched.set(true);
-                Ok(())
-            },
-        )
-        .expect("apply and relaunch");
+        ok!(apply_update_plan_with_relauncher(&plan_path, &install_root, &[], true, &FakePlatform::new(), 73, |layout, pending, result_path, helper_pid| {assert_eq!(layout, &InstallLayout::plain(&install_root)); assert_eq!(pending, directory.path()); assert_eq!(result_path, directory.path().join(UPDATE_RESULT_FILE_NAME)); assert_eq!(helper_pid, 73); assert!(result_path.exists(), "result must precede relaunch"); assert!(plan_path.exists(), "the helper must not clean itself up"); relaunched.set(true); Ok(())},) => "apply and relaunch");
 
         assert!(relaunched.get());
     }
@@ -3974,59 +3706,32 @@ mod tests {
         fs::write(backup.join("System.c4g"), b"stub").expect("write backed-up system group");
         let mut step = JournalStep::new("planet", &"aa".repeat(32), "planet");
         step.state = StepState::BackupMoved;
-        Journal::new(
-            "0.7.0",
-            nonce,
-            fs::canonicalize(install_dir.path()).expect("canonical install root"),
-            vec![step],
-        )
-        .save(install_dir.path())
-        .expect("save interrupted update journal");
+        ok!(Journal::new("0.7.0", nonce, fs::canonicalize(install_dir.path()).expect("canonical install root"), vec![step],).save(install_dir.path()) => "save interrupted update journal");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install_dir.path())),
             ("LC_USER_DATA_DIR", Some(user_dir.path())),
         ]);
 
-        assert!(matches!(
+        assert_true!(matches!(
             AppPaths::discover(),
             Err(clonk_platform::PathsError::SystemGroupMissing { .. })
         ));
-        let outcome = recover_interrupted_update_before_path_discovery()
-            .expect("recover before validating the system group");
+        let outcome = ok!(recover_interrupted_update_before_path_discovery() => "recover before validating the system group");
         let paths = AppPaths::discover().expect("discover recovered paths");
 
-        assert_eq!(
-            outcome,
-            ResumeOutcome::RolledBack {
-                version: "0.7.0".to_string()
-            }
-        );
-        assert_eq!(
-            fs::read(paths.system_group_path()).expect("read restored system group"),
-            b"stub"
-        );
+        checks!(assert_same!(outcome => ResumeOutcome::RolledBack {version: "0.7.0".to_string()}); assert_same!(fs::read(paths.system_group_path()).expect("read restored system group") => b"stub"));
     }
 
     #[test]
     fn normal_startup_logs_that_no_interrupted_update_needed_recovery() {
-        let install_dir = TempDir::new().expect("install root");
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).expect("create planet directory");
-        fs::write(planet_dir.join("System.c4g"), b"stub").expect("write system group");
-        let user_dir = TempDir::new().expect("user data");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover paths");
-        paths.ensure_user_dirs().expect("prepare user directories");
-        let logger = LauncherLogger::new(&paths).expect("launcher logger");
+        let fixture = AppFixture::new();
+        let logger = fixture.logger();
 
         let outcome = recover_interrupted_update_before_path_discovery().expect("check recovery");
         log_update_recovery(&outcome, &logger).expect("log update recovery");
 
         let log = fs::read_to_string(logger.path()).expect("read launcher log");
-        assert!(
+        assert_true!(
             log.contains("no interrupted component update to recover"),
             "missing recovery result in launcher log: {log}"
         );
@@ -4034,13 +3739,12 @@ mod tests {
 
     #[test]
     fn ensure_runtime_assets_populates_group_files() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+        let fixture = AppFixture::with_system(b"system payload");
+        let planet_dir = fixture.install_dir.path().join("planet");
         fs::write(planet_dir.join("Graphics.c4g"), b"graphics payload").unwrap();
 
-        let binary_path = install_dir
+        let binary_path = fixture
+            .install_dir
             .path()
             .join("build")
             .join("bin")
@@ -4048,54 +3752,17 @@ mod tests {
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         fs::write(&binary_path, b"stub").unwrap();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        ok!(ensure_runtime_assets(paths, &binary_path, &logger) => "runtime assets should be linked");
 
-        ensure_runtime_assets(&paths, &binary_path, &logger)
-            .expect("runtime assets should be linked");
-
-        let system_target = install_dir.path().join("System.c4g");
-        let graphics_target = install_dir.path().join("Graphics.c4g");
+        let system_target = fixture.install_dir.path().join("System.c4g");
+        let graphics_target = fixture.install_dir.path().join("Graphics.c4g");
         let binary_dir = binary_path.parent().unwrap();
         let binary_system = binary_dir.join("System.c4g");
         let binary_graphics = binary_dir.join("Graphics.c4g");
-        assert!(system_target.exists(), "system group should exist");
-        assert!(graphics_target.exists(), "graphics group should exist");
-        assert!(
-            binary_system.exists(),
-            "system group should exist next to the binary"
-        );
-        assert!(
-            binary_graphics.exists(),
-            "graphics group should exist next to the binary"
-        );
-        assert_eq!(
-            fs::read(&system_target).unwrap(),
-            b"system payload",
-            "system group contents should match source"
-        );
-        assert_eq!(
-            fs::read(&graphics_target).unwrap(),
-            b"graphics payload",
-            "graphics group contents should match source"
-        );
-        assert_eq!(
-            fs::read(&binary_system).unwrap(),
-            b"system payload",
-            "system group adjacent to binary should match source"
-        );
-        assert_eq!(
-            fs::read(&binary_graphics).unwrap(),
-            b"graphics payload",
-            "graphics group adjacent to binary should match source"
-        );
+        checks!(assert!(system_target.exists(), "system group should exist"); assert!(graphics_target.exists(), "graphics group should exist"); assert_true!(binary_system.exists(), "system group should exist next to the binary"); assert_true!(binary_graphics.exists(), "graphics group should exist next to the binary"); assert_same!(fs::read(&system_target).unwrap() => b"system payload", "system group contents should match source"); assert_same!(fs::read(&graphics_target).unwrap() => b"graphics payload", "graphics group contents should match source"); assert_same!(fs::read(&binary_system).unwrap() => b"system payload", "system group adjacent to binary should match source"); assert_same!(fs::read(&binary_graphics).unwrap() => b"graphics payload", "graphics group adjacent to binary should match source"));
     }
 
     #[cfg(target_os = "macos")]
@@ -4122,12 +3789,7 @@ mod tests {
 
         ensure_runtime_assets(&paths, &binary, &logger).expect("stage runtime groups");
 
-        assert!(directory.path().join("System.c4g").exists());
-        assert!(directory.path().join("Graphics.c4g").exists());
-        assert!(!resources.join("System.c4g").exists());
-        assert!(!resources.join("Graphics.c4g").exists());
-        assert!(!binaries.join("System.c4g").exists());
-        assert!(!binaries.join("Graphics.c4g").exists());
+        checks!(assert!(directory.path().join("System.c4g").exists()); assert!(directory.path().join("Graphics.c4g").exists()); assert!(!resources.join("System.c4g").exists()); assert!(!resources.join("Graphics.c4g").exists()); assert!(!binaries.join("System.c4g").exists()); assert!(!binaries.join("Graphics.c4g").exists()));
     }
 
     #[test]
@@ -4138,17 +3800,15 @@ mod tests {
         // Shipped groups are directories, so a stale target is removed through
         // the `remove_dir_all` arm rather than `remove_file`.
         fs::create_dir_all(planet_dir.join("System.c4g")).unwrap();
-        fs::write(
+        ok!(fs::write(
             planet_dir.join("System.c4g").join("C4.c"),
             b"system payload",
-        )
-        .unwrap();
+        ));
         fs::create_dir_all(planet_dir.join("Graphics.c4g")).unwrap();
-        fs::write(
+        ok!(fs::write(
             planet_dir.join("Graphics.c4g").join("Logo.png"),
             b"graphics payload",
-        )
-        .unwrap();
+        ));
 
         let binary_path = install_dir.path().join("clonk-app.exe");
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
@@ -4169,30 +3829,13 @@ mod tests {
         paths.ensure_user_dirs().unwrap();
         let logger = LauncherLogger::new(&paths).unwrap();
 
-        ensure_runtime_assets(&paths, &binary_path, &logger)
-            .expect("runtime assets should be refreshed");
+        ok!(ensure_runtime_assets(&paths, &binary_path, &logger) => "runtime assets should be refreshed");
 
-        assert_eq!(
-            fs::read(stale_system.join("C4.c")).unwrap(),
-            b"system payload",
-            "system target should match updated source"
-        );
-        assert_eq!(
-            fs::read(stale_graphics.join("Logo.png")).unwrap(),
-            b"graphics payload",
-            "graphics target should match updated source"
-        );
+        checks!(assert_same!(fs::read(stale_system.join("C4.c")).unwrap() => b"system payload", "system target should match updated source"); assert_same!(fs::read(stale_graphics.join("Logo.png")).unwrap() => b"graphics payload", "graphics target should match updated source"));
 
         let binary_system = binary_path.parent().unwrap().join("System.c4g");
         let binary_graphics = binary_path.parent().unwrap().join("Graphics.c4g");
-        assert!(
-            binary_system.exists(),
-            "system group should be materialised alongside binary"
-        );
-        assert!(
-            binary_graphics.exists(),
-            "graphics group should be materialised alongside binary"
-        );
+        checks!(assert_true!(binary_system.exists(), "system group should be materialised alongside binary"); assert_true!(binary_graphics.exists(), "graphics group should be materialised alongside binary"));
 
         // A second run should succeed even when the targets already point at the source.
         assert!(ensure_runtime_assets(&paths, &binary_path, &logger).is_ok());
@@ -4215,54 +3858,30 @@ mod tests {
 
         copy_runtime_asset(&source, &target).expect("group directory should be copied");
 
-        assert_eq!(
-            fs::read(target.join("C4.c")).unwrap(),
-            b"root script",
-            "top level group entry should be copied"
-        );
-        assert_eq!(
-            fs::read(target.join("nested").join("Extra.c")).unwrap(),
-            b"nested script",
-            "nested group entry should be copied"
-        );
+        checks!(assert_same!(fs::read(target.join("C4.c")).unwrap() => b"root script", "top level group entry should be copied"); assert_same!(fs::read(target.join("nested").join("Extra.c")).unwrap() => b"nested script", "nested group entry should be copied"));
     }
 
     #[test]
     fn prepare_config_and_app_paths_use_the_same_override_file() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
         let override_dir = TempDir::new().unwrap();
         let override_path = override_dir.path().join("custom.cfg");
         let log_dir = TempDir::new().unwrap();
 
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-            ("LC_CONFIG_FILE", Some(override_path.as_path())),
-            ("LC_LEGACY_CONFIG_FILE", None),
-            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let fixture = AppFixture::with_env(
+            b"system payload",
+            &[
+                ("LC_CONFIG_FILE", Some(override_path.as_path())),
+                ("LC_LEGACY_CONFIG_FILE", None),
+                ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+            ],
+        );
+        let paths = &fixture.paths;
+        ok!(paths.ensure_user_dirs());
         let logger = test_logger(&log_dir);
 
-        let config_path = prepare_config_with_registry_reader(&paths, &logger, || {
-            panic!("LC_CONFIG_FILE must bypass legacy registry migration")
-        })
-        .expect("config preparation should succeed");
+        let config_path = ok!(prepare_config_with_registry_reader(paths, &logger, || {panic!("LC_CONFIG_FILE must bypass legacy registry migration")}) => "config preparation should succeed");
 
-        assert_eq!(paths.config_file(), override_path);
-        assert_eq!(config_path, override_path);
-        assert!(config_path.exists(), "override config file should exist");
-        assert!(
-            fs::metadata(&config_path).unwrap().is_file(),
-            "override config path should resolve to a file"
-        );
+        checks!(assert_eq!(paths.config_file(), override_path); assert_eq!(config_path, override_path); assert!(config_path.exists(), "override config file should exist"); assert_true!(fs::metadata(&config_path).unwrap().is_file(), "override config path should resolve to a file"));
     }
 
     #[test]
@@ -4274,31 +3893,25 @@ mod tests {
             }
         }
 
-        let install_dir = TempDir::new().unwrap();
-        fs::create_dir_all(install_dir.path().join("planet")).unwrap();
-        fs::write(install_dir.path().join("planet/System.c4g"), b"system").unwrap();
-        let user_dir = TempDir::new().unwrap();
         let legacy_home = TempDir::new().unwrap();
         let log_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-            ("LC_CONFIG_FILE", None),
-            ("LC_LEGACY_CONFIG_FILE", None),
-            ("HOME", Some(legacy_home.path())),
-            ("APPDATA", Some(legacy_home.path())),
-            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
-        ]);
+        let fixture = AppFixture::with_env(
+            b"system",
+            &[
+                ("LC_CONFIG_FILE", None),
+                ("LC_LEGACY_CONFIG_FILE", None),
+                ("HOME", Some(legacy_home.path())),
+                ("APPDATA", Some(legacy_home.path())),
+                ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+            ],
+        );
 
-        let heuristic_path = heuristic_legacy_config_candidates()
-            .into_iter()
-            .next()
-            .expect("the host platform should expose a legacy config candidate");
+        let heuristic_path = ok!(heuristic_legacy_config_candidates().into_iter().next() => "the host platform should expose a legacy config candidate");
         fs::create_dir_all(heuristic_path.parent().unwrap()).unwrap();
         fs::write(heuristic_path, b"[General]\nVersion=362\nName=Heuristic\n").unwrap();
 
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let paths = &fixture.paths;
+        ok!(paths.ensure_user_dirs());
         let logger = test_logger(&log_dir);
         let registry = LegacyRegistryConfig {
             keys: vec![
@@ -4361,47 +3974,15 @@ mod tests {
         };
         let reads = Cell::new(0);
 
-        let config_path = prepare_config_with_registry_reader(&paths, &logger, || {
-            reads.set(reads.get() + 1);
-            Ok(Some(registry))
-        })
-        .expect("first run should import the registry snapshot");
+        let config_path = ok!(prepare_config_with_registry_reader(paths, &logger, || {reads.set(reads.get() + 1); Ok(Some(registry))}) => "first run should import the registry snapshot");
 
         assert_eq!(reads.get(), 1);
         let imported_bytes = fs::read(&config_path).unwrap();
         let imported = Config::load(&config_path).unwrap();
-        assert_eq!(imported.get_in(Some("General"), "Version"), Some("362"));
-        assert_eq!(imported.get_in(Some("General"), "Name"), Some("Müller"));
-        assert_eq!(
-            imported.get_in(Some("General"), "GamepadEnabled"),
-            Some("false")
-        );
-        assert_eq!(
-            imported.get_in(Some("Graphics"), "ResolutionX"),
-            Some("1920")
-        );
-        assert_eq!(
-            imported.get_in(Some("Graphics"), "DisplayMode"),
-            Some("Window")
-        );
-        assert_eq!(imported.get_in(Some("Gamepad0"), "Button1"), Some("-1"));
-        assert_eq!(
-            imported.get_in(Some("Network"), "LastUpdateTime"),
-            Some("1234605616436508552")
-        );
-        assert!(imported_bytes
-            .windows(b"  [C4AudioSystem]\r\n  LogLevel=debug\r\n".len())
-            .any(|window| window == b"  [C4AudioSystem]\r\n  LogLevel=debug\r\n"));
-        assert!(!imported_bytes
-            .windows(b"[Console]".len())
-            .any(|window| window == b"[Console]"));
+        checks!(assert_eq!(imported.get_in(Some("General"), "Version"), Some("362")); assert_eq!(imported.get_in(Some("General"), "Name"), Some("Müller")); assert_same!(imported.get_in(Some("General"), "GamepadEnabled") => Some("false")); assert_same!(imported.get_in(Some("Graphics"), "ResolutionX") => Some("1920")); assert_same!(imported.get_in(Some("Graphics"), "DisplayMode") => Some("Window")); assert_eq!(imported.get_in(Some("Gamepad0"), "Button1"), Some("-1")); assert_same!(imported.get_in(Some("Network"), "LastUpdateTime") => Some("1234605616436508552")); assert_true!(imported_bytes.windows(b"  [C4AudioSystem]\r\n  LogLevel=debug\r\n".len()).any(|window| window == b"  [C4AudioSystem]\r\n  LogLevel=debug\r\n")); assert_true!(!imported_bytes.windows(b"[Console]".len()).any(|window| window == b"[Console]")));
 
-        let second_path = prepare_config_with_registry_reader(&paths, &logger, || {
-            panic!("an existing destination must not read the legacy registry")
-        })
-        .expect("later runs should keep the imported destination");
-        assert_eq!(second_path, config_path);
-        assert_eq!(fs::read(second_path).unwrap(), imported_bytes);
+        let second_path = ok!(prepare_config_with_registry_reader(paths, &logger, || {panic!("an existing destination must not read the legacy registry")}) => "later runs should keep the imported destination");
+        checks!(assert_eq!(second_path, config_path); assert_eq!(fs::read(second_path).unwrap(), imported_bytes));
     }
 
     #[test]
@@ -4410,127 +3991,60 @@ mod tests {
         // `//` as a comment and persisted only `https:`. Repair that specific
         // Rust-port corruption before handing configuration to the now
         // C++-faithful network client.
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
         let log_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-            ("LC_CONFIG_FILE", None),
-            ("LC_LEGACY_CONFIG_FILE", None),
-            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        fs::write(
+        let fixture = AppFixture::with_env(
+            b"system payload",
+            &[
+                ("LC_CONFIG_FILE", None),
+                ("LC_LEGACY_CONFIG_FILE", None),
+                ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+            ],
+        );
+        let paths = &fixture.paths;
+        ok!(paths.ensure_user_dirs());
+        ok!(fs::write(
             paths.config_file(),
             "[Network]\nServerAddress = https:\nAlternateServerAddress = https:\n",
-        )
-        .unwrap();
+        ));
         let logger = test_logger(&log_dir);
 
-        prepare_config(&paths, &logger).unwrap();
+        prepare_config(paths, &logger).unwrap();
 
         let config = Config::load(paths.config_file()).unwrap();
-        assert_eq!(
-            config.get_in(Some("Network"), "ServerAddress"),
-            Some("https://league.clonkspot.org")
-        );
-        assert_eq!(
-            config.get_in(Some("Network"), "AlternateServerAddress"),
-            Some("https://league.clonkspot.org")
-        );
+        checks!(assert_same!(config.get_in(Some("Network"), "ServerAddress") => Some("https://league.clonkspot.org")); assert_same!(config.get_in(Some("Network"), "AlternateServerAddress") => Some("https://league.clonkspot.org")));
     }
 
     #[test]
     fn prepare_config_applies_classic_version_347_migrations() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
         let legacy_dir = TempDir::new().unwrap();
         let legacy_path = legacy_dir.path().join("Legacy.cfg");
         let legacy = b"# preserve this comment\r\n[General]\r\nVersion=347\r\nName=Sentinel\r\n[Network]\r\nServerAddress=league.clonkspot.org:80\r\nAlternateServerAddress=league.clonkspot.org:80\r\nUpdateServerAddress=update.clonkspot.org/lc/update\r\nPuncherAddress=clonk.de:11115\r\n[Graphics]\r\n  Shader=false # keep shader note\r\nDisableGamma=true\r\n[Sound]\r\nMaxChannels=7\r\nMusic=false\r\n";
         fs::write(&legacy_path, legacy).unwrap();
         let log_dir = TempDir::new().unwrap();
 
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-            ("LC_LEGACY_CONFIG_FILE", Some(legacy_path.as_path())),
-            ("LC_CONFIG_FILE", None),
-            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
+        let fixture = AppFixture::with_env(
+            b"system payload",
+            &[
+                ("LC_LEGACY_CONFIG_FILE", Some(legacy_path.as_path())),
+                ("LC_CONFIG_FILE", None),
+                ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+            ],
+        );
+        let paths = &fixture.paths;
+        ok!(paths.ensure_user_dirs());
         let logger = test_logger(&log_dir);
 
-        let config_path = prepare_config_with_registry_reader(&paths, &logger, || {
-            panic!("LC_LEGACY_CONFIG_FILE must bypass legacy registry migration")
-        })
-        .expect("config preparation should succeed");
+        let config_path = ok!(prepare_config_with_registry_reader(paths, &logger, || {panic!("LC_LEGACY_CONFIG_FILE must bypass legacy registry migration")}) => "config preparation should succeed");
 
-        assert_eq!(config_path, paths.config_file());
-        assert!(
-            config_path.exists(),
-            "default config path should be materialised"
-        );
+        checks!(assert_eq!(config_path, paths.config_file()); assert_true!(config_path.exists(), "default config path should be materialised"));
         let config = Config::load(&config_path).expect("migrated config should be readable");
-        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
-        assert_eq!(config.get_in(Some("General"), "Name"), Some("Sentinel"));
-        assert_eq!(
-            config.get_in(Some("Network"), "ServerAddress"),
-            Some(OFFICIAL_LEAGUE_SERVER)
-        );
-        assert_eq!(
-            config.get_in(Some("Network"), "AlternateServerAddress"),
-            Some(OFFICIAL_LEAGUE_SERVER)
-        );
-        assert_eq!(
-            config.get_in(Some("Network"), "UpdateServerAddress"),
-            Some(OFFICIAL_UPDATE_SERVER)
-        );
-        assert_eq!(
-            config.get_in(Some("Network"), "PuncherAddress"),
-            Some(OFFICIAL_PUNCHER_SERVER)
-        );
-        assert_eq!(
-            config.get_in(Some("Graphics"), "Shader"),
-            Some("true # keep shader note")
-        );
-        assert_eq!(
-            config.get_in(Some("Graphics"), "DisableGamma"),
-            Some("false")
-        );
-        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("1024"));
-        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
-        assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
+        checks!(assert_eq!(config.get_in(Some("General"), "Version"), Some("362")); assert_eq!(config.get_in(Some("General"), "Name"), Some("Sentinel")); assert_same!(config.get_in(Some("Network"), "ServerAddress") => Some(OFFICIAL_LEAGUE_SERVER)); assert_same!(config.get_in(Some("Network"), "AlternateServerAddress") => Some(OFFICIAL_LEAGUE_SERVER)); assert_same!(config.get_in(Some("Network"), "UpdateServerAddress") => Some(OFFICIAL_UPDATE_SERVER)); assert_same!(config.get_in(Some("Network"), "PuncherAddress") => Some(OFFICIAL_PUNCHER_SERVER)); assert_same!(config.get_in(Some("Graphics"), "Shader") => Some("true # keep shader note")); assert_same!(config.get_in(Some("Graphics"), "DisableGamma") => Some("false")); assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("1024")); assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true")); assert_eq!(fs::read(&legacy_path).unwrap(), legacy));
 
         let first_adaptation = fs::read(&config_path).unwrap();
         let first_adaptation_text = String::from_utf8(first_adaptation.clone()).unwrap();
-        assert!(first_adaptation_text.contains("Version=362\r\n"));
-        assert!(!first_adaptation_text.contains("Version ="));
-        assert!(
-            first_adaptation_text.contains("ServerAddress=\"https://league.clonkspot.org\"\r\n")
-        );
-        assert!(first_adaptation_text.contains("  Shader=true # keep shader note\r\n"));
-        assert!(first_adaptation_text.contains("DisableGamma=false\r\n"));
-        assert!(first_adaptation_text.contains("Name=Sentinel\r\n"));
-        assert!(first_adaptation_text.starts_with("# preserve this comment\r\n"));
-        prepare_config(&paths, &logger).expect("current config should remain valid");
-        assert_eq!(
-            fs::read(&config_path).unwrap(),
-            first_adaptation,
-            "Version=362 should make adaptation byte-stable"
-        );
+        checks!(assert!(first_adaptation_text.contains("Version=362\r\n")); assert!(!first_adaptation_text.contains("Version =")); assert_true!(first_adaptation_text.contains("ServerAddress=\"https://league.clonkspot.org\"\r\n")); assert!(first_adaptation_text.contains("  Shader=true # keep shader note\r\n")); assert!(first_adaptation_text.contains("DisableGamma=false\r\n")); assert!(first_adaptation_text.contains("Name=Sentinel\r\n")); assert!(first_adaptation_text.starts_with("# preserve this comment\r\n")));
+        prepare_config(paths, &logger).expect("current config should remain valid");
+        assert_same!(fs::read(&config_path).unwrap() => first_adaptation, "Version=362 should make adaptation byte-stable");
     }
 
     #[test]
@@ -4539,67 +4053,29 @@ mod tests {
         let config_path = temp.path().join("config.cfg");
         let logger = test_logger(&temp);
 
-        fs::write(
-            &config_path,
-            "[General]\nVersion=0x168junk\n[Network]\nServerAddress=league.clonkspot.org:80\nPuncherAddress=clonk.de:11115\n[Graphics]\nShader=false\nDisableGamma=true\n[Sound]\nMaxChannels=7\nMusic=false\n",
-        )
-        .unwrap();
-        adapt_config_to_current_version(&config_path, &logger).unwrap();
-        let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
-        assert_eq!(
-            config.get_in(Some("Network"), "ServerAddress"),
-            Some("league.clonkspot.org:80")
-        );
-        assert_eq!(
-            config.get_in(Some("Network"), "PuncherAddress"),
-            Some("clonk.de:11115")
-        );
-        assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("false"));
-        assert_eq!(
-            config.get_in(Some("Graphics"), "DisableGamma"),
-            Some("true")
-        );
-        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("7"));
-        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("false"));
+        let config = migrate_config(&config_path, &logger, "[General]\nVersion=0x168junk\n[Network]\nServerAddress=league.clonkspot.org:80\nPuncherAddress=clonk.de:11115\n[Graphics]\nShader=false\nDisableGamma=true\n[Sound]\nMaxChannels=7\nMusic=false\n");
+        checks!(assert_eq!(config.get_in(Some("General"), "Version"), Some("362")); assert_same!(config.get_in(Some("Network"), "ServerAddress") => Some("league.clonkspot.org:80")); assert_same!(config.get_in(Some("Network"), "PuncherAddress") => Some("clonk.de:11115")); assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("false")); assert_same!(config.get_in(Some("Graphics"), "DisableGamma") => Some("true")); assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("7")); assert_eq!(config.get_in(Some("Sound"), "Music"), Some("false")));
 
-        fs::write(
+        let config = migrate_config(
             &config_path,
+            &logger,
             "[General]\nVersion =360\n[Sound]\nMaxChannels=7\nMusic=false\n",
-        )
-        .unwrap();
-        adapt_config_to_current_version(&config_path, &logger).unwrap();
-        let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
-        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("1024"));
-        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
-        assert!(fs::read_to_string(&config_path)
-            .unwrap()
-            .contains("Version=362\n"));
-
-        fs::write(
-            &config_path,
-            "[General]\nVersion=346\n[Sound]\nMaxChannels=7\nMusic=false\n",
-        )
-        .unwrap();
-        adapt_config_to_current_version(&config_path, &logger).unwrap();
-        let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("7"));
-        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
-
-        fs::write(
-            &config_path,
-            "[General]\nVersion=999\n[Graphics]\nShader=false\nDisableGamma=true\n",
-        )
-        .unwrap();
-        adapt_config_to_current_version(&config_path, &logger).unwrap();
-        let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
-        assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("false"));
-        assert_eq!(
-            config.get_in(Some("Graphics"), "DisableGamma"),
-            Some("true")
         );
+        checks!(assert_eq!(config.get_in(Some("General"), "Version"), Some("362")); assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("1024")); assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true")); assert_true!(fs::read_to_string(&config_path).unwrap().contains("Version=362\n")));
+
+        let config = migrate_config(
+            &config_path,
+            &logger,
+            "[General]\nVersion=346\n[Sound]\nMaxChannels=7\nMusic=false\n",
+        );
+        checks!(assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("7")); assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true")));
+
+        let config = migrate_config(
+            &config_path,
+            &logger,
+            "[General]\nVersion=999\n[Graphics]\nShader=false\nDisableGamma=true\n",
+        );
+        checks!(assert_eq!(config.get_in(Some("General"), "Version"), Some("362")); assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("false")); assert_same!(config.get_in(Some("Graphics"), "DisableGamma") => Some("true")));
     }
 
     #[cfg(target_os = "macos")]
@@ -4613,8 +4089,7 @@ mod tests {
         adapt_config_to_current_version(&config_path, &logger).unwrap();
 
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
-        assert_eq!(config.get_in(Some("General"), "Preloading"), Some("false"));
+        checks!(assert_eq!(config.get_in(Some("General"), "Version"), Some("362")); assert_eq!(config.get_in(Some("General"), "Preloading"), Some("false")));
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -4628,11 +4103,10 @@ mod tests {
         let home_dir = TempDir::new().unwrap();
         let legacy_dir = TempDir::new().unwrap();
         let legacy_path = legacy_dir.path().join("Legacy.cfg");
-        fs::write(
+        ok!(fs::write(
             &legacy_path,
             b"[General]\nUserPath=\"$HOME/Relocated Data\"\n",
-        )
-        .unwrap();
+        ));
         let configured_user = home_dir.path().join("Relocated Data");
         let log_dir = TempDir::new().unwrap();
 
@@ -4656,11 +4130,7 @@ mod tests {
 
         let runtime_paths = rediscover_paths_after_config(&config_path).unwrap();
 
-        assert_eq!(runtime_paths.config_file(), config_path);
-        assert_eq!(runtime_paths.user_data_dir(), configured_user);
-        assert_eq!(runtime_paths.cache_dir(), configured_user.join("Cache"));
-        assert_eq!(runtime_paths.logs_dir(), configured_user.join("Logs"));
-        assert!(configured_user.join("Config").is_dir());
+        checks!(assert_eq!(runtime_paths.config_file(), config_path); assert_eq!(runtime_paths.user_data_dir(), configured_user); assert_eq!(runtime_paths.cache_dir(), configured_user.join("Cache")); assert_eq!(runtime_paths.logs_dir(), configured_user.join("Logs")); assert!(configured_user.join("Config").is_dir()));
     }
 
     #[test]
@@ -4708,7 +4178,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let override_bin = temp.path().join("missing");
         let err = resolve_runtime_binary(Some(&override_bin), temp.path()).unwrap_err();
-        assert!(
+        assert_true!(
             err.to_string().contains("does not exist"),
             "unexpected message: {err}"
         );
@@ -4719,33 +4189,22 @@ mod tests {
     fn validate_update_tool_runs_binary() {
         use std::os::unix::fs::PermissionsExt;
 
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-        let patcher_path = install_dir.path().join("c4group");
-        fs::write(
+        let fixture = AppFixture::new();
+        let patcher_path = fixture.install_dir.path().join("c4group");
+        ok!(fs::write(
             &patcher_path,
             b"#!/bin/sh\necho \"LegacyClonk C4Group 9.0\"\nexit 0\n",
-        )
-        .unwrap();
+        ));
         let mut perms = fs::metadata(&patcher_path).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&patcher_path, perms).unwrap();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-
-        validate_update_tool(&paths, &logger).unwrap();
+        validate_update_tool(paths, &logger).unwrap();
         let log_contents = std::fs::read_to_string(logger.path()).unwrap();
-        assert!(
+        assert_true!(
             log_contents.contains("c4group responded: LegacyClonk C4Group 9.0"),
             "probe output missing in log:\n{log_contents}"
         );
@@ -4755,23 +4214,13 @@ mod tests {
     fn packaged_update_tool_precedes_development_fallbacks() {
         // xtask/src/main.rs:1741-1763 stages every shipped executable under
         // `bin`; a source-tree fallback must not shadow the installed tool.
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-        let packaged = install_dir.path().join("bin/c4group");
+        let fixture = AppFixture::new();
+        let packaged = fixture.install_dir.path().join("bin/c4group");
         fs::create_dir_all(packaged.parent().unwrap()).unwrap();
         fs::write(&packaged, b"packaged").unwrap();
-        fs::write(install_dir.path().join("c4group"), b"development").unwrap();
+        fs::write(fixture.install_dir.path().join("c4group"), b"development").unwrap();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-        let paths = AppPaths::discover().unwrap();
-
-        assert_eq!(locate_update_tool(&paths), Some(packaged));
+        assert_eq!(locate_update_tool(&fixture.paths), Some(packaged));
     }
 
     #[test]
@@ -4796,50 +4245,28 @@ mod tests {
         ]);
         let paths = AppPaths::discover().unwrap();
 
-        assert_eq!(paths.binaries_dir(), contents.join("MacOS"));
-        assert_eq!(locate_update_tool(&paths), Some(bundled));
+        checks!(assert_eq!(paths.binaries_dir(), contents.join("MacOS")); assert_eq!(locate_update_tool(&paths), Some(bundled)));
     }
 
     #[test]
     fn development_update_tool_fallback_remains_available() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-        let fallback = install_dir.path().join("build/Release/c4group");
+        let fixture = AppFixture::new();
+        let fallback = fixture.install_dir.path().join("build/Release/c4group");
         fs::create_dir_all(fallback.parent().unwrap()).unwrap();
         fs::write(&fallback, b"development").unwrap();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-        let paths = AppPaths::discover().unwrap();
-
-        assert_eq!(locate_update_tool(&paths), Some(fallback));
+        assert_eq!(locate_update_tool(&fixture.paths), Some(fallback));
     }
 
     #[test]
     fn validate_update_tool_allows_missing_optional_binary() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-
-        validate_update_tool(&paths, &logger).unwrap();
+        validate_update_tool(paths, &logger).unwrap();
         let log_contents = std::fs::read_to_string(logger.path()).unwrap();
-        assert!(
+        assert_true!(
             log_contents.contains(
                 "optional c4group updater not found; continuing without legacy update support"
             ),
@@ -4849,23 +4276,13 @@ mod tests {
 
     #[test]
     fn validate_update_tool_respects_skip_env() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let fixture = AppFixture::with_env(
+            b"stub",
+            &[(SKIP_PATCHER_VALIDATION_ENV, Some(Path::new("1")))],
+        );
+        let logger = fixture.logger();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-            (SKIP_PATCHER_VALIDATION_ENV, Some(Path::new("1"))),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-
-        assert!(validate_update_tool(&paths, &logger).is_ok());
+        assert!(validate_update_tool(&fixture.paths, &logger).is_ok());
     }
 
     #[cfg(unix)]
@@ -4873,120 +4290,60 @@ mod tests {
     fn validate_update_tool_reports_probe_failure() {
         use std::os::unix::fs::PermissionsExt;
 
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-        let patcher_path = install_dir.path().join("c4group");
-        fs::write(
+        let fixture = AppFixture::new();
+        let patcher_path = fixture.install_dir.path().join("c4group");
+        ok!(fs::write(
             &patcher_path,
             b"#!/bin/sh\necho \"probe failure\" >&2\nexit 3\n",
-        )
-        .unwrap();
+        ));
         let mut perms = fs::metadata(&patcher_path).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&patcher_path, perms).unwrap();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
+        let logger = fixture.logger();
 
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-
-        let err = validate_update_tool(&paths, &logger).unwrap_err();
+        let err = validate_update_tool(&fixture.paths, &logger).unwrap_err();
         let display = err.to_string();
         let root = err.chain().next_back().unwrap().to_string();
-        assert!(
-            display.contains("failed to execute"),
-            "context missing command failure: {display}"
-        );
-        assert!(
-            root.contains("exit code 3"),
-            "unexpected root cause: {root}"
-        );
-        assert!(
-            root.contains("probe failure"),
-            "missing stderr snippet: {root}"
-        );
+        checks!(assert_true!(display.contains("failed to execute"), "context missing command failure: {display}"); assert_true!(root.contains("exit code 3"), "unexpected root cause: {root}"); assert_true!(root.contains("probe failure"), "missing stderr snippet: {root}"));
     }
 
     #[test]
     fn collect_runtime_logs_copies_recent_files() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
         // Backdated deliberately: `collect_runtime_logs` skips anything whose
         // mtime precedes `started_at`, and a filesystem timestamp can round
         // below a `now()` captured moments earlier — coarsely so on Windows.
         let start = SystemTime::now() - Duration::from_secs(1);
-        fs::write(
-            install_dir.path().join("Clonk.log"),
+        ok!(fs::write(
+            fixture.install_dir.path().join("Clonk.log"),
             b"legacy runtime log contents",
-        )
-        .unwrap();
+        ));
 
-        let copies = collect_runtime_logs(&paths, start, &logger).unwrap();
+        let copies = collect_runtime_logs(paths, start, &logger).unwrap();
 
-        assert_eq!(
-            copies.len(),
-            1,
-            "expected exactly one copied log in {}",
-            paths.logs_dir().display()
-        );
-        assert!(
-            copies[0].starts_with(paths.logs_dir()),
-            "expected copied log to live in {}",
-            paths.logs_dir().display()
-        );
-        assert!(
-            copies[0].exists(),
-            "copied log {} should exist",
-            copies[0].display()
-        );
+        checks!(assert_same!(copies.len() => 1, "expected exactly one copied log in {}", paths.logs_dir().display()); assert_true!(copies[0].starts_with(paths.logs_dir()), "expected copied log to live in {}", paths.logs_dir().display()); assert_true!(copies[0].exists(), "copied log {} should exist", copies[0].display()));
     }
 
     #[test]
     fn collect_crash_reports_copies_recent_artifacts() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let crash_file = user_dir
+        let fixture = AppFixture::new();
+        let crash_file = fixture
+            .user_dir
             .path()
             .join("ClonkRust-crash-2024-01-01-00-00-00.dmp");
         fs::write(&crash_file, b"crash").unwrap();
 
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
         let start = SystemTime::now() - Duration::from_secs(60);
-        let artifacts = collect_crash_reports(&paths, start, &logger).unwrap();
+        let artifacts = collect_crash_reports(paths, start, &logger).unwrap();
 
-        assert!(
+        assert_true!(
             artifacts
                 .iter()
                 .any(|path| path.starts_with(paths.logs_dir())),
@@ -4994,7 +4351,7 @@ mod tests {
             paths.logs_dir().display()
         );
         for artifact in artifacts {
-            assert!(
+            assert_true!(
                 artifact.exists(),
                 "expected crash artifact {} to exist",
                 artifact.display()
@@ -5004,75 +4361,32 @@ mod tests {
 
     #[test]
     fn digest_update_telemetry_detects_failure_lines() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
         let telemetry_log = paths.logs_dir().join("Clonk-session.log");
-        fs::write(
+        ok!(fs::write(
             &telemetry_log,
             "c4group returned status 2\nDone.\nRandom other line\n",
-        )
-        .unwrap();
+        ));
 
         let summary =
             digest_update_telemetry(std::slice::from_ref(&telemetry_log), &logger).unwrap();
         let failures = summary.failures();
         assert_eq!(failures.len(), 1, "expected one failure event");
         let successes = summary.successes();
-        assert_eq!(successes.len(), 1, "expected one success source");
-        assert_eq!(
-            failures[0].log_path, telemetry_log,
-            "failure should reference telemetry log"
-        );
-        assert_eq!(
-            failures[0].message, "c4group returned status 2",
-            "failure message should match telemetry line"
-        );
-        assert_eq!(
-            successes[0], telemetry_log,
-            "success should reference telemetry log"
-        );
+        checks!(assert_eq!(successes.len(), 1, "expected one success source"); assert_same!(failures[0].log_path => telemetry_log, "failure should reference telemetry log"); assert_same!(failures[0].message => "c4group returned status 2", "failure message should match telemetry line"); assert_same!(successes[0] => telemetry_log, "success should reference telemetry log"));
 
         let launcher_log = fs::read_to_string(logger.path()).unwrap();
-        assert!(
-            launcher_log
-                .contains("updater telemetry [Clonk-session.log]: c4group returned status 2"),
-            "launcher log should record failure telemetry, contents:\n{launcher_log}"
-        );
-        assert!(
-            launcher_log.contains("updater telemetry: success recorded in Clonk-session.log"),
-            "launcher log should record success telemetry, contents:\n{launcher_log}"
-        );
+        checks!(assert_true!(launcher_log.contains("updater telemetry [Clonk-session.log]: c4group returned status 2"), "launcher log should record failure telemetry, contents:\n{launcher_log}"); assert_true!(launcher_log.contains("updater telemetry: success recorded in Clonk-session.log"), "launcher log should record success telemetry, contents:\n{launcher_log}"));
     }
 
     #[test]
     fn create_support_bundle_packages_artifacts() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
         logger.log_line("bundle integration test start").unwrap();
 
         let runtime_log = paths.logs_dir().join("Clonk-session.log");
@@ -5084,24 +4398,15 @@ mod tests {
         telemetry.record_success(runtime_log.clone());
         telemetry.record_failure(runtime_log.clone(), "c4group returned status 0".into());
 
-        let bundle_path = create_support_bundle(
-            &paths,
-            &logger,
-            logger.path(),
-            std::slice::from_ref(&runtime_log),
-            std::slice::from_ref(&crash_log),
-            &telemetry,
-        )
-        .unwrap()
-        .expect("bundle path should be returned");
+        let bundle_path = ok!(create_support_bundle(paths, &logger, logger.path(), std::slice::from_ref(&runtime_log), std::slice::from_ref(&crash_log), &telemetry,).unwrap() => "bundle path should be returned");
 
-        assert!(
+        assert_true!(
             bundle_path.exists(),
             "support bundle {} should exist",
             bundle_path.display()
         );
 
-        append_support_bundle_report(&paths, &bundle_path, &telemetry).unwrap();
+        append_support_bundle_report(paths, &bundle_path, &telemetry).unwrap();
 
         let file = fs::File::open(&bundle_path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
@@ -5110,51 +4415,22 @@ mod tests {
             let entry = archive.by_index(idx).unwrap();
             entries.push(entry.name().to_string());
         }
-        assert!(
-            entries.iter().any(|name| name.starts_with("launcher/")),
-            "bundle should include launcher log, entries: {entries:?}"
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|name| name.starts_with("runtime/01_Clonk-session.log")),
-            "bundle should include runtime log, entries: {entries:?}"
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|name| name.starts_with("crash/01_ClonkRust-crash-2024.dmp")),
-            "bundle should include crash artifact, entries: {entries:?}"
-        );
-        assert!(
-            entries.contains(&"telemetry-summary.json".to_string()),
-            "bundle should include telemetry summary, entries: {entries:?}"
-        );
-        assert!(
-            entries.contains(&"support-bundle-report.txt".to_string()),
-            "bundle should include textual report, entries: {entries:?}"
-        );
+        checks!(assert_true!(entries.iter().any(|name| name.starts_with("launcher/")), "bundle should include launcher log, entries: {entries:?}"); assert_true!(entries.iter().any(|name| name.starts_with("runtime/01_Clonk-session.log")), "bundle should include runtime log, entries: {entries:?}"); assert_true!(entries.iter().any(|name| name.starts_with("crash/01_ClonkRust-crash-2024.dmp")), "bundle should include crash artifact, entries: {entries:?}"); assert_true!(entries.contains(&"telemetry-summary.json".to_string()), "bundle should include telemetry summary, entries: {entries:?}"); assert_true!(entries.contains(&"support-bundle-report.txt".to_string()), "bundle should include textual report, entries: {entries:?}"));
 
         let mut telemetry_json = String::new();
-        archive
+        ok!(archive
             .by_name("telemetry-summary.json")
             .unwrap()
-            .read_to_string(&mut telemetry_json)
-            .unwrap();
+            .read_to_string(&mut telemetry_json));
         let value: Value = serde_json::from_str(&telemetry_json).unwrap();
-        assert_eq!(
-            value["successes"][0].as_str(),
-            Some("Clonk-session.log"),
-            "telemetry summary should list runtime log success"
-        );
+        assert_same!(value["successes"][0].as_str() => Some("Clonk-session.log"), "telemetry summary should list runtime log success");
 
         let mut report_contents = String::new();
-        archive
+        ok!(archive
             .by_name("support-bundle-report.txt")
             .unwrap()
-            .read_to_string(&mut report_contents)
-            .unwrap();
-        assert!(
+            .read_to_string(&mut report_contents));
+        assert_true!(
             report_contents.contains("Launcher summary written to"),
             "report should describe summary path: {report_contents}"
         );
@@ -5162,20 +4438,9 @@ mod tests {
 
     #[test]
     fn write_launcher_summary_emits_machine_readable_output() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
         logger.log_line("summary integration test start").unwrap();
 
         let runtime_log = paths.logs_dir().join("Clonk-summary.log");
@@ -5189,8 +4454,8 @@ mod tests {
         telemetry.record_success(runtime_log.clone());
         telemetry.record_failure(runtime_log.clone(), "c4group returned status 1".into());
 
-        write_launcher_summary(
-            &paths,
+        ok!(write_launcher_summary(
+            paths,
             &logger,
             logger.path(),
             std::slice::from_ref(&runtime_log),
@@ -5200,11 +4465,10 @@ mod tests {
             None,
             None,
             None,
-        )
-        .unwrap();
+        ));
 
         let summary_path = paths.logs_dir().join("launcher-summary.json");
-        assert!(
+        assert_true!(
             summary_path.exists(),
             "summary file {} should exist",
             summary_path.display()
@@ -5213,70 +4477,17 @@ mod tests {
         let contents = fs::read_to_string(&summary_path).unwrap();
         let value: Value = serde_json::from_str(&contents).unwrap();
 
-        assert_eq!(
-            value["schema_version"].as_u64(),
-            Some(1),
-            "summary should include schema version"
-        );
-        assert!(
-            value["launcher_log"]
-                .as_str()
-                .unwrap()
-                .starts_with("clonk-game"),
-            "summary should include launcher log path"
-        );
-        assert_eq!(
-            value["runtime_logs"][0].as_str(),
-            Some("Clonk-summary.log"),
-            "summary should include runtime log relative path"
-        );
-        assert_eq!(
-            value["crash_reports"][0].as_str(),
-            Some("ClonkRust-crash-summary.dmp"),
-            "summary should include crash artifact relative path"
-        );
-        assert_eq!(
-            value["support_bundle"].as_str(),
-            Some("support-bundle-test.zip"),
-            "summary should reference support bundle"
-        );
-        assert!(
-            value["update_telemetry"]["successes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry.as_str() == Some("Clonk-summary.log")),
-            "summary should record telemetry success: {value}"
-        );
-        assert!(
-            value["update_telemetry"]["failures"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["message"].as_str() == Some("c4group returned status 1")),
-            "summary should record telemetry failure: {value}"
-        );
+        checks!(assert_same!(value["schema_version"].as_u64() => Some(1), "summary should include schema version"); assert_true!(value["launcher_log"].as_str().unwrap().starts_with("clonk-game"), "summary should include launcher log path"); assert_same!(value["runtime_logs"][0].as_str() => Some("Clonk-summary.log"), "summary should include runtime log relative path"); assert_same!(value["crash_reports"][0].as_str() => Some("ClonkRust-crash-summary.dmp"), "summary should include crash artifact relative path"); assert_same!(value["support_bundle"].as_str() => Some("support-bundle-test.zip"), "summary should reference support bundle"); assert_true!(value["update_telemetry"]["successes"].as_array().unwrap().iter().any(|entry| entry.as_str() == Some("Clonk-summary.log")), "summary should record telemetry success: {value}"); assert_true!(value["update_telemetry"]["failures"].as_array().unwrap().iter().any(|entry| entry["message"].as_str() == Some("c4group returned status 1")), "summary should record telemetry failure: {value}"));
     }
 
     #[test]
     fn regenerate_support_bundle_requires_existing_summary() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
 
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-
-        let result = regenerate_support_bundle(&paths, &logger, logger.path());
-        assert!(
+        let result = regenerate_support_bundle(paths, &logger, logger.path());
+        assert_true!(
             result.is_err(),
             "regenerating a support bundle without a summary should fail"
         );
@@ -5284,23 +4495,10 @@ mod tests {
 
     #[test]
     fn regenerate_support_bundle_uses_launcher_summary() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-        logger
-            .log_line("regeneration integration test start")
-            .unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
+        ok!(logger.log_line("regeneration integration test start"));
 
         let runtime_log = paths.logs_dir().join("Clonk-regenerate.log");
         fs::write(&runtime_log, "Done.\n").unwrap();
@@ -5311,8 +4509,8 @@ mod tests {
         telemetry.record_success(runtime_log.clone());
         telemetry.record_failure(runtime_log.clone(), "c4group returned status 1".into());
 
-        write_launcher_summary(
-            &paths,
+        ok!(write_launcher_summary(
+            paths,
             &logger,
             logger.path(),
             std::slice::from_ref(&runtime_log),
@@ -5322,47 +4520,22 @@ mod tests {
             None,
             None,
             None,
-        )
-        .unwrap();
+        ));
 
         let (bundle_path, regenerated) =
-            regenerate_support_bundle(&paths, &logger, logger.path()).unwrap();
-        assert!(
-            bundle_path.exists(),
-            "regenerated bundle {} should exist",
-            bundle_path.display()
-        );
-        assert!(
-            bundle_path.starts_with(paths.logs_dir()),
-            "bundle {} should be created inside logs dir {}",
-            bundle_path.display(),
-            paths.logs_dir().display()
-        );
-        assert_eq!(
-            regenerated.successes().len(),
-            1,
-            "telemetry should report one success"
-        );
-        assert_eq!(
-            regenerated.failures().len(),
-            1,
-            "telemetry should report one failure"
-        );
+            regenerate_support_bundle(paths, &logger, logger.path()).unwrap();
+        checks!(assert_true!(bundle_path.exists(), "regenerated bundle {} should exist", bundle_path.display()); assert_true!(bundle_path.starts_with(paths.logs_dir()), "bundle {} should be created inside logs dir {}", bundle_path.display(), paths.logs_dir().display()); assert_same!(regenerated.successes().len() => 1, "telemetry should report one success"); assert_same!(regenerated.failures().len() => 1, "telemetry should report one failure"));
 
         let summary_path = paths.logs_dir().join("launcher-summary.json");
         let summary_text = fs::read_to_string(&summary_path).unwrap();
         let document: Value = serde_json::from_str(&summary_text).unwrap();
-        let recorded_bundle = document["support_bundle"]
-            .as_str()
-            .expect("support bundle entry should exist");
+        let recorded_bundle =
+            ok!(document["support_bundle"].as_str() => "support bundle entry should exist");
         let expected_relative = bundle_path
             .strip_prefix(paths.logs_dir())
             .map(|relative| relative.display().to_string())
             .unwrap_or_else(|_| bundle_path.display().to_string());
-        assert_eq!(
-            recorded_bundle, expected_relative,
-            "summary should point at regenerated bundle"
-        );
+        assert_same!(recorded_bundle => expected_relative, "summary should point at regenerated bundle");
 
         let file = fs::File::open(&bundle_path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
@@ -5371,34 +4544,14 @@ mod tests {
             let entry = archive.by_index(idx).unwrap();
             entries.push(entry.name().to_string());
         }
-        assert!(
-            entries.iter().any(|name| name.starts_with("launcher/")),
-            "bundle should include launcher log entries: {entries:?}"
-        );
-        assert!(
-            entries.iter().any(|name| name.starts_with("runtime/")),
-            "bundle should include runtime logs entries: {entries:?}"
-        );
-        assert!(
-            entries.iter().any(|name| name.starts_with("crash/")),
-            "bundle should include crash artifacts entries: {entries:?}"
-        );
-        assert!(
-            entries.iter().any(|name| name == "telemetry-summary.json"),
-            "bundle should include telemetry summary entries: {entries:?}"
-        );
-        assert!(
-            entries.contains(&"support-bundle-report.txt".to_string()),
-            "bundle should include textual report entries: {entries:?}"
-        );
+        checks!(assert_true!(entries.iter().any(|name| name.starts_with("launcher/")), "bundle should include launcher log entries: {entries:?}"); assert_true!(entries.iter().any(|name| name.starts_with("runtime/")), "bundle should include runtime logs entries: {entries:?}"); assert_true!(entries.iter().any(|name| name.starts_with("crash/")), "bundle should include crash artifacts entries: {entries:?}"); assert_true!(entries.iter().any(|name| name == "telemetry-summary.json"), "bundle should include telemetry summary entries: {entries:?}"); assert_true!(entries.contains(&"support-bundle-report.txt".to_string()), "bundle should include textual report entries: {entries:?}"));
 
         let mut report = String::new();
-        archive
+        ok!(archive
             .by_name("support-bundle-report.txt")
             .unwrap()
-            .read_to_string(&mut report)
-            .unwrap();
-        assert!(
+            .read_to_string(&mut report));
+        assert_true!(
             report.contains("Support bundle available"),
             "report should mention support bundle availability: {report}"
         );
@@ -5406,23 +4559,10 @@ mod tests {
 
     #[test]
     fn provider_report_surfaces_history_cleared_without_records() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
-        logger
-            .log_line("provider report history cleared test")
-            .unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
+        ok!(logger.log_line("provider report history cleared test"));
 
         let bulk_summary = ProviderBulkRetargetSummary {
             history_cleared_at: Some("2024-06-05T18:30:00Z".into()),
@@ -5431,8 +4571,8 @@ mod tests {
 
         let telemetry = UpdateTelemetrySummary::default();
 
-        write_launcher_summary(
-            &paths,
+        ok!(write_launcher_summary(
+            paths,
             &logger,
             logger.path(),
             &[],
@@ -5442,38 +4582,17 @@ mod tests {
             Some(ProviderAutomationSnapshot::default()),
             Some(bulk_summary),
             None,
-        )
-        .unwrap();
+        ));
 
-        let lines = build_support_bundle_report(&paths, None, &telemetry).lines;
-        assert!(
-            lines.iter().any(|line| line == "  Bulk retarget history:"),
-            "expected bulk retarget history headline to be rendered: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|line| line.contains(
-                "Bulk retarget history was cleared at 2024-06-05T18:30:00Z. No retarget records remain while providers use default staging paths."
-            )),
-            "expected history cleared annotation to match UI wording: {lines:?}"
-        );
+        let lines = build_support_bundle_report(paths, None, &telemetry).lines;
+        checks!(assert_true!(lines.iter().any(|line| line == "  Bulk retarget history:"), "expected bulk retarget history headline to be rendered: {lines:?}"); assert_true!(lines.iter().any(|line| line.contains("Bulk retarget history was cleared at 2024-06-05T18:30:00Z. No retarget records remain while providers use default staging paths.")), "expected history cleared annotation to match UI wording: {lines:?}"));
     }
 
     #[test]
     fn provider_report_surfaces_history_cleared_alongside_records() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
         logger.log_line("provider report records test").unwrap();
 
         let mut bulk_summary = ProviderBulkRetargetSummary::default();
@@ -5497,8 +4616,8 @@ mod tests {
 
         let telemetry = UpdateTelemetrySummary::default();
 
-        write_launcher_summary(
-            &paths,
+        ok!(write_launcher_summary(
+            paths,
             &logger,
             logger.path(),
             &[],
@@ -5508,38 +4627,17 @@ mod tests {
             Some(automation),
             Some(bulk_summary),
             None,
-        )
-        .unwrap();
+        ));
 
-        let lines = build_support_bundle_report(&paths, None, &telemetry).lines;
-        assert!(
-            lines
-                .iter()
-                .any(|line| line
-                    .contains("Bulk retarget history last cleared at 2024-06-05T18:30:00Z")),
-            "expected history cleared annotation alongside records: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|line| line.contains("support-share")),
-            "expected share base path to appear in report: {lines:?}"
-        );
+        let lines = build_support_bundle_report(paths, None, &telemetry).lines;
+        checks!(assert_true!(lines.iter().any(|line| line.contains("Bulk retarget history last cleared at 2024-06-05T18:30:00Z")), "expected history cleared annotation alongside records: {lines:?}"); assert_true!(lines.iter().any(|line| line.contains("support-share")), "expected share base path to appear in report: {lines:?}"));
     }
 
     #[test]
     fn automation_report_includes_triage_summary() {
-        let install_dir = TempDir::new().unwrap();
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-        let user_dir = TempDir::new().unwrap();
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.path())),
-        ]);
-
-        let paths = AppPaths::discover().unwrap();
-        paths.ensure_user_dirs().unwrap();
-        let logger = LauncherLogger::new(&paths).unwrap();
+        let fixture = AppFixture::new();
+        let paths = &fixture.paths;
+        let logger = fixture.logger();
         logger.log_line("automation triage test").unwrap();
 
         let telemetry = UpdateTelemetrySummary::default();
@@ -5549,8 +4647,8 @@ mod tests {
             active_line: None,
         };
 
-        write_launcher_summary(
-            &paths,
+        ok!(write_launcher_summary(
+            paths,
             &logger,
             logger.path(),
             &[],
@@ -5560,28 +4658,17 @@ mod tests {
             None,
             None,
             Some(search_preferences),
-        )
-        .unwrap();
+        ));
 
-        let report = build_support_bundle_report(&paths, None, &telemetry);
-        assert!(
+        let report = build_support_bundle_report(paths, None, &telemetry);
+        assert_true!(
             report.triage.is_some(),
             "triage summary should be attached to support bundle report"
         );
 
-        let automation = build_automation_report(&paths, None, &telemetry, &report);
-        let triage = automation
-            .triage_summary
-            .expect("automation report should include triage summary");
-        assert_eq!(triage.query, "support");
-        assert_eq!(triage.match_count, 2);
-        assert!(
-            automation
-                .report_lines
-                .iter()
-                .any(|line| line == "Search (text): \"support\" — 2 match(es)."),
-            "rendered report lines should include triage summary header: {:?}",
-            automation.report_lines
-        );
+        let automation = build_automation_report(paths, None, &telemetry, &report);
+        let triage =
+            ok!(automation.triage_summary => "automation report should include triage summary");
+        checks!(assert_eq!(triage.query, "support"); assert_eq!(triage.match_count, 2); assert_true!(automation.report_lines.iter().any(|line| line == "Search (text): \"support\" — 2 match(es)."), "rendered report lines should include triage summary header: {:?}", automation.report_lines));
     }
 }

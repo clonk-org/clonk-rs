@@ -7,7 +7,7 @@ use clonk_engine::{Definition, Engine, SpawnConfig};
 fn local_variables_default_to_nil() {
     let mut engine = Engine::new();
 
-    let definition = Definition::from_script(
+    let definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -23,14 +23,13 @@ fn local_variables_default_to_nil() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()))
-        .expect("spawn should succeed - local vars should be nil, not undefined");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string())),
+    );
 
     // If we got here, the test passed - no undefined variable error
     // The Initialize function accessed MyLocalVar and it was nil (not undefined)
@@ -41,7 +40,7 @@ fn local_variables_in_action_callback() {
     // This reproduces the actual Tree/MotionThreshold issue
     let mut engine = Engine::new();
 
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "TREE",
         "Tree",
         r#"
@@ -63,8 +62,7 @@ fn local_variables_in_action_callback() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
     // Configure action with StartCall
     use clonk_engine::{ActionSpec, ActionState};
@@ -82,16 +80,16 @@ fn local_variables_in_action_callback() {
     );
     definition.configure_actions(Some("Idle".to_string()), actions);
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
     // Spawn object with Still action that has StartCall=StillCallback
     let action_state = ActionState::new("Still");
-    let obj = engine
-        .spawn_object(SpawnConfig::new("TREE".to_string()).with_action(action_state))
-        .expect("spawn should work - local var should be nil, not undefined");
+    let obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TREE".to_string()).with_action(action_state)),
+    );
 
     // Verify object exists
-    let snapshot = engine.tick().expect("tick should succeed");
+    let snapshot = crate::support::TestValueExt::test_value(engine.tick());
     assert!(
         snapshot.object(obj).is_some(),
         "object should exist after tick"

@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use std::env;
 use std::path::PathBuf;
 
@@ -28,8 +29,9 @@ fn tutorial01_real_clonk_subcases_batch() {
     let resolver = ContentResolver {
         root: content.clone(),
     };
-    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
-        .expect("Tutorial01 and the real Objects.c4d load");
+    let scenario = crate::support::TestValueExt::test_value(Scenario::load_from_path_with(
+        &tutorial, &resolver,
+    ));
     let subcases: &[ScenarioSubcase] = &[
         (
             "clonk_dig_control_starts_the_real_dig_action_like_cpp",
@@ -75,9 +77,9 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp(scenario: &Sce
     // ObjectComDig and selects the real CLNK "Dig" action
     // (C4Object.cpp:3422-3434; C4ObjectCom.cpp:353-362).
     let mut engine = Engine::with_seed(0);
-    scenario.apply(&mut engine).expect("Tutorial01 applies");
-    let joined = engine
-        .join_player(JoinPlayerConfig {
+    crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
+    let joined = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Dig tester".to_string(),
             player_info_id: 0,
             score: 0,
@@ -93,18 +95,15 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp(scenario: &Sce
             control_style: false,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("Tutorial01 player joins")
-        .initialized()
-        .expect("Tutorial01 player initializes");
-    let clonk = engine
-        .crew_cursor(joined.number)
-        .expect("Tutorial01 joins one selected CLNK");
+        }))
+        .initialized(),
+    );
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
 
     for _ in 0..100 {
-        engine.tick_without_snapshot().expect("settling frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let settled = engine.object_snapshot(clonk).expect("settled CLNK");
+    let settled = engine.test_object_snapshot(clonk);
     assert_eq!(
         settled.action.name, "Walk",
         "the tutorial CLNK must be walking before the dig control"
@@ -127,27 +126,14 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp(scenario: &Sce
         temporary: None,
         changes: Vec::new(),
     });
-    engine
-        .apply_object_update(clonk, reset)
-        .expect("Script160 ResetPhysical milestone");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(clonk, reset));
 
-    engine
-        .player_in_com(joined.number, COM_DIG, 0)
-        .expect("normal player Dig control");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_DIG, 0));
     for _ in 0..=10 {
-        engine
-            .tick_without_snapshot()
-            .expect("dig single-click timeout frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
-    assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("CLNK after Dig")
-            .action
-            .name,
-        "Dig"
-    );
+    assert_eq!(engine.test_object_snapshot(clonk).action.name, "Dig");
 }
 
 impl LegacyDefinitionResolver for ContentResolver {
@@ -176,8 +162,8 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // permanent menus created/refilled by C4Object/C4ObjectMenu
     // (C4Object.cpp:1919-1980,2044-2062; C4ObjectMenu.cpp:207-435).
     let mut engine = load_installed_scenario("Tutorial.c4f/Tutorial03.c4s", 0);
-    let joined = engine
-        .join_player(JoinPlayerConfig {
+    let joined = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Building-menu tester".to_string(),
             player_info_id: 0,
             score: 0,
@@ -193,22 +179,17 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
             control_style: false,
             auto_context_menu: true,
             startup_player_count: 1,
-        })
-        .expect("Tutorial03 player joins")
-        .initialized()
-        .expect("Tutorial03 player initializes");
-    let clonk = engine
-        .crew_cursor(joined.number)
-        .expect("Tutorial03 joins one selected CLNK");
+        }))
+        .initialized(),
+    );
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
     // ReadyMaterial FLAG enters the ready HUT3 during ScenarioInit, then
     // C4Object::ExecBase assigns Base on Tick10 (C4Object.cpp:1000-1018).
     // Do not enter early: the pre-base context correctly lacks Buy/Sell.
     // Exit spends its first C++ Execute in InitEvaluation, so Tick10 may
     // assign Base one frame before the ready crew actually leaves.
     for _ in 0..20 {
-        engine
-            .tick_without_snapshot()
-            .expect("ready-base initialization frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         let base_ready = engine
             .snapshot()
             .objects
@@ -221,12 +202,13 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
             break;
         }
     }
-    let hut = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "HUT3" && object.base == joined.number)
-        .expect("Tick10 assigns the ready HUT3 as this player's base");
+    let hut = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "HUT3" && object.base == joined.number),
+    );
     assert_ne!(
         hut.ocf & ocf::ENTRANCE,
         0,
@@ -238,32 +220,28 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // own regression below; put the CLNK back inside here to isolate the
     // tutorial's subsequent Context -> Buy -> Contents sequence.
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("joined Tutorial03 clonk")
-            .container,
+        engine.test_object_snapshot(clonk).container,
         None,
         "ready crew must have executed the C++ Exit command"
     );
-    engine
-        .apply_object_update(clonk, ObjectUpdate::new().with_container(hut.id))
-        .expect("model the completed enter-building step");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(clonk, ObjectUpdate::new().with_container(hut.id)),
+    );
 
-    engine.tick_without_snapshot().expect("auto-context frame");
-    let context = engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .unwrap_or_else(|| {
-            let clonk = engine.object_snapshot(clonk).expect("clonk snapshot");
-            panic!(
-                "HUT3 opens C4MN_Context: container={:?}, crew={}, commands={:?}",
-                clonk.container,
-                clonk.crew_member,
-                clonk.command_stack.command_names()
-            )
-        });
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    let context =
+        crate::support::TestValueExt::test_value(engine.debug_object_menu(clonk.as_u64()))
+            .unwrap_or_else(|| {
+                let clonk = engine.test_object_snapshot(clonk);
+                panic!(
+                    "HUT3 opens C4MN_Context: container={:?}, crew={}, commands={:?}",
+                    clonk.container,
+                    clonk.crew_member,
+                    clonk.command_stack.command_names()
+                )
+            });
     assert_eq!(
-        engine.object_snapshot(hut.id).expect("hut survives").base,
+        engine.test_object_snapshot(hut.id).base,
         joined.number,
         "the auto-context frame must retain the ready-base owner"
     );
@@ -298,16 +276,11 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
         ]
     );
 
-    engine
-        .player_in_com(joined.number, COM_RIGHT, 0)
-        .expect("select Buy");
-    engine
-        .player_in_com(joined.number, COM_THROW, 0)
-        .expect("open Buy");
-    let buy = engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .expect("Buy menu opens");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_RIGHT, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_THROW, 0));
+    let buy = crate::support::TestValueExt::test_value(crate::support::TestValueExt::test_value(
+        engine.debug_object_menu(clonk.as_u64()),
+    ));
     assert_eq!(buy.identification, Value::Int(4));
     assert_eq!(
         buy.items
@@ -317,16 +290,10 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
         vec![("LORY", 1, Some(20))]
     );
 
-    engine
-        .player_in_com(joined.number, COM_THROW, 0)
-        .expect("buy LORY");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_THROW, 0));
     assert_eq!(engine.player(joined.number).expect("player").wealth(), 5);
-    engine
-        .player_in_com(joined.number, COM_DIG, 0)
-        .expect("close Buy");
-    engine
-        .tick_without_snapshot()
-        .expect("auto-context reopens");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_DIG, 0));
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
         engine
             .debug_object_menu(clonk.as_u64())
@@ -335,13 +302,10 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
             .identification,
         Value::Int(14)
     );
-    engine
-        .player_in_com(joined.number, COM_THROW, 0)
-        .expect("open Contents");
-    let contents = engine
-        .debug_object_menu(clonk.as_u64())
-        .expect("clonk exists")
-        .expect("Contents menu opens");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_THROW, 0));
+    let contents = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.debug_object_menu(clonk.as_u64())),
+    );
     assert_eq!(contents.identification, Value::Int(18));
     assert!(contents.items.iter().any(|item| item.item_id == "LORY"));
 }
@@ -352,9 +316,9 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control(scenario: &Scenario) {
     // entrance then queues Enter before considering Jump
     // (C4ObjectCom.cpp:335-348).
     let mut engine = Engine::with_seed(0);
-    scenario.apply(&mut engine).expect("Tutorial01 applies");
-    let joined = engine
-        .join_player(JoinPlayerConfig {
+    crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
+    let joined = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Entrance tester".to_string(),
             player_info_id: 0,
             score: 0,
@@ -370,19 +334,17 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control(scenario: &Scenario) {
             control_style: false,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("Tutorial01 player joins")
-        .initialized()
-        .expect("Tutorial01 player initializes");
-    let clonk = engine
-        .crew_cursor(joined.number)
-        .expect("Tutorial01 joins one selected CLNK");
-    let hut = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id.as_str() == "HUT2")
-        .expect("Tutorial01 creates HUT2");
+        }))
+        .initialized(),
+    );
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
+    let hut = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id.as_str() == "HUT2"),
+    );
 
     assert_ne!(
         hut.ocf & ocf::ENTRANCE,
@@ -390,46 +352,34 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control(scenario: &Scenario) {
         "full-con HUT2 exposes its DefCore entrance"
     );
 
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(570, 170))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk")
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("place CLNK in the real hut entrance");
-    engine
-        .player_in_com(joined.number, COM_UP, 0)
-        .expect("normal player Up control");
+        ),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_UP, 0));
 
     assert_eq!(
         engine
-            .object_snapshot(clonk)
-            .expect("CLNK after input")
+            .test_object_snapshot(clonk)
             .command_stack
             .command_names(),
         vec!["Enter".to_string()]
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("first entrance command frame");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("CLNK while the door opens")
-            .container,
+        engine.test_object_snapshot(clonk).container,
         None,
         "C4Command::Enter waits outside a closed entrance (C4Command.cpp:600-609)"
     );
     assert_eq!(
-        engine
-            .object_snapshot(hut.id)
-            .expect("HUT2 while opening")
-            .action
-            .name,
+        engine.test_object_snapshot(hut.id).action.name,
         "OpenDoor",
         "the closed entrance calls ActivateEntrance before entering"
     );
@@ -441,14 +391,10 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control(scenario: &Scenario) {
         {
             break;
         }
-        engine.tick_without_snapshot().expect("door-opening frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let clonk_after_open = engine
-        .object_snapshot(clonk)
-        .expect("CLNK after the door opens");
-    let hut_after_open = engine
-        .object_snapshot(hut.id)
-        .expect("HUT2 after opening frames");
+    let clonk_after_open = engine.test_object_snapshot(clonk);
+    let hut_after_open = engine.test_object_snapshot(hut.id);
     assert_eq!(
         clonk_after_open.container,
         Some(hut.id),
@@ -468,13 +414,14 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     let content = content_root();
     let mut engine = Engine::with_seed(0);
     let material_group =
-        Group::open(content.join("Material.c4g")).expect("the real global Material.c4g opens");
-    let materials = clonk_resources::MaterialLibrary::from_group(&material_group)
-        .expect("the real global material definitions load");
+        crate::support::TestValueExt::test_value(Group::open(content.join("Material.c4g")));
+    let materials = crate::support::TestValueExt::test_value(
+        clonk_resources::MaterialLibrary::from_group(&material_group),
+    );
     engine.configure_materials_from_library(&materials);
-    scenario.apply(&mut engine).expect("Tutorial01 applies");
-    let joined = engine
-        .join_player(JoinPlayerConfig {
+    crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
+    let joined = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Flag tester".to_string(),
             player_info_id: 0,
             score: 0,
@@ -490,54 +437,46 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
             control_style: false,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("Tutorial01 player joins")
-        .initialized()
-        .expect("Tutorial01 player initializes");
+        }))
+        .initialized(),
+    );
     assert_eq!(joined.number, 0, "Tutorial01 scripts address player zero");
-    let clonk = engine
-        .crew_cursor(joined.number)
-        .expect("Tutorial01 joins one selected CLNK");
-    let hut = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id.as_str() == "HUT2")
-        .expect("Tutorial01 creates HUT2")
-        .id;
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
+    let hut = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id.as_str() == "HUT2"),
+    )
+    .id;
 
-    let flag = (0..700)
-        .find_map(|_| {
-            engine
-                .tick_without_snapshot()
-                .expect("tutorial lead-in frame");
-            engine
-                .snapshot()
-                .objects
-                .into_iter()
-                .find(|object| object.definition_id.as_str() == "FLAG")
-                .map(|object| object.id)
-        })
-        .expect("Script50 creates the tutorial flag");
-    engine
-        .apply_object_update(flag, ObjectUpdate::new().with_container(clonk))
-        .expect("collect the real tutorial flag");
-    engine
-        .apply_object_update(
+    let flag = crate::support::TestValueExt::test_value((0..700).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id.as_str() == "FLAG")
+            .map(|object| object.id)
+    }));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(flag, ObjectUpdate::new().with_container(clonk)),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_container(hut)
                 .with_action("Walk")
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("stand inside the tutorial hut");
+        ),
+    );
 
     let mut mask = engine.snapshot().players[0].show_control;
     let mut mask_changes = 0;
     for _ in 0..400 {
-        engine
-            .tick_without_snapshot()
-            .expect("tutorial flag instruction frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         let next = engine.snapshot().players[0].show_control;
         if next != mask {
             mask = next;
@@ -552,19 +491,14 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
         "Script60 must accept the carried flag and reach Script110"
     );
 
-    engine
-        .player_in_com(joined.number, COM_THROW, 0)
-        .expect("contained Throw control");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_THROW, 0));
     assert_eq!(
-        engine
-            .object_snapshot(flag)
-            .expect("FLAG after Throw")
-            .container,
+        engine.test_object_snapshot(flag).container,
         Some(hut),
         "COM_Throw puts FLAG into HUT2 before returning"
     );
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("ExecBase frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         if engine
             .object_snapshot(hut)
             .is_some_and(|object| object.base == joined.number)
@@ -572,8 +506,8 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
             break;
         }
     }
-    let hut_after_flag = engine.object_snapshot(hut).expect("HUT2 after FLAG");
-    let flag_after_base = engine.object_snapshot(flag).expect("attached FLAG");
+    let hut_after_flag = engine.test_object_snapshot(hut);
+    let flag_after_base = engine.test_object_snapshot(flag);
     assert_eq!(hut_after_flag.base, joined.number);
     assert_eq!(flag_after_base.container, None);
     assert_eq!(flag_after_base.action.name, "FlyBase");
@@ -581,7 +515,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
 
     let script110_mask = engine.snapshot().players[0].show_control;
     for _ in 0..150 {
-        engine.tick_without_snapshot().expect("Script120 frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         if engine.snapshot().players[0].show_control != script110_mask {
             break;
         }
@@ -592,8 +526,8 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
         "Script120 must call GetBase(HUT2) and advance without a script error"
     );
 
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .clear_container()
@@ -601,18 +535,18 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk")
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("leave HUT2 for the digging lesson");
+        ),
+    );
     for _ in 0..500 {
-        engine
-            .apply_object_update(
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
                 clonk,
                 ObjectUpdate::new()
                     .with_position(Vector2::new(220, 271))
                     .with_velocity(Vector2::ZERO),
-            )
-            .expect("keep CLNK in Script160's lesson area");
-        engine.tick_without_snapshot().expect("Script160 frame");
+            ),
+        );
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         let script160_message = engine.snapshot().hud.messages.iter().any(|message| {
             message
                 .lines
@@ -627,7 +561,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
             break;
         }
     }
-    let script160_clonk = engine.object_snapshot(clonk).expect("CLNK at Script160");
+    let script160_clonk = engine.test_object_snapshot(clonk);
     assert!(
         script160_clonk.temporary_physical.is_none()
             && engine.snapshot().hud.messages.iter().any(|message| {
@@ -643,22 +577,22 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
         engine.snapshot().players[0].show_control,
         engine.snapshot().hud.messages,
     );
-    let gold = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id.as_str() == "GOLD")
-        .expect("Script150 creates the tutorial gold")
-        .id;
-    let (width, height, before_dig) = engine
-        .debug_landscape_plane()
-        .expect("Tutorial01 keeps its authoritative Surface8 plane");
+    let gold = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id.as_str() == "GOLD"),
+    )
+    .id;
+    let (width, height, before_dig) =
+        crate::support::TestValueExt::test_value(engine.debug_landscape_plane());
     assert!(
         engine.debug_landscape_is_solid(220, 299),
         "the lesson floor starts solid before DigFree"
     );
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(220, 289))
@@ -666,17 +600,13 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
                 .with_action("Walk")
                 .with_direction(Direction::Left)
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("place the unlocked CLNK on the real lesson floor");
-    engine
-        .player_in_com(joined.number, COM_DIG, 0)
-        .expect("normal player Dig control");
+        ),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_DIG, 0));
     for _ in 0..100 {
-        engine
-            .tick_without_snapshot()
-            .expect("diagonal tutorial digging frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let diagonal_digger = engine.object_snapshot(clonk).expect("CLNK after Dig");
+    let diagonal_digger = engine.test_object_snapshot(clonk);
     assert_eq!(diagonal_digger.action.name, "Dig");
     assert_eq!(
         diagonal_digger.command_direction,
@@ -689,32 +619,24 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
         !engine.debug_landscape_is_solid(220, 299),
         "the real tutorial floor pixel must be excavated"
     );
-    let (dug_width, dug_height, after_diagonal_dig) = engine
-        .debug_landscape_plane()
-        .expect("Tutorial01 Surface8 remains authoritative after digging");
+    let (dug_width, dug_height, after_diagonal_dig) =
+        crate::support::TestValueExt::test_value(engine.debug_landscape_plane());
     assert_eq!((dug_width, dug_height), (width, height));
     assert_ne!(
         after_diagonal_dig, before_dig,
         "DigFree must mutate the authoritative landscape byte plane"
     );
 
-    engine
-        .player_in_com(joined.number, COM_LEFT, 0)
-        .expect("steer the active dig left toward the gold");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_LEFT, 0));
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("CLNK after steering")
-            .command_direction,
+        engine.test_object_snapshot(clonk).command_direction,
         CommandDirection::Left
     );
     // Tick3 cross-check collection enters carryable objects into the crew
     // (C4GameObjects.cpp:143-194; C4Object.cpp:5693-5713). Follow the real
     // tutorial tunnel until its Script150 GOLD enters the real CLNK.
     for _ in 0..140 {
-        engine
-            .tick_without_snapshot()
-            .expect("horizontal tutorial digging frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         if engine
             .object_snapshot(gold)
             .is_some_and(|object| object.container == Some(clonk))
@@ -722,7 +644,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
             break;
         }
     }
-    let collected_gold = engine.object_snapshot(gold).expect("tutorial GOLD remains");
+    let collected_gold = engine.test_object_snapshot(gold);
     assert_eq!(
         collected_gold.container,
         Some(clonk),
@@ -745,9 +667,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("Script200 GOLD observation frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert!(
         engine.snapshot().hud.messages.iter().any(|message| {
@@ -769,16 +689,16 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     // (C4ObjectCom.cpp:335-348). Once Enter's callbacks finish, HUT2
     // synchronously auto-sells nested BaseAutoSell GOLD
     // (C4Object.cpp:1625-1634,970-995).
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(570, 170))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk")
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("place the gold-carrying CLNK at HUT2's entrance");
+        ),
+    );
 
     // C4Game::Ticks only raises TimeGo; the external Sec1Timer consumes it
     // (C4Game.cpp:1755-1759,1899-1913). Let seven deterministic seconds
@@ -786,17 +706,13 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     // (C4Game.cpp:1908; Tutorial01 Script.c:176-181).
     for _ in 0..7 {
         for _ in 0..35 {
-            engine
-                .tick_without_snapshot()
-                .expect("pre-completion clock frame");
+            crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         }
         engine.sec1_timer();
     }
     assert_eq!(engine.game_time(), 7);
 
-    engine
-        .player_in_com(joined.number, COM_UP, 0)
-        .expect("normal player Up control at HUT2");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_UP, 0));
     for _ in 0..30 {
         if engine
             .object_snapshot(clonk)
@@ -804,15 +720,10 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("final HUT2 entrance frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("CLNK after entering HUT2")
-            .container,
+        engine.test_object_snapshot(clonk).container,
         Some(hut),
         "the normal Up control must carry the CLNK into HUT2"
     );
@@ -833,9 +744,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     // enters (C4ScriptHost.cpp:222-230).
     let mut reached_tutorial02 = false;
     for _ in 0..20 {
-        engine
-            .tick_without_snapshot()
-            .expect("Script215 approach frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         if engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s" {
             reached_tutorial02 = true;
             break;
@@ -858,7 +767,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     // (Goal.c4d DefCore.txt:7-8; ActMap.txt:9-15; Script.c:52-81).
     let mut completed = None;
     for _ in 0..300 {
-        let snapshot = engine.tick().expect("GOAL completion frame");
+        let snapshot = crate::support::TestValueExt::test_value(engine.tick());
         if snapshot.game_over {
             completed = Some(snapshot);
             break;
@@ -898,11 +807,12 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     );
     assert_eq!(completed.round_results.playing_time_seconds, 7);
 
-    let player = completed
-        .players
-        .iter()
-        .find(|player| player.id == joined.number)
-        .expect("Tutorial01 evaluated player");
+    let player = crate::support::TestValueExt::test_value(
+        completed
+            .players
+            .iter()
+            .find(|player| player.id == joined.number),
+    );
     assert!(player.won);
     assert!(player.evaluated);
     assert_eq!(player.value, 165);
@@ -910,12 +820,13 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     assert_eq!(player.score, 240);
     assert_eq!(player.total_playing_time, 7);
 
-    let result = completed
-        .round_results
-        .players
-        .iter()
-        .find(|result| result.player_info_id == player.player_info_id)
-        .expect("Tutorial01 frozen player result");
+    let result = crate::support::TestValueExt::test_value(
+        completed
+            .round_results
+            .players
+            .iter()
+            .find(|result| result.player_info_id == player.player_info_id),
+    );
     assert_eq!(result.total_playing_time, 7);
     assert_eq!(result.score_old, 0);
     assert_eq!(result.score_new, Some(240));
@@ -927,11 +838,9 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario)
     // through the CLNK top vertex then enters Hangle without changing its
     // facing (C4Object.cpp:4369-4404; C4ObjectCom.cpp:112-118).
     let mut engine = Engine::with_seed(0);
-    scenario
-        .apply_before_players(&mut engine)
-        .expect("Tutorial01 definitions apply");
-    let joined = engine
-        .join_player(JoinPlayerConfig {
+    crate::support::TestValueExt::test_value(scenario.apply_before_players(&mut engine));
+    let joined = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Ceiling tester".to_string(),
             player_info_id: 0,
             score: 0,
@@ -947,15 +856,12 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario)
             control_style: false,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("Tutorial01 player joins")
-        .initialized()
-        .expect("Tutorial01 player initializes");
-    let clonk = engine
-        .crew_cursor(joined.number)
-        .expect("Tutorial01 joins one selected CLNK");
+        }))
+        .initialized(),
+    );
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
 
-    let loaded = engine.object_snapshot(clonk).expect("joined CLNK exists");
+    let loaded = engine.test_object_snapshot(clonk);
     assert_eq!(loaded.definition_id.as_str(), "CLNK");
     assert!(
         loaded
@@ -969,8 +875,8 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario)
     // the floor at y=30, while its top vertex starts below the y=5 ceiling.
     // The gap guarantees one observable Jump/FLIGHT frame before contact.
     engine.set_landscape(Landscape::flat(60, 30));
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(30, 20))
@@ -978,39 +884,31 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario)
                 .with_action("Walk")
                 .with_direction(Direction::Right)
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("place the real CLNK in the fixture");
-    let mut ceiling = Definition::from_script("TSTC", "Test ceiling", "#strict\n")
-        .expect("ceiling definition compiles");
+        ),
+    );
+    let mut ceiling = crate::support::TestValueExt::test_value(Definition::from_script(
+        "TSTC",
+        "Test ceiling",
+        "#strict\n",
+    ));
     ceiling.set_category(CATEGORY_STATIC_BACK);
     ceiling.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 60, 1, 0, 0)));
-    engine
-        .register_definition(ceiling)
-        .expect("ceiling definition registers");
-    engine
-        .spawn_object(SpawnConfig::new("TSTC").with_position(Vector2::new(0, 5)))
-        .expect("ceiling solid mask spawns");
+    engine.register_test_definition(ceiling);
+    engine.spawn_test_object(SpawnConfig::new("TSTC").with_position(Vector2::new(0, 5)));
 
-    engine
-        .player_in_com(joined.number, COM_UP, 0)
-        .expect("normal player Up control");
+    crate::support::TestValueExt::test_value(engine.player_in_com(joined.number, COM_UP, 0));
     assert_eq!(
         engine
-            .object_snapshot(clonk)
-            .expect("CLNK after input")
+            .test_object_snapshot(clonk)
             .command_stack
             .command_names(),
         vec!["Jump".to_string()],
         "COM_Up must take the normal WALK -> Jump command path"
     );
 
-    engine.tick_without_snapshot().expect("first jump frame");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("CLNK in flight")
-            .action
-            .name,
+        engine.test_object_snapshot(clonk).action.name,
         "Jump",
         "the real action map must reach DFA_FLIGHT before ceiling contact"
     );
@@ -1022,11 +920,9 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario)
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("ceiling approach frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let hangle = engine.object_snapshot(clonk).expect("CLNK after contact");
+    let hangle = engine.test_object_snapshot(clonk);
     assert_eq!(hangle.action.name, "Hangle");
     assert_eq!(hangle.direction, Direction::Right);
     assert_eq!(hangle.velocity, Vector2::ZERO);
@@ -1038,11 +934,9 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick(scenario
     // no generic terminal-velocity clamp, so a Clonk falling through enough
     // open space must accelerate past 12 px/tick.
     let mut engine = Engine::with_seed(0);
-    scenario
-        .apply_before_players(&mut engine)
-        .expect("Tutorial01 definitions apply");
-    let joined = engine
-        .join_player(JoinPlayerConfig {
+    crate::support::TestValueExt::test_value(scenario.apply_before_players(&mut engine));
+    let joined = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Flight tester".to_string(),
             player_info_id: 0,
             score: 0,
@@ -1058,31 +952,28 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick(scenario
             control_style: false,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("Tutorial01 player joins")
-        .initialized()
-        .expect("Tutorial01 player initializes");
-    let clonk = engine
-        .crew_cursor(joined.number)
-        .expect("Tutorial01 joins one selected CLNK");
+        }))
+        .initialized(),
+    );
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number));
 
     engine.set_landscape(Landscape::flat(80, 400));
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(40, 100))
                 .with_velocity(Vector2::new(0, 11))
                 .with_action("Jump")
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("place the real CLNK in open flight");
+        ),
+    );
 
     for _ in 0..9 {
-        engine.tick_without_snapshot().expect("open flight frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
-    let falling = engine.object_snapshot(clonk).expect("CLNK after flight");
+    let falling = engine.test_object_snapshot(clonk);
     assert_eq!(falling.action.name, "Jump");
     assert_eq!(falling.command_direction, CommandDirection::Stop);
     assert_eq!(

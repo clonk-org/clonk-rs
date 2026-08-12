@@ -1,4 +1,5 @@
 use crate::support::real_scenario::load_installed_scenario;
+use crate::support::EngineTestExt;
 use clonk_engine::{AudioCommand, EffectState, Engine, ObjectId, PlayerConfig, SpawnConfig};
 use clonk_script::Value;
 use std::collections::HashMap;
@@ -7,37 +8,29 @@ const PLAYER: i32 = 1;
 
 fn mars_engine() -> Engine {
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    engine
-        .register_player(PlayerConfig::new(PLAYER, "Mars oxygen tester"))
-        .expect("test player registers");
+    engine.register_test_player(PlayerConfig::new(PLAYER, "Mars oxygen tester"));
     engine
 }
 
 fn spawn_spaceclonk(engine: &mut Engine, oxygen: i32, warning: bool) -> ObjectId {
-    engine
-        .spawn_object(
-            SpawnConfig::new("SCNK")
-                .with_loaded(true)
-                .with_owner(PLAYER)
-                .with_controller(PLAYER)
-                .with_alive(true)
-                .with_crew_member(true)
-                .with_energy(50_000)
-                .with_local_vars(HashMap::from([
-                    ("O2".to_string(), Value::Int(oxygen)),
-                    ("O2Warning".to_string(), Value::Bool(warning)),
-                ])),
-        )
-        .expect("Spaceclonk spawns")
+    engine.spawn_test_object(
+        SpawnConfig::new("SCNK")
+            .with_loaded(true)
+            .with_owner(PLAYER)
+            .with_controller(PLAYER)
+            .with_alive(true)
+            .with_crew_member(true)
+            .with_energy(50_000)
+            .with_local_vars(HashMap::from([
+                ("O2".to_string(), Value::Int(oxygen)),
+                ("O2Warning".to_string(), Value::Bool(warning)),
+            ])),
+    )
 }
 
 fn call_oxygen_timer(engine: &mut Engine, clonk: ObjectId) {
-    let index = engine
-        .find_object_index(clonk)
-        .expect("Spaceclonk remains present");
-    engine
-        .call_object_function(index, "FxO2Timer", Vec::new())
-        .expect("real Mars oxygen timer executes");
+    let index = engine.test_object_index(clonk);
+    engine.call_test_object_function(index, "FxO2Timer", Vec::new());
 }
 
 #[test]
@@ -50,9 +43,7 @@ fn mars_zero_oxygen_drains_health_before_death() {
 
     call_oxygen_timer(&mut engine, clonk);
 
-    let clonk = engine
-        .object_snapshot(clonk)
-        .expect("Spaceclonk survives the first zero-O2 tick");
+    let clonk = engine.test_object_snapshot(clonk);
     assert!(
         clonk.alive,
         "zero O2 must not kill a full-health clonk immediately"
@@ -72,34 +63,30 @@ fn dead_mars_clonk_does_not_restart_the_low_oxygen_loop() {
     let mut engine = mars_engine();
     let mut oxygen_effect = EffectState::new("O2").with_priority(100).with_interval(20);
     oxygen_effect.start_dispatched = true;
-    let clonk = engine
-        .spawn_object(
-            SpawnConfig::new("SCNK")
-                .with_loaded(true)
-                .with_owner(PLAYER)
-                .with_controller(PLAYER)
-                .with_alive(true)
-                .with_crew_member(true)
-                .with_energy(10_000)
-                .with_local_vars(HashMap::from([
-                    ("O2".to_string(), Value::Int(0)),
-                    ("O2Warning".to_string(), Value::Bool(true)),
-                ]))
-                .add_effect(oxygen_effect),
-        )
-        .expect("alarmed Spaceclonk spawns");
-    let index = engine.find_object_index(clonk).expect("Spaceclonk exists");
-    engine.objects[index].state.effects[0].command_target =
-        Some(i32::try_from(clonk.as_u64()).expect("test object id fits C4 int"));
+    let clonk = engine.spawn_test_object(
+        SpawnConfig::new("SCNK")
+            .with_loaded(true)
+            .with_owner(PLAYER)
+            .with_controller(PLAYER)
+            .with_alive(true)
+            .with_crew_member(true)
+            .with_energy(10_000)
+            .with_local_vars(HashMap::from([
+                ("O2".to_string(), Value::Int(0)),
+                ("O2Warning".to_string(), Value::Bool(true)),
+            ]))
+            .add_effect(oxygen_effect),
+    );
+    let index = engine.test_object_index(clonk);
+    engine.objects[index].state.effects[0].command_target = Some(
+        crate::support::TestValueExt::test_value(i32::try_from(clonk.as_u64())),
+    );
     engine.pending_audio.clear();
 
     call_oxygen_timer(&mut engine, clonk);
 
     assert!(
-        !engine
-            .object_snapshot(clonk)
-            .expect("dead Spaceclonk remains as a corpse")
-            .alive,
+        !engine.test_object_snapshot(clonk).alive,
         "the lethal oxygen tick kills the low-health Spaceclonk"
     );
     let warning_commands = engine

@@ -13,7 +13,7 @@
             assert_eq!(resort(&[Value::Object(2)])?, Value::Nil);
             Ok::<_, RuntimeError>(())
         });
-        result.expect("object Resort calls succeed");
+        result.test_value();
         assert_eq!(
             outcome.object_order_commands,
             [
@@ -49,8 +49,7 @@
                             Not(0), Or(0, 0, 1)];
                 }
                 "#,
-            )
-            .expect("legacy helper probe compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("Probe", &[]).expect("legacy helpers run"),
@@ -92,8 +91,7 @@
                 func Last() { return [SetVar(999999, 9), Var(999999)]; }
                 func TooLarge() { return SetVar(1000000, 9); }
                 "#,
-            )
-            .expect("SetVar boundary probe compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("High", &[]).expect("high SetVar index runs"),
@@ -139,8 +137,7 @@
                     return [DecVar(0), Var(0), DecVar(1), Var(1)];
                 }
                 "#,
-            )
-            .expect("DecVar caller-slot probe compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("Probe", &[]).expect("DecVar probe runs"),
@@ -192,8 +189,7 @@
                     return [result, Var(3), Var(4)];
                 }
                 "#,
-            )
-            .expect("IncVar caller-slot probe compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("Outer", &[]).expect("nested IncVar probe runs"),
@@ -291,8 +287,7 @@
                     ];
                 }
                 "#,
-            )
-            .expect("reduced Fire potion rotation loop compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("Probe", &[]).expect("Fire rotation loop runs"),
@@ -384,8 +379,7 @@
                     ];
                 }
                 "#,
-            )
-            .expect("inverse-trig probe compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("Probe", &[]).expect("inverse trig runs"),
@@ -432,8 +426,7 @@
                     ];
                 }
                 "#,
-            )
-            .expect("Sqrt probe compiles");
+            ).test_value();
 
         assert_eq!(
             engine.call("Probe", &[]).expect("Sqrt runs"),
@@ -607,7 +600,7 @@
                 target: event.metadata().target().to_string(),
                 message,
             };
-            self.records.lock().unwrap().push(record);
+            self.records.lock().test_value().push(record);
         }
     }
 
@@ -643,7 +636,7 @@
         map.insert("beta".into(), Value::Int(2));
         map.insert("alpha".into(), Value::Int(1));
         map.insert_key(Value::Int(7), Value::String("seven".into()));
-        let result = get_keys(&[Value::Proplist(map)]).expect("GetKeys succeeds");
+        let result = get_keys(&[Value::Proplist(map)]).test_value();
         match result {
             Value::Array(entries) => {
                 assert_eq!(
@@ -715,9 +708,9 @@
         let original = Value::Proplist(map);
 
         let effect_value = value_to_effect_var(&original);
-        let json = serde_json::to_string(&effect_value).expect("effect value serializes");
+        let json = serde_json::to_string(&effect_value).test_value();
         let restored: EffectVarValue =
-            serde_json::from_str(&json).expect("effect value deserializes");
+            serde_json::from_str(&json).test_value();
         let restored = effect_var_to_value(&restored);
 
         assert_eq!(restored, original);
@@ -1014,8 +1007,7 @@
         let reflected = |value: Option<&str>| {
             DefCoreValueStore::c4id(value)
                 .into_iter()
-                .next()
-                .expect("C4ID entries always expose one compiler primitive")
+                .next().test_value()
                 .into_value()
         };
         let typed = |value: &str| {
@@ -1194,8 +1186,7 @@
 
     #[test]
     fn get_def_core_val_reflects_rect_vertices_types_and_physical_section_like_cpp() {
-        let mut definition = crate::Definition::from_script("TST1", "Reflection Test", "#strict 2")
-            .expect("definition compiles");
+        let mut definition = test_definition("TST1", "Reflection Test", "#strict 2");
         definition.set_version([5, 1, 2, 0, 0]);
         definition.require_defs = vec!["REQ1".to_string()];
         definition.max_user_select = 7;
@@ -1363,8 +1354,7 @@
 
     #[test]
     fn def_core_value_store_covers_the_complete_cpp_compiler_entry_tables() {
-        let definition = crate::Definition::from_script("TST1", "Reflection Test", "")
-            .expect("definition compiles");
+        let definition = test_definition("TST1", "Reflection Test", "");
         let values = DefCoreValueStore::from_definition(&definition);
         let expected_def_core = [
             "id",
@@ -1520,9 +1510,9 @@
         // (C4Aul.h:104-121); nil converts to int 0, so GBackSolid() with no
         // arguments queries the object's own position (DRAI/WTFL/LAFL
         // action-start scripts call it bare).
-        let solid = g_back_solid(&[]).expect("GBackSolid() succeeds");
+        let solid = g_back_solid(&[]).test_value();
         assert!(matches!(solid, Value::Bool(_)));
-        let liquid = g_back_liquid(&[Value::Nil]).expect("GBackLiquid(nil) succeeds");
+        let liquid = g_back_liquid(&[Value::Nil]).test_value();
         assert!(matches!(liquid, Value::Bool(_)));
     }
 
@@ -1583,48 +1573,33 @@ public func Activate(int player) { return MessageWindow(GetDesc(), player); }
             engine.install_global_scripts(&[("Helpers.c".into(), message_window.into())]),
             1
         );
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
         let mut goal =
-            crate::Definition::from_script("GOAL", "Goal", script).expect("goal fixture compiles");
+            test_definition("GOAL", "Goal", script);
         goal.set_description(Some("Goal description".into()));
-        engine.register_definition(goal).expect("goal registers");
+        engine.register_test_definition(goal);
         for (id, name, description) in [
             ("RULE", "Rule", "Rule description"),
             ("OTHR", "Other", "Other description"),
         ] {
-            let mut definition = crate::Definition::from_script(id, name, "#strict 2")
-                .expect("description fixture compiles");
+            let mut definition = test_definition(id, name, "#strict 2");
             definition.set_description(Some(description.into()));
-            engine
-                .register_definition(definition)
-                .expect("description fixture registers");
+            engine.register_test_definition(definition);
         }
-        let mut crew = crate::Definition::from_script("CLNK", "Clonk", "#strict 2")
-            .expect("crew fixture compiles");
+        let mut crew = test_definition("CLNK", "Clonk", "#strict 2");
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("crew registers");
+        engine.register_test_definition(crew);
 
-        let goal = engine
-            .spawn_object(SpawnConfig::new("GOAL"))
-            .expect("goal spawns");
-        let other = engine
-            .spawn_object(SpawnConfig::new("OTHR"))
-            .expect("other object spawns");
-        let crew = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK")
-                    .with_alive(true)
-                    .with_owner(0)
-                    .with_crew_member(true),
-            )
-            .expect("crew spawns");
-        engine.select_crew(0, [crew]).expect("crew selects");
+        let goal = engine.spawn_test_object(SpawnConfig::new("GOAL"));
+        let other = engine.spawn_test_object(SpawnConfig::new("OTHR"));
+        let crew = engine.spawn_test_object(SpawnConfig::new("CLNK")
+            .with_alive(true)
+            .with_owner(0)
+            .with_crew_member(true));
+        engine.select_crew(0, [crew]).test_value();
         engine
-            .set_crew_cursor(0, Some(crew))
-            .expect("crew cursor sets");
-        let goal_index = engine.find_object_index(goal).expect("goal exists");
+            .set_crew_cursor(0, Some(crew)).test_value();
+        let goal_index = engine.find_object_index(goal).test_value();
 
         assert_eq!(
             engine
@@ -1645,8 +1620,7 @@ public func Activate(int player) { return MessageWindow(GetDesc(), player); }
         );
         let menu = engine
             .debug_object_menu(crew.as_u64())
-            .expect("crew remains")
-            .expect("description menu is open");
+            .expect("crew remains").test_value();
         assert_eq!(menu.style, 2);
         assert_eq!(menu.caption, "Goal");
         assert_eq!(menu.symbol_id, "GOAL");
@@ -1683,44 +1657,26 @@ func CalcSellValue(object item, int value) { return(value + 200); }
 "#;
 
         let mut engine = crate::Engine::with_seed(0);
-        let mut caller = crate::Definition::from_script("CALL", "Caller", caller_script)
-            .expect("caller fixture compiles");
+        let mut caller = test_definition("CALL", "Caller", caller_script);
         caller.set_value(9);
-        engine
-            .register_definition(caller)
-            .expect("caller fixture registers");
-        let mut valued = crate::Definition::from_script("VALU", "Valued", value_script)
-            .expect("valued fixture compiles");
+        engine.register_test_definition(caller);
+        let mut valued = test_definition("VALU", "Valued", value_script);
         valued.set_value(50);
-        engine
-            .register_definition(valued)
-            .expect("valued fixture registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("BASE", "Base", base_script)
-                    .expect("base fixture compiles"),
-            )
-            .expect("base fixture registers");
+        engine.register_test_definition(valued);
+        engine.register_test_definition(test_definition("BASE", "Base", base_script));
 
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL"))
-            .expect("caller fixture spawns");
-        let item = engine
-            .spawn_object(crate::SpawnConfig::new("VALU").with_construction(crate::FULL_CON / 2))
-            .expect("valued fixture spawns");
-        let base = engine
-            .spawn_object(crate::SpawnConfig::new("BASE"))
-            .expect("base fixture spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL"));
+        let item = engine.spawn_test_object(crate::SpawnConfig::new("VALU").with_construction(crate::FULL_CON / 2));
+        let base = engine.spawn_test_object(crate::SpawnConfig::new("BASE"));
+        let caller_index = engine.find_object_index(caller).test_value();
         engine
             .call_object_function(
                 caller_index,
                 "Trigger",
                 vec![Value::Object(item.as_u64()), Value::Object(base.as_u64())],
-            )
-            .expect("GetValue fixture runs");
+            ).test_value();
 
-        let snapshot = engine.object_snapshot(caller).expect("caller remains live");
+        let snapshot = engine.object_snapshot(caller).test_value();
         assert_eq!(snapshot.local_vars.get("iObject"), Some(&Value::Int(211)));
         assert_eq!(
             snapshot.local_vars.get("iDefinition"),
@@ -1748,31 +1704,19 @@ func Trigger()
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", script)
-                    .expect("name fixture compiles"),
-            )
-            .expect("name fixture registers");
-        let caller = engine
-            .spawn_object(
-                crate::SpawnConfig::new("CALL")
-                    .with_category(crate::CATEGORY_OBJECT)
-                    .with_loaded(true)
-                    .with_custom_name("Saved Caller"),
-            )
-            .expect("name fixture spawns");
+        engine.register_test_definition(test_definition("CALL", "Caller", script));
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL")
+            .with_category(crate::CATEGORY_OBJECT)
+            .with_loaded(true)
+            .with_custom_name("Saved Caller"));
         let caller_index = engine
-            .find_object_index(caller)
-            .expect("name fixture exists");
+            .find_object_index(caller).test_value();
 
         engine
-            .call_object_function(caller_index, "Trigger", Vec::new())
-            .expect("name fixture runs");
+            .call_object_function(caller_index, "Trigger", Vec::new()).test_value();
 
         let snapshot = engine
-            .object_snapshot(caller)
-            .expect("name fixture remains");
+            .object_snapshot(caller).test_value();
         assert_eq!(
             snapshot.local_vars.get("sInitial"),
             Some(&Value::String("Saved Caller".into()))
@@ -1814,43 +1758,21 @@ func Probe(object crew, object plain)
 func Read(object crew) { return GetName(crew); }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
         engine.set_standard_names(Some("Twonky\n".to_owned()));
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", script).expect("driver compiles"),
-            )
-            .expect("driver registers");
-        let mut crew = crate::Definition::from_script("CREW", "Crew", "").expect("crew compiles");
+        engine.register_test_definition(test_definition("CALL", "Caller", script));
+        let mut crew = test_definition("CREW", "Crew", "");
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("crew registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("PLAI", "Plain", "").expect("plain compiles"),
-            )
-            .expect("plain registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("NEWW", "Changed", "").expect("changed compiles"),
-            )
-            .expect("changed registers");
+        engine.register_test_definition(crew);
+        engine.register_test_definition(test_definition("PLAI", "Plain", ""));
+        engine.register_test_definition(test_definition("NEWW", "Changed", ""));
 
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL"))
-            .expect("driver spawns");
-        let crew = engine
-            .spawn_object(
-                crate::SpawnConfig::new("CREW")
-                    .with_owner(0)
-                    .with_crew_member(false),
-            )
-            .expect("crew spawns");
-        let plain = engine
-            .spawn_object(crate::SpawnConfig::new("PLAI"))
-            .expect("plain object spawns");
-        let caller_index = engine.find_object_index(caller).expect("driver exists");
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL"));
+        let crew = engine.spawn_test_object(crate::SpawnConfig::new("CREW")
+            .with_owner(0)
+            .with_crew_member(false));
+        let plain = engine.spawn_test_object(crate::SpawnConfig::new("PLAI"));
+        let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -1911,35 +1833,18 @@ func Trigger(object pOther)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", script)
-                    .expect("caller fixture compiles"),
-            )
-            .expect("caller fixture registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("OTHR", "Other", "#strict\n")
-                    .expect("target fixture compiles"),
-            )
-            .expect("target fixture registers");
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT))
-            .expect("caller fixture spawns");
-        let other = engine
-            .spawn_object(crate::SpawnConfig::new("OTHR").with_category(crate::CATEGORY_OBJECT))
-            .expect("target fixture spawns");
+        engine.register_test_definition(test_definition("CALL", "Caller", script));
+        engine.register_test_definition(test_definition("OTHR", "Other", "#strict\n"));
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT));
+        let other = engine.spawn_test_object(crate::SpawnConfig::new("OTHR").with_category(crate::CATEGORY_OBJECT));
         let caller_index = engine
-            .find_object_index(caller)
-            .expect("caller fixture exists");
+            .find_object_index(caller).test_value();
 
         engine
-            .call_object_function(caller_index, "Trigger", vec![Value::Object(other.as_u64())])
-            .expect("foreign name fixture runs");
+            .call_object_function(caller_index, "Trigger", vec![Value::Object(other.as_u64())]).test_value();
 
         let caller_snapshot = engine
-            .object_snapshot(caller)
-            .expect("caller fixture remains");
+            .object_snapshot(caller).test_value();
         assert_eq!(
             caller_snapshot.local_vars.get("bForeign"),
             Some(&Value::Bool(true))
@@ -1982,12 +1887,9 @@ func RenameInfo(object target, string name, bool make_valid)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
-            .expect("crew-name fixture compiles");
+        let mut definition = test_definition("CREW", "Crew", script);
         definition.set_crew_member(true);
-        engine
-            .register_definition(definition)
-            .expect("crew-name fixture registers");
+        engine.register_test_definition(definition);
 
         let mut start = crate::scenario::PlayerStart::default();
         start.ready_crew = vec![("CREW".to_string(), 1)];
@@ -2018,13 +1920,11 @@ func RenameInfo(object target, string name, bool make_valid)
                 control_style: false,
                 auto_context_menu: false,
                 startup_player_count: 1,
-            })
-            .expect("name owner joins");
+            }).test_value();
 
-        let target = engine.player(0).expect("player exists").crew()[0];
+        let target = engine.player(0).test_value().crew()[0];
         let target_index = engine
-            .find_object_index(target)
-            .expect("ready crew object exists");
+            .find_object_index(target).test_value();
         assert_eq!(
             engine
                 .call_object_function(
@@ -2054,8 +1954,7 @@ func RenameInfo(object target, string name, bool make_valid)
                         Value::String(name.to_string().into()),
                         Value::Bool(make_valid),
                     ],
-                )
-                .expect("info rename probe runs")
+                ).test_value()
         };
         assert_eq!(
             rename(&mut engine, "Nova", false),
@@ -2157,16 +2056,9 @@ func RenameDefinition(string name, bool set_in_info, object target)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CREW", "Crew", script)
-                    .expect("definition-name fixture compiles"),
-            )
-            .expect("definition-name fixture registers");
-        let target = engine
-            .spawn_object(crate::SpawnConfig::new("CREW"))
-            .expect("info-less target spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.register_test_definition(test_definition("CREW", "Crew", script));
+        let target = engine.spawn_test_object(crate::SpawnConfig::new("CREW"));
+        let target_index = engine.find_object_index(target).test_value();
 
         assert_eq!(
             engine
@@ -2230,34 +2122,19 @@ func Trigger(object pOther)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", script)
-                    .expect("caller fixture compiles"),
-            )
-            .expect("caller fixture registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("OTHR", "Other", "#strict\n")
-                    .expect("target fixture compiles"),
-            )
-            .expect("target fixture registers");
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT))
-            .expect("caller fixture spawns");
-        let other = engine
-            .spawn_object(crate::SpawnConfig::new("OTHR").with_category(crate::CATEGORY_OBJECT))
-            .expect("target fixture spawns");
+        engine.register_test_definition(test_definition("CALL", "Caller", script));
+        engine.register_test_definition(test_definition("OTHR", "Other", "#strict\n"));
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT));
+        let other = engine.spawn_test_object(crate::SpawnConfig::new("OTHR").with_category(crate::CATEGORY_OBJECT));
 
         engine
             .call_object_function(
                 engine.find_object_index(caller).expect("caller exists"),
                 "Trigger",
                 vec![Value::Object(other.as_u64())],
-            )
-            .expect("visibility fixture runs");
+            ).test_value();
 
-        let caller_snapshot = engine.object_snapshot(caller).expect("caller remains");
+        let caller_snapshot = engine.object_snapshot(caller).test_value();
         assert_eq!(
             caller_snapshot.local_vars.get("iInitial"),
             Some(&Value::Int(0))
@@ -2374,7 +2251,7 @@ func Trigger(object pOther)
         map.insert("beta".into(), Value::Int(2));
         map.insert("alpha".into(), Value::Int(1));
         map.insert_key(Value::Int(7), Value::String("seven".into()));
-        let result = get_values(&[Value::Proplist(map)]).expect("GetValues succeeds");
+        let result = get_values(&[Value::Proplist(map)]).test_value();
         match result {
             Value::Array(entries) => {
                 assert_eq!(
@@ -2442,12 +2319,9 @@ func Announce()
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
-            .expect("death-message fixture compiles");
+        let mut definition = test_definition("CREW", "Crew", script);
         definition.set_crew_member(true);
-        engine
-            .register_definition(definition)
-            .expect("death-message fixture registers");
+        engine.register_test_definition(definition);
         let mut start = crate::scenario::PlayerStart::default();
         start.ready_crew = vec![("CREW".to_string(), 1)];
         engine.set_player_starts(vec![start]);
@@ -2474,10 +2348,9 @@ func Announce()
                 control_style: false,
                 auto_context_menu: false,
                 startup_player_count: 1,
-            })
-            .expect("death-message owner joins");
-        let crew = engine.player(0).expect("player exists").crew()[0];
-        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+            }).test_value();
+        let crew = engine.player(0).test_value().crew()[0];
+        let crew_index = engine.find_object_index(crew).test_value();
 
         let initial_rng = crate::particles::SafeRng::new(224);
         SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = initial_rng.clone());
@@ -2851,8 +2724,7 @@ func Announce()
             .collect();
         let mut script = ScriptEngine::new();
         script
-            .load_script("protected func FrameDecorationBackClr() { return(-2144193998); }")
-            .expect("DECO callback compiles");
+            .load_script("protected func FrameDecorationBackClr() { return(-2144193998); }").test_value();
         let world = HostWorldContext::default()
             .with_definition_metadata(Rc::new(HashMap::from([(
                 "DECO".into(),
@@ -2891,8 +2763,7 @@ func Announce()
                 assert_eq!(spec.portrait.as_deref(), Some("Portrait:SCLK::0000ff::1"));
                 let frame = spec
                     .frame_decoration
-                    .as_ref()
-                    .expect("C4GameMessage snapshots DECO at creation");
+                    .as_ref().test_value();
                 assert_eq!(frame.source_definition, "DECO");
                 assert_eq!(frame.background_color, 0x8032_3232);
                 assert_eq!(

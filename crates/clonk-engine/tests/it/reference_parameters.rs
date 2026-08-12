@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use std::fs;
 use std::path::Path;
 
@@ -7,26 +8,26 @@ use clonk_script::Value;
 use tempfile::tempdir;
 
 fn write_definition(path: &Path, id: &str, script: &str) {
-    fs::create_dir_all(path).expect("definition directory creates");
-    fs::write(
+    crate::support::TestValueExt::test_value(fs::create_dir_all(path));
+    crate::support::TestValueExt::test_value(fs::write(
         path.join("DefCore.txt"),
         format!("[DefCore]\nid={id}\nName={id}\n"),
-    )
-    .expect("DefCore writes");
-    fs::write(path.join("Script.c"), script).expect("Script writes");
+    ));
+    crate::support::TestValueExt::test_value(fs::write(path.join("Script.c"), script));
 }
 
 fn engine_with(definitions: &[(&str, &str)]) -> Engine {
-    let root = tempdir().expect("resource root creates");
+    let root = crate::support::TestValueExt::test_value(tempdir());
     let mut engine = Engine::new();
     for (id, script) in definitions {
         let path = root.path().join(format!("{id}.c4d"));
         write_definition(&path, id, script);
-        let resource = ResourceDefinition::load(&Group::open(&path).expect("group opens"))
-            .expect("definition loads");
-        engine
-            .register_definition(Definition::from_resource(&resource).expect("definition compiles"))
-            .expect("definition registers");
+        let resource = crate::support::TestValueExt::test_value(ResourceDefinition::load(
+            &crate::support::TestValueExt::test_value(Group::open(&path)),
+        ));
+        engine.register_test_definition(crate::support::TestValueExt::test_value(
+            Definition::from_resource(&resource),
+        ));
     }
     // The tempdir must outlive definition loading only; leak it so the engine
     // keeps working after this helper returns.
@@ -65,15 +66,11 @@ func Fill(&a, &b, c)
 }
 "#,
     )]);
-    let object = engine
-        .spawn_object(SpawnConfig::new("SELF").with_loaded(true))
-        .expect("object spawns");
-    let index = engine.find_object_index(object).expect("object exists");
+    let object = engine.spawn_test_object(SpawnConfig::new("SELF").with_loaded(true));
+    let index = engine.test_object_index(object);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", vec![])
-            .expect("probe runs"),
+        engine.call_test_object_function(index, "Probe", vec![]),
         Value::Array(vec![
             Value::Int(1),
             Value::Int(7),
@@ -113,18 +110,12 @@ func Fill(&a, &b)
 "#,
         ),
     ]);
-    let caller = engine
-        .spawn_object(SpawnConfig::new("CALR").with_loaded(true))
-        .expect("caller spawns");
-    let callee = engine
-        .spawn_object(SpawnConfig::new("CALE").with_loaded(true))
-        .expect("callee spawns");
-    let index = engine.find_object_index(caller).expect("caller exists");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALR").with_loaded(true));
+    let callee = engine.spawn_test_object(SpawnConfig::new("CALE").with_loaded(true));
+    let index = engine.test_object_index(caller);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", vec![Value::Object(callee.as_u64())])
-            .expect("probe runs"),
+        engine.call_test_object_function(index, "Probe", vec![Value::Object(callee.as_u64())]),
         Value::Array(vec![Value::Int(3), Value::Int(4)])
     );
 }

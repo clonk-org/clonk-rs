@@ -34,10 +34,10 @@
         let (result, outcome) =
             with_object_host_context(|| set_action_targets(&[Value::Proplist(target_map.clone())]));
 
-        let value = result.expect("SetActionTargets succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("object update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(
             action.target,
             Some(Some(ObjectId::new(42))),
@@ -67,10 +67,10 @@
             ])
         });
 
-        let value = result.expect("SetActionTargets succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("object update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.target, Some(Some(ObjectId::new(5))));
         assert_eq!(action.target2, Some(Some(ObjectId::new(6))));
     }
@@ -123,8 +123,7 @@
             .iter()
             .find(|object| object.object_id == target_id)
             .and_then(|object| object.update.as_ref())
-            .and_then(|update| update.action.as_ref())
-            .expect("foreign action-target update recorded");
+            .and_then(|update| update.action.as_ref()).test_value();
         assert_eq!(action.target, Some(None));
         assert_eq!(action.target2, Some(None));
     }
@@ -155,8 +154,7 @@
             .iter()
             .find(|object| object.object_id == target_id)
             .and_then(|object| object.update.as_ref())
-            .and_then(|update| update.action.as_ref())
-            .expect("foreign action-target update recorded");
+            .and_then(|update| update.action.as_ref()).test_value();
         assert_eq!(action.target, Some(Some(first_id)));
         assert_eq!(action.target2, Some(Some(second_id)));
     }
@@ -171,11 +169,11 @@
             get_action_target(&[Value::Int(0)])
         });
 
-        let value = result.expect("GetActionTarget succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(ObjectId::new(12)));
 
-        let update = outcome.object_update.expect("object update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.target, Some(Some(ObjectId::new(12))));
     }
 
@@ -189,15 +187,14 @@
             get_action_target(&[Value::Int(0), object_reference_value(ObjectId::new(99))])
         });
 
-        let value = result.expect("GetActionTarget succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(ObjectId::new(77)));
     }
 
     #[test]
     fn get_action_target_returns_nil_for_out_of_range_index() {
         let value = with_object_host_context(|| get_action_target(&[Value::Int(2)]))
-            .0
-            .expect("GetActionTarget succeeds");
+            .0.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -230,9 +227,9 @@
     #[test]
     fn set_dir_records_direction_update() {
         let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Int(1)]));
-        let value = result.expect("SetDir succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("direction update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.direction, Some(Direction::Right));
     }
 
@@ -244,7 +241,7 @@
         // C4Script.cpp:799-803). Epic Voltage calls SetDir(!i).
         let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Bool(true)]));
         assert_eq!(result.expect("SetDir converts bool"), Value::Bool(true));
-        let update = outcome.object_update.expect("direction update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.direction, Some(Direction::Right));
     }
 
@@ -315,8 +312,7 @@
             .iter()
             .find(|outcome| outcome.object_id == target_id)
             .and_then(|outcome| outcome.update.as_ref())
-            .and_then(|update| update.action.as_ref())
-            .expect("foreign phase update recorded");
+            .and_then(|update| update.action.as_ref()).test_value();
         assert_eq!(action.phase, Some(3));
     }
 
@@ -340,8 +336,7 @@
             .iter()
             .find(|outcome| outcome.object_id == target_id)
             .and_then(|outcome| outcome.update.as_ref())
-            .and_then(|update| update.action.as_ref())
-            .expect("scenario phase update recorded");
+            .and_then(|update| update.action.as_ref()).test_value();
         assert_eq!(action.phase, Some(2));
     }
 
@@ -386,8 +381,8 @@
                 Value::Int(5),
             ])
         );
-        let update = outcome.object_update.expect("phase update recorded");
-        let action = update.action.expect("action update present");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.phase, Some(5), "9 clamps to Length (5), inclusive");
     }
 
@@ -476,20 +471,19 @@
             set_dir(&[Value::Int(1)])?;
             get_dir(&[])
         });
-        let value = result.expect("GetDir succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(Direction::Right.to_script_value()));
-        let update = outcome.object_update.expect("direction update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.direction, Some(Direction::Right));
     }
 
     #[test]
     fn set_com_dir_records_command_direction_update() {
         let (result, outcome) = with_object_host_context(|| set_com_dir(&[Value::Int(3)]));
-        let value = result.expect("SetComDir succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         let update = outcome
-            .object_update
-            .expect("command direction update recorded");
+            .object_update.test_value();
         assert_eq!(update.command_direction, Some(CommandDirection::Right));
     }
 
@@ -542,8 +536,7 @@
             .other_objects
             .iter()
             .find(|outcome| outcome.object_id == target_id)
-            .and_then(|outcome| outcome.update.as_ref())
-            .expect("foreign command-direction update recorded");
+            .and_then(|outcome| outcome.update.as_ref()).test_value();
         assert_eq!(update.command_direction, Some(CommandDirection::Down));
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
     }
@@ -624,14 +617,13 @@
             set_com_dir(&[Value::Int(4)])?;
             get_com_dir(&[])
         });
-        let value = result.expect("GetComDir succeeds");
+        let value = result.test_value();
         assert_eq!(
             value,
             Value::Int(CommandDirection::DownRight.to_script_value())
         );
         let update = outcome
-            .object_update
-            .expect("command direction update recorded");
+            .object_update.test_value();
         assert_eq!(update.command_direction, Some(CommandDirection::DownRight));
     }
 
@@ -644,7 +636,7 @@
             Value::Int(15),
         ];
         let (result, outcome) = with_object_host_context(|| set_command(&args));
-        let value = result.expect("SetCommand succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         // C4Object::SetCommand: NoCollectDelay decrement (C4Object.cpp:
         // 3941-3942), ClearCommands (:3943), then the push.
@@ -676,7 +668,7 @@
             Value::Int(8),
         ];
         let (result, outcome) = with_object_host_context(|| add_command(&args));
-        let value = result.expect("AddCommand succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.command_operations.len(), 1);
         match &outcome.command_operations[0] {
@@ -794,8 +786,7 @@
         let operations = &outcome
             .other_objects
             .iter()
-            .find(|outcome| outcome.object_id == worker_id)
-            .expect("foreign worker outcome recorded")
+            .find(|outcome| outcome.object_id == worker_id).test_value()
             .command_operations;
         match operations.as_slice() {
             [CommandOperation::PushFront(request)] => {
@@ -819,7 +810,7 @@
             Value::Int(4),
         ];
         let (result, outcome) = with_object_host_context(|| append_command(&args));
-        let value = result.expect("AppendCommand succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.command_operations.len(), 1);
         match &outcome.command_operations[0] {
@@ -876,7 +867,7 @@
                 Value::Int(prec),
             ];
             let (result, _) = with_object_host_context(|| angle_func(&args));
-            result.expect("Angle succeeds")
+            result.test_value()
         };
         assert_eq!(angle(0, 0, 0, 10, 0), Value::Int(180), "straight down");
         assert_eq!(angle(0, 0, 0, -10, 0), Value::Int(0), "straight up");
@@ -918,7 +909,7 @@
             let (result, _) = with_object_host_context_with_world(world.clone(), || {
                 get_command(&[Value::Int(0), Value::Int(element)])
             });
-            result.expect("GetCommand succeeds")
+            result.test_value()
         };
         assert_eq!(query(0), Value::String("MoveTo".into()));
         assert_eq!(query(1), Value::Nil, "no target object");
@@ -1020,7 +1011,7 @@
         // dest = (0 - 9) * 1 = -9; r = 0 -> rdir = itofix(-9)/100.
         let mut surface = vec![25; 32];
         surface.extend(vec![5; 32]);
-        let landscape = Landscape::new(64, surface).expect("landscape builds");
+        let landscape = Landscape::new(64, surface).test_value();
         let seed = WalkRotationSeed {
             rotateable: 45,
             t_attach: CNAT_BOTTOM,
@@ -1224,7 +1215,7 @@
             set_x_dir(&[])
         });
         assert_eq!(result.expect("bare SetXDir succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("velocity update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.rotation_velocity, Some(C4Fixed::ZERO));
         assert_eq!(update.fixed_velocity_x, Some(C4Fixed::ZERO));
     }
@@ -1376,8 +1367,7 @@
             .find_map(|operation| match operation {
                 CommandOperation::PushFront(request) => Some(request),
                 _ => None,
-            })
-            .expect("SetCommand queues Call");
+            }).test_value();
         assert_eq!(set_request.data, CommandData::Text(String::new()));
         assert_eq!(set_request.tx_value.as_ref(), Some(&tx));
 
@@ -1443,8 +1433,7 @@
                 ],
                 CommandArgLayout::Add,
                 "AddCommand",
-            )
-            .expect("Call parses")
+            ).test_value()
             .data
         };
 
@@ -1454,7 +1443,7 @@
 
     #[test]
     fn command_data_any_value_matches_c4value_guess_type() {
-        let wood = definition_id_to_c4id("WOOD").expect("four-byte definition id");
+        let wood = definition_id_to_c4id("WOOD").test_value();
         assert_eq!(command_data_any_value(0), Value::Nil);
         assert_eq!(command_data_any_value(9_999), Value::Int(9_999));
         assert_eq!(command_data_any_value(wood), Value::C4Id("WOOD".into()));
@@ -1505,7 +1494,7 @@
             || get_x(&[]),
         );
 
-        let value = result.expect("GetX succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(42));
     }
 
@@ -1523,7 +1512,7 @@
             || get_y(&[]),
         );
 
-        let value = result.expect("GetY succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(63));
     }
 
@@ -1535,7 +1524,7 @@
         let args = [object_reference_value(ObjectId::new(99))];
 
         let (result, _) = with_effect_context(None, &[], world, 1, || get_x(&args));
-        let value = result.expect("GetX target succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(-12));
     }
 
@@ -1544,7 +1533,7 @@
         let args = [object_reference_value(ObjectId::new(1234))];
         let (result, _) =
             with_effect_context(None, &[], HostWorldContext::default(), 1, || get_y(&args));
-        let value = result.expect("GetY handles missing target");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1570,7 +1559,7 @@
             3,
             || object_distance(&args),
         );
-        let value = result.expect("ObjectDistance succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(integer_distance(10, 15, 25, 30)));
     }
 
@@ -1589,7 +1578,7 @@
             object_reference_value(anchor_id),
         ];
         let (result, _) = with_effect_context(None, &[], world, 10, || object_distance(&args));
-        let value = result.expect("ObjectDistance with explicit anchor succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(integer_distance(-40, 12, -10, -18)));
     }
 
@@ -1607,7 +1596,7 @@
             4,
             || object_distance(&args),
         );
-        let value = result.expect("ObjectDistance with missing other succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1655,8 +1644,7 @@
                 43,
                 || object_by_number(&[Value::Int(42)]),
             )
-            .0
-            .expect("Object lookup succeeds")
+            .0.test_value()
         };
 
         assert_eq!(
@@ -1734,8 +1722,7 @@
         let mut script = clonk_script::Engine::new();
         register_host_functions(&mut script);
         script
-            .load_script("global func Probe() { return ObjectNumber(); }")
-            .expect("ObjectNumber probe compiles");
+            .load_script("global func Probe() { return ObjectNumber(); }").test_value();
 
         assert_eq!(
             script
@@ -1783,7 +1770,7 @@
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
                 get_x_dir(&[])
             });
-        let value = result.expect("GetXDir succeeds");
+        let value = result.test_value();
         // C++ GetXDir default precision 10 returns fixtoi(xdir, 10): for a
         // 12 px/frame velocity that is 12 * 10 = 120. `C4Script.cpp:1167`.
         assert_eq!(value, Value::Int(120));
@@ -1801,7 +1788,7 @@
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
                 get_y_dir(&args)
             });
-        let value = result.expect("GetYDir succeeds");
+        let value = result.test_value();
         // C++ GetYDir(precision = 5) returns fixtoi(ydir, 5): for a 25 px/frame
         // velocity that is 25 * 5 = 125. `C4Script.cpp:1174`.
         assert_eq!(value, Value::Int(125));
@@ -1814,7 +1801,7 @@
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(42))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_x_dir(&args));
-        let value = result.expect("GetXDir target succeeds");
+        let value = result.test_value();
         // GetXDir on another object: fixtoi(xdir, 10) for -8 px/frame = -80.
         assert_eq!(value, Value::Int(-80));
     }
@@ -1830,36 +1817,19 @@ func Probe(object other)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller fixture compiles"),
-            )
-            .expect("caller fixture registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("OTHR", "Other", "#strict 2\n")
-                    .expect("target fixture compiles"),
-            )
-            .expect("target fixture registers");
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT))
-            .expect("caller fixture spawns");
-        let other = engine
-            .spawn_object(
-                crate::SpawnConfig::new("OTHR")
-                    .with_category(crate::CATEGORY_OBJECT)
-                    .with_fixed_velocity(FixedVec2::new(fixed10(26), fixed10(14))),
-            )
-            .expect("target fixture spawns");
+        engine.register_test_definition(test_definition("CALL", "Caller", caller_script));
+        engine.register_test_definition(test_definition("OTHR", "Other", "#strict 2\n"));
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT));
+        let other = engine.spawn_test_object(crate::SpawnConfig::new("OTHR")
+            .with_category(crate::CATEGORY_OBJECT)
+            .with_fixed_velocity(FixedVec2::new(fixed10(26), fixed10(14))));
 
         let result = engine
             .call_object_function(
                 engine.find_object_index(caller).expect("caller exists"),
                 "Probe",
                 vec![object_reference_value(other)],
-            )
-            .expect("velocity fixture runs");
+            ).test_value();
 
         assert_eq!(
             result,
@@ -1879,7 +1849,7 @@ func Probe(object other)
         let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
             get_x_dir(&args)
         });
-        let value = result.expect("GetXDir handles missing target");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1890,9 +1860,9 @@ func Probe(object other)
         let args = [Value::Int(15)];
         let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
         assert_eq!(result.expect("SetXDir succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("velocity update recorded");
+        let update = outcome.object_update.test_value();
         // Component-only write (C4Script.cpp:697-705): ydir is untouched.
-        let fixed_x = update.fixed_velocity_x.expect("fixed x recorded");
+        let fixed_x = update.fixed_velocity_x.test_value();
         assert_eq!(fixed_x, itofix_prec(15, 10));
         assert_eq!(fixed_x.val(), 98304);
         assert!(update.fixed_velocity.is_none());
@@ -1908,12 +1878,12 @@ func Probe(object other)
         // (raw 16.16 value 65536). `C4Script.cpp:723`.
         let args = [Value::Int(5), Value::Nil, Value::Int(5)];
         let (result, outcome) = with_object_host_context(|| set_y_dir(&args));
-        let value = result.expect("SetYDir succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("velocity update recorded");
+        let update = outcome.object_update.test_value();
         // Component-only write (C4Script.cpp:718-732): xdir untouched, the
         // whole-pixel mirror derives at the fold from the final fixed value.
-        let fixed_y = update.fixed_velocity_y.expect("fixed y recorded");
+        let fixed_y = update.fixed_velocity_y.test_value();
         assert_eq!(fixed_y, itofix_prec(5, 5));
         assert_eq!(fixed_y.val(), 65536);
         assert!(update.fixed_velocity.is_none());
@@ -1952,8 +1922,7 @@ func Probe(object other)
             .other_objects
             .iter()
             .find(|outcome| outcome.object_id == target_id)
-            .and_then(|outcome| outcome.update.as_ref())
-            .expect("foreign ydir update recorded");
+            .and_then(|outcome| outcome.update.as_ref()).test_value();
         assert_eq!(update.fixed_velocity_y, Some(C4Fixed::ZERO));
         assert!(
             update.fixed_velocity_x.is_none(),
@@ -1970,11 +1939,9 @@ func Probe(object other)
         let (result, outcome) = with_object_host_context(|| set_r_dir(&args));
         assert_eq!(result.expect("SetRDir succeeds"), Value::Bool(true));
         let update = outcome
-            .object_update
-            .expect("rotation velocity update recorded");
+            .object_update.test_value();
         let rdir = update
-            .rotation_velocity
-            .expect("rotation velocity recorded");
+            .rotation_velocity.test_value();
         assert_eq!(rdir, itofix_prec(10, 10));
         assert_eq!(rdir.val(), 65536);
     }
@@ -2090,8 +2057,7 @@ func Probe(object other)
             .other_objects
             .iter()
             .find(|outcome| outcome.object_id == target_id)
-            .and_then(|outcome| outcome.update.as_ref())
-            .expect("foreign rotation update recorded");
+            .and_then(|outcome| outcome.update.as_ref()).test_value();
         assert_eq!(update.rotation, Some(0));
         assert_eq!(update.rotation_velocity, Some(C4Fixed::ZERO));
         assert_eq!(update.mobile, Some(true));
@@ -2104,7 +2070,7 @@ func Probe(object other)
         target.insert("id".into(), Value::Int(99));
         let args = [Value::Int(4), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
-        let value = result.expect("SetXDir returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -2115,7 +2081,7 @@ func Probe(object other)
         target.insert("id".into(), Value::Int(99));
         let args = [Value::Int(4), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_r_dir(&args));
-        let value = result.expect("SetRDir returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -2125,9 +2091,9 @@ func Probe(object other)
         let args = [Value::Int(15), Value::Int(27)];
         let (result, outcome) = with_object_host_context(|| set_position(&args));
 
-        let value = result.expect("SetPosition succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("position update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.position, Some(Vector2::new(15, 27)));
     }
 
@@ -2181,10 +2147,9 @@ func Probe(object other)
         // and ExtractMaterial/PXS order are part of the lockstep result.
         let materials = clonk_resources::MaterialLibrary::parse(
             "[Material Water]\nName=Water\nDensity=30\nInstable=1\n",
-        )
-        .expect("water material parses");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&materials);
-        let water = materials.id_of("Water").expect("water material exists");
+        let water = materials.id_of("Water").test_value();
         let mut landscape = Landscape::flat(16, 50);
         landscape.set_liquid_column(1, vec![LiquidSegment::with_material(5, 30, Some(water))]);
         let definitions = HashMap::from([
@@ -2243,7 +2208,7 @@ func Probe(object other)
         let args = [Value::Int(5), Value::Int(6), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_position(&args));
 
-        let value = result.expect("SetPosition returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -2276,9 +2241,9 @@ func Probe(object other)
             || set_position(&args),
         );
 
-        let value = result.expect("SetPosition returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("position update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.position, Some(Vector2::new(10, 20)));
     }
 
@@ -2302,7 +2267,7 @@ func Probe(object other)
             ])
         });
 
-        let value = result.expect("GetEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::String("Glow".into()));
     }
 

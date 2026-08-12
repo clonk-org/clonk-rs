@@ -6213,8 +6213,7 @@ mod tests {
             view_formats: &[],
         });
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("lc_gpu_texture_limit_test_encoder"),
         });
@@ -6363,7 +6362,7 @@ mod tests {
             eprintln!("no wgpu adapter; skipping retained device-loss callback check");
             return;
         };
-        let renderer = RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let renderer = test_renderer(&device, &queue);
 
         device.destroy();
         device
@@ -7030,13 +7029,13 @@ mod tests {
             })
         };
         let resource = rgba_resource_2x1(texture, [255, 48, 16, 255], [16, 64, 255, 255]);
-        let scene = |commands| GpuScene {
-            logical_extent: [4, 2],
-            clear: Color::new(11, 19, 31, 255),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![resource.clone()],
-            commands,
+        let scene = |commands| {
+            test_scene(
+                [4, 2],
+                Color::new(11, 19, 31, 255),
+                vec![resource.clone()],
+                commands,
+            )
         };
         let compact = scene(vec![GpuCommand::ObjectBatch {
             texture,
@@ -7069,24 +7068,11 @@ mod tests {
                 gamma: false,
             },
         ]);
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let compact_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &compact,
-            &GpuPresentation::identity(4, 2),
-        );
+        let compact_frame = render_identity_readback(&mut renderer, &device, &queue, &compact);
         let compact_stats = renderer.last_stats();
-        let expanded_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &expanded,
-            &GpuPresentation::identity(4, 2),
-        );
+        let expanded_frame = render_identity_readback(&mut renderer, &device, &queue, &expanded);
 
         assert_eq!(compact_frame, expanded_frame);
         assert_eq!(compact_stats.draw_calls, 1);
@@ -7219,24 +7205,13 @@ mod tests {
                     gamma: true,
                 }]);
                 let expanded = scene(generic);
-                let mut renderer =
-                    RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+                let mut renderer = test_renderer(&device, &queue);
 
-                let compact_frame = render_readback(
-                    &mut renderer,
-                    &device,
-                    &queue,
-                    &compact,
-                    &GpuPresentation::identity(30, 30),
-                );
+                let compact_frame =
+                    render_identity_readback(&mut renderer, &device, &queue, &compact);
                 let compact_stats = renderer.last_stats();
-                let expanded_frame = render_readback(
-                    &mut renderer,
-                    &device,
-                    &queue,
-                    &expanded,
-                    &GpuPresentation::identity(30, 30),
-                );
+                let expanded_frame =
+                    render_identity_readback(&mut renderer, &device, &queue, &expanded);
 
                 assert_eq!(
                     compact_frame, expanded_frame,
@@ -7384,23 +7359,10 @@ mod tests {
             .collect::<Vec<_>>();
         expanded_commands.push(generic_quad(construction_texture, construction));
         let expanded = scene(expanded_commands);
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let compact_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &compact,
-            &GpuPresentation::identity(5, 5),
-        );
-        let expanded_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &expanded,
-            &GpuPresentation::identity(5, 5),
-        );
+        let compact_frame = render_identity_readback(&mut renderer, &device, &queue, &compact);
+        let expanded_frame = render_identity_readback(&mut renderer, &device, &queue, &expanded);
 
         assert_eq!(compact_frame, expanded_frame);
         assert!(compact_frame
@@ -7428,17 +7390,14 @@ mod tests {
             blend: GpuBlend::Replace,
             style: GpuSolidStyle::NONE,
         };
-        let scene = GpuScene {
-            logical_extent: [6, 4],
-            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: Vec::new(),
-            commands: vec![line(0.5), line(2.5)],
-        };
+        let scene = test_scene(
+            [6, 4],
+            Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            Vec::new(),
+            vec![line(0.5), line(2.5)],
+        );
         let presentation = GpuPresentation::identity(6, 4);
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
         let frame = render_readback(&mut renderer, &device, &queue, &scene, &presentation);
         let stats = renderer.last_stats();
@@ -7505,8 +7464,7 @@ mod tests {
             textures: vec![rgba_resource(texture, [96, 144, 208, 191])],
             commands: vec![command],
         };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
         for blend in [GpuBlend::Normal, GpuBlend::Additive] {
             for mod2 in [false, true] {
@@ -7535,20 +7493,8 @@ mod tests {
                     outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
                 });
 
-                let expanded = render_readback(
-                    &mut renderer,
-                    &device,
-                    &queue,
-                    &expanded,
-                    &GpuPresentation::identity(2, 2),
-                );
-                let compact = render_readback(
-                    &mut renderer,
-                    &device,
-                    &queue,
-                    &compact,
-                    &GpuPresentation::identity(2, 2),
-                );
+                let expanded = render_identity_readback(&mut renderer, &device, &queue, &expanded);
+                let compact = render_identity_readback(&mut renderer, &device, &queue, &compact);
 
                 assert_eq!(
                     compact, expanded,
@@ -7615,24 +7561,15 @@ mod tests {
             command([1.0, 0.0, 0.0, 127.0 / 255.0]),
             command([0.0, 1.0, 0.0, 127.0 / 255.0]),
         ];
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
             commands,
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(1, 1),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
         assert_eq!(renderer.last_stats().draw_calls, 1);
@@ -7657,14 +7594,8 @@ mod tests {
             phase: [0.0; 3],
             gamma: false,
         };
-        let scene = |textures, commands| GpuScene {
-            logical_extent: [3, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures,
-            commands,
-        };
+        let scene =
+            |textures, commands| test_scene([3, 1], Color::transparent(), textures, commands);
         let coalesced = scene(
             vec![rgba_resource(shared_base, [255; 4])],
             vec![
@@ -7682,24 +7613,11 @@ mod tests {
                 chunk(split_second_base, [0.0, 1.0, 0.0, 127.0 / 255.0]),
             ],
         );
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let coalesced_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &coalesced,
-            &GpuPresentation::identity(3, 1),
-        );
+        let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 1);
-        let split_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &forced_split,
-            &GpuPresentation::identity(3, 1),
-        );
+        let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 2);
         assert_eq!(coalesced_frame, split_frame);
@@ -7738,13 +7656,11 @@ mod tests {
             rgba_resource(liquid_a, [128, 128, 128, 255]),
             rgba_resource(liquid_b, [128, 128, 128, 255]),
         ];
-        let scene = GpuScene {
-            logical_extent: [2, 2],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: resources.clone(),
-            commands: vec![
+        let scene = test_scene(
+            [2, 2],
+            Color::transparent(),
+            resources.clone(),
+            vec![
                 command(base_a, None, None, None),
                 command(base_a, None, None, None),
                 command(base_b, None, None, None),
@@ -7760,17 +7676,10 @@ mod tests {
                     Some(Rect::new(0, 0, 1, 1)),
                 ),
             ],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let _ = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(2, 2),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
         assert_eq!(renderer.last_stats().draw_calls, 7);
 
         let one_command_scene = GpuScene {
@@ -7812,14 +7721,8 @@ mod tests {
             phase: [0.0; 3],
             gamma: false,
         };
-        let scene = |textures, commands| GpuScene {
-            logical_extent: [4, 4],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures,
-            commands,
-        };
+        let scene =
+            |textures, commands| test_scene([4, 4], Color::transparent(), textures, commands);
         let coalesced = scene(
             vec![rgba_resource(shared_base, [255; 4])],
             vec![
@@ -7837,24 +7740,11 @@ mod tests {
                 triangle(split_second_base, [2, 1, 3, 3], [0.0, 1.0, 0.0, 0.0]),
             ],
         );
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let coalesced_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &coalesced,
-            &GpuPresentation::identity(4, 4),
-        );
+        let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 1);
-        let split_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &forced_split,
-            &GpuPresentation::identity(4, 4),
-        );
+        let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 2);
         assert_eq!(coalesced_frame, split_frame);
@@ -7945,24 +7835,11 @@ mod tests {
                 .collect(),
             vec![first(split_first), second(split_second)],
         );
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let coalesced_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &coalesced,
-            &GpuPresentation::identity(2, 1),
-        );
+        let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 1);
-        let split_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &forced_split,
-            &GpuPresentation::identity(2, 1),
-        );
+        let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 2);
         assert_eq!(coalesced_frame, split_frame);
@@ -7990,17 +7867,17 @@ mod tests {
             phase: [0.0; 3],
             gamma: false,
         };
-        let scene = |commands| GpuScene {
-            logical_extent: [3, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![
-                rgba_resource(tile_a, [220, 32, 48, 255]),
-                rgba_resource(tile_a_split, [220, 32, 48, 255]),
-                rgba_resource(tile_b, [24, 216, 72, 255]),
-            ],
-            commands,
+        let scene = |commands| {
+            test_scene(
+                [3, 1],
+                Color::transparent(),
+                vec![
+                    rgba_resource(tile_a, [220, 32, 48, 255]),
+                    rgba_resource(tile_a_split, [220, 32, 48, 255]),
+                    rgba_resource(tile_b, [24, 216, 72, 255]),
+                ],
+                commands,
+            )
         };
         let coalesced = scene(vec![
             chunk(tile_a, 0.0, 1.0),
@@ -8012,24 +7889,11 @@ mod tests {
             chunk(tile_a_split, 1.0, 2.0),
             chunk(tile_b, 2.0, 3.0),
         ]);
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let coalesced_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &coalesced,
-            &GpuPresentation::identity(3, 1),
-        );
+        let coalesced_frame = render_identity_readback(&mut renderer, &device, &queue, &coalesced);
         assert_eq!(renderer.last_stats().draw_calls, 2);
-        let split_frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &forced_split,
-            &GpuPresentation::identity(3, 1),
-        );
+        let split_frame = render_identity_readback(&mut renderer, &device, &queue, &forced_split);
 
         assert_eq!(renderer.last_stats().draw_calls, 3);
         assert_eq!(coalesced_frame, split_frame);
@@ -8056,16 +7920,14 @@ mod tests {
             phase: [0.0; 3],
             gamma: false,
         };
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![
                 rgba_resource(visible_base, [255; 4]),
                 rgba_resource(clipped_base, [255; 4]),
             ],
-            commands: vec![
+            vec![
                 chunk(visible_base, [1.0, 0.0, 0.0, 127.0 / 255.0], None),
                 chunk(
                     clipped_base,
@@ -8074,17 +7936,10 @@ mod tests {
                 ),
                 chunk(visible_base, [0.0, 1.0, 0.0, 127.0 / 255.0], None),
             ],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(1, 1),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
         assert_eq!(renderer.last_stats().draw_calls, 1);
@@ -8097,13 +7952,11 @@ mod tests {
             return;
         };
         let texture = GpuTextureId::fresh();
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
-            commands: vec![
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            vec![
                 GpuCommand::Quad {
                     texture,
                     owner_mask: None,
@@ -8129,17 +7982,10 @@ mod tests {
                     outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
                 },
             ],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(1, 1),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
         assert_eq!(renderer.last_stats().draw_calls, 2);
@@ -8152,13 +7998,11 @@ mod tests {
             return;
         };
         let texture = GpuTextureId::fresh();
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
-            commands: vec![
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            vec![
                 GpuCommand::Quad {
                     texture,
                     owner_mask: None,
@@ -8184,17 +8028,10 @@ mod tests {
                     outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
                 },
             ],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(1, 1),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![0, 255, 0, 255]);
         assert_eq!(renderer.last_stats().draw_calls, 1);
@@ -8207,13 +8044,11 @@ mod tests {
             return;
         };
         let texture = GpuTextureId::fresh();
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
-            commands: vec![
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            vec![
                 GpuCommand::SpriteBatch {
                     texture,
                     quads: vec![GpuSpriteQuad {
@@ -8239,17 +8074,10 @@ mod tests {
                     gamma: false,
                 },
             ],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(1, 1),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
         assert_eq!(renderer.last_stats().draw_calls, 2);
@@ -8275,24 +8103,15 @@ mod tests {
             gamma: false,
             outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
         };
-        let scene = GpuScene {
-            logical_extent: [1, 1],
-            clear: Color::transparent(),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![rgba_resource(texture, [255; 4])],
-            commands: vec![batch(0x7fff_0000), batch(0x7f00_ff00)],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(1, 1),
+        let scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![rgba_resource(texture, [255; 4])],
+            vec![batch(0x7fff_0000), batch(0x7f00_ff00)],
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![64, 128, 0, 192]);
         assert_eq!(renderer.last_stats().draw_calls, 1);
@@ -8319,16 +8138,14 @@ mod tests {
             gamma: false,
             outer_modulation: clonk_graphics::GpuOuterModulation::Combine,
         };
-        let scene = GpuScene {
-            logical_extent: [2, 1],
-            clear: Color::opaque(0, 0, 0),
-            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
-            gamma_mode: GpuGammaMode::Disabled,
-            textures: vec![
+        let scene = test_scene(
+            [2, 1],
+            Color::opaque(0, 0, 0),
+            vec![
                 rgba_resource(fire_texture, [255; 4]),
                 rgba_resource(fire2_texture, [255; 4]),
             ],
-            commands: vec![
+            vec![
                 batch(
                     fire_texture,
                     [0.0, 0.0, 1.0, 1.0],
@@ -8342,17 +8159,10 @@ mod tests {
                     GpuBlend::Additive,
                 ),
             ],
-        };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(2, 1),
         );
+        let mut renderer = test_renderer(&device, &queue);
+
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &scene);
 
         assert_eq!(frame.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
         assert_eq!(renderer.last_stats().draw_calls, 2);
@@ -8507,52 +8317,9 @@ mod tests {
 
     #[test]
     fn layered_presentations_preserve_physical_painter_order() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build Tokio runtime for layered renderer test");
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            backend_options: wgpu::BackendOptions {
-                dx12: wgpu::Dx12BackendOptions {
-                    shader_compiler: wgpu::Dx12Compiler::Fxc,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = runtime
-            .block_on(async {
-                let primary = instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::HighPerformance,
-                        compatible_surface: None,
-                        force_fallback_adapter: false,
-                    })
-                    .await;
-                if primary.is_ok() {
-                    primary
-                } else {
-                    instance
-                        .request_adapter(&wgpu::RequestAdapterOptions {
-                            power_preference: wgpu::PowerPreference::LowPower,
-                            compatible_surface: None,
-                            force_fallback_adapter: true,
-                        })
-                        .await
-                }
-            })
-            .expect("layered renderer test requires a working wgpu adapter");
-        let descriptor = wgpu::DeviceDescriptor {
-            label: Some("lc_gpu_layered_test_device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        };
-        let (device, queue) = runtime
-            .block_on(adapter.request_device(&descriptor))
-            .expect("request layered renderer test device");
+        let (runtime, _instance, _adapter, device, queue) =
+            test_wgpu_device("lc_gpu_layered_test_device", true)
+                .expect("layered renderer test requires a working wgpu adapter");
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let gamma = GpuGammaLut::from_ramp(&GammaRamp::standard());
@@ -8601,8 +8368,7 @@ mod tests {
                 GpuPresentation::identity(physical_extent[0], physical_extent[1]),
             ),
         ];
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
         assert_eq!(renderer.health(), RetainedGpuRendererHealth::Healthy);
         let frame = render_layers_readback(&mut renderer, &device, &queue, &layers);
 
@@ -8891,13 +8657,8 @@ mod tests {
             .collect()
     }
 
-    fn shader_landscape_test_device() -> Option<(tokio::runtime::Runtime, wgpu::Device, wgpu::Queue)>
-    {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build Tokio runtime for wgpu adapter discovery");
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+    fn test_wgpu_instance() -> wgpu::Instance {
+        wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             backend_options: wgpu::BackendOptions {
                 dx12: wgpu::Dx12BackendOptions {
@@ -8907,23 +8668,73 @@ mod tests {
                 ..Default::default()
             },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        })
+    }
+
+    fn request_test_device(
+        runtime: &tokio::runtime::Runtime,
+        instance: &wgpu::Instance,
+        label: &'static str,
+        allow_fallback: bool,
+    ) -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
         let adapter = runtime
-            .block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            }))
+            .block_on(async {
+                let primary = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await;
+                if primary.is_ok() || !allow_fallback {
+                    primary
+                } else {
+                    instance
+                        .request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::LowPower,
+                            compatible_surface: None,
+                            force_fallback_adapter: true,
+                        })
+                        .await
+                }
+            })
             .ok()?;
+        let descriptor = wgpu::DeviceDescriptor {
+            label: Some(label),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        };
         let (device, queue) = runtime
-            .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("lc_gpu_shader_landscape_test_device"),
-                required_features: wgpu::Features::empty(),
-                required_limits:
-                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-                ..Default::default()
-            }))
-            .expect("request shader landscape test device");
+            .block_on(adapter.request_device(&descriptor))
+            .unwrap_or_else(|error| panic!("request {label}: {error}"));
+        Some((adapter, device, queue))
+    }
+
+    fn test_wgpu_device(
+        label: &'static str,
+        allow_fallback: bool,
+    ) -> Option<(
+        tokio::runtime::Runtime,
+        wgpu::Instance,
+        wgpu::Adapter,
+        wgpu::Device,
+        wgpu::Queue,
+    )> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for wgpu adapter discovery");
+        let instance = test_wgpu_instance();
+        let (adapter, device, queue) =
+            request_test_device(&runtime, &instance, label, allow_fallback)?;
+        Some((runtime, instance, adapter, device, queue))
+    }
+
+    fn shader_landscape_test_device() -> Option<(tokio::runtime::Runtime, wgpu::Device, wgpu::Queue)>
+    {
+        let (runtime, _instance, _adapter, device, queue) =
+            test_wgpu_device("lc_gpu_shader_landscape_test_device", false)?;
         Some((runtime, device, queue))
     }
 
@@ -9155,18 +8966,11 @@ mod tests {
         };
 
         for (detail, expected) in [(1_u32, extent), (3, [extent[0] * 3, extent[1] * 3])] {
-            let mut renderer =
-                RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+            let mut renderer = test_renderer(&device, &queue);
             renderer.set_shader_landscape(true);
             renderer.set_landscape_detail(detail);
             renderer.set_pending_shader_landscape(Some((base, plan.clone())));
-            let _ = render_readback(
-                &mut renderer,
-                &device,
-                &queue,
-                &scene,
-                &GpuPresentation::identity(extent[0], extent[1]),
-            );
+            let _ = render_extent_readback(&mut renderer, &device, &queue, &scene, extent);
             assert_eq!(
                 renderer
                     .textures
@@ -9196,17 +9000,10 @@ mod tests {
         disabled_plan.shading_plane = None;
         disabled_plan.atlas.clear();
         disabled_plan.atlas_extent = [1, 1];
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
         renderer.set_landscape_detail(3);
         renderer.set_pending_shader_landscape(Some((base, disabled_plan)));
-        let _ = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(extent[0], extent[1]),
-        );
+        let _ = render_extent_readback(&mut renderer, &device, &queue, &scene, extent);
         assert_eq!(
             renderer
                 .textures
@@ -9234,8 +9031,7 @@ mod tests {
             eprintln!("no wgpu adapter; skipping renderer recreate flag carry-over");
             return;
         };
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
         renderer.set_mipmaps(true);
         renderer.set_smooth_landscape(true);
         renderer.set_shader_landscape(true);
@@ -9358,40 +9154,12 @@ mod tests {
         // material, so plain bilinear would ring every silhouette with dark
         // grey. Magnify a one-texel-wide edge 8x and check the boundary both
         // ramps in coverage and keeps the material's colour.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build Tokio runtime for wgpu adapter discovery");
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            backend_options: wgpu::BackendOptions {
-                dx12: wgpu::Dx12BackendOptions {
-                    shader_compiler: wgpu::Dx12Compiler::Fxc,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let Ok(adapter) =
-            runtime.block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            }))
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_landscape_smooth_test_device", false)
         else {
             eprintln!("no wgpu adapter; skipping landscape magnification readback");
             return;
         };
-        let (device, queue) = runtime
-            .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("lc_gpu_landscape_smooth_test_device"),
-                required_features: wgpu::Features::empty(),
-                required_limits:
-                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-                ..Default::default()
-            }))
-            .expect("request landscape magnification test device");
 
         // Two texels: opaque red material on the left, sky on the right.
         let base = GpuTextureId::fresh();
@@ -9438,20 +9206,13 @@ mod tests {
         };
 
         let row = |renderer: &mut RetainedGpuRenderer| {
-            let frame = render_readback(
-                renderer,
-                &device,
-                &queue,
-                &scene,
-                &GpuPresentation::identity(16, 4),
-            );
+            let frame = render_identity_readback(renderer, &device, &queue, &scene);
             (0..16)
                 .map(|x| readback_pixel(&frame, x, 1))
                 .collect::<Vec<_>>()
         };
 
-        let mut classic =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut classic = test_renderer(&device, &queue);
         let classic_row = row(&mut classic);
         assert!(
             classic_row
@@ -9460,7 +9221,7 @@ mod tests {
             "the C++ path is a hard nearest step: {classic_row:?}"
         );
 
-        let mut smooth = RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut smooth = test_renderer(&device, &queue);
         smooth.set_smooth_landscape(true);
         let smooth_row = row(&mut smooth);
         let partial: Vec<[u8; 4]> = smooth_row
@@ -9488,43 +9249,8 @@ mod tests {
 
     #[test]
     fn gpu_renderer_matches_cpu_reference_frame() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build Tokio runtime for wgpu adapter discovery");
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            backend_options: wgpu::BackendOptions {
-                dx12: wgpu::Dx12BackendOptions {
-                    shader_compiler: wgpu::Dx12Compiler::Fxc,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = runtime
-            .block_on(async {
-                let primary = instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::HighPerformance,
-                        compatible_surface: None,
-                        force_fallback_adapter: false,
-                    })
-                    .await;
-                if primary.is_ok() {
-                    primary
-                } else {
-                    instance
-                        .request_adapter(&wgpu::RequestAdapterOptions {
-                            power_preference: wgpu::PowerPreference::LowPower,
-                            compatible_surface: None,
-                            force_fallback_adapter: true,
-                        })
-                        .await
-                }
-            })
-            .unwrap_or_else(|_| {
+        let (runtime, instance, adapter, device, queue) =
+            test_wgpu_device("lc_gpu_parity_test_device", true).unwrap_or_else(|| {
                 panic!(
                     "gpu_renderer_matches_cpu_reference_frame requires a working wgpu adapter; \
                      no hardware or fallback adapter was available for Backends::all()"
@@ -9535,15 +9261,6 @@ mod tests {
             "GPU parity adapter: {} ({:?}, {:?})",
             adapter_info.name, adapter_info.backend, adapter_info.device_type
         );
-        let descriptor = wgpu::DeviceDescriptor {
-            label: Some("lc_gpu_parity_test_device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        };
-        let (device, queue) = runtime
-            .block_on(adapter.request_device(&descriptor))
-            .expect("request wgpu device for retained renderer parity test");
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let ids = SceneTextureIds {
@@ -9560,16 +9277,9 @@ mod tests {
         };
         let initial_mutable = [100, 50, 25, 255];
         let mut scene = representative_scene(ids, initial_mutable);
-        let mut renderer =
-            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = test_renderer(&device, &queue);
 
-        let initial = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
-        );
+        let initial = render_identity_readback(&mut renderer, &device, &queue, &scene);
         let validation = runtime.block_on(validation_scope.pop());
         assert!(
             validation.is_none(),
@@ -9595,24 +9305,12 @@ mod tests {
         let mut raw_scene = scene.clone();
         raw_scene.gamma = GpuGammaLut::from_ramp(&monitor_ramp);
         raw_scene.gamma_mode = GpuGammaMode::Disabled;
-        let raw = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &raw_scene,
-            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
-        );
+        let raw = render_identity_readback(&mut renderer, &device, &queue, &raw_scene);
         let mut expected_monitor = raw.rgba.clone();
         monitor_ramp.apply_to_rgba_bytes(&mut expected_monitor);
         let mut monitor_scene = raw_scene;
         monitor_scene.gamma_mode = GpuGammaMode::Monitor;
-        let monitor = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &monitor_scene,
-            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
-        );
+        let monitor = render_identity_readback(&mut renderer, &device, &queue, &monitor_scene);
         assert_ne!(monitor.rgba, raw.rgba);
         assert_eq!(
             monitor.rgba, expected_monitor,
@@ -9637,25 +9335,13 @@ mod tests {
             textures: Vec::new(),
             commands: Vec::new(),
         };
-        let _ = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &hidden,
-            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
-        );
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &hidden);
         assert_eq!(
             renderer.last_stats().resident_source_textures,
             10,
             "temporarily hidden C4Surface textures stay resident"
         );
-        let visible_again = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
-        );
+        let visible_again = render_identity_readback(&mut renderer, &device, &queue, &scene);
         assert_eq!(visible_again.rgba, initial.rgba);
         assert_eq!(renderer.last_stats().created_source_textures, 0);
         assert_eq!(renderer.last_stats().full_upload_bytes, 0);
@@ -9875,13 +9561,7 @@ mod tests {
                 [(4, 0), (3, 0), (2, 1), (1, 1)],
             ),
         ] {
-            let diagonal = render_readback(
-                &mut renderer,
-                &device,
-                &queue,
-                &scene,
-                &GpuPresentation::identity(5, 4),
-            );
+            let diagonal = render_identity_readback(&mut renderer, &device, &queue, &scene);
             for y in 0..4 {
                 for x in 0..5 {
                     let expected = if expected_pixels.contains(&(x, y)) {
@@ -9925,13 +9605,7 @@ mod tests {
                 style: GpuSolidStyle::NONE,
             }],
         };
-        let frame = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &frame_scene,
-            &GpuPresentation::identity(6, 6),
-        );
+        let frame = render_identity_readback(&mut renderer, &device, &queue, &frame_scene);
         for y in 0..6 {
             for x in 0..6 {
                 let on_frame = (1..=4).contains(&x)
@@ -9960,13 +9634,8 @@ mod tests {
                 style: GpuSolidStyle::NONE,
             }],
         };
-        let translucent_point = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &translucent_point_scene,
-            &GpuPresentation::identity(1, 1),
-        );
+        let translucent_point =
+            render_identity_readback(&mut renderer, &device, &queue, &translucent_point_scene);
         assert_eq!(
             readback_pixel(&translucent_point, 0, 0),
             [50, 25, 13, 160],
@@ -9988,13 +9657,7 @@ mod tests {
                 style: GpuSolidStyle::NONE,
             }],
         };
-        let additive = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &additive_scene,
-            &GpuPresentation::identity(1, 1),
-        );
+        let additive = render_identity_readback(&mut renderer, &device, &queue, &additive_scene);
         assert_eq!(
             readback_pixel(&additive, 0, 0),
             [50, 25, 13, 192],
@@ -10023,13 +9686,8 @@ mod tests {
                 style: GpuSolidStyle::NONE,
             }],
         };
-        let additive_filled = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &additive_filled_scene,
-            &GpuPresentation::identity(1, 1),
-        );
+        let additive_filled =
+            render_identity_readback(&mut renderer, &device, &queue, &additive_filled_scene);
         assert_eq!(
             readback_pixel(&additive_filled, 0, 0),
             [50, 25, 13, 192],
@@ -10122,13 +9780,7 @@ mod tests {
             .expect("linear draw remains captured")
             .into_scene([10, 6], Color::transparent(), &GammaRamp::standard());
         assert_eq!(tiled_scene.commands.len(), 1);
-        let tiled_gpu = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &tiled_scene,
-            &GpuPresentation::identity(10, 6),
-        );
+        let tiled_gpu = render_identity_readback(&mut renderer, &device, &queue, &tiled_scene);
         assert_eq!(tiled_gpu.rgba.len(), cpu_tiled.pixels().len());
         for (index, (&actual, &expected)) in
             tiled_gpu.rgba.iter().zip(cpu_tiled.pixels()).enumerate()
@@ -10145,13 +9797,8 @@ mod tests {
 
         let resized_extent = [10, 8];
         let resize_generation = renderer.generation();
-        let resized = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(resized_extent[0], resized_extent[1]),
-        );
+        let resized =
+            render_extent_readback(&mut renderer, &device, &queue, &scene, resized_extent);
         assert_eq!(
             resized.rgba,
             expected_frame(resized_extent, initial_mutable, &scene.gamma),
@@ -10178,13 +9825,7 @@ mod tests {
         mutable.pixels = Arc::from(updated_mutable);
         mutable.dirty = vec![Rect::new(0, 0, 1, 1)];
 
-        let dirty = render_readback(
-            &mut renderer,
-            &device,
-            &queue,
-            &scene,
-            &GpuPresentation::identity(resized_extent[0], resized_extent[1]),
-        );
+        let dirty = render_extent_readback(&mut renderer, &device, &queue, &scene, resized_extent);
         assert_eq!(
             dirty.rgba,
             expected_frame(resized_extent, updated_mutable, &scene.gamma),
@@ -10201,38 +9842,9 @@ mod tests {
             "first device reported wgpu validation error: {validation:?}"
         );
 
-        let replacement_adapter = runtime
-            .block_on(async {
-                let primary = instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::HighPerformance,
-                        compatible_surface: None,
-                        force_fallback_adapter: false,
-                    })
-                    .await;
-                if primary.is_ok() {
-                    primary
-                } else {
-                    instance
-                        .request_adapter(&wgpu::RequestAdapterOptions {
-                            power_preference: wgpu::PowerPreference::LowPower,
-                            compatible_surface: None,
-                            force_fallback_adapter: true,
-                        })
-                        .await
-                }
-            })
-            .expect("request a fresh adapter for replacement wgpu device");
-        let replacement_descriptor = wgpu::DeviceDescriptor {
-            label: Some("lc_gpu_replacement_test_device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults()
-                .using_resolution(replacement_adapter.limits()),
-            ..Default::default()
-        };
-        let (replacement_device, replacement_queue) = runtime
-            .block_on(replacement_adapter.request_device(&replacement_descriptor))
-            .expect("request replacement wgpu device");
+        let (_replacement_adapter, replacement_device, replacement_queue) =
+            request_test_device(&runtime, &instance, "lc_gpu_replacement_test_device", true)
+                .expect("request a fresh adapter and replacement wgpu device");
         let replacement_validation_scope =
             replacement_device.push_error_scope(wgpu::ErrorFilter::Validation);
         let previous_generation = renderer.generation();
@@ -10244,12 +9856,12 @@ mod tests {
         assert_eq!(renderer.generation(), replacement_generation);
         assert_ne!(replacement_generation, previous_generation);
         assert_eq!(renderer.health(), RetainedGpuRendererHealth::Healthy);
-        let recreated = render_readback(
+        let recreated = render_extent_readback(
             &mut renderer,
             &replacement_device,
             &replacement_queue,
             &scene,
-            &GpuPresentation::identity(resized_extent[0], resized_extent[1]),
+            resized_extent,
         );
         assert_eq!(
             recreated.rgba,
@@ -10561,6 +10173,51 @@ mod tests {
 
     fn rgba_f32(color: [u8; 4]) -> [f32; 4] {
         color.map(|component| f32::from(component) / 255.0)
+    }
+
+    fn test_renderer(device: &wgpu::Device, queue: &wgpu::Queue) -> RetainedGpuRenderer {
+        RetainedGpuRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm)
+    }
+
+    fn test_scene(
+        logical_extent: [u32; 2],
+        clear: Color,
+        textures: Vec<GpuTextureResource>,
+        commands: Vec<GpuCommand>,
+    ) -> GpuScene {
+        GpuScene {
+            logical_extent,
+            clear,
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures,
+            commands,
+        }
+    }
+
+    fn render_identity_readback(
+        renderer: &mut RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &GpuScene,
+    ) -> GpuReadbackFrame {
+        render_extent_readback(renderer, device, queue, scene, scene.logical_extent)
+    }
+
+    fn render_extent_readback(
+        renderer: &mut RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &GpuScene,
+        extent: [u32; 2],
+    ) -> GpuReadbackFrame {
+        render_readback(
+            renderer,
+            device,
+            queue,
+            scene,
+            &GpuPresentation::identity(extent[0], extent[1]),
+        )
     }
 
     fn render_readback(

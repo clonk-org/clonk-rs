@@ -41,7 +41,7 @@ fn initial_record_cleanup_matches_native_component_patterns() {
         "Icon.png",
         "Keep.bin",
     ] {
-        group.add_file(name, name.as_bytes().to_vec()).unwrap();
+        group.add_file(name, name.as_bytes().to_vec()).test_value();
     }
 
     clean_initial_record_group(&mut group);
@@ -138,7 +138,7 @@ fn runtime_join_restore_infos_come_from_dynamic_not_join_data_parameters() {
     let packet_restore_infos = restore_infos(7, b"Packet restore");
     let dynamic_restore_infos = restore_infos(42, b"Dynamic restore");
 
-    let directory = tempdir().expect("runtime join scenario directory");
+    let directory = tempdir();
     let combined_path = directory.path().join("Combined9.c4s");
     let mut combined = MutableGroup::new("Combined9.c4s");
     combined
@@ -146,20 +146,16 @@ fn runtime_join_restore_infos_come_from_dynamic_not_join_data_parameters() {
             "Scenario.txt",
             b"[Head]\r\nNetworkGame=1\r\nNetworkRuntimeJoin=1\r\n".to_vec(),
         )
-        .expect("add scenario core");
+        .test_value();
     combined
         .add_file(
             "SavePlayerInfos.txt",
             clonk_network::encode_player_info_list_ini(&dynamic_restore_infos)
                 .expect("encode dynamic restore infos"),
         )
-        .expect("add dynamic restore infos");
-    fs::write(
-        &combined_path,
-        combined.pack().expect("pack combined runtime scenario"),
-    )
-    .expect("write combined runtime scenario");
-    let combined = Group::open(&combined_path).expect("open combined runtime scenario");
+        .test_value();
+    fs::write(&combined_path, combined.pack().test_value()).test_value();
+    let combined = Group::open(&combined_path).test_value();
 
     let selected = client_network_restore_player_infos(
         true,
@@ -189,13 +185,9 @@ fn runtime_join_restore_infos_come_from_dynamic_not_join_data_parameters() {
             "Scenario.txt",
             b"[Head]\r\nNetworkGame=1\r\nNetworkRuntimeJoin=1\r\n".to_vec(),
         )
-        .expect("add scenario core without restore infos");
-    fs::write(
-        &missing_path,
-        missing.pack().expect("pack missing-restore scenario"),
-    )
-    .expect("write missing-restore scenario");
-    let missing = Group::open(&missing_path).expect("open missing-restore scenario");
+        .test_value();
+    fs::write(&missing_path, missing.pack().test_value()).test_value();
+    let missing = Group::open(&missing_path).test_value();
     let selected = client_network_restore_player_infos(
         true,
         &missing,
@@ -226,7 +218,7 @@ fn console_input_and_open_parameters_follow_native_framing() {
         std::io::Cursor::new(b"\n   \r\n/quit\r\nhello\tworld\nunterminated"),
         sender,
     )
-    .expect("read redirected console input");
+    .test_value();
     let mut events = receiver.into_iter();
     assert!(matches!(
         events.next(),
@@ -256,18 +248,15 @@ fn classic_recdump_c4r_suffix_retains_both_native_interpretations() {
 
 #[test]
 fn classic_command_line_direct_join_queries_the_first_reference() {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("bind direct-reference fixture");
-    let reference_server = listener.local_addr().expect("direct-reference address");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let reference_server = listener.local_addr().test_value();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept direct-reference query");
+        let (mut stream, _) = listener.accept().test_value();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("bound direct-reference request read");
+            .test_value();
         let mut request = [0_u8; 4096];
-        let size = stream
-            .read(&mut request)
-            .expect("read direct-reference query");
+        let size = stream.read(&mut request).test_value();
         let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
         assert!(request.starts_with("get / http/1.1"));
         assert!(request.contains("accept-language: de"));
@@ -277,7 +266,7 @@ fn classic_command_line_direct_join_queries_the_first_reference() {
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len(),
         )
-        .expect("write direct-reference response");
+        .test_value();
     });
     let config = clonk_network::ReferenceQueryConfig {
         language_sequence: "DE".to_string(),
@@ -288,9 +277,9 @@ fn classic_command_line_direct_join_queries_the_first_reference() {
         clonk_network::ReferenceEndpoint::Address(reference_server),
         &config,
     )
-    .expect("query first direct reference");
+    .test_value();
 
-    server.join().expect("direct-reference fixture thread");
+    server.test_join();
     assert_eq!(reference.title, "Direct fixture");
     assert_eq!(
         reference.addresses,
@@ -326,28 +315,26 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
             settings,
             password_needed: true,
         }))
-        .expect("queue passworded direct reference");
+        .test_value();
     app.classic_direct_reference_query = Some(ClassicDirectReferenceQuery { receiver });
     app.mode = AppMode::Loading;
     let (boot_sender, boot_receiver) = mpsc::channel();
     app.boot_loading = Some(BootLoadingState::new(boot_receiver));
 
-    app.poll_classic_direct_reference_query()
-        .expect("completed query waits for boot resources");
+    app.poll_classic_direct_reference_query().test_value();
     assert!(app.classic_direct_reference_query.is_some());
     assert!(app.pending_network_join.is_none());
     assert!(app.game_option_input_dialog.is_none());
 
     boot_sender
         .send(BootLoadingEvent::Finished(None))
-        .expect("finish boot resources");
+        .test_value();
     app.poll_boot_loading();
     assert!(app.boot_loading.is_none());
     assert_eq!(app.mode, AppMode::Loading);
     assert!(app.classic_direct_reference_query.is_some());
 
-    app.poll_classic_direct_reference_query()
-        .expect("passworded direct reference opens prompt after boot");
+    app.poll_classic_direct_reference_query().test_value();
 
     assert!(app.classic_direct_reference_query.is_none());
     assert!(app.startup_network_connection.is_none());
@@ -367,7 +354,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
     );
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
-        .expect("cancel direct-join password prompt");
+        .test_value();
     assert!(app.pending_network_join.is_none());
 }
 
@@ -401,28 +388,28 @@ fn save_description_preserves_native_definition_path_bytes() {
 
 #[test]
 fn optional_initial_network_game_source_distinguishes_missing_and_unreadable_entries() {
-    let directory = tempdir().expect("scenario directory");
-    let group = Group::open(directory.path()).expect("open scenario group");
+    let directory = tempdir();
+    let group = Group::open(directory.path()).test_value();
     assert_eq!(
         read_optional_initial_network_game_source(&group).expect("missing is optional"),
         None
     );
 
     let game_path = directory.path().join("Game.txt");
-    fs::write(&game_path, []).expect("write empty Game.txt");
+    fs::write(&game_path, []).test_value();
     assert_eq!(
         read_optional_initial_network_game_source(&group).expect("empty is optional"),
         None
     );
 
-    fs::write(&game_path, b"[Script]\nGlobals=1;42;").expect("write Game.txt");
+    fs::write(&game_path, b"[Script]\nGlobals=1;42;").test_value();
     assert_eq!(
         read_optional_initial_network_game_source(&group).expect("read Game.txt"),
         Some(b"[Script]\nGlobals=1;42;".to_vec())
     );
 
-    fs::remove_file(&game_path).expect("remove Game.txt");
-    fs::create_dir(&game_path).expect("create unreadable Game.txt directory");
+    fs::remove_file(&game_path).test_value();
+    fs::create_dir(&game_path).test_value();
     assert!(read_optional_initial_network_game_source(&group).is_err());
 }
 
@@ -461,11 +448,10 @@ fn help_regions_share_one_native_caption_slot() {
     let (mut app, owner, _crew, _first, target, inventory_point) = inventory_region_fixture();
     app.ingame_mouse_help = true;
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(inventory_point.x),
         f64::from(inventory_point.y),
-    ))
-    .expect("hover inventory while Help is active");
+    ));
     assert_eq!(
         app.ingame_mouse_help_caption
             .as_ref()
@@ -479,22 +465,17 @@ fn help_regions_share_one_native_caption_slot() {
     );
 
     let help_button = viewport_button_point(&app, owner, clonk_frontend::hud::ViewportButton::Help);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(help_button.x),
         f64::from(help_button.y),
-    ))
-    .expect("move Help onto the targetless Help button region");
+    ));
     assert!(
         app.ingame_mouse_help_caption.is_none(),
         "a targetless region replaces the prior Help tooltip"
     );
-    let caption = app
-        .ingame_mouse_caption
-        .caption
-        .as_ref()
-        .expect("the viewport button keeps its ordinary red region caption");
+    let caption = app.ingame_mouse_caption.caption.test_ref();
     let expected = app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
-    let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let button_rect = clonk_frontend::hud::viewport_button_rect(
         viewport,
         clonk_frontend::hud::ViewportButton::Help,
@@ -511,8 +492,7 @@ fn help_regions_share_one_native_caption_slot() {
 fn network_control_catch_up_latches_and_releases_render_skip() {
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(31, 1);
 
-    let catch_up = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("catch up deep ready-control backlog");
+    let catch_up = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     assert!(catch_up.skipped_render_frames > 0);
     assert!(
         !catch_up.skip_redraw,
@@ -522,8 +502,7 @@ fn network_control_catch_up_latches_and_releases_render_skip() {
     assert!(!app.network_control_pacing().skip_render);
 
     accumulator += schedule.simulation_interval;
-    let paced = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("resume normal rendering after catch-up");
+    let paced = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     assert_eq!(paced.executed_frames, 1);
     assert!(!paced.skip_redraw);
 }
@@ -532,8 +511,7 @@ fn network_control_catch_up_latches_and_releases_render_skip() {
 fn network_control_within_overflow_limit_keeps_normal_pacing() {
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(4, 1);
 
-    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("execute one timer-paced network frame");
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
     assert_eq!(outcome.executed_frames, 1);
     assert_eq!(app.network_control_pacing().behind, 3);
@@ -552,10 +530,7 @@ fn control_buffered_inside_the_presend_horizon_is_not_a_catch_up_backlog() {
     // client's own jitter buffer reads as permanent backlog and every frame
     // then runs unpaced.
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(7, 2);
-    let clock = app
-        .network_control_clock
-        .as_mut()
-        .expect("fixture installs a control clock");
+    let clock = app.network_control_clock.test_mut();
     clock.observe_control_send_time_ms(300);
     assert_eq!(
         clock
@@ -565,8 +540,7 @@ fn control_buffered_inside_the_presend_horizon_is_not_a_catch_up_backlog() {
         "a 300 ms link sizes the horizon at twelve frames"
     );
 
-    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("execute one timer-paced network frame");
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
     assert_eq!(outcome.executed_frames, 1);
     assert!(!app.network_control_pacing().overflow);
@@ -579,10 +553,7 @@ fn a_shallow_presend_horizon_keeps_the_cpp_overflow_limit() {
     // beyond the one being executed and so stays inside C++'s 3. Every link
     // C++'s mean-sized horizon describes fast-forwards exactly as C++ does.
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(4, 2);
-    let clock = app
-        .network_control_clock
-        .as_mut()
-        .expect("fixture installs a control clock");
+    let clock = app.network_control_clock.test_mut();
     clock.observe_control_send_time_ms(110);
     assert_eq!(
         clock
@@ -591,8 +562,7 @@ fn a_shallow_presend_horizon_keeps_the_cpp_overflow_limit() {
         Some(5)
     );
 
-    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("catch up a backlog C++ would also catch up");
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
     assert!(outcome.executed_frames > 1);
 }
@@ -603,15 +573,11 @@ fn a_backlog_beyond_the_presend_horizon_still_catches_up() {
     // shipped async control mode the host packs a tick without a straggler, so
     // a client can hold far more ready control than it ever submitted for.
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(12, 2);
-    let clock = app
-        .network_control_clock
-        .as_mut()
-        .expect("fixture installs a control clock");
+    let clock = app.network_control_clock.test_mut();
     clock.observe_control_send_time_ms(300);
     clock.calculate_performance();
 
-    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("catch up the control the horizon cannot explain");
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
     assert!(outcome.executed_frames > 1);
     assert!(!app.network_control_pacing().overflow);
@@ -624,16 +590,16 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
     let start_tick = 41_u32;
     app.network = Some(manager);
     app.network_control_clock = Some(NetworkControlClock::new(
-        i32::try_from(start_tick).unwrap(),
+        i32::try_from(start_tick).test_value(),
         1,
     ));
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(i32::try_from(start_tick).unwrap(), 1)
-            .expect("valid network control timing"),
+        clonk_engine::NetworkControlTiming::new(i32::try_from(start_tick).test_value(), 1)
+            .test_value(),
     );
     let (wake_tx, wake_rx) = mpsc::channel();
     app.install_network_event_waker(Arc::new(move |wake| {
-        wake_tx.send(wake).expect("deliver network wake");
+        wake_tx.send(wake).test_value();
     }));
     let mut schedule = frame_schedule_for_mode(
         app.mode,
@@ -643,8 +609,7 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
     );
     let mut accumulator = schedule.simulation_interval;
 
-    let blocked = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("attempt blocked control boundary");
+    let blocked = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     assert_eq!(blocked.executed_frames, 0);
     assert_eq!(accumulator, Duration::ZERO);
     assert_eq!(
@@ -657,15 +622,10 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
             tick: start_tick,
             controls: Vec::new(),
         })
-        .expect("queue completed control");
-    app.note_network_event_wake(
-        wake_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("completed control wakes the app"),
-    );
+        .test_value();
+    app.note_network_event_wake(wake_rx.recv_timeout(Duration::from_secs(1)).test_value());
     accumulator = Duration::from_millis(9);
-    let retried = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("retry completed control before the next timer");
+    let retried = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     assert_eq!(retried.executed_frames, 1);
     assert!(retried.immediate_network_retry);
     assert_eq!(accumulator, Duration::ZERO);
@@ -675,14 +635,9 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
             tick: start_tick + 1,
             controls: Vec::new(),
         })
-        .expect("queue future control");
-    app.note_network_event_wake(
-        wake_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("future control still signals the event loop"),
-    );
-    let future = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("future control cannot advance a non-due frame");
+        .test_value();
+    app.note_network_event_wake(wake_rx.recv_timeout(Duration::from_secs(1)).test_value());
+    let future = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     assert_eq!(future.executed_frames, 0);
     assert!(!future.immediate_network_retry);
 }
@@ -711,9 +666,11 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
     let mut missing_submission = passing.clone();
     missing_submission.submissions = 713;
     missing_submission.retained_gpu_submissions = 713;
-    assert!(validate_native_tick_presentation_budget(&missing_submission)
-        .unwrap_err()
-        .contains("successful presentation submissions 713 below native cadence 714"));
+    assert!(
+        validate_native_tick_presentation_budget(&missing_submission)
+            .unwrap_err()
+            .contains("successful presentation submissions 713 below native cadence 714")
+    );
 
     let mut missing_refresh = passing.clone();
     missing_refresh.refreshed_frames = 713;
@@ -723,9 +680,11 @@ fn deep_sea_gpu_presentation_meets_native_tick_budget() {
 
     let mut missing_simulation = passing.clone();
     missing_simulation.simulation_frames = 713;
-    assert!(validate_native_tick_presentation_budget(&missing_simulation)
-        .unwrap_err()
-        .contains("simulation frames 713 below native cadence 714"));
+    assert!(
+        validate_native_tick_presentation_budget(&missing_simulation)
+            .unwrap_err()
+            .contains("simulation frames 713 below native cadence 714")
+    );
 
     let mut too_slow = passing.clone();
     too_slow.graphics_average = Duration::from_micros(28_001);
@@ -768,8 +727,7 @@ fn network_control_catch_up_advances_non_control_frames() {
         "fixture starts on control cadence"
     );
 
-    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("catch up across rate-two non-control frames");
+    let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
     assert_eq!(outcome.executed_frames, 16);
     assert_eq!(app.network_control_pacing().behind, 3);
@@ -782,25 +740,25 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
     // C4PlayerList::Join (C4PlayerList.cpp:271-318) so the [Player1]
     // Crew= spec materialises as crew objects, instead of registering a
     // crew-less player.
-    let dir = tempdir().expect("tempdir");
-    let user_data = tempdir().expect("isolated user data");
+    let dir = tempdir();
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     configure_test_startup_participant(&paths, user_data.path());
     let scenario_dir = dir.path().join("JoinTest.c4s");
     let def_dir = scenario_dir.join("GOOD.c4d");
-    fs::create_dir_all(&def_dir).expect("definition dir");
+    fs::create_dir_all(&def_dir).test_value();
     fs::write(
         def_dir.join("DefCore.txt"),
         "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=1\n",
     )
-    .expect("write DefCore.txt");
-    fs::write(def_dir.join("Script.c"), "// crew def\n").expect("write def script");
+    .test_value();
+    fs::write(def_dir.join("Script.c"), "// crew def\n").test_value();
     write_test_definition_graphics(&def_dir);
     fs::write(
         scenario_dir.join("Scenario.txt"),
         "[Head]\nTitle=JoinTest\n\n[Player1]\nCrew=GOOD=2\nPosition=10,10\n",
     )
-    .expect("write Scenario.txt");
+    .test_value();
 
     let scenario_data =
         clonk_engine::Scenario::load_from_path_with_languages_and_definition_modules(
@@ -809,7 +767,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
             &["US"],
             &[def_dir.to_string_lossy()],
         )
-        .expect("scenario loads");
+        .test_value();
 
     let mut app = GameApp::new(
         320,
@@ -823,7 +781,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     app.scenario_game_options = GameOptionButtons::new(
         GameOptionContext::LocalSelector,
         GameOptionValues {
@@ -857,7 +815,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
         definition_modules: Vec::new(),
     };
     app.activate_loaded_scenario(frontend.clone(), &scenario_data)
-        .expect("scenario activates");
+        .test_value();
     assert!(app.engine.use_fair_crew());
     assert_eq!(app.engine.fair_crew_strength(), 4_321);
 
@@ -882,10 +840,8 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
         .snapshot
         .crew_selection
         .get(&app.local_owner)
-        .expect("crew selection exists after join");
-    let cursor = selection
-        .cursor
-        .expect("the crew cursor is selected at join");
+        .test_value();
+    let cursor = selection.cursor.test_value();
     // AdjustCursorCommand selects exactly the cursor (Cursor->DoSelect,
     // C4Player.cpp:1255-1257) — the app focus must adopt it instead of
     // stacking a second selection.
@@ -900,8 +856,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
         "the app focus adopts the join cursor"
     );
 
-    app.restart_current_scenario()
-        .expect("restart keeps the effective fixed definition vector");
+    app.restart_current_scenario().test_value();
     wait_for_running(&mut app);
     assert_eq!(
         app.active_scenario
@@ -925,7 +880,7 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
     // implicit ENRG rule (C4Game.cpp:4056-4076). The client must therefore
     // retain those narrow JoinData lists while consuming the full pending
     // packet into its prepared loading state.
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
 
     let scenario_dir = dir.path().join("NetworkRuleGoalSync.c4s");
     for (folder, id, category) in [
@@ -935,28 +890,28 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
         ("SynchronizedGoal.c4d", "GOAL", 4096),
     ] {
         let definition = scenario_dir.join(folder);
-        fs::create_dir_all(&definition).expect("definition dir");
+        fs::create_dir_all(&definition).test_value();
         fs::write(
             definition.join("DefCore.txt"),
             format!("[DefCore]\nid={id}\nName={id}\nCategory={category}\n"),
         )
-        .expect("write DefCore.txt");
+        .test_value();
         write_test_definition_graphics(&definition);
     }
-    fs::create_dir_all(&scenario_dir).expect("scenario dir");
+    fs::create_dir_all(&scenario_dir).test_value();
     fs::write(
         scenario_dir.join("Scenario.txt"),
         "[Head]\nTitle=NetworkRuleGoalSync\nNetworkGame=1\n\n\
-                 [Game]\nGoals=RACE=1;\nRules=RVLR=1;\n\n\
-                 [Landscape]\nMapZoom=10\n",
+             [Game]\nGoals=RACE=1;\nRules=RVLR=1;\n\n\
+             [Landscape]\nMapZoom=10\n",
     )
-    .expect("write Scenario.txt");
+    .test_value();
 
     let mut authoritative = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     let id_entry = |id: [u8; 4]| clonk_network::JoinDataIdListEntry {
-        id: clonk_network::JoinDataC4Id::from_bytes(id).expect("valid C4ID"),
+        id: clonk_network::JoinDataC4Id::from_bytes(id).test_value(),
         count: 1,
     };
     authoritative.parameters.rules = vec![id_entry(*b"RVLR"), id_entry(*b"ENRG")];
@@ -982,8 +937,7 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
     app.pending_network_join_data = Some(join_data.clone());
     app.pending_client_start_status = Some(status);
     app.client_combined_scenario_path = Some(scenario_dir.clone());
-    app.try_prepare_client_network_scenario()
-        .expect("install prepared client scenario from pending JoinData");
+    app.try_prepare_client_network_scenario().test_value();
     assert!(
         app.pending_network_join_data.is_none(),
         "the full pending JoinData packet is consumed after installation"
@@ -994,8 +948,7 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
         .as_ref()
         .is_some_and(|loading| !loading.finished)
     {
-        app.poll_loading()
-            .expect("activate the installed client scenario");
+        app.poll_loading().test_value();
         assert!(
             Instant::now() < deadline,
             "client scenario worker did not finish"
@@ -1040,8 +993,7 @@ fn control_script_errors_are_non_fatal_like_cpp() {
         source: ScriptError::parse("boom", 1, 1),
         recovery: None,
     };
-    let status = control_script_error_to_status(script_error)
-        .expect("script errors downgrade to a status message");
+    let status = control_script_error_to_status(script_error).test_value();
     assert!(
         status.contains("CLNK"),
         "status names the definition: {status}"
@@ -1155,16 +1107,16 @@ fn integrity_numbers_keep_native_scalar_grammar() {
     let bare_hex_prefix = b"[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=0x\n";
     assert!(startup_config_is_corrupted(bare_hex_prefix));
 
-    let dir = tempdir().expect("config root");
+    let dir = tempdir();
     let path = dir.path().join("clonk-rust.config");
     fs::write(
         &path,
         "[General]\nConfigResetSafety=\"7\"\nVendor=keep\n\n[Graphics]\nResolutionX=1234junk\n",
     )
-    .expect("write native prefix config");
+    .test_value();
     assert!(!validate_or_repair_startup_config(&path, false)
         .expect("canonicalize healthy native prefix config"));
-    let canonical = Config::load(&path).expect("reload native prefix config");
+    let canonical = Config::load(&path).test_value();
     assert_eq!(
         canonical.get_in(Some("General"), "ConfigResetSafety"),
         Some("42")
@@ -1179,7 +1131,7 @@ fn integrity_numbers_keep_native_scalar_grammar() {
         &path,
         "[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=\"1234\"\n",
     )
-    .expect("write quoted resolution config");
+    .test_value();
     assert!(!validate_or_repair_startup_config(&path, false)
         .expect("canonicalize quoted resolution default"));
     assert_eq!(
@@ -1192,18 +1144,18 @@ fn integrity_numbers_keep_native_scalar_grammar() {
 
 #[test]
 fn global_sound_discovery_uses_only_native_sound_c4g() {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let native = dir.path().join("Sound.c4g");
     let nested = native.join("Nested");
     let probable = dir.path().join("SoundExtra.c4g");
     let alternate = dir.path().join("Sound.ocg");
     for path in [&nested, &probable, &alternate] {
-        fs::create_dir_all(path).expect("create global sound fixture");
+        fs::create_dir_all(path).test_value();
     }
-    fs::write(native.join("Native.wav"), b"native").expect("write native sound");
-    fs::write(nested.join("Nested.wav"), b"nested").expect("write nested decoy");
-    fs::write(probable.join("Probable.wav"), b"probable").expect("write probable decoy");
-    fs::write(alternate.join("Alternate.wav"), b"alternate").expect("write alternate decoy");
+    fs::write(native.join("Native.wav"), b"native").test_value();
+    fs::write(nested.join("Nested.wav"), b"nested").test_value();
+    fs::write(probable.join("Probable.wav"), b"probable").test_value();
+    fs::write(alternate.join("Alternate.wav"), b"alternate").test_value();
 
     let (global, base_sample_loads) = discover_global_sound_libraries_at(dir.path());
     let mut resolver = SoundResolver::empty();
@@ -1351,22 +1303,19 @@ fn ordered_overlay_retains_additive_rgb_with_zero_alpha() {
 
     app.commit_pending_native_overlay();
 
-    let plan = app
-        .pending_native_presentation
-        .as_ref()
-        .expect("ordered presentation plan");
+    let plan = app.pending_native_presentation.test_ref();
     let layer = plan
         .batches
         .first()
         .and_then(|batch| batch.logical_layer.as_ref())
-        .expect("additive RGB contribution is retained as raster");
+        .test_value();
     assert_eq!(&layer[..4], &[37, 11, 5, 0]);
 }
 
 #[test]
 fn ordered_overlay_does_not_infer_clipper_from_shared_text_clip() {
     let mut app = new_running_sandbox_app();
-    let fonts = app.assets.clonk_fonts.clone().expect("classic test fonts");
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     let clip = Rect::new(7, 11, 101, 79);
     app.pending_native_presentation = Some(NativePresentationPlan::default());
     app.begin_native_text_capture(true);
@@ -1391,7 +1340,7 @@ fn ordered_overlay_does_not_infer_clipper_from_shared_text_clip() {
         .pending_native_presentation
         .as_ref()
         .and_then(|plan| plan.batches.first())
-        .expect("ordinary overlay batch");
+        .test_value();
     assert!(batch.logical_layer.is_some());
     assert!(batch.text.iter().all(|command| command.clip == Some(clip)));
     assert_eq!(
@@ -1408,7 +1357,7 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
         .objects
         .first()
         .map(|object| object.id)
-        .expect("sandbox target");
+        .test_value();
     let shape_height = app
         .snapshot
         .object(target)
@@ -1445,13 +1394,13 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
     let filtered_base = output.clone();
 
     app.render_native_game_messages(&mut output, presenter.presentation_geometry(), &gamma)
-        .expect("commit native target message");
+        .test_value();
     let viewport = app
         .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.local_owner)
-        .expect("local target-message viewport")
+        .test_value()
         .rect;
     let physical_viewport = Rect::new(
         viewport.x * 3,
@@ -1497,7 +1446,7 @@ fn scale_three_hud_caption_uses_one_pixel_native_edge() {
         .enumerate()
         .flat_map(|(batch, batch_data)| batch_data.text.iter().map(move |command| (batch, command)))
         .find(|(_, command)| command.text == "H")
-        .expect("HUD scenario caption was captured");
+        .test_value();
     assert!(batch_index > 0, "HUD text follows the world/base batch");
     assert!(
         plan.batches[batch_index].logical_layer.is_some(),
@@ -1515,7 +1464,7 @@ fn scale_one_point_five_hud_uses_fractional_native_font_bundle() {
     let mut app = new_classic_running_sandbox_app();
     app.configure_running_state("H".to_string(), DEFAULT_GROUND_HEIGHT);
     install_native_test_fonts(&mut app, 1.5);
-    let fonts = app.native_startup_fonts.as_deref().expect("native fonts");
+    let fonts = app.native_startup_fonts.as_deref().test_value();
     assert_eq!(fonts.text.raster_height(), 21);
     assert_eq!(fonts.main_small.raster_height(), 19);
 
@@ -1530,8 +1479,7 @@ fn scale_one_point_five_hud_uses_fractional_native_font_bundle() {
 
 #[test]
 fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
-    let mut definition =
-        Definition::from_script("M2PX", "Mod2 Picture", "").expect("definition compiles");
+    let mut definition = test_definition("M2PX", "Mod2 Picture", "");
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -1545,14 +1493,11 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         color_mask: None,
     }));
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("MOD2 picture definition registers");
+    engine.register_test_definition(definition);
     let image = engine
         .definition_picture_phase_image("M2PX", 0)
-        .expect("definition picture");
-    let mut transparent_definition = Definition::from_script("M2BG", "Transparent Picture", "")
-        .expect("transparent definition compiles");
+        .test_value();
+    let mut transparent_definition = test_definition("M2BG", "Transparent Picture", "");
     transparent_definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -1565,14 +1510,11 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         pixels: Arc::from([0, 0, 0, 0]),
         color_mask: None,
     }));
-    engine
-        .register_definition(transparent_definition)
-        .expect("transparent definition registers");
+    engine.register_test_definition(transparent_definition);
     let transparent_image = engine
         .definition_picture_phase_image("M2BG", 0)
-        .expect("transparent definition picture");
-    let mut owner_definition = Definition::from_script("M2OW", "Owner Overlay", "")
-        .expect("owner-overlay definition compiles");
+        .test_value();
+    let mut owner_definition = test_definition("M2OW", "Owner Overlay", "");
     owner_definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -1585,16 +1527,14 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         pixels: Arc::from([0, 255, 0, 255]),
         color_mask: Some(Arc::from([128, 128, 128, 128])),
     }));
-    engine
-        .register_definition(owner_definition)
-        .expect("owner-overlay definition registers");
+    engine.register_test_definition(owner_definition);
     let owner_image = engine
         .definition_picture_phase_image("M2OW", 0)
-        .expect("owner-overlay definition picture");
+        .test_value();
     let modulation = 0x007f_7f7f;
 
-    let inventory = compose_inventory_picture(image.clone(), Vec::new(), 0, modulation, 2)
-        .expect("inventory picture");
+    let inventory =
+        compose_inventory_picture(image.clone(), Vec::new(), 0, modulation, 2).test_value();
     assert_eq!(
         inventory.pixels(),
         &[127, 255, 255, 128],
@@ -1616,7 +1556,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
             rank: None,
         },
     )
-    .expect("owned menu picture");
+    .test_value();
     assert_eq!(
         menu.pixels(),
         &[128, 255, 255, 128],
@@ -1631,7 +1571,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         2,
         0,
     )
-    .expect("masked inventory picture");
+    .test_value();
     assert_eq!(
         masked_inventory.pixels(),
         &[31, 63, 95, 128],
@@ -1653,12 +1593,12 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         },
         0,
     )
-    .expect("masked owned-menu picture");
+    .test_value();
     assert_eq!(masked_menu.pixels(), &[31, 63, 95, 128]);
 
     let prepared_owner =
         prepare_inventory_picture(owner_image.clone(), Vec::new(), 0x00ff_0000, modulation, 2)
-            .expect("two-pass owner inventory picture");
+            .test_value();
     assert_eq!(prepared_owner.base.pixels(), &[0, 255, 0, 255]);
     assert_eq!(prepared_owner.overlays.len(), 1);
     assert_eq!(
@@ -1673,7 +1613,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         2,
         clonk_frontend::AdvancedRendererConfig::DEFAULT,
     )
-    .expect("default-modulation MOD2 layers");
+    .test_value();
     assert_eq!(default_mod2_base, [255, 255, 255, 255]);
     assert_eq!(
         default_mod2_owner.expect("owner pass"),
@@ -1682,11 +1622,11 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
     );
     let owner_inventory =
         compose_inventory_picture(owner_image.clone(), Vec::new(), 0x00ff_0000, modulation, 2)
-            .expect("flattened two-pass owner inventory picture");
+            .test_value();
     assert_eq!(owner_inventory.pixels(), &[32, 127, 0, 255]);
     let fully_faded_owner =
         prepare_inventory_picture(owner_image.clone(), Vec::new(), 0x00ff_0000, 0xffff_ffff, 0)
-            .expect("fully faded owner inventory picture");
+            .test_value();
     assert_eq!(fully_faded_owner.base.pixels(), &[0, 255, 0, 0]);
     assert_eq!(
         fully_faded_owner.overlays[0].picture.pixels(),
@@ -1706,7 +1646,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
             0x0080_4020,
             mode,
         )
-        .expect("owner-mode inventory picture");
+        .test_value();
         assert_eq!(prepared.overlays[0].picture.pixels(), &expected);
     }
     let owner_menu = compose_owned_menu_picture(
@@ -1724,7 +1664,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
             rank: None,
         },
     )
-    .expect("packed two-pass owner menu picture");
+    .test_value();
     assert_eq!(owner_menu.pixels(), &[31, 126, 0, 255]);
 
     let render_cached_picture = |picture: &ImageData| {
@@ -1749,8 +1689,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         "the cached straight-alpha menu pixel is blended exactly once",
     );
 
-    let black_reset = compose_inventory_picture(image.clone(), Vec::new(), 0, 0, 2)
-        .expect("zero-modulation MOD2 picture");
+    let black_reset = compose_inventory_picture(image.clone(), Vec::new(), 0, 0, 2).test_value();
     assert_eq!(black_reset.pixels(), &[0, 0, 0, 128]);
     let software_zero = compose_owned_menu_picture(
         image.clone(),
@@ -1767,7 +1706,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
             rank: None,
         },
     )
-    .expect("zero-modulation owned menu picture");
+    .test_value();
     assert_eq!(software_zero.pixels(), &[0, 2, 130, 128]);
 
     let transparent_overlay =
@@ -1787,7 +1726,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
             rank: None,
         },
     )
-    .expect("transparent software overlay");
+    .test_value();
     assert_eq!(
         software_transparent_overlay.pixels(),
         &[63, 127, 191, 128],
@@ -1806,7 +1745,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         0,
         0,
     )
-    .expect("transformed MOD2 inventory overlay");
+    .test_value();
     assert_eq!(overlay_inventory.pixels(), &[127, 255, 255, 128]);
     assert_eq!(
         render_cached_picture(&overlay_inventory),
@@ -1814,8 +1753,8 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         "a translucent overlay over a transparent base is not alpha-squared",
     );
 
-    let additive_picture = compose_inventory_picture(image.clone(), Vec::new(), 0, modulation, 3)
-        .expect("MOD2+additive inventory picture");
+    let additive_picture =
+        compose_inventory_picture(image.clone(), Vec::new(), 0, modulation, 3).test_value();
     let mut additive_target = Surface::new(45, 45, PixelFormat::Rgba8888);
     additive_target.fill(Color::opaque(10, 20, 30));
     let fallback_font = test_font();
@@ -1849,7 +1788,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
         0,
         0,
     )
-    .expect("mixed additive inventory layers prepare");
+    .test_value();
     assert!(prepared_mixed.overlays[0].additive);
     let mut mixed_target = Surface::new(45, 45, PixelFormat::Rgba8888);
     mixed_target.fill(Color::opaque(10, 20, 30));
@@ -1890,7 +1829,7 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
             rank: None,
         },
     )
-    .expect("inherited zero-MOD2 owned-menu overlay");
+    .test_value();
     assert_eq!(
         overlay_menu.pixels(),
         &[0, 2, 130, 128],
@@ -1903,11 +1842,11 @@ fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
 fn network_row_colors_disable_errors_but_not_too_few_warning() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated network-row user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     configure_test_startup_participant(&paths, user_data.path());
     let scenario_root = paths.scenario_dir().to_path_buf();
-    fs::create_dir_all(&scenario_root).expect("create network-row scenario root");
+    fs::create_dir_all(&scenario_root).test_value();
     for (name, core) in [
         (
             "Replay.c4s",
@@ -1923,29 +1862,26 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
         ),
     ] {
         let path = scenario_root.join(name);
-        fs::create_dir(&path).expect("create network-row scenario group");
-        fs::write(path.join("Scenario.txt"), core).expect("write network-row scenario core");
+        fs::create_dir(&path).test_value();
+        fs::write(path.join("Scenario.txt"), core).test_value();
     }
 
     let scenarios = resource_scenario::discover(&scenario_root)
-        .expect("discover network-row scenarios")
+        .test_value()
         .into_iter()
         .map(|entry| FrontendScenario::from_resource(entry, "Test scenarios"))
         .collect::<Vec<_>>();
-    let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("network-row menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
 
     let render_row_alphas = |app: &mut GameApp| {
-        let assets = app.assets.scensel_assets().expect("scenario assets");
-        let button_down = app
-            .assets
-            .dialog_image("GUIButtonDown.png")
-            .expect("scenario button-down plank");
-        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
-        let book = app.assets.book_fonts.clone().expect("book fonts");
+        let assets = app.assets.scensel_assets().test_value();
+        let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+        let fonts = app.assets.clonk_fonts.clone().test_value();
+        let book = app.assets.book_fonts.clone().test_value();
         let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
         draw_scensel_dynamic(
             &mut surface,
@@ -1959,7 +1895,7 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
             startup_gamma(),
             true,
         )
-        .expect("render network-row labels");
+        .test_value();
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, &fonts);
         let item_h = clonk_frontend::startup_scensel::scen_list_item_height(&book.text);
         let label_x = layout.list.x + 3 + item_h + 2;
@@ -2030,16 +1966,11 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
 fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated replay-gate user data");
-    let scenario_group = tempdir().expect("replay-gate scenario");
-    fs::write(
-                scenario_group.path().join("Scenario.txt"),
-                "[Head]\nTitle=Replay\nReplay=1\nMinPlayer=9\nMaxPlayer=0\n\n[Definitions]\nAllowUserChange=true\n",
-            )
-            .expect("write replay core");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
+    fs::write(scenario_group.path().join("Scenario.txt"), "[Head]\nTitle=Replay\nReplay=1\nMinPlayer=9\nMaxPlayer=0\n\n[Definitions]\nAllowUserChange=true\n").test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "General", "Participants", "")
-        .expect("clear startup participants");
+    persist_config_value(&paths, "General", "Participants", "").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let mut scenario = FrontendScenario::fallback();
     scenario.identifier = "Replay.c4s".to_string();
@@ -2047,8 +1978,8 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     scenario.path = Some(scenario_group.path().to_path_buf());
     scenario.allow_user_change = Some(true);
     let scenarios = vec![scenario.clone()];
-    let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("network replay menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
     app.open_network_host_scenario_browser();
@@ -2063,7 +1994,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
             },
         )]
     })
-    .expect("network replay rejection is a handled dialog");
+    .test_value();
 
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert_eq!(
@@ -2089,7 +2020,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
         clonk_frontend::message_dialog::MessageDialogIcon::ERROR
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss replay error");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert!(app.definition_selector.is_none());
     reset_cached_app_paths();
@@ -2098,13 +2029,13 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
 #[test]
 fn network_mission_access_gate_precedes_replay_rejection() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated mission-access user data");
-    let scenario_group = tempdir().expect("mission-access scenario");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nTitle=Locked replay\nMissionAccess=LOCK\nReplay=1\n",
     )
-    .expect("write locked replay core");
+    .test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let app = new_menu_app_with_paths(640, 480, &paths);
     let mut scenario = FrontendScenario::fallback();
@@ -2118,8 +2049,7 @@ fn network_mission_access_gate_precedes_replay_rejection() {
     ));
     // C4Config only reads the file at load, so the granted list has to reach
     // the live config the way it does natively: through startup.
-    persist_config_value(&paths, "General", "MissionAccess", "other;lock")
-        .expect("grant case-insensitive mission access");
+    persist_config_value(&paths, "General", "MissionAccess", "other;lock").test_value();
     let granted = new_menu_app_with_paths(640, 480, &paths);
     assert!(matches!(
         granted
@@ -2139,13 +2069,13 @@ fn network_mission_access_gate_honours_memory_only_grant() {
     // C4StartupScenSelDlg.cpp:1838-1856). A password earned this session must
     // therefore unlock the network selector exactly as it unlocks the local one.
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated mission-access user data");
-    let scenario_group = tempdir().expect("mission-access scenario");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nTitle=Locked replay\nMissionAccess=LOCK\nReplay=1\n",
     )
-    .expect("write locked replay core");
+    .test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let app = new_menu_app_with_paths(640, 480, &paths);
     let mut scenario = FrontendScenario::fallback();
@@ -2175,16 +2105,11 @@ fn network_mission_access_gate_honours_memory_only_grant() {
 fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated warning user data");
-    let scenario_group = tempdir().expect("warning scenario");
-    fs::write(
-                scenario_group.path().join("Scenario.txt"),
-                "[Head]\nTitle=Needs players\nMinPlayer=2\nMaxPlayer=4\n\n[Definitions]\nAllowUserChange=true\n",
-            )
-            .expect("write warning core");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
+    fs::write(scenario_group.path().join("Scenario.txt"), "[Head]\nTitle=Needs players\nMinPlayer=2\nMaxPlayer=4\n\n[Definitions]\nAllowUserChange=true\n").test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "General", "Participants", "")
-        .expect("clear startup participants");
+    persist_config_value(&paths, "General", "Participants", "").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let mut scenario = FrontendScenario::fallback();
     scenario.identifier = "NeedsPlayers.c4s".to_string();
@@ -2192,8 +2117,8 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     scenario.path = Some(scenario_group.path().to_path_buf());
     scenario.allow_user_change = Some(true);
     let scenarios = vec![scenario.clone()];
-    let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("network warning menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
     app.open_network_host_scenario_browser();
@@ -2208,8 +2133,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
         )]
     };
 
-    app.handle_menu_input(|_| start())
-        .expect("too-few warning opens");
+    app.handle_menu_input(|_| start()).test_value();
     let dialog = &app.message_dialogs[0].state;
     assert_eq!(dialog.caption(), "Start Game");
     assert_eq!(
@@ -2241,12 +2165,11 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
         Some("1")
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("cancel warning");
+        .test_value();
     assert!(app.definition_selector.is_none());
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.handle_menu_input(|_| start())
-        .expect("hidden warning continues immediately");
+    app.handle_menu_input(|_| start()).test_value();
     assert!(app.message_dialogs.is_empty());
     assert!(app.definition_selector.is_some());
     assert_eq!(
@@ -2262,17 +2185,16 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
 #[test]
 fn network_maximum_error_overrides_the_too_few_warning_text() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated ordered warning user data");
-    let scenario_group = tempdir().expect("ordered warning scenario");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nTitle=Overconstrained\nMinPlayer=2\nMaxPlayer=0\n",
     )
-    .expect("write overconstrained scenario core");
+    .test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let app = new_menu_app_with_paths(640, 480, &paths);
-    persist_config_value(&paths, "General", "Participants", "One")
-        .expect("configure one overconstrained participant");
+    persist_config_value(&paths, "General", "Participants", "One").test_value();
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_group.path().to_path_buf());
     assert!(matches!(
@@ -2286,17 +2208,16 @@ fn network_maximum_error_overrides_the_too_few_warning_text() {
 #[test]
 fn network_savegame_zero_max_lifts_to_minimum_for_selector_check() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated savegame selector user data");
-    let scenario_group = tempdir().expect("savegame selector scenario");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nTitle=Saved round\nSaveGame=1\nMinPlayer=3\nMaxPlayer=0\n",
     )
-    .expect("write savegame selector core");
+    .test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let app = new_menu_app_with_paths(640, 480, &paths);
-    persist_config_value(&paths, "General", "Participants", "One;Two;Three")
-        .expect("configure savegame selector participants");
+    persist_config_value(&paths, "General", "Participants", "One;Two;Three").test_value();
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_group.path().to_path_buf());
 
@@ -2309,22 +2230,22 @@ fn network_savegame_zero_max_lifts_to_minimum_for_selector_check() {
 
 #[test]
 fn definition_file_scan_is_flat_case_insensitive_and_raw_ordered() {
-    let root = tempdir().expect("definition root");
-    fs::create_dir(root.path().join("Folder.C4D")).expect("definition directory");
-    fs::write(root.path().join("Packed.c4d"), b"pack").expect("definition file");
-    fs::create_dir(root.path().join("Ignore.c4f")).expect("ignored folder");
-    fs::create_dir_all(root.path().join("Nested/Hidden.c4d")).expect("nested definition");
+    let root = tempdir();
+    fs::create_dir(root.path().join("Folder.C4D")).test_value();
+    fs::write(root.path().join("Packed.c4d"), b"pack").test_value();
+    fs::create_dir(root.path().join("Ignore.c4f")).test_value();
+    fs::create_dir_all(root.path().join("Nested/Hidden.c4d")).test_value();
 
     let expected = fs::read_dir(root.path())
-        .expect("raw directory iteration")
-        .map(|entry| entry.expect("entry").path())
+        .test_value()
+        .map(|entry| entry.test_value().path())
         .filter(|path| {
             path.extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("c4d"))
         })
         .collect::<Vec<_>>();
-    let actual = enumerate_startup_definition_files(root.path()).expect("definition scan");
+    let actual = enumerate_startup_definition_files(root.path()).test_value();
     assert_eq!(actual, expected, "the selector must not sort readdir order");
     assert_eq!(actual.len(), 2);
 }
@@ -2333,17 +2254,15 @@ fn definition_file_scan_is_flat_case_insensitive_and_raw_ordered() {
 fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated user data");
-    let executable_data = tempdir().expect("isolated executable data");
+    let user_data = tempdir();
+    let executable_data = tempdir();
     let definition_root = executable_data.path().join("Definitions");
-    fs::create_dir_all(definition_root.join("Alpha.c4d")).expect("fixed definition");
-    fs::create_dir(definition_root.join("Beta.C4D")).expect("optional definition");
+    fs::create_dir_all(definition_root.join("Alpha.c4d")).test_value();
+    fs::create_dir(definition_root.join("Beta.C4D")).test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(executable_data.path()));
     configure_test_startup_participant(&paths, user_data.path());
-    persist_config_value(&paths, "General", "DefinitionPath", "Definitions/")
-        .expect("configure selector root");
-    let configured_definition_paths =
-        startup_definition_paths(&paths).expect("read configured definition paths");
+    persist_config_value(&paths, "General", "DefinitionPath", "Definitions/").test_value();
+    let configured_definition_paths = startup_definition_paths(&paths).test_value();
     assert_eq!(
         configured_definition_paths,
         StartupDefinitionPaths {
@@ -2362,15 +2281,14 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         Some(&(std::path::MAIN_SEPARATOR as u8)),
         "the active prefix retains DefinitionPath's trailing separator"
     );
-    let external = tempdir().expect("absolute definition prefix");
+    let external = tempdir();
     let external_value = format!(
         "{}{sep}",
         external.path().display(),
         sep = std::path::MAIN_SEPARATOR
     );
-    persist_config_value(&paths, "General", "DefinitionPath", &external_value)
-        .expect("configure absolute definition prefix");
-    let absolute_paths = startup_definition_paths(&paths).expect("read absolute definition prefix");
+    persist_config_value(&paths, "General", "DefinitionPath", &external_value).test_value();
+    let absolute_paths = startup_definition_paths(&paths).test_value();
     assert_eq!(
         absolute_paths.selector_root,
         concatenate_legacy_path(
@@ -2390,8 +2308,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         "game loading honors an absolute DefinitionPath independently"
     );
     let missing_definition_root = executable_data.path().join("missing-definitions");
-    persist_config_value(&paths, "General", "DefinitionPath", "/missing-definitions/")
-        .expect("configure absent selector root");
+    persist_config_value(&paths, "General", "DefinitionPath", "/missing-definitions/").test_value();
     assert_eq!(
         startup_definition_paths(&paths).expect("read absent definition paths"),
         StartupDefinitionPaths {
@@ -2400,8 +2317,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         },
         "the selector displays an absent configured path, but C4Game does not expand it"
     );
-    persist_config_value(&paths, "General", "DefinitionPath", "Definitions/")
-        .expect("restore selector root");
+    persist_config_value(&paths, "General", "DefinitionPath", "Definitions/").test_value();
     let mut app = GameApp::new(
         1280,
         720,
@@ -2420,7 +2336,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     wait_for_menu(&mut app);
     app.open_scenario_browser();
 
@@ -2430,10 +2346,9 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     scenario.allow_user_change = Some(true);
     scenario.definition_modules = vec!["Alpha.c4d".to_string()];
     app.menu_state.definition_checkbox_checked = false;
-    app.open_definition_selector(scenario.clone())
-        .expect("open definition selector");
+    app.open_definition_selector(scenario.clone()).test_value();
 
-    let controller = app.definition_selector.as_ref().expect("selector opens");
+    let controller = app.definition_selector.test_ref();
     assert_eq!(
         app.pending_definition_selection
             .as_ref()
@@ -2459,10 +2374,8 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     assert_eq!(controller.selected_index(), None);
 
     let mut frame = vec![0_u8; 1280 * 720 * 4];
-    app.render(&mut frame)
-        .expect("exact classic selector resources render");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("unselected Enter opens recursive error");
+    app.test_render(&mut frame);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(app.definition_selector.is_some());
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.message_dialogs[0].state.caption(), "Error");
@@ -2470,25 +2383,21 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         app.message_dialogs[0].state.message(),
         "Please select a file first!"
     );
-    app.render(&mut frame)
-        .expect("nested message renders above inactive selector");
+    app.test_render(&mut frame);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("close nested error");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("the error-opening release remains captured");
+        .test_value();
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
-    app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("F5 refreshes selector");
-    let controller = app.definition_selector.as_ref().expect("selector remains");
+    app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+    let controller = app.definition_selector.test_ref();
     assert_eq!(controller.selected_index(), None);
     assert!(
         controller.rows().iter().all(|row| !row.is_checked()),
         "C4DefinitionSelDlg does not reapply even fixed checks after F5"
     );
-    app.handle_key(VirtualKeyCode::F5, ElementState::Released)
-        .expect("release refresh key");
+    app.test_key(VirtualKeyCode::F5, ElementState::Released);
 
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button: ControlButton::Right,
@@ -2504,12 +2413,11 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             class: GuiButtonClass::Low,
             state: ElementState::Released,
         },
-    ])
-    .expect("gamepad OK release opens recursive selection error");
+    ]);
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss gamepad selection error by non-gamepad input");
-    app.process_gamepad_event_batch([
+        .test_value();
+    app.test_gamepad_events([
         GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button: ControlButton::Left,
@@ -2520,8 +2428,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             button: ControlButton::Down,
             state: ElementState::Pressed,
         },
-    ])
-    .expect("next gamepad gesture reaches the selector");
+    ]);
     assert_eq!(
         app.definition_selector
             .as_ref()
@@ -2530,8 +2437,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         "focus return selects the first row and the following Down reaches the second"
     );
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Escape cancels selector");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.definition_selector.is_none());
     assert!(app.pending_definition_selection.is_none());
     assert!(
@@ -2539,17 +2445,15 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             .contains(&VirtualKeyCode::Escape),
         "close-on-key-down retains the matching physical release"
     );
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("captured Escape release");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     assert!(app.definition_selector_consumed_keys.is_empty());
     assert!(
         !app.menu_state.definition_checkbox_checked,
         "cancel must retain the user's current checkbox toggle"
     );
 
-    app.open_definition_selector(scenario.clone())
-        .expect("open definition selector");
-    app.process_gamepad_event_batch([
+    app.open_definition_selector(scenario.clone()).test_value();
+    app.test_gamepad_events([
         GamepadEvent::GuiButton {
             slot: GamepadSlot::new(0),
             class: GuiButtonClass::High,
@@ -2565,55 +2469,45 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             class: GuiButtonClass::High,
             state: ElementState::Released,
         },
-    ])
-    .expect("high gamepad button cancels and captures duplicate batch events");
+    ]);
     assert!(app.definition_selector.is_none());
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.open_definition_selector(scenario.clone())
-        .expect("open definition selector");
-    app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0))
-        .expect("move over selector backdrop");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("selector acquires pointer gesture");
+    app.open_definition_selector(scenario.clone()).test_value();
+    app.test_cursor(PhysicalPosition::new(10.0, 10.0));
+    app.test_left_button(ElementState::Pressed);
     assert!(app.definition_selector_pointer_capture);
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
-    .expect("close selector before physical pointer release");
+    .test_value();
     assert!(app.definition_selector_pointer_capture);
-    app.handle_mouse_button(ElementState::Released)
-        .expect("closed selector consumes pointer release");
+    app.test_left_button(ElementState::Released);
     assert!(!app.definition_selector_pointer_capture);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.open_definition_selector(scenario.clone())
-        .expect("open definition selector");
-    app.handle_touch(TouchPhase::Started, GuiPoint::new(10.0, 10.0))
-        .expect("selector acquires touch gesture");
+    app.open_definition_selector(scenario.clone()).test_value();
+    app.test_touch(TouchPhase::Started, GuiPoint::new(10.0, 10.0));
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
-    .expect("close selector before touch end");
+    .test_value();
     assert!(app.definition_selector_pointer_capture);
-    app.handle_touch(TouchPhase::Ended, GuiPoint::new(10.0, 10.0))
-        .expect("closed selector consumes touch end");
+    app.test_touch(TouchPhase::Ended, GuiPoint::new(10.0, 10.0));
     assert!(!app.definition_selector_pointer_capture);
 
     // Low activates OK on release. Keep the remainder of that same
     // gamepad batch away from the newly running sandbox.
     let mut sandbox = scenario;
     sandbox.path = None;
-    app.open_definition_selector(sandbox)
-        .expect("open definition selector");
+    app.open_definition_selector(sandbox).test_value();
     let optional_index = app
         .definition_selector
-        .as_ref()
-        .expect("sandbox definition selector")
+        .test_ref()
         .rows()
         .iter()
         .position(|row| row.filename() == "Beta.C4D")
-        .expect("optional definition row");
+        .test_value();
     // C4DefinitionSelDlg retains DirectoryIterator's native order
     // (src/C4FileSelDlg.cpp:251-268), so APFS and ext4 may place the
     // optional row on opposite sides of the fixed row. Drive to the named row
@@ -2623,7 +2517,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         button: ControlButton::Down,
         state: ElementState::Pressed,
     });
-    app.process_gamepad_event_batch(select_optional.chain([
+    app.test_gamepad_events(select_optional.chain([
         GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button: ControlButton::Right,
@@ -2649,8 +2543,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             action: GamepadActionType::MenuToggle,
             state: ElementState::Pressed,
         },
-    ]))
-    .expect("release-close captures duplicate gamepad aliases");
+    ]));
     assert!(matches!(app.mode, AppMode::Running));
     assert!(app.definition_selector.is_none());
     assert!(app.ingame_menu.is_none());
@@ -2662,26 +2555,26 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     let scenario_path = user_data.path().join("Start.c4s");
     let rooted_objects = definition_root.join("Objects.c4d");
     let original_objects = executable_data.path().join("Objects.c4d");
-    fs::create_dir_all(&scenario_path).expect("rooted scenario group");
-    fs::create_dir_all(&rooted_objects).expect("rooted Objects definition group");
-    fs::create_dir_all(&original_objects).expect("original Objects definition group");
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::create_dir_all(&rooted_objects).test_value();
+    fs::create_dir_all(&original_objects).test_value();
     fs::write(
         rooted_objects.join("DefCore.txt"),
         "[DefCore]\nid=ROOT\nName=Rooted\nCategory=1\n",
     )
-    .expect("rooted Objects DefCore");
+    .test_value();
     fs::write(
         original_objects.join("DefCore.txt"),
         "[DefCore]\nid=ORIG\nName=Original\nCategory=1\n",
     )
-    .expect("original Objects DefCore");
+    .test_value();
     write_test_definition_graphics(&rooted_objects);
     write_test_definition_graphics(&original_objects);
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Definition Root Start\n",
     )
-    .expect("rooted scenario core");
+    .test_value();
     let mut rooted_scenario = FrontendScenario::fallback();
     rooted_scenario.identifier = "rooted-start".to_string();
     rooted_scenario.title = "Definition Root Start".to_string();
@@ -2691,7 +2584,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         vec!["Objects.c4d".to_string()],
         Some(definition_root.clone()),
     )
-    .expect("start with active custom definition root");
+    .test_value();
     wait_for_running(&mut app);
     let expected_effective = vec![
         rooted_objects.to_string_lossy().into_owned(),
@@ -2704,8 +2597,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             definition_root: None,
         }) if modules == &expected_effective
     ));
-    app.restart_current_scenario()
-        .expect("restart rooted definition scenario");
+    app.restart_current_scenario().test_value();
     wait_for_running(&mut app);
     assert!(matches!(
         app.active_definition_load.as_ref(),
@@ -2714,11 +2606,9 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
             definition_root: None,
         }) if modules == &expected_effective
     ));
-    app.quick_save()
-        .expect("save preserves the effective definition vector");
+    app.quick_save().test_value();
     app.active_definition_load = None;
-    app.quick_load()
-        .expect("save reload resolves the preserved definition vector");
+    app.quick_load().test_value();
     assert!(matches!(
         app.active_definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
@@ -2755,21 +2645,20 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     outer.children = vec![inner.clone()];
 
     let scenarios = vec![outer];
-    let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("nested selector menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_menu_app(800, 600);
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
     app.open_network_game_dialog();
     app.startup_network_dialog
-        .as_mut()
-        .expect("retained NetDlg")
+        .test_mut()
         .set_join_address("remembered.example:11112");
 
     app.process_network_dialog_actions(vec![
         clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
     ])
-    .expect("open network scenario selector");
+    .test_value();
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert_eq!(
         app.scenario_selector_mode,
@@ -2791,9 +2680,9 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         Some("outer")
     );
     app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
-        .expect("press outer folder");
+        .test_value();
     app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
-        .expect("release outer folder");
+        .test_value();
     assert_eq!(
         app.menu_state
             .stack
@@ -2809,9 +2698,9 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         Some("outer/inner")
     );
     app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
-        .expect("press inner folder");
+        .test_value();
     app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
-        .expect("release inner folder");
+        .test_value();
     assert_eq!(
         app.menu_state
             .stack
@@ -2825,14 +2714,12 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
         ScenarioSelectorMode::NetworkHost
     );
 
-    app.scensel_do_back()
-        .expect("leave exactly one nested folder");
+    app.scensel_do_back().test_value();
     assert_eq!(app.menu_state.stack.len(), 2);
     assert_eq!(app.menu_state.book_caption(), "Outer Folder");
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.open_definition_selector(target.clone())
-        .expect("open definition selector");
+    app.open_definition_selector(target.clone()).test_value();
     assert_eq!(
         app.pending_definition_selection
             .as_ref()
@@ -2842,7 +2729,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::RefreshRequested,
     ])
-    .expect("refresh retains network selector mode");
+    .test_value();
     assert_eq!(
         app.pending_definition_selection
             .as_ref()
@@ -2852,19 +2739,17 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
-    .expect("cancel network definition selector");
+    .test_value();
     assert_eq!(
         app.scenario_selector_mode,
         ScenarioSelectorMode::NetworkHost
     );
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.scensel_do_back()
-        .expect("return from outer folder to root");
+    app.scensel_do_back().test_value();
     assert_eq!(app.menu_state.stack.len(), 1);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-    app.scensel_do_back()
-        .expect("network root Back returns to NetDlg");
+    app.scensel_do_back().test_value();
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert_eq!(
         app.startup_network_dialog
@@ -2882,13 +2767,12 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     app.process_network_dialog_actions(vec![
         clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
     ])
-    .expect("reopen network scenario selector");
-    app.open_definition_selector(target)
-        .expect("open definition selector");
+    .test_value();
+    app.open_definition_selector(target).test_value();
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
     ])
-    .expect("accepted definition list returns to network staging");
+    .test_value();
     assert_eq!(
         app.scenario_selector_mode,
         ScenarioSelectorMode::NetworkHost
@@ -2905,20 +2789,17 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("isolated staged-host config");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    persist_config_value(&paths, "General", "LanguageEx", "US".to_string())
-        .expect("seed exact lobby language");
-    persist_config_value(&paths, "Network", "LocalName", "Host Tester".to_string())
-        .expect("seed exact C++ local name");
-    persist_config_value(&paths, "Network", "MasterServerSignUp", "0".to_string())
-        .expect("seed Internet off");
-    persist_config_value(&paths, "General", "Record", "0".to_string()).expect("seed Record off");
+    let paths = test_app_paths();
+    persist_config_value(&paths, "General", "LanguageEx", "US".to_string()).test_value();
+    persist_config_value(&paths, "Network", "LocalName", "Host Tester".to_string()).test_value();
+    persist_config_value(&paths, "Network", "MasterServerSignUp", "0".to_string()).test_value();
+    persist_config_value(&paths, "General", "Record", "0".to_string()).test_value();
     let mut app = GameApp::new(
         800,
         600,
@@ -2931,30 +2812,25 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
             record_enabled: false,
         },
     )
-    .expect("staged-host app");
+    .test_value();
     wait_for_menu(&mut app);
     app.open_network_game_dialog();
     app.startup_network_dialog
-        .as_mut()
-        .expect("retained NetDlg")
+        .test_mut()
         .set_join_address("remembered.example:11112");
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
-        app.assets.clonk_fonts.as_deref().expect("NetDlg fonts"),
+        app.assets.clonk_fonts.as_deref().test_value(),
     );
     let net_layout = clonk_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
     let mut internet_off = vec![0_u8; 800 * 600 * 4];
-    app.render(&mut internet_off)
-        .expect("render NetDlg with Internet disabled");
+    app.test_render(&mut internet_off);
     let internet_point = PhysicalPosition::new(
         f64::from(net_layout.btn_internet.x + net_layout.btn_internet.w / 2),
         f64::from(net_layout.btn_internet.y + net_layout.btn_internet.h / 2),
     );
-    app.handle_cursor_moved(internet_point)
-        .expect("point at Internet button");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Internet button");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("enable Internet");
+    app.test_cursor(internet_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(
         app.startup_network_dialog
             .as_ref()
@@ -2963,8 +2839,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
             .masterserver_signup
     );
     let mut internet_on = vec![0_u8; 800 * 600 * 4];
-    app.render(&mut internet_on)
-        .expect("render freshly created masterserver row");
+    app.test_render(&mut internet_on);
     assert!(
         (net_layout.list_entry.y..net_layout.list_entry.y + net_layout.list_entry.h).any(|y| {
             (net_layout.list_entry.x..net_layout.list_entry.x + net_layout.list_entry.w).any(|x| {
@@ -2973,10 +2848,8 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
             })
         })
     );
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Internet button again");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("disable Internet and delete query row");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(
         !app.startup_network_dialog
             .as_ref()
@@ -2989,12 +2862,9 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         (net_layout.btn_chat.x + net_layout.btn_chat.w / 2) as f32,
         (net_layout.btn_chat.y + net_layout.btn_chat.h / 2) as f32,
     );
-    let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     {
-        let dialog = app
-            .startup_network_dialog
-            .as_mut()
-            .expect("retained NetDlg");
+        let dialog = app.startup_network_dialog.test_mut();
         let _ = dialog.handle_pointer_down(chat_point, &fonts.text);
         let _ = dialog.handle_pointer_up(chat_point, &fonts.text);
         let _ = dialog.handle_key_down(KeyCode::Tab);
@@ -3020,12 +2890,9 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         },
         GameOptionAction::RecordPreferenceChanged(true),
     ])
-    .expect("persist selector toggles");
+    .test_value();
     app.close_scenario_browser();
-    let retained = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("returned retained NetDlg");
+    let retained = app.startup_network_dialog.test_ref();
     assert!(retained.config().masterserver_signup);
     assert!(
         !retained.config().record,
@@ -3071,29 +2938,27 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     };
     let staged = app
         .prepare_network_host_scenario(frontend, definition_load)
-        .expect("validate a real host scenario without binding");
+        .test_value();
     assert_eq!(staged.options, accepted_options);
     assert_eq!(staged.options.password, "round secret");
     app.staged_network_host_scenario = Some(staged);
 
     let (sender, receiver) = mpsc::channel();
     app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None, None)
-        .expect("begin controlled host transition");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.startup_network_transition_active());
     let join_before = app
         .startup_network_dialog
-        .as_ref()
-        .expect("transition NetDlg")
+        .test_ref()
         .join_address()
         .to_string();
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("gate transition keyboard");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.process_network_dialog_actions(vec![
         clonk_frontend::startup_netdlg::NetDlgAction::Back,
         clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
     ])
-    .expect("gate programmatic transition actions");
+    .test_value();
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert_eq!(
         app.startup_network_dialog
@@ -3107,9 +2972,8 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         .send(Err(NetworkStartError::Other(
             reported_host_error.to_string(),
         )))
-        .expect("resolve controlled transition");
-    app.poll_startup_network_connection()
-        .expect("poll controlled host transition");
+        .test_value();
+    app.poll_startup_network_connection().test_value();
     assert!(!app.startup_network_transition_active());
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
@@ -3133,11 +2997,10 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     assert!(app.network.is_none());
     assert!(app.network_mode.is_none());
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render restored host selector and Error Log");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss host Error Log");
+        .test_value();
     let stale = prepare_tutorial_host_lobby(&app, repository);
     app.staged_network_host_scenario = Some(stale);
     app.stage_network_host_scenario(
@@ -3147,7 +3010,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
             definition_root: None,
         },
     )
-    .expect("stale staged host scenario is discarded");
+    .test_value();
     assert!(app.staged_network_host_scenario.is_none());
     assert!(app.startup_network_connection.is_none());
     reset_cached_app_paths();
@@ -3168,14 +3031,13 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
             }),
             manager,
         )))
-        .expect("queue completed host connection");
+        .test_value();
     app.startup_network_connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::StagedHost,
     ));
-    app.poll_startup_network_connection()
-        .expect("poll unstaged host transition");
+    app.poll_startup_network_connection().test_value();
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert_eq!(
         app.scenario_selector_mode,
@@ -3190,8 +3052,7 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
                 "Network lobby unavailable: classic game-lobby model is unavailable: host connection completed without a staged scenario; refusing guessed lobby state",
             );
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render restored host selector and Error Log");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
 }
 
@@ -3218,7 +3079,7 @@ fn failed_host_staging_returns_to_host_selector_with_error_log() {
             definition_root: None,
         },
     )
-    .expect("a failed host start returns to the remembered startup dialog");
+    .test_value();
 
     // A failed OpenGame sets Game.fQuitWithError and calls QuitGame, which
     // reconstructs the remembered startup dialog and shows the accumulated
@@ -3243,23 +3104,21 @@ fn failed_host_staging_returns_to_host_selector_with_error_log() {
     // The retained status overlay this used to leave behind is a parity
     // boundary, and every render path treats one as fatal — which is how a
     // failed host start terminated the process (clonk-org/clonk-rs#196).
-    app.preflight_startup_presentation()
-        .expect("no generic startup status overlay remains");
+    app.preflight_startup_presentation().test_value();
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render restored host selector and Error Log");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
 }
 
 #[test]
 fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated staged-host GUI data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let mut staged = prepare_tutorial_host_lobby(&app, repository);
     let source =
@@ -3293,8 +3152,7 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
         },
     );
     let mut after_rejected_start = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut after_rejected_start)
-        .expect("visible lobby still renders after the rejected Start child");
+    app.test_render(&mut after_rejected_start);
     assert_eq!(
         after_rejected_start, visible,
         "a rejected Start child must not change what the lobby shows"
@@ -3317,22 +3175,21 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
 #[test]
 fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated host model user data");
-    let content = tempdir().expect("minimal host model content");
+    let user_data = tempdir();
+    let content = tempdir();
     let scenario = install_minimal_prepared_host_fixture(content.path());
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
     configure_test_startup_participant(&paths, user_data.path());
     let undiscovered_player_root = user_data.path().join("undiscovered-players");
-    fs::create_dir(&undiscovered_player_root).expect("undiscovered participant root");
+    fs::create_dir(&undiscovered_player_root).test_value();
     persist_config_value(
         &paths,
         "General",
         "PlayerPath",
         undiscovered_player_root.to_string_lossy(),
     )
-    .expect("keep the valid participant outside the discovery root");
-    persist_config_value(&paths, "General", "LanguageEx", "DE")
-        .expect("configure non-US startup language");
+    .test_value();
+    persist_config_value(&paths, "General", "LanguageEx", "DE").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     assert!(
         !app.startup_player_models
@@ -3345,26 +3202,22 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
 
     let staged = app
         .prepare_network_host_scenario(make_frontend(), definition_load())
-        .expect("configured participants and non-US language are staged before host preparation");
+        .test_value();
     assert_eq!(staged.lobby.max_players, 1);
 
-    persist_config_value(&paths, "General", "Participants", "")
-        .expect("clear participant gate probe");
-    persist_config_value(&paths, "Network", "LocalName", "<i<i<i<i>>>>")
-        .expect("configure noncanonical C++ local name");
-    persist_config_value(&paths, "Network", "Nick", "").expect("configure noncanonical C++ nick");
+    persist_config_value(&paths, "General", "Participants", "").test_value();
+    persist_config_value(&paths, "Network", "LocalName", "<i<i<i<i>>>>").test_value();
+    persist_config_value(&paths, "Network", "Nick", "").test_value();
     let staged = app
         .prepare_network_host_scenario(make_frontend(), definition_load())
-        .expect("noncanonical C4ClientCore identity is sanitized before bind");
+        .test_value();
     assert_eq!(staged.lobby.local_name, "<i<i>>");
     assert_eq!(staged.lobby.nick, "Unknown");
     assert!(app.network.is_none());
     assert!(app.startup_network_connection.is_none());
 
-    persist_config_value(&paths, "Network", "LocalName", "Changed Host")
-        .expect("change LocalName after staging");
-    persist_config_value(&paths, "Network", "Nick", "Changed Nick")
-        .expect("change Nick after staging");
+    persist_config_value(&paths, "Network", "LocalName", "Changed Host").test_value();
+    persist_config_value(&paths, "Network", "Nick", "Changed Nick").test_value();
     let preparation = build_network_host_preparation(
         &app,
         &staged.frontend,
@@ -3374,34 +3227,30 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
         Some((&staged.definition_executable_path, &staged.definition_path)),
         Some((&staged.lobby.local_name, &staged.lobby.nick)),
     )
-    .expect("host preparation reuses the staged sanitized identity");
+    .test_value();
     assert_eq!(preparation.host_name, staged.lobby.local_name);
     assert_eq!(preparation.host_nick, staged.lobby.nick);
-    let prepared = preparation
-        .prepare()
-        .expect("final client identity remains unchanged through host bootstrap");
+    let prepared = preparation.prepare().test_value();
     assert_eq!(prepared.host_config().local_core.name.as_bytes(), b"<i<i>>");
     assert_eq!(
         prepared.host_config().local_core.nick.as_bytes(),
         b"Unknown"
     );
 
-    persist_config_value(&paths, "Network", "LocalName", "Exact Host")
-        .expect("restore canonical C++ local name");
+    persist_config_value(&paths, "Network", "LocalName", "Exact Host").test_value();
     let error = app
         .prepare_network_host_scenario(FrontendScenario::fallback(), definition_load())
         .err()
-        .expect("missing scenario path must retain the typed model boundary");
+        .test_value();
     assert!(matches!(
         error.downcast_ref::<ClassicParityBoundary>(),
         Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
             if detail.contains("transferable scenario")
     ));
 
-    app.loader_render_config =
-        Some(LoaderRenderConfig::new(2.0, false).expect("valid integer loader scale"));
+    app.loader_render_config = Some(LoaderRenderConfig::new(2.0, false).test_value());
     app.prepare_network_host_scenario(make_frontend(), definition_load())
-        .expect("integer application scale does not fence host staging");
+        .test_value();
     assert!(app.network.is_none());
     assert!(app.startup_network_connection.is_none());
 }
@@ -3409,7 +3258,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
 #[test]
 fn control_rate_submits_relative_set_and_waits_for_echo() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated control-rate user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
@@ -3470,7 +3319,7 @@ fn control_rate_submits_relative_set_and_waits_for_echo() {
 #[test]
 fn runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated lobby-option user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
@@ -3533,7 +3382,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     let mut snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     snapshot.parameters.teams = clonk_network::join_team_list_snapshot(metadata.clone());
     app.host_join_snapshot = Some(snapshot);
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
@@ -3553,12 +3402,12 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     let random = app
         .classic_host_lobby
         .as_ref()
-        .unwrap()
+        .test_value()
         .controller
         .option_rows()
         .iter()
         .find(|row| row.kind == LobbyOptionKind::RandomTeamCount)
-        .expect("random mode shows the count row");
+        .test_value();
     assert_eq!(
         random
             .choices
@@ -3573,7 +3422,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     let (player_infos, snapshots) = commands.take_team_control_updates();
     assert_eq!(player_infos.len(), 1);
     assert_eq!(snapshots.len(), 1);
-    let teams = app.network_team_assignment.as_ref().unwrap().teams();
+    let teams = app.network_team_assignment.as_ref().test_value().teams();
     assert_eq!(teams.random_team_count, 2);
     assert_eq!(teams.teams.len(), 2);
     assert_eq!(
@@ -3626,7 +3475,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
 fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated savegame-warning user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
@@ -3636,11 +3485,11 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
         check_league_rules: true,
         confirm_unassociated_savegame_players: true,
     }])
-    .expect("open savegame assignment warning");
+    .test_value();
 
     assert!(commands.take_submitted_lobby_countdowns().is_empty());
     assert!(app.host_lobby_countdown.is_none());
-    let warning = app.message_dialogs.last().expect("savegame warning dialog");
+    let warning = app.message_dialogs.last().test_value();
     assert_eq!(warning.state.caption(), "Player assignment");
     assert_eq!(
         warning.state.icon(),
@@ -3656,12 +3505,12 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
 
     app.message_dialogs
         .last_mut()
-        .expect("savegame warning dialog")
+        .test_value()
         .state
         .handle_hotkey('D');
     app.persist_top_message_dialog_checkbox_changes();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
-        .expect("cancel classic host start after remembering warning preference");
+        .test_value();
     assert!(commands.take_submitted_lobby_countdowns().is_empty());
     assert!(app.host_lobby_countdown.is_none());
     assert_eq!(
@@ -3676,7 +3525,7 @@ fn classic_host_start_persists_and_honors_unassociated_savegame_warning() {
         check_league_rules: true,
         confirm_unassociated_savegame_players: true,
     }])
-    .expect("hidden savegame assignment warning starts immediately");
+    .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
         commands.take_submitted_lobby_countdowns(),
@@ -3695,7 +3544,7 @@ fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     install_test_free_savegame_player_row(&mut app, 50);
-    let lobby = app.classic_host_lobby.as_mut().expect("test lobby");
+    let lobby = app.classic_host_lobby.test_mut();
     let rows = lobby
         .controller
         .rows()
@@ -3719,7 +3568,7 @@ fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
     );
     let mut snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     snapshot.parameters.restore_player_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 50,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -3748,7 +3597,7 @@ fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
         check_league_rules: true,
         confirm_unassociated_savegame_players: true,
     }])
-    .expect("start an entirely assigned savegame");
+    .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
         commands.take_submitted_lobby_countdowns(),
@@ -3761,8 +3610,8 @@ fn classic_host_regular_scenario_never_warns_about_restore_rows() {
     // C4GameLobby::Start asks FindUnassociatedRestoreInfo only when the
     // synchronized scenario is a savegame (C4GameLobby.cpp:452-464).
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("regular-scenario warning user data");
-    let content = tempdir().expect("regular-scenario warning content");
+    let user_data = tempdir();
+    let content = tempdir();
     let scenario = install_minimal_prepared_host_fixture(content.path());
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
     let mut app = new_menu_app_with_paths(640, 480, &paths);
@@ -3770,7 +3619,7 @@ fn classic_host_regular_scenario_never_warns_about_restore_rows() {
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let mut snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     snapshot.parameters.restore_player_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 50,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -3790,7 +3639,7 @@ fn classic_host_regular_scenario_never_warns_about_restore_rows() {
         check_league_rules: true,
         confirm_unassociated_savegame_players: true,
     }])
-    .expect("start regular scenario despite retained restore rows");
+    .test_value();
 
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
@@ -3810,16 +3659,16 @@ fn client_start_and_abort_report_the_cpp_host_only_error() {
         lobby.chat_edit.text = "stale".to_string();
     }
     app.process_lobby_action(LobbyAction::SubmitMessage(String::new()))
-        .expect("empty client chat remains a local GUI error");
+        .test_value();
     assert_eq!(app.ui_sound_log, ["Error"]);
-    let lobby = app.network_lobby.as_ref().unwrap();
+    let lobby = app.network_lobby.as_ref().test_value();
     assert_eq!(lobby.chat_history_index, -1);
     assert!(lobby.chat_edit.text.is_empty());
 
     app.process_lobby_action(LobbyAction::SubmitMessage("/start 10".to_string()))
-        .expect("client start command is consumed");
+        .test_value();
     app.process_lobby_action(LobbyAction::SubmitMessage("/abort".to_string()))
-        .expect("client abort command is consumed");
+        .test_value();
 
     assert_eq!(
         app.network_lobby
@@ -3855,7 +3704,7 @@ fn set_comment_updates_state_reference_and_invalidation() {
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(format!(
         "/set comment {oversized}"
     )))
-    .expect("set the live lobby comment");
+    .test_value();
 
     let expected = "x".repeat(clonk_frontend::game_option_buttons::COMMENT_MAX_TEXT);
     assert_eq!(app.scenario_game_options.values().comment, expected);
@@ -3892,7 +3741,7 @@ fn set_password_sets_and_bare_command_clears_live_password() {
         for _ in 0..2 {
             let (password, completion) = commands.receive_host_password();
             passwords.push(password.as_bytes().to_vec());
-            completion.send(Ok(())).expect("accept password update");
+            completion.send(Ok(())).test_value();
         }
         passwords
     });
@@ -3900,7 +3749,7 @@ fn set_password_sets_and_bare_command_clears_live_password() {
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
         "/set password secret".to_string(),
     ))
-    .expect("set live lobby password");
+    .test_value();
     assert_eq!(app.scenario_game_options.values().password, "secret");
     assert!(
         app.advertised_game_reference
@@ -3911,7 +3760,7 @@ fn set_password_sets_and_bare_command_clears_live_password() {
     );
 
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/set password".to_string()))
-        .expect("clear live lobby password");
+        .test_value();
     assert!(app.scenario_game_options.values().password.is_empty());
     assert!(
         !app.advertised_game_reference
@@ -3938,15 +3787,12 @@ fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
         app.startup_view = StartupView::NetworkLobby;
         app.last_startup_dialog = StartupDialog::NetworkGame;
         app.mode = AppMode::Loading;
-        app.show_reached_network_start_wait()
-            .expect("show client wait");
+        app.show_reached_network_start_wait().test_value();
 
         if result == MessageDialogResult::Dismissed {
-            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-                .expect("Escape aborts client start wait");
+            app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         } else {
-            app.finish_message_dialog(result)
-                .expect("Cancel aborts client start wait");
+            app.finish_message_dialog(result).test_value();
         }
 
         assert!(matches!(app.mode, AppMode::Menu));
@@ -3996,23 +3842,17 @@ fn client_host_timeout_during_final_init_aborts_startup() {
         TeamConfiguration::default(),
         Vec::new(),
     );
-    loading
-        .prepared_go
-        .as_mut()
-        .expect("prepared Go loading state")
-        .local_reached = true;
+    loading.prepared_go.test_mut().local_reached = true;
     app.loading_state = Some(loading);
-    app.show_reached_network_start_wait()
-        .expect("show client start wait");
+    app.show_reached_network_start_wait().test_value();
     events
         .send(NetworkEvent::PeerDisconnected {
             client_id: 0,
             reason: Some("connection Ping timeout".to_string()),
         })
-        .expect("queue host timeout");
+        .test_value();
 
-    app.process_network_events()
-        .expect("host timeout aborts client startup");
+    app.test_network_events();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -4069,7 +3909,7 @@ fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
     let clients = app
         .network_start_wait
         .as_ref()
-        .unwrap()
+        .test_value()
         .controller
         .clients();
     assert_eq!(
@@ -4094,7 +3934,7 @@ fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
         ..expected
     };
     app.update_network_start_wait_ack(8, retargeted);
-    let wait = app.network_start_wait.as_ref().unwrap();
+    let wait = app.network_start_wait.as_ref().test_value();
     assert_eq!(wait.expected_status, retargeted);
     assert_eq!(
         wait.controller
@@ -4125,7 +3965,7 @@ fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
             },
         )],
     )
-    .expect("apply authoritative client removal");
+    .test_value();
     assert!(app
         .network_start_wait
         .as_ref()
@@ -4147,18 +3987,16 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     )));
 
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     let scenario_core = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Scenario as u8,
         id: 9,
         loadable: true,
-        filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).unwrap(),
+        filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).test_value(),
         ..Default::default()
     };
     snapshot.parameters.scenario = scenario_core.clone();
-    snapshot.parameters.title = LegacyCString::from_bytes(b"Remote title".to_vec()).unwrap();
+    snapshot.parameters.title = LegacyCString::from_bytes(b"Remote title".to_vec()).test_value();
     app.pending_network_join_data = Some(clonk_network::JoinDataEnvelope {
         client_id: 7,
         start_control_tick: 0,
@@ -4171,12 +4009,9 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     app.admission_resources.mark_progress(9, 42);
 
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
-        .expect("Scenario tab activates");
+        .test_value();
     fn scenario_state(app: &GameApp) -> &LobbyScenarioDescriptionState {
-        &app.network_lobby
-            .as_ref()
-            .expect("client lobby")
-            .scenario_description
+        &app.network_lobby.test_ref().scenario_description
     }
     assert_eq!(
         scenario_state(&app).text,
@@ -4185,9 +4020,9 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     assert!(!scenario_state(&app).finished);
 
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
-        .expect("Scenario tab deactivates");
+        .test_value();
     app.admission_resources.mark_progress(9, 73);
-    app.sec1_timer().expect("pulse inactive Scenario timer");
+    app.sec1_timer().test_value();
     assert_eq!(
         scenario_state(&app).text,
         LobbyScenarioText::Message("Loading... (42%)".to_string()),
@@ -4195,14 +4030,13 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     );
 
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
-        .expect("Scenario reactivation forces an immediate update");
+        .test_value();
     assert_eq!(
         scenario_state(&app).text,
         LobbyScenarioText::Message("Loading... (73%)".to_string())
     );
     app.admission_resources.mark_progress(9, 100);
-    app.sec1_timer()
-        .expect("refresh active Scenario loading state");
+    app.sec1_timer().test_value();
     assert_eq!(
         scenario_state(&app).text,
         LobbyScenarioText::Message("Loading... (100%)".to_string())
@@ -4212,17 +4046,16 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
         "present percent does not make an incomplete resource terminal"
     );
 
-    let directory = tempdir().expect("completed scenario resource");
+    let directory = tempdir();
     let scenario = directory.path().join("Remote.c4s");
-    fs::create_dir_all(&scenario).expect("create unpacked scenario group");
+    fs::create_dir_all(&scenario).test_value();
     fs::write(
         scenario.join("DescUS.rtf"),
         br"{\rtf1 Gold Mine\par Mine some gold.\par}",
     )
-    .expect("write completed description");
+    .test_value();
     app.admission_resources.mark_complete(9, scenario);
-    app.sec1_timer()
-        .expect("install completed Scenario description");
+    app.sec1_timer().test_value();
     assert_eq!(
         scenario_state(&app).text,
         LobbyScenarioText::Description("Gold Mine\nMine some gold.\n".to_string())
@@ -4233,12 +4066,11 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
         .resources
         .insert(9, AdmissionResourceState::Loading { removed: false });
     app.admission_resources.present_percent.insert(9, 7);
-    app.sec1_timer()
-        .expect("terminal ScenDesc ignores later ticks");
+    app.sec1_timer().test_value();
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
-        .expect("leave terminal Scenario tab");
+        .test_value();
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
-        .expect("terminal Scenario reactivation is a no-op");
+        .test_value();
     assert_eq!(
         scenario_state(&app).text,
         LobbyScenarioText::Description("Gold Mine\nMine some gold.\n".to_string())
@@ -4263,14 +4095,12 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     }
 
     fn tab(app: &mut GameApp) {
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("Tab down");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("Tab up");
+        app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
 
     fn controller_focus(app: &mut GameApp) -> LobbyControl {
-        let lobby = app.network_lobby.as_mut().expect("joined lobby");
+        let lobby = app.network_lobby.test_mut();
         lobby.sync_classic_controller();
         lobby.controller.focus()
     }
@@ -4292,24 +4122,20 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
 
     // An unhandled mapped key on the focused chrome button reroutes to
     // the chat default first (Dialog::KeyFocusDefault), like the strip.
-    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
-        .expect("Up on Exit reroutes to the chat default");
+    app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     assert_eq!(controller_focus(&mut app), LobbyControl::ChatInput);
-    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Released)
-        .expect("Up release after the reroute");
+    app.test_key(VirtualKeyCode::ArrowUp, ElementState::Released);
 
     tab_to(&mut app, LobbyControl::Exit);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("Return downs the focused Exit button");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
     assert_eq!(
         app.startup_view,
         StartupView::NetworkLobby,
         "KeyButtonDown only downs the button"
     );
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("Return release presses the focused Exit button");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(
         app.ui_sound_log,
         ["ArrowHit".to_string(), "Click".to_string()]
@@ -4326,8 +4152,7 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         let mut app = joined_app();
         tab_to(&mut app, stop);
         app.ui_sound_log.clear();
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("Escape aborts from a non-chat focus");
+        app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         assert_eq!(app.startup_view, StartupView::MainMenu, "{stop:?}");
         assert!(app.network_lobby.is_none());
         assert!(app.ui_sound_log.is_empty(), "Escape stays silent");
@@ -4339,10 +4164,8 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     let mut app = joined_app();
     tab_to(&mut app, LobbyControl::ResourcesTab);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("Space downs the focused Resources tab");
-    app.handle_key(VirtualKeyCode::Space, ElementState::Released)
-        .expect("Space release presses the focused Resources tab");
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Space, ElementState::Released);
     assert_eq!(
         app.ui_sound_log,
         [
@@ -4373,15 +4196,11 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         "Client",
     )));
     app.sync_network_lobby_game_option_state();
-    app.network_lobby
-        .as_mut()
-        .expect("joined lobby")
-        .resources_loaded = true;
+    app.network_lobby.test_mut().resources_loaded = true;
 
     tab_to(&mut app, LobbyControl::Ready);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("Return on Ready reroutes to the chat default");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert_eq!(controller_focus(&mut app), LobbyControl::ChatInput);
     assert!(app.ui_sound_log.is_empty());
     assert!(!app
@@ -4390,13 +4209,11 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         .expect("joined lobby")
         .local_ready());
     assert!(commands.take_submitted_ready_checks().is_empty());
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("Return release after the Ready reroute");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
     tab_to(&mut app, LobbyControl::Ready);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("Space toggles the focused Ready checkbox");
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
     assert!(app
         .network_lobby
@@ -4412,15 +4229,13 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     let checks = commands.take_submitted_ready_checks();
     assert_eq!(checks.len(), 1, "the accepted toggle submits exactly once");
     assert!(checks[0].data.is_ready());
-    app.handle_key(VirtualKeyCode::Space, ElementState::Released)
-        .expect("Space release adds no checkbox interaction");
+    app.test_key(VirtualKeyCode::Space, ElementState::Released);
     assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
     assert!(commands.take_submitted_ready_checks().is_empty());
 
     // MainDlg::OnReadyCheck's cooldown replays the native click sound
     // but rejects the toggle (src/C4GameLobby.cpp:334-338).
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("Space inside the ready-button cooldown");
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     assert_eq!(
         app.ui_sound_log,
         ["ArrowHit".to_string(), "ArrowHit".to_string()]
@@ -4433,18 +4248,15 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         "the cooldown keeps the accepted value"
     );
     assert!(commands.take_submitted_ready_checks().is_empty());
-    app.handle_key(VirtualKeyCode::Space, ElementState::Released)
-        .expect("Space release inside the cooldown");
+    app.test_key(VirtualKeyCode::Space, ElementState::Released);
 
     // Roster focus keeps the joined-lobby roster's confirm-key eating (a
     // different arm).
     let mut app = joined_app();
     tab_to(&mut app, LobbyControl::Roster);
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("roster-focus Return stays eaten");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("roster-focus Return release stays eaten");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(controller_focus(&mut app), LobbyControl::Roster);
     assert!(app.ui_sound_log.is_empty());
     assert_eq!(app.startup_view, StartupView::NetworkLobby);
@@ -4480,12 +4292,9 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_lobby
-        .as_mut()
-        .expect("joined lobby")
-        .resources_loaded = true;
+    app.network_lobby.test_mut().resources_loaded = true;
     {
-        let lobby = app.network_lobby.as_mut().expect("joined lobby");
+        let lobby = app.network_lobby.test_mut();
         let rect = lobby.update_layout(640.0, 480.0).ready_button;
         // C4GUI::CheckBox toggles only over its left square, not the
         // caption (C4GuiCheckBox.cpp:82-97).
@@ -4495,10 +4304,8 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
         ));
     }
     app.ui_sound_log.clear();
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press the Ready square");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release the Ready square");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
     assert!(app
         .network_lobby
@@ -4527,9 +4334,7 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.sync_classic_lobby_roster();
 
-    let entries = app
-        .classic_lobby_client_context_entries(7)
-        .expect("remote host-controlled row");
+    let entries = app.classic_lobby_client_context_entries(7).test_value();
     assert_eq!(
         entries
             .iter()
@@ -4577,16 +4382,12 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
     );
 
     app.control_clients.apply_update(&update);
-    let entries = app
-        .classic_lobby_client_context_entries(7)
-        .expect("authoritative inactive row");
+    let entries = app.classic_lobby_client_context_entries(7).test_value();
     let mut activation_label = entries[2].text.clone();
     Markup::strip_markup(&mut activation_label);
     assert_eq!(activation_label, "Activate");
 
-    let local_entries = app
-        .classic_lobby_client_context_entries(0)
-        .expect("local host row retains native host options");
+    let local_entries = app.classic_lobby_client_context_entries(0).test_value();
     assert_eq!(
         local_entries
             .iter()
@@ -4614,21 +4415,21 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
 
 #[test]
 fn packed_scenario_rename_missing_source_does_not_touch_destination() {
-    let directory = tempdir().expect("packed collision directory");
+    let directory = tempdir();
     let outer_path = directory.path().join("Campaign.c4f");
     let mut destination = MutableGroup::new("Destination.c4s");
     destination
         .add_file("Scenario.txt", b"[Head]\nTitle=Keep\n".to_vec())
-        .expect("add destination core");
+        .test_value();
     destination
         .add_file("Title.txt", b"US:Keep".to_vec())
-        .expect("add destination title");
+        .test_value();
     let mut campaign = MutableGroup::new("Campaign.c4f");
     campaign
         .add_child("Destination.c4s", destination)
-        .expect("add destination scenario");
-    let before = campaign.pack().expect("pack collision campaign");
-    fs::write(&outer_path, &before).expect("write collision campaign");
+        .test_value();
+    let before = campaign.pack().test_value();
+    fs::write(&outer_path, &before).test_value();
 
     let error = rename_scenario_storage(
         &outer_path.join("Missing.c4s"),
@@ -4642,7 +4443,7 @@ fn packed_scenario_rename_missing_source_does_not_touch_destination() {
         fs::read(&outer_path).expect("read untouched campaign"),
         before
     );
-    let group = Group::open(&outer_path).expect("open untouched campaign");
+    let group = Group::open(&outer_path).test_value();
     assert_eq!(
         group
             .open_child("Destination.c4s")
@@ -4672,13 +4473,10 @@ fn scale_native_scensel_rows_retain_clipped_book_text() {
     install_classic_test_assets(&mut app);
     app.open_scenario_browser();
 
-    let assets = app.assets.scensel_assets().expect("scenario assets");
-    let button_down = app
-        .assets
-        .dialog_image("GUIButtonDown.png")
-        .expect("scenario button-down plank");
-    let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
-    let book = app.assets.book_fonts.clone().expect("book fonts");
+    let assets = app.assets.scensel_assets().test_value();
+    let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+    let fonts = app.assets.clonk_fonts.clone().test_value();
+    let book = app.assets.book_fonts.clone().test_value();
     let expected_titles = app
         .menu_state
         .visible_entries()
@@ -4704,7 +4502,7 @@ fn scale_native_scensel_rows_retain_clipped_book_text() {
         startup_gamma(),
         true,
     )
-    .expect("render scale-native scenario rows");
+    .test_value();
     let commands = surface.take_clonk_text_capture();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, &fonts);
     let item_h = clonk_frontend::startup_scensel::scen_list_item_height(&book.text);
@@ -4790,12 +4588,12 @@ fn scale_native_scensel_static_text_survives_backdrop_cache_hits() {
         .iter()
         .flat_map(|batch| batch.text.iter())
         .collect::<Vec<_>>();
-    let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
     let title = cached_commands
         .iter()
         .find(|command| command.text == "Start Game")
-        .expect("cached frame title command");
+        .test_value();
     assert_eq!(
         (title.x, title.y, title.align, title.clip),
         (
@@ -4810,7 +4608,7 @@ fn scale_native_scensel_static_text_survives_backdrop_cache_hits() {
     let search = cached_commands
         .iter()
         .find(|command| command.text == "Search:")
-        .expect("cached frame wooden-label command");
+        .test_value();
     let label_clip = Rect::new(label.x, label.y, (label.w + 1) as u32, (label.h + 1) as u32);
     assert_eq!(
         (search.x, search.y, search.align, search.clip),
@@ -4827,7 +4625,7 @@ fn scale_native_scensel_static_text_survives_backdrop_cache_hits() {
     let query = cached_commands
         .iter()
         .find(|command| command.text == "needle")
-        .expect("cached frame edit command");
+        .test_value();
     let query_y = if client_h <= fonts.text.line_height {
         client_y - 1
     } else {
@@ -4862,11 +4660,11 @@ fn scale_native_scensel_static_text_survives_backdrop_cache_hits() {
 
 #[test]
 fn scenario_music_safe_random_does_not_advance_the_synchronized_lcg() {
-    let dir = tempdir().expect("scenario music RNG fixture");
+    let dir = tempdir();
     let scenario = dir.path().join("Scenario.c4s");
-    fs::create_dir_all(&scenario).expect("create scenario group");
-    fs::write(scenario.join("A.ogg"), silent_pcm_wav(20)).expect("write A");
-    fs::write(scenario.join("B.ogg"), silent_pcm_wav(20)).expect("write B");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("A.ogg"), silent_pcm_wav(20)).test_value();
+    fs::write(scenario.join("B.ogg"), silent_pcm_wav(20)).test_value();
     let mut app = new_state_only_running_sandbox_app();
     let synchronized_before = app.engine.snapshot().rng;
 
@@ -4878,14 +4676,14 @@ fn scenario_music_safe_random_does_not_advance_the_synchronized_lcg() {
         synchronized_before,
         "the live scenario path must draw through libc SafeRandom, not Engine::LcgRng"
     );
-    app.audio.as_mut().expect("test audio").stop_music();
+    app.audio.test_mut().stop_music();
 }
 
 #[test]
 fn scenario_title_tooltip_tracks_native_readd_z_order_and_fresh_open_reset() {
     let mut app = new_real_classic_menu_app(640, 480);
     app.open_scenario_browser();
-    let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
     let title = app.startup_tooltip_resource_no_amp("IDS_DLG_STARTGAME");
     let title_height = fonts.title.measure(&title, true).1;
@@ -4931,25 +4729,24 @@ fn platform_cursor_tracks_client_area_and_focus_in_every_mode() {
     }
 
     let mut app = new_menu_app(64, 48);
-    app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
-        .expect("enter client area");
+    app.test_cursor(PhysicalPosition::new(20.0, 18.0));
     assert!(!app.platform_cursor_visible());
     let retained = app.window_mouse_position;
 
     app.window_active = false;
-    app.handle_focus_lost().expect("lose focus");
+    app.handle_focus_lost().test_value();
     assert!(app.platform_cursor_visible());
     assert_eq!(app.window_mouse_position, retained);
     assert!(app.pointer_inside_window);
 
-    app.handle_focus_gained().expect("regain focus");
+    app.handle_focus_gained().test_value();
     assert_eq!(app.window_mouse_position, retained);
     for mode in [AppMode::Menu, AppMode::Loading, AppMode::Running] {
         app.mode = mode;
         assert!(!app.platform_cursor_visible(), "{mode:?}");
     }
     app.mode = AppMode::Menu;
-    app.pointer_left().expect("leave client area");
+    app.pointer_left().test_value();
     assert!(app.platform_cursor_visible());
     assert_eq!(app.window_mouse_position, None);
 }
@@ -4998,13 +4795,9 @@ fn irc_settings_use_cpp_defaults_and_network_nick_fallback() {
 fn irc_persistence_preserves_legacy_native_config_bytes() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("native IRC config user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    fs::write(
-                paths.config_file(),
-                b"[General]\r\nName=\"M\x81ker\"\r\n[IRC]\r\nServer2=\"irc.native.test\"\r\nNick=\"Old\"\r\n[Vendor]\r\nOpaque=\"\xfe\"\r\n",
-            )
-            .expect("write non-UTF-8 legacy config");
+    fs::write(paths.config_file(), b"[General]\r\nName=\"M\x81ker\"\r\n[IRC]\r\nServer2=\"irc.native.test\"\r\nNick=\"Old\"\r\n[Vendor]\r\nOpaque=\"\xfe\"\r\n").test_value();
     persist_irc_login_settings(
         &paths,
         &clonk_frontend::startup_netdlg::NetDlgChatLogin {
@@ -5015,11 +4808,10 @@ fn irc_persistence_preserves_legacy_native_config_bytes() {
             channel: "#native".into(),
         },
     )
-    .expect("persist IRC fields in native config");
-    persist_irc_warning_preference(&paths, true)
-        .expect("persist IRC warning preference in native config");
+    .test_value();
+    persist_irc_warning_preference(&paths, true).test_value();
 
-    let updated = fs::read(paths.config_file()).expect("read updated native config");
+    let updated = fs::read(paths.config_file()).test_value();
     assert!(updated.starts_with(b"[General]\r\nName=\"M\x81ker\"\r\n"));
     assert!(updated
         .windows(b"[Vendor]\r\nOpaque=\"\xfe\"\r\n".len())
@@ -5041,13 +4833,9 @@ fn irc_persistence_preserves_legacy_native_config_bytes() {
 fn startup_network_dialog_seeds_irc_login_from_config() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("IRC seed user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    fs::write(
-                paths.config_file(),
-                "[General]\nLanguageEx=US\n[Network]\nNick=NetworkFallback\nMasterServerSignUp=0\n[IRC]\nServer2=irc.seeded.test\nNick=\nRealName=Seeded Name\nChannel=#seeded\n",
-            )
-            .expect("seed IRC config");
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n[Network]\nNick=NetworkFallback\nMasterServerSignUp=0\n[IRC]\nServer2=irc.seeded.test\nNick=\nRealName=Seeded Name\nChannel=#seeded\n").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     install_classic_test_assets(&mut app);
 
@@ -5076,7 +4864,7 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
     };
 
     let mut app = new_classic_menu_app(640, 480);
-    let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
     let mut dialog = NetDlgController::new(
         NetDlgConfig::default(),
         NetDlgFontMetrics::from_fonts(fonts),
@@ -5085,10 +4873,8 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
     app.startup_network_dialog = Some(dialog);
     app.replace_startup_view(StartupView::NetworkGame);
 
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("plain Tab advances network focus");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release plain Tab");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -5097,12 +4883,9 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
         NetDlgControl::JoinAddress
     );
 
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Shift+Tab reverses network focus");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release Shift+Tab");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -5110,10 +4893,8 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
             .focused_control(),
         NetDlgControl::GameList
     );
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Shift+Tab wraps network focus");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release wrapped Shift+Tab");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -5122,12 +4903,9 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
         NetDlgControl::ChatButton
     );
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("plain Tab wraps forward");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release wrapped plain Tab");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -5136,12 +4914,9 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
         NetDlgControl::GameList
     );
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold unsupported Tab modifier");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Ctrl+Tab is inert in the network dialog");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release inert Ctrl+Tab");
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -5154,7 +4929,7 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
 #[test]
 fn activation_overflow_reverts_row_and_shows_native_error() {
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated player-selection config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let player_model = |name: &str, activated: bool| clonk_frontend::startup_plrsel::PlrSelPlayer {
         name: name.to_string(),
@@ -5223,12 +4998,9 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
     );
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss open-time overflow error");
+        .test_value();
     let (actions, scroll_before) = {
-        let dialog = app
-            .startup_player_dialog
-            .as_mut()
-            .expect("player-selection controller");
+        let dialog = app.startup_player_dialog.test_mut();
         dialog.set_selected_index(Some(overflow_index));
         let scroll_before = dialog.list_scroll_offset();
         assert!(scroll_before > 0, "fixture must exercise a scrolled list");
@@ -5237,8 +5009,7 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
         (actions, scroll_before)
     };
 
-    app.process_player_dialog_actions(actions)
-        .expect("refuse oversized activation");
+    app.process_player_dialog_actions(actions).test_value();
 
     assert!(
         !app.startup_player_files[overflow_index]
@@ -5246,10 +5017,7 @@ fn activation_overflow_reverts_row_and_shows_native_error() {
             .activated
     );
     assert!(!app.startup_player_models[overflow_index].activated);
-    let dialog = app
-        .startup_player_dialog
-        .as_ref()
-        .expect("player-selection controller remains open");
+    let dialog = app.startup_player_dialog.test_ref();
     assert_eq!(dialog.is_player_activated(overflow_index), Some(false));
     assert_eq!(dialog.selected_index(), Some(overflow_index));
     assert_eq!(dialog.list_scroll_offset(), scroll_before);
@@ -5303,26 +5071,25 @@ fn retained_gpu_gamma_mode_matches_native_device_switch_matrix() {
 
 #[test]
 fn graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
-    let install = tempdir().expect("install root");
-    let user_data = tempdir().expect("user data");
-    let custom = tempdir().expect("custom config root");
-    fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-    fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
+    let install = tempdir();
+    let user_data = tempdir();
+    let custom = tempdir();
+    fs::create_dir_all(install.path().join("planet")).test_value();
+    fs::write(install.path().join("planet/System.c4g"), b"stub").test_value();
     let config_file = custom.path().join("debug.config");
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
         ("LC_CONFIG_FILE", None),
     ]);
-    let paths = AppPaths::discover_with_config_file(Some(&config_file))
-        .expect("discover explicit debug config");
+    let paths = AppPaths::discover_with_config_file(Some(&config_file)).test_value();
     let mut engine = Engine::new();
 
-    fs::write(&config_file, b"[General]\n").expect("write missing debug flag");
+    fs::write(&config_file, b"[General]\n").test_value();
     arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
     assert!(!engine.debug_mode(), "missing DebugMode defaults off");
 
-    fs::write(&config_file, b"[General]\nDebugMode=true\n").expect("enable debug mode");
+    fs::write(&config_file, b"[General]\nDebugMode=true\n").test_value();
     arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
     assert!(engine.debug_mode(), "DebugMode=true arms a graphical game");
 
@@ -5334,7 +5101,7 @@ fn graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
     );
 
     engine.set_allow_debug(true);
-    fs::write(&config_file, b"[General]\nDebugMode= true\n").expect("write malformed debug flag");
+    fs::write(&config_file, b"[General]\nDebugMode= true\n").test_value();
     arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
     assert!(
         !engine.debug_mode(),
@@ -5353,20 +5120,19 @@ fn replay_script_injection_obeys_native_config() {
     ));
 
     let _lock = env_lock().lock();
-    let fixture = tempdir().expect("replay scripting configuration");
+    let fixture = tempdir();
     let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
     fs::write(
         paths.config_file(),
         b"[General]\nAllowScriptingInReplays=false\n",
     )
-    .expect("disable replay scripting");
+    .test_value();
 
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
-    app.control_playback = Some(
-        ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).expect("open replay marker"),
-    );
+    app.control_playback =
+        Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.engine.set_debug_mode(true);
     let initial_gravity = app.engine.physics().gravity;
 
@@ -5389,14 +5155,14 @@ fn replay_script_injection_obeys_native_config() {
             },
         )],
     )
-    .expect("deny replay editor script without aborting the batch");
+    .test_value();
     assert_eq!(app.engine.physics().gravity, initial_gravity);
 
     fs::write(
         paths.config_file(),
         b"[General]\nAllowScriptingInReplays=true\n",
     )
-    .expect("enable replay scripting");
+    .test_value();
     app.synchronize_advanced_options_runtime();
     app.process_running_chat_text("/script SetGravity(88)");
     assert_eq!(
@@ -5417,20 +5183,20 @@ fn replay_script_injection_obeys_native_config() {
             },
         )],
     )
-    .expect("execute allowed replay editor script");
+    .test_value();
     assert_eq!(app.engine.physics().gravity, 99);
 }
 
 #[test]
 fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     let _lock = env_lock().lock();
-    let fixture = tempdir().expect("startup gamma configuration");
+    let fixture = tempdir();
     let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
     fs::write(
         paths.config_file(),
         b"[Graphics]\nDisableGamma=true\nGamma2=6579300\n",
     )
-    .expect("disable startup gamma");
+    .test_value();
 
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
@@ -5480,7 +5246,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
         paths.config_file(),
         b"[Graphics]\nDisableGamma= true\nGamma2=6579300\n",
     )
-    .expect("write malformed native gamma switch");
+    .test_value();
     app.synchronize_advanced_options_runtime();
     assert!(!app.graphics.advanced_renderer_config().disable_gamma);
     assert_eq!(
@@ -5510,7 +5276,7 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
             ControlButton::Right,
             ElementState::Pressed,
         )
-        .expect("advance Program focus");
+        .test_value();
         assert_eq!(
             app.startup_options_dialog
                 .as_ref()
@@ -5520,23 +5286,19 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
         );
     }
 
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("Alt+Down opens Font Face");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     assert!(app.context_menu.is_some());
     app.close_context_menu_silently();
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-        .expect("release Alt+Down");
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Alt");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
+    app.test_modifiers(ModifiersState::empty());
 
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
         ControlButton::Right,
         ElementState::Pressed,
     )
-    .expect("focus Font Size");
+    .test_value();
     assert_eq!(
         app.startup_options_dialog
             .as_ref()
@@ -5544,21 +5306,19 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
             .focused_program_control(),
         Some(OptionsProgramFocusTarget::FontSizeCombo)
     );
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("Alt+Space opens Font Size");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     assert!(app.context_menu.is_some());
 }
 
 #[test]
 fn malformed_active_gui_sheet_override_fails_typed_before_pixels() {
-    let root = tempdir().expect("malformed override fixture");
+    let root = tempdir();
     let graphics_child = root.path().join("Scenario.c4s/Graphics.c4g");
-    fs::create_dir_all(&graphics_child).expect("scenario Graphics.c4g");
-    fs::write(graphics_child.join("GUICaption.png"), b"not a png").expect("write corrupt override");
+    fs::create_dir_all(&graphics_child).test_value();
+    fs::write(graphics_child.join("GUICaption.png"), b"not a png").test_value();
     let base_graphics = root.path().join("planet/Graphics.c4g");
-    fs::create_dir_all(&base_graphics).expect("base Graphics.c4g");
+    fs::create_dir_all(&base_graphics).test_value();
 
     let registrations = vec![LoaderGroupRegistration {
         priority: 1,
@@ -5567,16 +5327,13 @@ fn malformed_active_gui_sheet_override_fails_typed_before_pixels() {
     }];
     let resolution = resolve_classic_global_gui_sheet_overrides(
         &registrations,
-        &Group::open(&base_graphics).expect("open base graphics"),
+        &Group::open(&base_graphics).test_value(),
     );
     assert!(
         resolution.overrides.is_empty(),
         "a corrupt override must not be applied"
     );
-    let failure = resolution
-        .failures
-        .get("GUICaption")
-        .expect("corrupt override is a typed failure");
+    let failure = resolution.failures.get("GUICaption").test_value();
     assert!(
         failure.contains("GUICaption.png"),
         "the failure must name the winning source: {failure}"
@@ -5603,8 +5360,7 @@ fn malformed_active_gui_sheet_override_fails_typed_before_pixels() {
 fn global_gui_bootstrap_precedes_all_startup_roots_and_native_pixels() {
     let mut app = new_real_classic_menu_app(320, 200);
     let mut initial = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut initial)
-        .expect("startup renders before the sheet is removed");
+    app.test_render(&mut initial);
     remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
     let expected = vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")];
 
@@ -5711,13 +5467,13 @@ fn global_gui_bootstrap_precedes_constructed_recursive_overlay_stacks() {
             .with_lazy_submenu(|| vec![ContextMenuEntry::new("Nested")])];
     context
         .open_context_menu_at(entries, GuiPoint::new(100.0, 100.0))
-        .expect("open recursive context menu");
+        .test_value();
     assert_guard(&mut context, "recursive context menu");
 
     let mut definition = new_classic_menu_app(640, 480);
     definition
         .open_definition_selector(FrontendScenario::fallback())
-        .expect("open definition selector");
+        .test_value();
     assert_guard(&mut definition, "definition selector");
 
     let mut input = new_classic_menu_app(640, 480);
@@ -5731,7 +5487,7 @@ fn global_gui_bootstrap_precedes_constructed_recursive_overlay_stacks() {
             initial_text: String::new(),
             chat_layout: false,
         })
-        .expect("open input dialog");
+        .test_value();
     assert_guard(&mut input, "input dialog");
 
     let mut messages = new_classic_menu_app(640, 480);
@@ -5745,7 +5501,7 @@ fn global_gui_bootstrap_precedes_constructed_recursive_overlay_stacks() {
                 ),
                 MessageDialogContinuation::None,
             )
-            .expect("push stacked message dialog");
+            .test_value();
     }
     assert_guard(&mut messages, "stacked message dialogs");
 }
@@ -5758,23 +5514,23 @@ fn network_join_applies_active_scenario_gui_overrides() {
     // overload the GUI sheets, and a malformed winner fails typed before
     // pixels through the same loading-refresh gate local starts use.
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("client join user data");
-    let content = tempdir().expect("client join content");
+    let user_data = tempdir();
+    let content = tempdir();
     let content_root = content.path();
-    fs::create_dir_all(content_root.join("Material.c4g")).expect("global material group");
+    fs::create_dir_all(content_root.join("Material.c4g")).test_value();
     let pack = install_network_definition_pack(content_root, "GuiPack.c4d", "GUIP");
     let pack_graphics = pack.join("Graphics.c4g");
-    fs::create_dir_all(&pack_graphics).expect("pack Graphics.c4g");
+    fs::create_dir_all(&pack_graphics).test_value();
     image::RgbaImage::from_pixel(8, 4, image::Rgba([0x21, 0x42, 0x63, 0xff]))
         .save(pack_graphics.join("GUICaption.png"))
-        .expect("write pack GUICaption");
+        .test_value();
     let scenario_path = content_root.join("JoinGui.c4s");
-    fs::create_dir_all(&scenario_path).expect("join scenario group");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Join GUI\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
     )
-    .expect("join scenario core");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
     let mut app = new_menu_app_with_paths(640, 480, &paths);
@@ -5791,14 +5547,10 @@ fn network_join_applies_active_scenario_gui_overrides() {
                 definition_root: None,
             },
         )
-        .expect("stage the GUI-override host");
+        .test_value();
     let prepared = prepare_staged_network_host(&app, &staged);
     let host = prepared.host_config();
-    let snapshot = host
-        .initial_join_snapshot
-        .as_ref()
-        .expect("prepared JoinData")
-        .clone();
+    let snapshot = host.initial_join_snapshot.test_ref().clone();
     let host_files = host.resource_files.clone();
     let join_data = clonk_network::JoinDataEnvelope {
         client_id: 2,
@@ -5813,19 +5565,18 @@ fn network_join_applies_active_scenario_gui_overrides() {
             .find(|resource| resource.core.id == core.id)
             .map(|resource| resource.path.clone())
     };
-    let scenario_resources = resolve_client_scenario_resources(&join_data, complete_path)
-        .expect("client scenario resources");
-    let game_resources =
-        resolve_client_game_resources(&join_data, complete_path).expect("client game resources");
+    let scenario_resources =
+        resolve_client_scenario_resources(&join_data, complete_path).test_value();
+    let game_resources = resolve_client_game_resources(&join_data, complete_path).test_value();
     let published_pack = game_resources
         .iter()
         .find(|resource| {
             resource.core.resource_type == clonk_network::HostResourceType::Definitions as u8
         })
-        .expect("published definition pack")
+        .test_value()
         .path
         .clone();
-    let client_directory = tempdir().expect("client resource directory");
+    let client_directory = tempdir();
     let combined_path = client_directory.path().join("Combined2.c4s");
     let preload_job = |app: &GameApp,
                        join_data: clonk_network::JoinDataEnvelope,
@@ -5846,7 +5597,7 @@ fn network_join_applies_active_scenario_gui_overrides() {
                 staging_path: None,
             },
         })
-        .expect("preload the combined client scenario")
+        .test_value()
     };
     let artifact = preload_job(&app, join_data.clone(), game_resources.clone());
 
@@ -5867,22 +5618,18 @@ fn network_join_applies_active_scenario_gui_overrides() {
     }
     app.client_combined_scenario_path = Some(combined_path.clone());
     app.lobby_preload_artifact = Some(artifact);
-    app.try_prepare_client_network_scenario()
-        .expect("install the prepared client network scenario");
+    app.try_prepare_client_network_scenario().test_value();
 
-    let loading = app.loading_state.as_ref().expect("client loading state");
+    let loading = app.loading_state.test_ref();
     assert!(
         loading.refresh_requested,
         "the client GO must stage a GraphicsResource refresh"
     );
-    let staged_overrides = loading
-        .refreshed_gui_sheet_overrides
-        .as_ref()
-        .expect("staged client GUI sheet overrides");
+    let staged_overrides = loading.refreshed_gui_sheet_overrides.test_ref();
     let staged_caption = staged_overrides
         .iter()
         .find(|sheet| sheet.stem == "GUICaption")
-        .expect("the synchronized definition pack wins GUICaption");
+        .test_value();
     assert!(
         staged_caption
             .source
@@ -5905,16 +5652,15 @@ fn network_join_applies_active_scenario_gui_overrides() {
         .assets
         .startup_dialog_images
         .get("GUICaption.png")
-        .expect("startup caption sheet")
+        .test_value()
         .pixels()
         .as_ptr();
-    app.apply_pending_loading_resource_refresh()
-        .expect("apply the staged client refresh");
+    app.apply_pending_loading_resource_refresh().test_value();
     let applied = app
         .assets
         .startup_dialog_images
         .get("GUICaption.png")
-        .expect("applied caption sheet");
+        .test_value();
     assert_eq!(applied.pixels()[..4], [0x21, 0x42, 0x63, 0xff]);
     assert_ne!(applied.pixels().as_ptr(), pristine_ptr);
     assert!(app.active_global_gui_failures.is_empty());
@@ -5922,7 +5668,7 @@ fn network_join_applies_active_scenario_gui_overrides() {
         .assets
         .startup_dialog_images
         .get("GUICaption.png")
-        .expect("applied caption sheet")
+        .test_value()
         .pixels()
         .as_ptr();
 
@@ -5930,15 +5676,13 @@ fn network_join_applies_active_scenario_gui_overrides() {
     // the identical gate, before any pixel changes.
     let corrupt_pack = install_network_definition_pack(content_root, "CorruptPack.c4d", "CORR");
     let corrupt_graphics = corrupt_pack.join("Graphics.c4g");
-    fs::create_dir_all(&corrupt_graphics).expect("corrupt pack Graphics.c4g");
-    fs::write(corrupt_graphics.join("GUIScroll.png"), b"not a png")
-        .expect("write corrupt GUIScroll");
+    fs::create_dir_all(&corrupt_graphics).test_value();
+    fs::write(corrupt_graphics.join("GUIScroll.png"), b"not a png").test_value();
     let corrupt_core = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Definitions as u8,
         id: 990,
         loadable: true,
-        filename: clonk_engine::LegacyCString::from_bytes(b"CorruptPack.c4d".to_vec())
-            .expect("valid corrupt pack name"),
+        filename: clonk_engine::LegacyCString::from_bytes(b"CorruptPack.c4d".to_vec()).test_value(),
         ..Default::default()
     };
     let mut corrupt_join_data = join_data;
@@ -5958,15 +5702,13 @@ fn network_join_applies_active_scenario_gui_overrides() {
     app.loading_state = None;
     app.pending_network_join_data = Some(corrupt_join_data);
     app.lobby_preload_artifact = Some(corrupt_artifact);
-    app.try_prepare_client_network_scenario()
-        .expect("a malformed override stages a typed failure, not an install error");
+    app.try_prepare_client_network_scenario().test_value();
     let failures = app
         .loading_state
         .as_ref()
-        .expect("corrupt client loading state")
+        .test_value()
         .refreshed_global_gui_failures
-        .as_ref()
-        .expect("staged typed failures");
+        .test_ref();
     assert!(failures.contains_key("GUIScroll"));
     let error = app
         .apply_pending_loading_resource_refresh()
@@ -6000,13 +5742,12 @@ fn network_join_applies_active_scenario_gui_overrides() {
 fn startup_bootstrap_precedes_all_seven_roots_status_models_and_native_pixels() {
     let mut app = new_real_classic_menu_app(320, 200);
     let mut initial = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut initial)
-        .expect("supported startup renders before the image is removed");
+    app.test_render(&mut initial);
     Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .remove("StartupPlrPropBG.png")
-        .expect("player-properties background is eagerly loaded");
+        .test_value();
     let expected = vec![ClassicStartupBootstrapIssue::missing(
         "StartupPlrPropBG.png",
     )];
@@ -6069,8 +5810,7 @@ fn retained_main_requires_scaled_native_fonts_but_headless_cpu_renders_without_t
     assert!(app.native_startup_fonts.is_none());
 
     let mut frame = vec![0xb4; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("headless CPU rendering keeps exact logical font cells");
+    app.test_render(&mut frame);
 
     let error = app
         .render_retained_gpu_frame(GpuPresentation {
@@ -6079,7 +5819,7 @@ fn retained_main_requires_scaled_native_fonts_but_headless_cpu_renders_without_t
             crop_top: 0,
         })
         .err()
-        .expect("scaled retained text must not fall back to point-rasterized glyphs");
+        .test_value();
     assert_startup_bootstrap_boundary(
         &error,
         vec![ClassicStartupBootstrapIssue::missing(
@@ -6088,13 +5828,12 @@ fn retained_main_requires_scaled_native_fonts_but_headless_cpu_renders_without_t
     );
 
     app.configure_native_startup_fonts(1.0, false);
-    app.render(&mut frame)
-        .expect("scale-one headless CPU rendering uses exact logical font cells");
+    app.test_render(&mut frame);
 
     let error = app
         .render_retained_gpu_frame(GpuPresentation::identity(320, 200))
         .err()
-        .expect("scale-one retained text must not fall back to point-rasterized glyphs");
+        .test_value();
     assert_startup_bootstrap_boundary(
         &error,
         vec![ClassicStartupBootstrapIssue::missing(
@@ -6107,10 +5846,7 @@ fn retained_main_requires_scaled_native_fonts_but_headless_cpu_renders_without_t
 fn scale_one_builds_native_fonts_and_enables_ordered_text_capture() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.configure_native_startup_fonts(1.0, false);
-    let fonts = app
-        .native_startup_fonts
-        .as_ref()
-        .expect("scale one keeps a retained native atlas");
+    let fonts = app.native_startup_fonts.test_ref();
     assert_eq!(fonts.scale(), 1.0);
     assert!(app.can_present_ordered_native_text(1.0));
 
@@ -6156,14 +5892,11 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     ]);
     app.engine
         .register_player(PlayerConfig::new(owner, "Secondary"))
-        .expect("register secondary local player");
+        .test_value();
     app.engine
-        .player_mut(owner)
-        .expect("secondary local player")
+        .test_player_mut(owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(7));
-    app.engine
-        .set_player_team(owner, Some(1))
-        .expect("put secondary player on Red");
+    app.engine.set_player_team(owner, Some(1)).test_value();
     app.snapshot = app.engine.snapshot();
     let mut teams = app.engine.team_configuration();
     teams.allow_team_switch = true;
@@ -6172,17 +5905,17 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     app.network = Some(manager);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
-        .expect("open first team-switch page");
+        .test_value();
     let outcome = {
-        let menu = app.ingame_menu.get_mut(owner).expect("team-switch page");
+        let menu = app.ingame_menu.get_mut(owner).test_value();
         menu.set_selection(1);
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
-            .expect("select Blue")
+            .test_value()
     };
     teams.allow_team_switch = false;
     app.engine.set_team_configuration(teams);
     app.execute_ingame_menu_outcome_for_player(owner, outcome)
-        .expect("disabled switch is a no-op");
+        .test_value();
     assert!(commands.take_submitted_internal_player_scripts().is_empty());
     assert_eq!(
         app.engine
@@ -6195,16 +5928,16 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     teams.allow_team_switch = true;
     app.engine.set_team_configuration(teams);
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
-        .expect("reopen team-switch page");
+        .test_value();
     let outcome = {
-        let menu = app.ingame_menu.get_mut(owner).expect("team-switch page");
+        let menu = app.ingame_menu.get_mut(owner).test_value();
         menu.set_selection(1);
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
-            .expect("select Blue")
+            .test_value()
     };
     let tick = app.local_control_submission_tick();
     app.execute_ingame_menu_outcome_for_player(owner, outcome)
-        .expect("queue enabled team switch");
+        .test_value();
     let control = clonk_engine::SetPlayerTeamControlData {
         team: 2,
         player: owner,
@@ -6223,7 +5956,7 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     );
 
     app.apply_ready_controls(tick, vec![NetworkControl::SetPlayerTeam(control)])
-        .expect("execute synchronized team switch");
+        .test_value();
     assert_eq!(
         app.engine
             .player(owner)
@@ -6252,24 +5985,21 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 
     app.engine
         .register_player(PlayerConfig::new(ada, "Ada").with_player_info_id(ada_info))
-        .expect("register visible user");
+        .test_value();
     app.engine
         .register_player(PlayerConfig::new(bot, "Bot").with_player_info_id(bot_info))
-        .expect("register visible script player");
+        .test_value();
     app.engine
         .register_player(PlayerConfig::new(hidden, "Hidden").with_player_info_id(hidden_info))
-        .expect("register invisible user");
+        .test_value();
     app.engine
-        .player_mut(owner)
-        .expect("menu owner")
+        .test_player_mut(owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(3));
     app.engine
-        .player_mut(ada)
-        .expect("Ada")
+        .test_player_mut(ada)
         .set_hostile_towards(owner, true);
     app.engine
-        .player_mut(owner)
-        .expect("menu owner")
+        .test_player_mut(owner)
         .set_hostile_towards(bot, true);
     let mut teams = app.engine.team_configuration();
     teams.allow_hostility_change = true;
@@ -6302,11 +6032,8 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     app.network = Some(manager);
 
     app.apply_ingame_menu_action(MenuAction::ActivateHostility)
-        .expect("open hostility page");
-    let menu = app
-        .ingame_menu
-        .get(owner)
-        .expect("hostility page remains open");
+        .test_value();
+    let menu = app.ingame_menu.get(owner).test_value();
     assert_eq!(menu.page(), ingame_menu::MenuPage::Hostility);
     assert_eq!(menu.caption(), "Don't attack Ada");
     assert!(menu.is_permanent());
@@ -6336,10 +6063,10 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 
     let tick = app.local_control_submission_tick();
     let outcome = {
-        let menu = app.ingame_menu.get_mut(owner).expect("hostility page");
+        let menu = app.ingame_menu.get_mut(owner).test_value();
         menu.set_selection(0);
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
-            .expect("select Ada row")
+            .test_value()
     };
     assert!(matches!(
         outcome,
@@ -6349,7 +6076,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
         } if opponent == ada
     ));
     app.execute_ingame_menu_outcome_for_player(owner, outcome)
-        .expect("queue hostility toggle");
+        .test_value();
     let control = clonk_engine::ToggleHostilityControlData {
         opponent: ada,
         player: owner,
@@ -6370,7 +6097,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     );
 
     app.apply_ready_controls(tick, vec![NetworkControl::ToggleHostility(control)])
-        .expect("execute synchronized hostility toggle");
+        .test_value();
     assert!(app
         .engine
         .player(owner)
@@ -6392,13 +6119,13 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     );
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(bot))
-        .expect("script-player row is rejected");
+        .test_value();
     assert!(commands.take_submitted_internal_player_scripts().is_empty());
 
     teams.allow_hostility_change = false;
     app.engine.set_team_configuration(teams);
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
-        .expect("disabled hostility change is ignored");
+        .test_value();
     assert!(commands.take_submitted_internal_player_scripts().is_empty());
     assert!(app
         .engine
@@ -6410,7 +6137,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     app.engine.set_team_configuration(teams);
     app.network = None;
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
-        .expect("execute local hostility toggle");
+        .test_value();
     assert!(!app
         .engine
         .player(owner)
@@ -6441,17 +6168,13 @@ fn all_graphical_modes_produce_retained_scenes() {
     let menu_presentation = retained_test_presentation(&menu);
     let menu_frame = menu
         .render_retained_gpu_frame(menu_presentation)
-        .expect("retain startup menu");
+        .test_value();
     assert_retained_frame_has_commands("menu", &menu_frame);
 
     let mut loading = new_real_menu_app(320, 200);
     loading.graphics.set_runtime_sprite_filtering(1.0, false);
     loading.configure_native_startup_fonts(1.0, false);
-    let fonts = loading
-        .assets
-        .clonk_fonts
-        .clone()
-        .expect("classic loader fonts");
+    let fonts = loading.assets.clonk_fonts.clone().test_value();
     loading.loader_screen = Some(
         LoaderScreen::new(
             LoaderSelection::startup("LoaderRetained.png")
@@ -6461,7 +6184,7 @@ fn all_graphical_modes_produce_retained_scenes() {
                 .expect("valid retained loader resources"),
             LoaderState::initial("Loading"),
         )
-        .expect("valid retained loader screen"),
+        .test_value(),
     );
     loading.loader_error = None;
     loading.loader_render_error = None;
@@ -6469,7 +6192,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     let loading_presentation = retained_test_presentation(&loading);
     let loading_frame = loading
         .render_retained_gpu_frame(loading_presentation)
-        .expect("retain loader");
+        .test_value();
     assert_retained_frame_has_commands("loading", &loading_frame);
 
     let mut running = new_classic_running_sandbox_app();
@@ -6478,7 +6201,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     let running_presentation = retained_test_presentation(&running);
     let running_frame = running
         .render_retained_gpu_frame(running_presentation)
-        .expect("retain running game");
+        .test_value();
     assert_retained_frame_has_commands("running", &running_frame);
 
     let mut console = new_state_only_menu_app(320, 200);
@@ -6486,7 +6209,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     let console_presentation = retained_test_presentation(&console);
     let console_frame = console
         .render_retained_gpu_frame(console_presentation)
-        .expect("retain developer console");
+        .test_value();
     assert_retained_frame_has_commands("console", &console_frame);
 }
 
@@ -6502,20 +6225,18 @@ fn scale_native_text_keeps_logical_physical_painter_order() {
         crop_top: 0,
     };
 
-    let frame = app
-        .render_retained_gpu_frame(presentation)
-        .expect("retain ordered scale-native menu");
+    let frame = app.render_retained_gpu_frame(presentation).test_value();
     assert_retained_frame_has_commands("scale-native menu", &frame);
     let logical = frame
         .layers
         .iter()
         .position(|layer| layer.presentation == presentation)
-        .expect("logical menu layer");
+        .test_value();
     let physical = frame
         .layers
         .iter()
         .position(|layer| layer.presentation == GpuPresentation::identity(640, 400))
-        .expect("physical native-text layer");
+        .test_value();
     assert!(
         logical < physical,
         "native text must follow the logical chrome batch that produced it"
@@ -6549,15 +6270,15 @@ fn fractional_loader_scales_reach_native_text() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
+    let paths = test_app_paths();
     for (scale, physical_width, physical_height) in [(1.5, 480_u32, 300_u32), (0.5, 160, 100)] {
-        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
+        let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
         app.configure_native_startup_fonts(scale, false);
         assert_eq!(app.mode, AppMode::Loading);
         assert!(app.can_defer_native_loader_text(scale));
@@ -6568,10 +6289,10 @@ fn fractional_loader_scales_reach_native_text() {
             .present(&mut frame, |logical| {
                 app.render_for_presentation(logical, false, true, false)
             })
-            .expect("render fractional loader chrome");
+            .test_value();
         assert!(refreshed);
         app.render_native_loader_text(&mut frame, physical_width, physical_height)
-            .expect("render fractional native loader text");
+            .test_value();
         assert!(frame.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 }
@@ -6582,35 +6303,27 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
+    let paths = test_app_paths();
 
     for client in [false, true] {
-        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
+        let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
         app.configure_native_startup_fonts(0.5, false);
         app.loader_screen
-            .as_mut()
-            .expect("loader")
+            .test_mut()
             .update(LoaderUpdate::SetTitle("scale-fifty loader".into()));
         app.loader_screen
-            .as_mut()
-            .expect("loader")
+            .test_mut()
             .update(LoaderUpdate::ReplaceLog(vec!["process".into()]));
         app.loader_screen
-            .as_mut()
-            .expect("loader")
+            .test_mut()
             .update(LoaderUpdate::SetProcess(Some(50)));
-        let resources = app
-            .loader_screen
-            .as_ref()
-            .expect("loader")
-            .resources()
-            .clone();
+        let resources = app.loader_screen.test_ref().resources().clone();
         let (_sender, receiver) = mpsc::channel();
         app.loading_state = Some(ScenarioLoadingState::new(
             FrontendScenario::fallback(),
@@ -6622,8 +6335,7 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
         app.mode = AppMode::Loading;
         if client {
             app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-            app.show_reached_network_start_wait()
-                .expect("show reached client wait");
+            app.show_reached_network_start_wait().test_value();
             app.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                     "upper message",
@@ -6632,7 +6344,7 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
                 ),
                 MessageDialogContinuation::None,
             )
-            .expect("stack client loading dialog");
+            .test_value();
         } else {
             app.network_mode = Some(NetworkMode::Host(host_network_settings()));
             app.begin_network_start_wait(clonk_network::NetworkStatus {
@@ -6640,8 +6352,7 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
                 control_mode: 1,
                 target_tick: 4,
             });
-            app.show_reached_network_start_wait()
-                .expect("show reached host wait");
+            app.show_reached_network_start_wait().test_value();
         }
 
         let (chrome, rendered, plan) = render_ordered_test_frame(&mut app, 0.5, 320, 240);
@@ -6666,7 +6377,7 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
             .batches
             .iter()
             .position(|batch| batch.native_loader_text)
-            .expect("loader keeps its dedicated native renderer");
+            .test_value();
         let wait_batch = command_batch("Waiting for start...");
         assert_eq!(loader_batch, 0);
         assert!(wait_batch > loader_batch);
@@ -6685,33 +6396,25 @@ fn scale_three_host_start_wait_renders_after_native_loader_text() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
+    let paths = test_app_paths();
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.configure_native_startup_fonts(3.0, false);
     app.loader_screen
-        .as_mut()
-        .expect("loader")
+        .test_mut()
         .update(LoaderUpdate::SetTitle("Session|host loader".into()));
     app.loader_screen
-        .as_mut()
-        .expect("loader")
+        .test_mut()
         .update(LoaderUpdate::ReplaceLog(vec!["process".into()]));
     app.loader_screen
-        .as_mut()
-        .expect("loader")
+        .test_mut()
         .update(LoaderUpdate::SetProcess(Some(73)));
-    let resources = app
-        .loader_screen
-        .as_ref()
-        .expect("loader")
-        .resources()
-        .clone();
+    let resources = app.loader_screen.test_ref().resources().clone();
     let (_sender, receiver) = mpsc::channel();
     app.loading_state = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
@@ -6728,8 +6431,7 @@ fn scale_three_host_start_wait_renders_after_native_loader_text() {
         target_tick: 4,
     };
     app.begin_network_start_wait(status);
-    app.show_reached_network_start_wait()
-        .expect("show reached host wait");
+    app.show_reached_network_start_wait().test_value();
 
     let (_chrome, _rendered, plan) = render_ordered_test_frame(&mut app, 3.0, 1920, 1440);
     let command_batch = |needle: &str| {
@@ -6749,7 +6451,7 @@ fn scale_three_host_start_wait_renders_after_native_loader_text() {
         .batches
         .iter()
         .position(|batch| batch.native_loader_text)
-        .expect("loader keeps its native-metric StringOut/process path");
+        .test_value();
     let wait_batch = command_batch("Waiting for start...");
     assert_eq!(loader_batch, 0, "loader text owns the native base batch");
     assert!(
@@ -6764,25 +6466,19 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("app");
+    let paths = test_app_paths();
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.configure_native_startup_fonts(1.5, false);
     app.loader_screen
-        .as_mut()
-        .expect("loader")
+        .test_mut()
         .update(LoaderUpdate::SetTitle("client loader".into()));
-    let resources = app
-        .loader_screen
-        .as_ref()
-        .expect("loader")
-        .resources()
-        .clone();
+    let resources = app.loader_screen.test_ref().resources().clone();
     let (_sender, receiver) = mpsc::channel();
     app.loading_state = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
@@ -6793,8 +6489,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     ));
     app.mode = AppMode::Loading;
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    app.show_reached_network_start_wait()
-        .expect("show reached client wait");
+    app.show_reached_network_start_wait().test_value();
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
             "upper message",
@@ -6803,31 +6498,28 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("stack a second loading dialog");
+    .test_value();
     let (upper_layout, title_point) = {
-        let resources = app
-            .assets
-            .message_dialog_resources()
-            .expect("message-dialog resources");
-        let layout = app
-            .message_dialogs
-            .last()
-            .expect("upper dialog")
-            .state
-            .layout(640, 480, &resources.fonts.text);
-        let caption = layout.caption.expect("upper dialog caption");
+        let resources = app.assets.message_dialog_resources().test_value();
+        let layout =
+            app.message_dialogs
+                .last()
+                .test_value()
+                .state
+                .layout(640, 480, &resources.fonts.text);
+        let caption = layout.caption.test_value();
         let point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
         (layout, point)
     };
     let tooltip_started = Instant::now()
         .checked_sub(clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1))
-        .expect("monotonic clock supports tooltip lookback");
+        .test_value();
     app.startup_tooltip = ClassicTooltipTracker::new_at(tooltip_started);
     app.startup_tooltip
         .note_pointer_move_at(title_point, tooltip_started);
     app.message_dialogs
         .last_mut()
-        .expect("upper dialog")
+        .test_value()
         .state
         .handle_pointer_move(title_point, &upper_layout);
 
@@ -6849,7 +6541,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         .batches
         .iter()
         .position(|batch| batch.native_loader_text)
-        .expect("loader keeps its dedicated native renderer");
+        .test_value();
     let client_wait_batch = command_batch("Waiting for start...");
     let upper_batch = command_batch("upper message");
     assert_eq!(loader_batch, 0);
@@ -6870,7 +6562,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         })
         .collect::<Vec<_>>();
     assert_eq!(upper_caption_batches.len(), 2);
-    let tooltip_batch = *upper_caption_batches.last().unwrap();
+    let tooltip_batch = *upper_caption_batches.last().test_value();
     assert!(tooltip_batch > upper_batch);
     assert!(plan.batches[tooltip_batch].logical_layer.is_some());
 
@@ -6889,14 +6581,14 @@ fn scale_three_clipped_loader_uses_native_text_after_chrome_upscale() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
+    let paths = test_app_paths();
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     app.configure_native_startup_fonts(3.0, false);
     // C++ rounds 598 / 3 up to 200 logical rows, renders a nominal
     // 600-row GL viewport, and lets the framebuffer clip its top two rows.
@@ -6906,9 +6598,9 @@ fn scale_three_clipped_loader_uses_native_text_after_chrome_upscale() {
         .present(&mut physical, |frame| {
             app.render_for_presentation(frame, false, true, false)
         })
-        .expect("loader chrome");
+        .test_value();
     app.render_native_loader_text(&mut physical, 960, 598)
-        .expect("native loader text");
+        .test_value();
     assert!(physical.chunks_exact(4).any(|pixel| pixel[3] != 0));
 }
 
@@ -6920,15 +6612,14 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    let mut app =
-        test_game_app(640, 480, AudioOptions::default(), Some(&paths)).expect("initialise app");
+    let paths = test_app_paths();
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     wait_for_menu(&mut app);
     app.configure_native_startup_fonts(3.0, false);
     assert!(app.can_defer_native_main_menu_text(3.0));
@@ -6939,11 +6630,11 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
         .present(&mut output, |frame| {
             app.render_for_presentation(frame, true, false, false)
         })
-        .expect("render filtered base");
+        .test_value();
     assert!(refreshed);
     let filtered_base = output.clone();
     app.render_native_main_menu_text(&mut output, 1920, 1438)
-        .expect("render native main-menu captions");
+        .test_value();
     assert_ne!(output, filtered_base, "physical caption pass must draw");
 
     let button = clonk_frontend::main_menu_layout(640, 480).buttons[0];
@@ -6968,14 +6659,14 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
         .present(&mut output, |frame| {
             app.render_for_presentation(frame, true, false, false)
         })
-        .expect("recompose the filtered base");
+        .test_value();
     assert!(refreshed);
     assert_eq!(
         output, filtered_base,
         "an unchanged menu recomposes the same deferred-text base"
     );
     app.render_native_main_menu_text(&mut output, 1920, 1438)
-        .expect("re-render native main-menu captions");
+        .test_value();
     assert_eq!(
         output, with_native_text,
         "the physical caption pass is deterministic over an identical base"
@@ -6996,7 +6687,7 @@ fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("push ordered startup dialog");
+        .test_value();
     }
 
     let (chrome, rendered, plan) = render_ordered_test_frame(&mut app, 3.0, 1920, 1440);

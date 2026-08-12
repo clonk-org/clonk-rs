@@ -1,8 +1,8 @@
 // Test for WARP script patterns
 
-#[test]
-fn warp_script_simplified() {
-    let source = r#"
+crate::support::compile_case!(
+    warp_script_simplified,
+    r#"
 private func Warp(clonk)
 {
   var ox, oy;
@@ -23,20 +23,17 @@ private func Warp(clonk)
   RemoveObject();
   return(1);
 }
-"#;
-    crate::support::assert_compiles(source);
-}
+"#,
+);
 
-#[test]
-fn scope_resolution_call() {
-    // Test the ::Connect pattern
-    let source = r#"func Test() { var obj; obj->WARP::Connect(0); }"#;
-    crate::support::assert_compiles(source);
-}
+// Test the ::Connect pattern
+crate::support::compile_case!(
+    scope_resolution_call,
+    r#"func Test() { var obj; obj->WARP::Connect(0); }"#
+);
 
-#[test]
-fn comma_return_with_parentheses() {
-    // Test return(0, Message(...))
-    let source = r#"func Test() { return(0, Message("test")); }"#;
-    crate::support::assert_compiles(source);
-}
+// Test return(0, Message(...))
+crate::support::compile_case!(
+    comma_return_with_parentheses,
+    r#"func Test() { return(0, Message("test")); }"#
+);

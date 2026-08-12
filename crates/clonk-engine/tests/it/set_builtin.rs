@@ -3,18 +3,19 @@ use clonk_script::Value;
 
 fn call_probe(id: &str, script: &str) -> Value {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition(id, "Set builtin probe", script)
-        .expect("probe definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new(id))
-        .expect("probe object spawns");
-    let index = engine
-        .find_object_index(object)
-        .expect("probe object exists");
-    engine
-        .call_object_function(index, "Probe", Vec::new())
-        .expect("probe runs")
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        id,
+        "Set builtin probe",
+        script,
+    ));
+    let object =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new(id)));
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
+    crate::support::TestValueExt::test_value(engine.call_object_function(
+        index,
+        "Probe",
+        Vec::new(),
+    ))
 }
 
 #[test]

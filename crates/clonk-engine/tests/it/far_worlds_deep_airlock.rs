@@ -41,9 +41,7 @@ fn pumping_fixture(airlock: Vector2) -> Landscape {
 }
 
 fn live_material_count(engine: &clonk_engine::Engine, material: MaterialId) -> usize {
-    let landscape = engine
-        .landscape()
-        .expect("the controlled AIRL landscape remains installed")
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape())
         .material_pixel_count(material, None) as usize;
     let pxs = engine
         .pxs_system
@@ -97,20 +95,19 @@ fn deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid(
     // copy instead returns the same three source pixels all twenty times and
     // creates liquid that never existed.
     let mut engine = prepared.instantiate();
-    let airlock = engine
-        .spawn_object(
-            SpawnConfig::new("AIRL").with_position(Vector2::new(AIRLOCK_X, REQUESTED_AIRLOCK_Y)),
-        )
-        .expect("the shipped Deep Sea airlock spawns");
+    let airlock = crate::support::TestValueExt::test_value(engine.spawn_object(
+        SpawnConfig::new("AIRL").with_position(Vector2::new(AIRLOCK_X, REQUESTED_AIRLOCK_Y)),
+    ));
     assert_eq!(
         engine.debug_definition_has_function("AIRL", "Pumping"),
         Some(true),
         "the spawned AIRL uses the shipped Deep Sea script"
     );
-    let airlock_position = engine
-        .object_snapshot(airlock)
-        .map(|object| object.position)
-        .expect("AIRL has a live callback-relative origin");
+    let airlock_position = crate::support::TestValueExt::test_value(
+        engine
+            .object_snapshot(airlock)
+            .map(|object| object.position),
+    );
     assert_eq!(airlock_position.x, AIRLOCK_X);
     let source = airlock_position.y + 13..=airlock_position.y + 15;
 
@@ -119,18 +116,19 @@ fn deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid(
     // script, material library, RNG, and callback path remain the shipped
     // Deep Sea scenario's.
     engine.set_landscape(pumping_fixture(airlock_position));
-    let water = engine
-        .landscape()
-        .and_then(|landscape| landscape.material_at(AIRLOCK_X, *source.start()))
-        .expect("fixture water resolves through Deep Sea's material library");
+    let water = crate::support::TestValueExt::test_value(
+        engine
+            .landscape()
+            .and_then(|landscape| landscape.material_at(AIRLOCK_X, *source.start())),
+    );
     assert_eq!(live_material_count(&engine, water), 3);
 
-    let airlock_index = engine
-        .find_object_index(airlock)
-        .expect("AIRL remains live");
-    engine
-        .call_object_function(airlock_index, "Pumping", Vec::new())
-        .expect("the shipped AIRL::Pumping callback completes");
+    let airlock_index = crate::support::TestValueExt::test_value(engine.find_object_index(airlock));
+    crate::support::TestValueExt::test_value(engine.call_object_function(
+        airlock_index,
+        "Pumping",
+        Vec::new(),
+    ));
 
     let remaining = source
         .filter(|&y| engine.debug_landscape_is_liquid(AIRLOCK_X, y))

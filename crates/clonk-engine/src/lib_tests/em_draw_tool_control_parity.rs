@@ -5,7 +5,7 @@ use crate::landscape::{
 };
 
 fn bytes(value: &str) -> LegacyCString {
-    LegacyCString::from_bytes(value.as_bytes().to_vec()).expect("fixture is NUL-free")
+    crate::TestValueExt::test_value(LegacyCString::from_bytes(value.as_bytes().to_vec()))
 }
 
 fn control(action: u8) -> EmDrawToolControlData {
@@ -23,11 +23,10 @@ fn control(action: u8) -> EmDrawToolControlData {
 fn editor_engine(seed: u64) -> Engine {
     const WIDTH: u32 = 32;
     const HEIGHT: u32 = 32;
-    let library = clonk_resources::MaterialLibrary::parse(
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
             "[Material Earth]\nName=Earth\nColor=1,2,3,40,50,60,10,20,30\nDensity=80\nMaxSlide=0\nTextureOverlay=Rough\n\n\
              [Material Water]\nName=Water\nColor=4,5,6,70,80,90,100,110,120\nDensity=25\nTextureOverlay=Smooth\n",
-    )
-    .expect("material fixture parses");
+    ));
     let materials = MaterialSet::from_resource_library(&library);
 
     let mut densities = vec![0; 128];
@@ -88,8 +87,8 @@ fn editor_engine(seed: u64) -> Engine {
         material_names,
         texture_names,
     );
-    let mut landscape = Landscape::new(WIDTH, vec![HEIGHT as i32; WIDTH as usize])
-        .expect("landscape fixture builds");
+    let mut landscape =
+        crate::TestValueExt::test_value(Landscape::new(WIDTH, vec![HEIGHT as i32; WIDTH as usize]));
     landscape.set_world_height(HEIGHT as i32);
     landscape.set_pixel_grid(grid);
     landscape.set_raster_state(raster);
@@ -153,11 +152,8 @@ fn set_mode_and_exact_primitives_match_surface8_geometry_and_ift() {
 #[test]
 fn fill_uses_y_then_x_draws_and_exactly_two_draws_per_grade() {
     let mut engine = editor_engine(23);
-    let _ = engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .set_mode(LANDSCAPE_MODE_EXACT);
+    let _ =
+        crate::TestValueExt::test_value(engine.landscape.as_mut()).set_mode(LANDSCAPE_MODE_EXACT);
     let mut fill = control(EMDT_FILL);
     fill.x = 14;
     fill.y = 12;
@@ -199,11 +195,8 @@ fn league_mode_mismatch_and_invalid_fill_inputs_are_rng_free_noops() {
     assert_eq!(undefined.debug_landscape_byte(0, 0), Some(0));
 
     let mut engine = editor_engine(29);
-    let _ = engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .set_mode(LANDSCAPE_MODE_EXACT);
+    let _ =
+        crate::TestValueExt::test_value(engine.landscape.as_mut()).set_mode(LANDSCAPE_MODE_EXACT);
     let mut fill = control(EMDT_FILL);
     fill.grade = 3;
     fill.x = 10;
@@ -235,11 +228,8 @@ fn league_mode_mismatch_and_invalid_fill_inputs_are_rng_free_noops() {
 #[test]
 fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
     let mut engine = editor_engine(31);
-    let _ = engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .set_mode(LANDSCAPE_MODE_STATIC);
+    let _ =
+        crate::TestValueExt::test_value(engine.landscape.as_mut()).set_mode(LANDSCAPE_MODE_STATIC);
 
     // A static radius-one brush uses Map::SetPix, not the asymmetric
     // two-pixel CSurface8 circle used in Exact mode.
@@ -249,22 +239,19 @@ fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
     brush.y = 8;
     brush.grade = 0;
     assert!(engine.execute_em_draw_tool_control(&brush));
-    let retained = engine
-        .landscape
-        .as_ref()
-        .and_then(Landscape::raster_state)
-        .and_then(LandscapeRasterState::map)
-        .expect("static editor map is retained");
+    let retained = crate::TestValueExt::test_value(
+        engine
+            .landscape
+            .as_ref()
+            .and_then(Landscape::raster_state)
+            .and_then(LandscapeRasterState::map),
+    );
     assert_eq!(retained.index_at(8, 8), Some(1));
     assert_eq!(retained.index_at(7, 8), Some(0));
 
     // MapToLandscape redraws only the primitive's affected rectangle;
     // unrelated runtime Surface8 changes outside it must survive.
-    engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .grid_write_byte(25, 25, 0x81);
+    crate::TestValueExt::test_value(engine.landscape.as_mut()).grid_write_byte(25, 25, 0x81);
     let mut rect = control(EMDT_RECT);
     rect.mode = LANDSCAPE_MODE_STATIC;
     rect.x = 2;
@@ -275,11 +262,8 @@ fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
     assert_ne!(engine.debug_landscape_byte(3, 3), Some(0));
     assert_eq!(engine.debug_landscape_byte(25, 25), Some(0x81));
 
-    let _ = engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .set_mode(LANDSCAPE_MODE_EXACT);
+    let _ =
+        crate::TestValueExt::test_value(engine.landscape.as_mut()).set_mode(LANDSCAPE_MODE_EXACT);
     let mut sky = control(EMDT_RECT);
     sky.material = bytes("Sky");
     sky.x = 3;
@@ -313,17 +297,11 @@ fn static_draw_marks_and_saves_map_bmp_with_store_map_palette_colors() {
         .expect("fMapChanged without a retained Map is a no-op"));
 
     let mut engine = editor_engine(37);
-    let _ = engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .set_mode(LANDSCAPE_MODE_STATIC);
-    engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .save_initial()
-        .expect("initial Surface8 captures");
+    let _ =
+        crate::TestValueExt::test_value(engine.landscape.as_mut()).set_mode(LANDSCAPE_MODE_STATIC);
+    crate::TestValueExt::test_value(
+        crate::TestValueExt::test_value(engine.landscape.as_mut()).save_initial(),
+    );
     assert!(!engine.landscape().unwrap().map_changed());
 
     let mut untouched = clonk_resources::MutableGroup::new("Scenario.c4s");
@@ -344,12 +322,10 @@ fn static_draw_marks_and_saves_map_bmp_with_store_map_palette_colors() {
     assert!(engine.landscape().unwrap().map_changed());
 
     let mut saved = clonk_resources::MutableGroup::new("Scenario.c4s");
-    saved
-        .add_file("LANDSCAPE.BMP", b"stale full surface".to_vec())
-        .unwrap();
-    engine
-        .save_c4_static_landscape(&mut saved)
-        .expect("static scenario components save");
+    crate::TestValueExt::test_value(
+        saved.add_file("LANDSCAPE.BMP", b"stale full surface".to_vec()),
+    );
+    crate::TestValueExt::test_value(engine.save_c4_static_landscape(&mut saved));
     let mut gated = clonk_resources::MutableGroup::new("Scenario.c4s");
     assert!(engine
         .save_changed_c4_landscape_map(&mut gated)
@@ -359,14 +335,14 @@ fn static_draw_marks_and_saves_map_bmp_with_store_map_palette_colors() {
         "save does not clear the gate"
     );
 
-    let root = clonk_resources::Group::from_memory(
+    let root = crate::TestValueExt::test_value(clonk_resources::Group::from_memory(
         std::path::PathBuf::from("Scenario.c4s"),
-        saved.pack_raw().expect("scenario packs"),
-    )
-    .expect("scenario reopens");
+        crate::TestValueExt::test_value(saved.pack_raw()),
+    ));
     assert!(!root.exists("Landscape.bmp"));
-    let bytes = root.read_file("Map.bmp").expect("SaveMap uses Map.bmp");
-    let map = clonk_resources::bitmap::IndexedBitmap::decode(&bytes).expect("map decodes");
+    let bytes = crate::TestValueExt::test_value(root.read_file("Map.bmp"));
+    let map =
+        crate::TestValueExt::test_value(clonk_resources::bitmap::IndexedBitmap::decode(&bytes));
     assert_eq!(map.index_at(8, 8), Some(1));
     assert_eq!(&bytes[54..58], &[252, 196, 192, 0], "sky palette is BGRA");
     assert_eq!(&bytes[58..62], &[30, 20, 10, 0]);
@@ -379,13 +355,12 @@ fn static_draw_marks_and_saves_map_bmp_with_store_map_palette_colors() {
     assert!(engine
         .save_c4_landscape_diff(&mut diff_group, false)
         .expect("changed Surface8 diff saves"));
-    let diff_group = clonk_resources::Group::from_memory(
+    let diff_group = crate::TestValueExt::test_value(clonk_resources::Group::from_memory(
         std::path::PathBuf::from("Scenario.c4s"),
         diff_group.pack_raw().unwrap(),
-    )
-    .unwrap();
+    ));
     assert!(diff_group.exists("Map.bmp"));
-    let diff = diff_group.read_file("DiffLandscape.bmp").unwrap();
+    let diff = crate::TestValueExt::test_value(diff_group.read_file("DiffLandscape.bmp"));
     assert_eq!(&diff[58..62], &[3, 2, 1, 0]);
     assert_eq!(&diff[54 + 129 * 4..54 + 130 * 4], &[3, 2, 1, 0]);
 }
@@ -402,25 +377,20 @@ fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
         .iter()
         .any(|name| name.eq_ignore_ascii_case("Material.c4g")));
     let mut clean_material = clonk_resources::MutableGroup::new("Material.c4g");
-    clean_material
-        .add_file("TexMap.txt", b"leave stale bytes alone".to_vec())
-        .unwrap();
-    clean_material
-        .add_file("Sentinel.bin", b"untouched".to_vec())
-        .unwrap();
+    crate::TestValueExt::test_value(
+        clean_material.add_file("TexMap.txt", b"leave stale bytes alone".to_vec()),
+    );
+    crate::TestValueExt::test_value(clean_material.add_file("Sentinel.bin", b"untouched".to_vec()));
     let mut clean_root = clonk_resources::MutableGroup::new("Scenario.c4s");
-    clean_root
-        .add_child("Material.c4g", clean_material)
-        .unwrap();
+    crate::TestValueExt::test_value(clean_root.add_child("Material.c4g", clean_material));
     assert!(!engine
         .save_c4_landscape_textures(&mut clean_root)
         .expect("clean existing child is untouched"));
-    let clean_root = clonk_resources::Group::from_memory(
+    let clean_root = crate::TestValueExt::test_value(clonk_resources::Group::from_memory(
         std::path::PathBuf::from("Scenario.c4s"),
         clean_root.pack_raw().unwrap(),
-    )
-    .unwrap();
-    let clean_material = clean_root.open_child("Material.c4g").unwrap();
+    ));
+    let clean_material = crate::TestValueExt::test_value(clean_root.open_child("Material.c4g"));
     assert_eq!(
         clean_material.read_file("TexMap.txt").unwrap(),
         b"leave stale bytes alone"
@@ -430,14 +400,10 @@ fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
         b"untouched"
     );
 
-    let slot = engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .raster_state_mut()
-        .unwrap()
-        .texmap_mut()
-        .get_index("Earth", Some("Smooth"), true);
+    let slot =
+        crate::TestValueExt::test_value(engine.landscape.as_mut().unwrap().raster_state_mut())
+            .texmap_mut()
+            .get_index("Earth", Some("Smooth"), true);
     assert_eq!(slot, 2);
     assert!(engine.landscape().unwrap().texture_map_entries_added());
 
@@ -447,11 +413,10 @@ fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
     assert!(engine
         .save_c4_landscape_textures(&mut fresh)
         .expect("fresh Material child saves"));
-    let fresh = clonk_resources::Group::from_memory(
+    let fresh = crate::TestValueExt::test_value(clonk_resources::Group::from_memory(
         std::path::PathBuf::from("Scenario.c4s"),
-        fresh.pack_raw().expect("fresh scenario packs"),
-    )
-    .expect("fresh scenario reopens");
+        crate::TestValueExt::test_value(fresh.pack_raw()),
+    ));
     assert_eq!(
         fresh
             .open_child("Material.c4g")
@@ -462,31 +427,24 @@ fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
     );
 
     let mut old_material = clonk_resources::MutableGroup::new("Material.c4g");
-    old_material
-        .add_file("Earth.c4m", b"sentinel".to_vec())
-        .unwrap();
-    old_material
-        .add_file("texmap.TXT", b"stale".to_vec())
-        .unwrap();
+    crate::TestValueExt::test_value(old_material.add_file("Earth.c4m", b"sentinel".to_vec()));
+    crate::TestValueExt::test_value(old_material.add_file("texmap.TXT", b"stale".to_vec()));
     let mut old_root = clonk_resources::MutableGroup::new("Scenario.c4s");
-    old_root.add_child("Material.c4g", old_material).unwrap();
-    let source = clonk_resources::Group::from_memory(
+    crate::TestValueExt::test_value(old_root.add_child("Material.c4g", old_material));
+    let source = crate::TestValueExt::test_value(clonk_resources::Group::from_memory(
         std::path::PathBuf::from("Scenario.c4s"),
-        old_root.pack_raw().expect("old scenario packs"),
-    )
-    .expect("old scenario opens");
-    let mut rewritten = clonk_resources::MutableGroup::from_group(&source).unwrap();
+        crate::TestValueExt::test_value(old_root.pack_raw()),
+    ));
+    let mut rewritten =
+        crate::TestValueExt::test_value(clonk_resources::MutableGroup::from_group(&source));
     assert!(engine
         .save_c4_landscape_textures(&mut rewritten)
         .expect("existing Material child mutates"));
-    let rewritten = clonk_resources::Group::from_memory(
+    let rewritten = crate::TestValueExt::test_value(clonk_resources::Group::from_memory(
         std::path::PathBuf::from("Scenario.c4s"),
-        rewritten.pack_raw().expect("rewritten scenario packs"),
-    )
-    .expect("rewritten scenario opens");
-    let material = rewritten
-        .open_child("Material.c4g")
-        .expect("rewritten material child opens");
+        crate::TestValueExt::test_value(rewritten.pack_raw()),
+    ));
+    let material = crate::TestValueExt::test_value(rewritten.open_child("Material.c4g"));
     assert_eq!(material.read_file("Earth.c4m").unwrap(), b"sentinel");
     assert_eq!(material.read_file("TexMap.txt").unwrap(), expected);
     assert!(
@@ -495,35 +453,25 @@ fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
     );
 
     let mut file_root = clonk_resources::MutableGroup::new("Scenario.c4s");
-    file_root
-        .add_file("Material.c4g", b"ordinary file".to_vec())
-        .unwrap();
+    crate::TestValueExt::test_value(file_root.add_file("Material.c4g", b"ordinary file".to_vec()));
     assert!(matches!(
         engine.save_c4_landscape_textures(&mut file_root),
         Err(LandscapePersistenceError::MaterialGroupIsFile)
     ));
 
     let mut moved = editor_engine(42);
-    let (succeeded, _) = moved
-        .landscape
-        .as_mut()
-        .unwrap()
-        .raster_state_mut()
-        .unwrap()
-        .texmap_mut()
-        .set_texture_index("Earth-Rough", 5, false);
+    let (succeeded, _) =
+        crate::TestValueExt::test_value(moved.landscape.as_mut().unwrap().raster_state_mut())
+            .texmap_mut()
+            .set_texture_index("Earth-Rough", 5, false);
     assert!(succeeded);
     assert!(moved.landscape().unwrap().texture_map_entries_added());
 
     let mut removed = editor_engine(43);
-    let cleared = removed
-        .landscape
-        .as_mut()
-        .unwrap()
-        .raster_state_mut()
-        .unwrap()
-        .texmap_mut()
-        .remove_unused_entries([true; 128]);
+    let cleared =
+        crate::TestValueExt::test_value(removed.landscape.as_mut().unwrap().raster_state_mut())
+            .texmap_mut()
+            .remove_unused_entries([true; 128]);
     assert!(cleared.is_empty());
     assert!(removed.landscape().unwrap().texture_map_entries_added());
 }

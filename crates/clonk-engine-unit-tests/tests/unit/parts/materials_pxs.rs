@@ -1,3 +1,147 @@
+    fn materials_pxs_test_materials(source: &str) -> MaterialSet {
+        let library = MaterialLibrary::parse(source).test_value();
+        MaterialSet::from_resource_library(&library)
+    }
+
+    fn materials_pxs_with_earth(source: &str) -> MaterialSet {
+        materials_pxs_test_materials(&format!(
+            "{source}\n[Material Earth]\nName=Earth\nDensity=100\nFriction=25\n"
+        ))
+    }
+
+    fn pxs_grid(
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+        materials: &[(usize, i32, &str)],
+    ) -> landscape::PixelGrid {
+        let mut densities = vec![0; 128];
+        let mut names = vec![None; 128];
+        for &(index, density, name) in materials {
+            densities[index] = density;
+            names[index] = Some(name.to_owned());
+        }
+        landscape::PixelGrid::new(width, height, bytes, densities, names, vec![None; 128])
+    }
+
+    fn pxs_grid_world(
+        width: u32,
+        height: i32,
+        surface: Vec<i32>,
+        grid: landscape::PixelGrid,
+    ) -> Landscape {
+        let mut world = Landscape::new(width, surface).test_value();
+        world.set_world_height(height);
+        world.set_pixel_grid(grid);
+        world
+    }
+
+    fn pxs_engine(seed: u64, materials: MaterialSet) -> Engine {
+        let mut engine = Engine::with_seed(seed);
+        engine.set_materials(materials);
+        engine
+    }
+
+    fn pxs_fixture(seed: u64, definition: Definition, config: SpawnConfig) -> (Engine, ObjectId) {
+        let mut engine = Engine::with_seed(seed);
+        engine.register_test_definition(definition);
+        let id = engine.spawn_test_object(config);
+        (engine, id)
+    }
+
+    fn pxs_default_fixture(definition: Definition, config: SpawnConfig) -> (Engine, ObjectId) {
+        let mut engine = Engine::new();
+        engine.register_test_definition(definition);
+        let id = engine.spawn_test_object(config);
+        (engine, id)
+    }
+
+    fn no_other_action_fixture(seed: u64) -> (Engine, ObjectId) {
+        let mut definition = test_definition(
+            "Actor",
+            "Actor",
+            r#"
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        "#,
+        );
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                (
+                    "Idle".to_string(),
+                    ActionSpec::default().with_no_other_action(true),
+                ),
+                ("Run".to_string(), ActionSpec::default()),
+            ]),
+        );
+        pxs_fixture(seed, definition, SpawnConfig::new("Actor"))
+    }
+
+    fn start_abort_definition(
+        id: &str,
+        name: &str,
+        source: &str,
+        hooks: DebuggerHooks,
+    ) -> Definition {
+        let mut definition = test_definition(id, name, source);
+        definition.set_debugger_hooks(hooks);
+        definition.set_c4_callback_convention(true);
+        definition.configure_actions(
+            Some("Old".to_string()),
+            HashMap::from([
+                (
+                    "Old".to_string(),
+                    ActionSpec::default().with_abort_call("OnOldAbort"),
+                ),
+                (
+                    "New".to_string(),
+                    ActionSpec::default().with_start_call("OnNewStart"),
+                ),
+            ]),
+        );
+        definition
+    }
+
+    fn create_test_pxs(
+        engine: &mut Engine,
+        material: MaterialId,
+        x: i32,
+        y: i32,
+        xdir: i32,
+        ydir: i32,
+    ) -> bool {
+        engine.pxs_system.create(
+            material,
+            math::itofix(x),
+            math::itofix(y),
+            math::itofix(xdir),
+            math::itofix(ydir),
+        )
+    }
+
+    fn pxs_material_ids<const N: usize>(
+        materials: &MaterialSet,
+        names: [&str; N],
+    ) -> [MaterialId; N] {
+        names.map(|name| materials.id_of(name).test_value())
+    }
+
+    fn pxs_call_hooks<T, F>(record: F) -> (Arc<Mutex<Vec<T>>>, DebuggerHooks)
+    where
+        T: Send + 'static,
+        F: Fn(&str, &[Value]) -> Option<T> + Send + Sync + 'static,
+    {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let call_log = Arc::clone(&calls);
+        let hooks = DebuggerHooks::new().with_on_call(move |name, args| {
+            if let Some(call) = record(name, args) {
+                call_log.lock().test_value().push(call);
+            }
+        });
+        (calls, hooks)
+    }
+
     #[test]
     fn weather_disaster_rng_draw_order_matches_cpp() {
         // C4Weather::Execute disaster block (C4Weather.cpp:104-148): on every
@@ -5,26 +149,14 @@
         // [lightning], Random(50) [earthquake], Random(60) [volcano] are
         // drawn UNCONDITIONALLY — the configured levels only gate the
         // follow-up Random(100) comparison, never the gate draw itself.
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth exists");
+        let materials = materials_pxs_with_earth("");
+        let earth = materials.id_of("Earth").test_value();
 
-        let mut engine = Engine::with_seed(123);
-        engine.set_materials(materials.clone());
+        let mut engine = pxs_engine(123, materials.clone());
         engine.set_landscape(Landscape::flat_with_material(64, 40, Some(earth)));
         let mut mirror = engine.rng.clone();
 
-        engine
-            .tick_weather_events(10)
-            .expect("weather tick succeeds");
+        engine.tick_weather_events(10).test_value();
         // levels all default to 0: each zero gate still draws Random(100)
         if mirror.random(60) == 0 {
             mirror.random(100);
@@ -42,9 +174,7 @@
 
         // Non-Tick10 frame: no draws at all (C4Weather.cpp:104).
         let before = engine.rng.clone();
-        engine
-            .tick_weather_events(11)
-            .expect("weather tick succeeds");
+        engine.tick_weather_events(11).test_value();
         assert_eq!(engine.rng, before);
 
         // With a level at 100, a zero gate launches: lightning consumes
@@ -54,8 +184,7 @@
         // meteorite consumes Random(101) then Random(GBackWdt) (:114-115).
         // No FX definitions are registered, so object creation is skipped,
         // but the synced draws must still happen.
-        let mut engine = Engine::with_seed(7);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(7, materials);
         engine.set_landscape(Landscape::flat_with_material(64, 40, Some(earth)));
         let mut environment = engine.environment();
         environment.meteorite = 100;
@@ -71,9 +200,7 @@
 
         for frame in 1..=400u64 {
             let mut mirror = engine.rng.clone();
-            engine
-                .tick_weather_events(frame)
-                .expect("weather tick succeeds");
+            engine.tick_weather_events(frame).test_value();
             if frame % 10 != 0 {
                 assert_eq!(engine.rng, mirror);
                 continue;
@@ -109,22 +236,19 @@
             let mut landscape = Landscape::flat(64, 40);
             landscape.set_border_open(0, 0, top_open, false);
             engine.set_landscape(landscape);
-            let mut meteor_definition = Definition::from_script(
+            let mut meteor_definition = test_definition(
                 "METO",
                 "Meteor",
                 r#"#strict 2
-local construction_xdir, initialize_xdir;
-protected func Construction() { construction_xdir = GetXDir(); }
-protected func Initialize() { initialize_xdir = GetXDir(); }
-"#,
-            )
-            .expect("meteor definition compiles");
+            local construction_xdir, initialize_xdir;
+            protected func Construction() { construction_xdir = GetXDir(); }
+            protected func Initialize() { initialize_xdir = GetXDir(); }
+            "#,
+            );
             meteor_definition.set_category(CATEGORY_OBJECT);
             meteor_definition.set_rotateable(1);
             meteor_definition.set_c4_callback_convention(true);
-            engine
-                .register_definition(meteor_definition)
-                .expect("meteor definition registers");
+            engine.register_test_definition(meteor_definition);
             let mut environment = engine.environment();
             environment.meteorite = 100;
             engine.set_environment(environment);
@@ -135,21 +259,15 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             let r2 = mirror.random(101);
             let x = mirror.random(64);
 
-            engine
-                .tick_weather_events(10)
-                .expect("weather tick launches meteor");
+            engine.tick_weather_events(10).test_value();
             let expected_xdir = C4Fixed::from_raw(itofix(r2 - 50).val() / 10);
-            let expected_ydir = if top_open {
-                C4Fixed::ZERO
-            } else {
-                itofix(2)
-            };
+            let expected_ydir = if top_open { C4Fixed::ZERO } else { itofix(2) };
             let expected_rdir = C4Fixed::from_raw(itofix(1).val() / 5);
             let meteor = engine
                 .objects
                 .iter()
                 .find(|object| object.definition_id == "METO")
-                .expect("meteor spawned");
+                .test_value();
             let meteor_id = meteor.id;
             assert_eq!(meteor.state.position.x, x);
             assert_eq!(meteor.state.owner, OWNER_NONE);
@@ -174,13 +292,13 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             let result = (meteor.state.position.y, meteor.fixed_velocity.y);
             if top_open {
                 for _ in 0..5 {
-                    engine.tick_without_snapshot().expect("meteor movement frame succeeds");
+                    engine.tick_without_snapshot().test_value();
                 }
                 let meteor = engine
                     .objects
                     .iter()
                     .find(|object| object.id == meteor_id)
-                    .expect("meteor remains after the short motion trace");
+                    .test_value();
                 assert!(
                     meteor.fixed_position.y > initial_fixed_y,
                     "open-top meteor falls under gravity before the next Tick10 pulse"
@@ -205,7 +323,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         engine.set_environment(EnvironmentSettings::new(50));
 
         for _ in 0..9 {
-            assert!(engine.tick().expect("pre-Tick10 frame succeeds").audio.is_empty());
+            assert!(engine
+                .tick()
+                .expect("pre-Tick10 frame succeeds")
+                .audio
+                .is_empty());
         }
         assert_eq!(
             engine.tick().expect("Tick10 weather succeeds").audio,
@@ -217,7 +339,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         );
 
         for _ in 0..9 {
-            assert!(engine.tick().expect("pre-Tick20 frame succeeds").audio.is_empty());
+            assert!(engine
+                .tick()
+                .expect("pre-Tick20 frame succeeds")
+                .audio
+                .is_empty());
         }
         let mut rising = EnvironmentSettings::new(49).with_wind_variation(1, 1_000);
         rising.wind_target = 50;
@@ -234,7 +360,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
         engine.set_environment(EnvironmentSettings::new(30));
         for _ in 0..9 {
-            assert!(engine.tick().expect("pre-Tick30 frame succeeds").audio.is_empty());
+            assert!(engine
+                .tick()
+                .expect("pre-Tick30 frame succeeds")
+                .audio
+                .is_empty());
         }
         assert_eq!(
             engine.tick().expect("Tick30 weather succeeds").audio,
@@ -285,7 +415,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
     #[test]
     fn negative_material_reaction_flags_are_truthy_like_cpp() {
-        use material::{MaterialReactionKind, evaluate_corrosion};
+        use material::{evaluate_corrosion, MaterialReactionKind};
 
         let natural = MaterialSet::from_resource_library(
             &MaterialLibrary::parse(
@@ -331,9 +461,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 Corrode=-8
                 "#,
             )
-            .expect("natural materials parse"),
+            .test_value(),
         );
-        let id = |name| natural.id_of(name).expect("natural material exists");
+        let id = |name| natural.id_of(name).test_value();
         assert_eq!(
             natural.reaction(Some(id("IL")), Some(id("EH"))).kind,
             MaterialReactionKind::Poof,
@@ -451,30 +581,24 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 Density=20
                 "#,
             )
-            .expect("category materials parse"),
+            .test_value(),
         );
-        let neg = categories.id_of("Neg").expect("negative target exists");
-        let zero = categories.id_of("Zero").expect("zero target exists");
+        let neg = categories.id_of("Neg").test_value();
+        let zero = categories.id_of("Zero").test_value();
         for source_name in ["RI", "RE", "RF", "RC", "RR"] {
-            let source = categories
-                .id_of(source_name)
-                .expect("category source exists");
+            let source = categories.id_of(source_name).test_value();
             let reaction = categories.reaction(Some(source), Some(neg));
             assert!(reaction.user_defined, "{source_name} matched its category");
             assert_eq!(reaction.kind, MaterialReactionKind::Poof);
         }
 
-        let inverse = categories.id_of("IV").expect("inverse source exists");
+        let inverse = categories.id_of("IV").test_value();
         assert!(
-            !categories
-                .reaction(Some(inverse), Some(neg))
-                .user_defined,
+            !categories.reaction(Some(inverse), Some(neg)).user_defined,
             "a nonzero negative flag is excluded from the inverse category",
         );
         assert!(
-            categories
-                .reaction(Some(inverse), Some(zero))
-                .user_defined,
+            categories.reaction(Some(inverse), Some(zero)).user_defined,
             "a zero flag matches the inverse category",
         );
         assert!(
@@ -482,7 +606,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             "sky matches an inverse flag category",
         );
 
-        let rate = categories.id_of("Rate").expect("rate source exists");
+        let rate = categories.id_of("Rate").test_value();
         let rate_reaction = categories.reaction(Some(rate), Some(zero));
         assert_eq!(
             rate_reaction.kind,
@@ -506,26 +630,17 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // itofix(1) and SplashRate set, !Random(SplashRate) bounces the PXS:
         // fYDir = -fYDir/8 (raw int division), fXDir = fXDir/8 +
         // FIXED100(Random(200)-100), and the nonzero fYDir keeps it alive.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Water]
             Name=Water
             Density=25
             Friction=0
             SplashRate=1
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(7);
-        engine.set_materials(materials);
+        );
+        let [water, earth] = pxs_material_ids(&materials, ["Water", "Earth"]);
+        let mut engine = pxs_engine(7, materials);
         engine.set_landscape(Landscape::flat_with_material(9, 10, Some(earth)));
 
         let mut mirror = engine.rng.clone();
@@ -560,32 +675,23 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // (Smoke(x, y, 4+Rnd3()), C4Effect.cpp:859-863); with no slide
         // available the check returns true (insertion OK,
         // C4Material.cpp:608-609).
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Lava]
             Name=Lava
             Density=30
             Friction=20
             Incindiary=1
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let lava = materials.id_of("Lava").expect("lava exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(2);
-        engine.set_materials(materials);
+        );
+        let [lava, earth] = pxs_material_ids(&materials, ["Lava", "Earth"]);
+        let mut engine = pxs_engine(2, materials);
         // Deep inside flat earth: no slide target anywhere.
         engine.set_landscape(Landscape::flat_with_material(9, 5, Some(earth)));
         // Force the Random(25) == 0 branch deterministically.
         let smoke_seed = (0u32..)
             .find(|&seed| LcgRng::new(seed).random(25) == 0)
-            .expect("seed exists");
+            .test_value();
         engine.rng = LcgRng::new(smoke_seed);
         engine
             .register_particle_definition(
@@ -601,7 +707,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 4,
                 1.0,
             )
-            .expect("smoke def registers");
+            .test_value();
 
         let mut mirror = engine.rng.clone();
         assert_eq!(mirror.random(25), 0);
@@ -645,32 +751,22 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // material → absorb (move there, fXDir = 0). Different material →
         // fXDir = (fXDir*10 + Sign(slide_x - x))/11 + FIXED10(Random(5)-2),
         // with the direct jump only when the target is within |fixtoi(fXDir)|.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Sand]
             Name=Sand
             Density=25
             Friction=10
             MaxSlide=2
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let sand = materials.id_of("Sand").expect("sand exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
+        );
+        let [sand, earth] = pxs_material_ids(&materials, ["Sand", "Earth"]);
 
         // Slide target two columns left: |x - slide_x| = 2 > |fixtoi(xdir')|
         // → no direct jump; the acceleration stays observable.
-        let mut engine = Engine::with_seed(13);
-        engine.set_materials(materials.clone());
+        let mut engine = pxs_engine(13, materials.clone());
         engine.set_landscape(
-            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
-                .expect("landscape builds"),
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth)).test_value(),
         );
         let mut mirror = engine.rng.clone();
         let expected_xdir =
@@ -696,11 +792,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         assert_eq!(engine.rng, mirror, "exactly one Random(5) draw");
 
         // Same material at the slide target → absorb without any draw.
-        let mut engine = Engine::with_seed(13);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(13, materials);
         engine.set_landscape(
-            Landscape::with_default_material(3, vec![11, 10, 11], Some(earth))
-                .expect("landscape builds"),
+            Landscape::with_default_material(3, vec![11, 10, 11], Some(earth)).test_value(),
         );
         let mirror = engine.rng.clone();
         let (mut x, mut y) = (1, 9);
@@ -730,7 +824,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // gated (C4Material.cpp:783-787). With CheckSlide=0 the insert
         // proceeds even where a slide path would otherwise keep the PXS
         // alive — and no slide RNG is drawn.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Sand]
             Name=Sand
@@ -743,35 +837,19 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Type=Insert
             TargetSpec=Earth
             CheckSlide=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let sand = materials.id_of("Sand").expect("sand exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
+        );
+        let [sand, earth] = pxs_material_ids(&materials, ["Sand", "Earth"]);
 
         // Same slide-available terrain as the builtin-insert test: without
         // CheckSlide the slide would keep the PXS alive; with CheckSlide=0
         // the user reaction inserts immediately.
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(21, materials);
         engine.set_landscape(
-            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
-                .expect("landscape builds"),
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth)).test_value(),
         );
         let mirror = engine.rng.clone();
-        assert!(engine.pxs_system.create(
-            sand,
-            math::itofix(2),
-            math::itofix(9),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, sand, 2, 9, 0, 1));
         engine.tick_pxs();
         assert_eq!(
             engine.pxs_system.iter().count(),
@@ -787,7 +865,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // excludes meePXSMove, so mrfUserCheck returns false and the PXS
         // continues through Water. Falling back to the natural equal-density
         // Insert reaction would instead kill the PXS and write Mist at y=2.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Mist]
             Name=Mist
@@ -806,43 +884,30 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=0
             MaxSlide=0
             "#,
-        )
-        .expect("materials parse");
-        let materials = MaterialSet::from_resource_library(&library);
-        let mist = materials.id_of("Mist").expect("Mist exists");
-        let water = materials.id_of("Water").expect("Water exists");
+        );
+        let [mist, water] = pxs_material_ids(&materials, ["Mist", "Water"]);
         let reaction = materials.reaction_for_event(
             Some(mist),
             Some(water),
             material::MaterialInteractionEvent::PxsMove,
         );
         assert_eq!(reaction.kind, material::MaterialReactionKind::None);
-        assert!(reaction.user_defined, "the masked pair slot remains occupied");
+        assert!(
+            reaction.user_defined,
+            "the masked pair slot remains occupied"
+        );
 
-        let mut densities = vec![0i32; 128];
-        densities[10] = 25;
-        densities[20] = 25;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[10] = Some("Water".into());
-        names[20] = Some("Mist".into());
         let mut bytes = vec![0u8; 7 * 8];
         bytes[3 * 7 + 3] = 10;
-        let grid = landscape::PixelGrid::new(7, 8, bytes, densities, names, vec![None; 128]);
-        let mut world = Landscape::new(7, vec![8; 7]).expect("landscape builds");
-        world.set_world_height(8);
-        world.set_pixel_grid(grid);
+        let grid = pxs_grid(7, 8, bytes, &[(10, 25, "Water"), (20, 25, "Mist")]);
+        let world = pxs_grid_world(7, 8, vec![8; 7], grid);
 
-        let mut engine = Engine::with_seed(22);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(22, materials);
         engine.set_landscape(world);
         engine.set_physics(PhysicsSettings::new(0, 12, -20));
-        assert!(engine.pxs_system.create(
-            mist,
-            itofix(3),
-            itofix(2),
-            C4Fixed::ZERO,
-            itofix(1),
-        ));
+        assert!(engine
+            .pxs_system
+            .create(mist, itofix(3), itofix(2), C4Fixed::ZERO, itofix(1),));
         let mirror = engine.rng.clone();
 
         engine.tick_pxs();
@@ -852,7 +917,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         assert_eq!(survivors[0].mat, mist);
         assert_eq!((fixtoi(survivors[0].x), fixtoi(survivors[0].y)), (3, 3));
         assert_eq!(engine.rng, mirror, "masked mrfUserCheck draws no RNG");
-        let world = engine.landscape().expect("landscape remains set");
+        let world = engine.landscape().test_value();
         assert_eq!(world.material_at(3, 2), None, "no builtin InsertMaterial");
         assert_eq!(world.grid_byte_at(3, 2), Some(0));
         assert_eq!(world.material_at(3, 3), Some(water));
@@ -866,7 +931,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // InsertMaterial follows FindMatSlide and re-creates a falling PXS
         // at an open ledge (C4Landscape.cpp:1179-1184); directly extending a
         // landscape column at the contact point loses that droplet.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Acid]
             Name=Acid
@@ -879,47 +944,27 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             TargetSpec=Earth
             CheckSlide=0
             CorrosionRate=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let acid = materials.id_of("Acid").expect("acid exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        );
+        let [acid, earth] = pxs_material_ids(&materials, ["Acid", "Earth"]);
+        let mut engine = pxs_engine(21, materials);
 
         // Earth floor through x=6, with an open drop at x=7. The acid PXS
         // hits Earth at (3, 6); failed corrosion inserts from (3, 5), whose
         // nearest valid slide is the open ledge at x=7.
-        let mut densities = vec![0i32; 128];
-        densities[30] = 100;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[30] = Some("Earth".into());
         let mut bytes = vec![0u8; 12 * 12];
         for y in 6..12 {
             for x in 0..=6 {
                 bytes[y * 12 + x] = 30;
             }
         }
-        let grid = landscape::PixelGrid::new(12, 12, bytes, densities, names, vec![None; 128]);
-        let mut world =
-            Landscape::with_default_material(12, vec![6; 12], Some(earth)).expect("builds");
+        let grid = pxs_grid(12, 12, bytes, &[(30, 100, "Earth")]);
+        let mut world = Landscape::with_default_material(12, vec![6; 12], Some(earth)).test_value();
         world.set_world_height(12);
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
-        assert!(engine.pxs_system.create(
-            acid,
-            math::itofix(3),
-            math::itofix(5),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, acid, 3, 5, 0, 1));
         engine.tick_pxs();
 
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
@@ -939,7 +984,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // it performs exactly one SetPix while preserving that pixel's IFT.
         // The column helper instead raises the surface to y=8 and rewrites
         // the intervening raster band.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Lava]
             Name=Lava
@@ -956,37 +1001,21 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             MaxSlide=0
             Inflammable=1
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let lava = materials.id_of("Lava").expect("lava exists");
-        let oil = materials.id_of("Oil").expect("oil exists");
-        let mut engine = Engine::with_seed(23);
-        engine.set_materials(materials);
-        engine
-            .register_script_definition(FIRE_DEFINITION_ID, "Fire", "")
-            .expect("FLAM definition registers");
-        let blocking_flame = engine
-            .spawn_object(
-                SpawnConfig::new(FIRE_DEFINITION_ID)
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(3, 7)),
-            )
-            .expect("blocking FLAM spawns");
-        assert!(
-            engine
-                .object_snapshot(blocking_flame)
-                .expect("blocking FLAM remains live")
-                .status
-                .is_active()
         );
+        let [lava, oil] = pxs_material_ids(&materials, ["Lava", "Oil"]);
+        let mut engine = pxs_engine(23, materials);
+        engine.register_test_script_definition(FIRE_DEFINITION_ID, "Fire", "");
+        let blocking_flame = engine.spawn_test_object(
+            SpawnConfig::new(FIRE_DEFINITION_ID)
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(3, 7)),
+        );
+        assert!(engine
+            .object_snapshot(blocking_flame)
+            .expect("blocking FLAM remains live")
+            .status
+            .is_active());
 
-        let mut densities = vec![0i32; 128];
-        densities[10] = 25;
-        densities[20] = 25;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[10] = Some("Lava".into());
-        names[20] = Some("Oil".into());
         let mut bytes = vec![0u8; 9 * 12];
         for y in 6..12 {
             for x in 0..9 {
@@ -994,20 +1023,13 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             }
         }
         bytes[5 * 9 + 3] = 0x80;
-        let grid = landscape::PixelGrid::new(9, 12, bytes, densities, names, vec![None; 128]);
-        let mut world =
-            Landscape::with_default_material(9, vec![6; 9], Some(oil)).expect("landscape builds");
+        let grid = pxs_grid(9, 12, bytes, &[(10, 25, "Lava"), (20, 25, "Oil")]);
+        let mut world = Landscape::with_default_material(9, vec![6; 9], Some(oil)).test_value();
         world.set_world_height(12);
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
-        assert!(engine.pxs_system.create(
-            lava,
-            math::itofix(3),
-            math::itofix(7),
-            math::C4Fixed::ZERO,
-            math::itofix(2),
-        ));
+        assert!(create_test_pxs(&mut engine, lava, 3, 7, 0, 2));
         let mut mirror = engine.rng.clone();
         assert_eq!(mirror.random(100), 63, "failed splash gate draw");
         assert_eq!(mirror.random(25), 0, "incendiary smoke gate draw");
@@ -1031,9 +1053,13 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             "the existing FLAM blocks a second ignition"
         );
 
-        let world = engine.landscape().expect("landscape remains set");
-        let grid = world.pixel_grid().expect("pixel grid remains set");
-        assert_eq!(grid.bytes()[5 * 9 + 3], 10 | 0x80, "single SetPix keeps IFT");
+        let world = engine.landscape().test_value();
+        let grid = world.pixel_grid().test_value();
+        assert_eq!(
+            grid.bytes()[5 * 9 + 3],
+            10 | 0x80,
+            "single SetPix keeps IFT"
+        );
         assert_eq!(grid.bytes()[6 * 9 + 3], 20, "Oil above contact is intact");
         assert_eq!(grid.bytes()[7 * 9 + 3], 20, "contact Oil is intact");
         assert_eq!(world.material_at(3, 5), Some(lava));
@@ -1047,7 +1073,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // reaction (C4Landscape.cpp:1185-1193). With negative gravity the
         // material ABOVE the insertion point reacts; the material below
         // must not be substituted for it.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Acid]
             Name=Acid
@@ -1065,31 +1091,15 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Density=100
             Friction=20
             MaxSlide=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let acid = materials.id_of("Acid").expect("acid exists");
-        let oil = materials.id_of("Oil").expect("oil exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(7);
-        engine.set_materials(materials);
+        );
+        let [acid, oil, earth] = pxs_material_ids(&materials, ["Acid", "Oil", "Earth"]);
+        let mut engine = pxs_engine(7, materials);
         engine.set_physics(PhysicsSettings::new(-1, 12, -20));
 
         // Oil at (3,4), sky insertion point (3,5), Earth below at (3,6).
         // MaxSlide=0 and the solid floor force InsertMaterial into its
         // reaction step without first re-creating a falling PXS.
-        let mut densities = vec![0i32; 128];
-        densities[20] = 100;
-        densities[30] = 100;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[20] = Some("Oil".into());
-        names[30] = Some("Earth".into());
         let mut bytes = vec![0u8; 7 * 10];
         bytes[4 * 7 + 3] = 20;
         for y in 6..10 {
@@ -1097,18 +1107,14 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 bytes[y * 7 + x] = 30;
             }
         }
-        let grid =
-            landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
-        let mut world =
-            Landscape::with_default_material(7, vec![6; 7], Some(earth)).expect("builds");
+        let grid = pxs_grid(7, 10, bytes, &[(20, 100, "Oil"), (30, 100, "Earth")]);
+        let mut world = Landscape::with_default_material(7, vec![6; 7], Some(earth)).test_value();
         world.set_world_height(10);
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
         assert_eq!(
-            engine
-                .landscape()
-                .and_then(|world| world.material_at(3, 4)),
+            engine.landscape().and_then(|world| world.material_at(3, 4)),
             Some(oil)
         );
         engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
@@ -1117,7 +1123,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             velocity: Vector2::new(0, 0),
         }]);
 
-        let world = engine.landscape().expect("landscape remains set");
+        let world = engine.landscape().test_value();
         assert_eq!(world.material_at(3, 4), None, "Oil above was poofed");
         assert_eq!(
             world.material_at(3, 5),
@@ -1146,29 +1152,19 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             MaxSlide=0
             "#
         ))
-        .expect("material library parses");
+        .test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let snow = materials.id_of("Snow").expect("snow exists");
-        let water = materials.id_of("Water").expect("water exists");
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let [snow, water] = pxs_material_ids(&materials, ["Snow", "Water"]);
+        let mut engine = pxs_engine(21, materials);
         engine.set_physics(PhysicsSettings::new(1, 12, -20));
 
         // Insert at (3,5): Water below selects the reaction and Water at
         // y-depth satisfies hardcoded InMatConvert's depth check.
-        let mut densities = vec![0i32; 128];
-        densities[10] = 25;
-        densities[20] = 100;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[10] = Some("Snow".into());
-        names[20] = Some("Water".into());
         let mut bytes = vec![0u8; 7 * 10];
         bytes[3 * 7 + 3] = 20;
         bytes[6 * 7 + 3] = 20;
-        let grid = landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
-        let mut world = Landscape::new(7, vec![10; 7]).expect("landscape builds");
-        world.set_world_height(10);
-        world.set_pixel_grid(grid);
+        let grid = pxs_grid(7, 10, bytes, &[(10, 25, "Snow"), (20, 100, "Water")]);
+        let world = pxs_grid_world(7, 10, vec![10; 7], grid);
         engine.set_landscape(world);
 
         (engine, snow, water)
@@ -1177,7 +1173,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     fn insert_material_thrust_fixture(
         landscape_insert_thrust: bool,
     ) -> (Engine, MaterialId, MaterialId, MaterialId) {
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Source]
             Name=Source
@@ -1197,34 +1193,24 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=0
             MaxSlide=0
             "#,
-        )
-        .expect("materials parse");
-        let materials = MaterialSet::from_resource_library(&library);
-        let source = materials.id_of("Source").expect("Source exists");
-        let old = materials.id_of("Old").expect("Old exists");
-        let support = materials.id_of("Support").expect("Support exists");
+        );
+        let [source, old, support] = pxs_material_ids(&materials, ["Source", "Old", "Support"]);
 
         // Source overwrites lower-density Old at (3,5). Dense Support at
         // (3,6) prevents the FindMatSlide/PXS path, so the only optional
         // write is Old recursively reinserted at (3,4).
-        let mut densities = vec![0i32; 128];
-        densities[10] = 50;
-        densities[20] = 25;
-        densities[30] = 100;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[10] = Some("Source".into());
-        names[20] = Some("Old".into());
-        names[30] = Some("Support".into());
         let mut bytes = vec![0u8; 7 * 10];
         bytes[5 * 7 + 3] = 20;
         bytes[6 * 7 + 3] = 30;
-        let grid = landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
-        let mut world = Landscape::new(7, vec![10; 7]).expect("landscape builds");
-        world.set_world_height(10);
-        world.set_pixel_grid(grid);
+        let grid = pxs_grid(
+            7,
+            10,
+            bytes,
+            &[(10, 50, "Source"), (20, 25, "Old"), (30, 100, "Support")],
+        );
+        let world = pxs_grid_world(7, 10, vec![10; 7], grid);
 
-        let mut engine = Engine::with_seed(24);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(24, materials);
         engine.set_physics(PhysicsSettings::new(1, 12, -20));
         engine.set_landscape_insert_thrust(landscape_insert_thrust);
         engine.set_landscape(world);
@@ -1245,7 +1231,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
         insert_source_over_old(&mut engine, source);
 
-        let world = engine.landscape().expect("landscape remains set");
+        let world = engine.landscape().test_value();
         assert_eq!(world.material_at(3, 5), Some(source));
         assert_eq!(world.grid_byte_at(3, 5), Some(10));
         assert_eq!(
@@ -1265,7 +1251,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
         insert_source_over_old(&mut engine, source);
 
-        let world = engine.landscape().expect("landscape remains set");
+        let world = engine.landscape().test_value();
         assert_eq!(world.material_at(3, 5), Some(source));
         assert_eq!(world.grid_byte_at(3, 5), Some(10));
         assert_eq!(
@@ -1291,10 +1277,18 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             velocity: Vector2::new(0, 0),
         }]);
 
-        let world = engine.landscape().expect("landscape remains set");
+        let world = engine.landscape().test_value();
         assert_eq!(world.material_at(3, 5), Some(water));
-        assert_eq!(world.grid_byte_at(3, 5), Some(20), "Water default mattex byte");
-        assert_eq!(engine.pxs_system.count(), 0, "converted material is dead-inserted");
+        assert_eq!(
+            world.grid_byte_at(3, 5),
+            Some(20),
+            "Water default mattex byte"
+        );
+        assert_eq!(
+            engine.pxs_system.count(),
+            0,
+            "converted material is dead-inserted"
+        );
         assert_eq!(engine.rng, mirror, "conversion and write-back draw no RNG");
     }
 
@@ -1302,7 +1296,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     fn insert_material_script_writes_back_position_before_dead_pixel_insert() {
         // A falsy mrfScript result keeps the material but writes X/Y back by
         // reference before InsertMaterial captures omat and calls SetPix.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Sand]
             Name=Sand
@@ -1329,13 +1323,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=0
             MaxSlide=0
             "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let sand = materials.id_of("Sand").expect("sand exists");
-        let old = materials.id_of("Old").expect("old material exists");
-        let mut engine = Engine::with_seed(22);
-        engine.set_materials(materials);
+        );
+        let [sand, old] = pxs_material_ids(&materials, ["Sand", "Old"]);
+        let mut engine = pxs_engine(22, materials);
         engine.set_physics(PhysicsSettings::new(1, 12, -20));
         engine.set_landscape_insert_thrust(true);
         engine
@@ -1348,24 +1338,18 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                     return 0;
                 }
                 "#,
-            )
-            .expect("scenario script installs");
+            ).test_value();
 
-        let mut densities = vec![0i32; 128];
-        densities[10] = 25;
-        densities[20] = 25;
-        densities[30] = 100;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[10] = Some("Sand".into());
-        names[20] = Some("Old".into());
-        names[30] = Some("Earth".into());
         let mut bytes = vec![0u8; 7 * 10];
         bytes[6 * 7 + 2] = 30;
         bytes[4 * 7 + 4] = 20;
-        let grid = landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
-        let mut world = Landscape::new(7, vec![10; 7]).expect("landscape builds");
-        world.set_world_height(10);
-        world.set_pixel_grid(grid);
+        let grid = pxs_grid(
+            7,
+            10,
+            bytes,
+            &[(10, 25, "Sand"), (20, 25, "Old"), (30, 100, "Earth")],
+        );
+        let world = pxs_grid_world(7, 10, vec![10; 7], grid);
         engine.set_landscape(world);
         let mirror = engine.rng.clone();
 
@@ -1375,17 +1359,29 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             velocity: Vector2::new(0, 0),
         }]);
 
-        let world = engine.landscape().expect("landscape remains set");
-        assert_eq!(world.material_at(2, 5), None, "original position stays empty");
+        let world = engine.landscape().test_value();
+        assert_eq!(
+            world.material_at(2, 5),
+            None,
+            "original position stays empty"
+        );
         assert_eq!(world.grid_byte_at(2, 5), Some(0));
         assert_eq!(world.material_at(4, 4), Some(sand));
-        assert_eq!(world.grid_byte_at(4, 4), Some(10), "Sand default mattex byte");
+        assert_eq!(
+            world.grid_byte_at(4, 4),
+            Some(10),
+            "Sand default mattex byte"
+        );
         assert_eq!(
             world.material_at(4, 3),
             Some(old),
             "thrust captures old material at the script-assigned destination"
         );
-        assert_eq!(engine.pxs_system.count(), 0, "script result is dead-inserted");
+        assert_eq!(
+            engine.pxs_system.count(),
+            0,
+            "script result is dead-inserted"
+        );
         assert_eq!(engine.rng, mirror, "falsy script write-back draws no RNG");
     }
 
@@ -1402,7 +1398,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 velocity: Vector2::new(0, 0),
             }]);
 
-            let world = engine.landscape().expect("landscape remains set");
+            let world = engine.landscape().test_value();
             assert_eq!(world.material_at(3, 5), None, "target {convert_to}");
             assert_eq!(world.grid_byte_at(3, 5), Some(0), "target {convert_to}");
             assert_eq!(engine.pxs_system.count(), 0, "target {convert_to}");
@@ -1436,39 +1432,25 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=0
             "#
         ))
-        .expect("material library parses");
+        .test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let source = materials.id_of("Source").expect("source exists");
-        let target = materials.id_of("Target").expect("target exists");
+        let [source, target] = pxs_material_ids(&materials, ["Source", "Target"]);
 
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(21, materials);
         engine.set_physics(PhysicsSettings::new(0, 12, -20));
         engine.set_environment(EnvironmentSettings::new(80));
 
         // The PXS sits at (2,2); its current cell optionally triggers the
         // PXSPos reaction, while the cell below always has density 10.
-        let mut densities = vec![0i32; 128];
-        densities[10] = 10;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[10] = Some("Trigger".into());
         let mut bytes = vec![0u8; 5 * 6];
         if trigger_at_pixel {
             bytes[2 * 5 + 2] = 10;
         }
         bytes[3 * 5 + 2] = 10;
-        let grid = landscape::PixelGrid::new(5, 6, bytes, densities, names, vec![None; 128]);
-        let mut world = Landscape::new(5, vec![6; 5]).expect("landscape builds");
-        world.set_world_height(6);
-        world.set_pixel_grid(grid);
+        let grid = pxs_grid(5, 6, bytes, &[(10, 10, "Trigger")]);
+        let world = pxs_grid_world(5, 6, vec![6; 5], grid);
         engine.set_landscape(world);
-        assert!(engine.pxs_system.create(
-            source,
-            math::itofix(2),
-            math::itofix(2),
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-        ));
+        assert!(create_test_pxs(&mut engine, source, 2, 2, 0, 0));
 
         (engine, source, target)
     }
@@ -1595,7 +1577,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // (C4Material.cpp:629-634). On success the dirs zero and the pixel
         // lives on as the converted material (pfPosChanged snaps it,
         // C4PXS.cpp:106-112).
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Slime]
             Name=Slime
@@ -1612,21 +1594,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Name=Water
             Density=25
             Friction=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let slime = materials.id_of("Slime").expect("slime exists");
-        let water = materials.id_of("Water").expect("water exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
+        );
+        let [slime, water, earth] = pxs_material_ids(&materials, ["Slime", "Water", "Earth"]);
 
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(21, materials);
         // World bottom below the ground surface: the y=10 contact row is
         // EARTH — at the world bottom it would be the closed border, which
         // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
@@ -1634,13 +1606,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         world.set_world_height(20);
         engine.set_landscape(world);
         let mirror = engine.rng.clone();
-        assert!(engine.pxs_system.create(
-            slime,
-            math::itofix(2),
-            math::itofix(9),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, slime, 2, 9, 0, 1));
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
         assert_eq!(survivors.len(), 1, "converted pixel lives on");
@@ -1659,7 +1625,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // finds no slide against the wall and InsertMaterial deactivates
         // the PXS in place — it must NOT walk out of bounds and die
         // draw-free like against sky.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Earth]
             Name=Earth
@@ -1678,53 +1644,36 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Density=100
             Friction=100
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(9);
-        engine.set_materials(materials);
+        );
+        let [water, earth] = pxs_material_ids(&materials, ["Water", "Earth"]);
+        let mut engine = pxs_engine(9, materials);
         engine.set_landscape(Landscape::flat_with_material(6, 6, Some(earth)));
 
         // Per-pixel world: earth from y=6 down, sky above (the audit bug
         // lives on the grid path — material_at answers None past the
         // sides there).
-        let mut densities = vec![0i32; 128];
-        densities[20] = 25;
-        densities[30] = 100;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[20] = Some("Water".into());
-        names[30] = Some("Earth".into());
         let mut bytes = vec![0u8; 6 * 12];
         for y in 6..12 {
             for x in 0..6 {
                 bytes[y * 6 + x] = 30;
             }
         }
-        let grid = landscape::PixelGrid::new(6, 12, bytes, densities, names, vec![None; 128]);
-        let mut world =
-            Landscape::with_default_material(6, vec![6; 6], Some(earth)).expect("builds");
+        let grid = pxs_grid(6, 12, bytes, &[(20, 25, "Water"), (30, 100, "Earth")]);
+        let mut world = Landscape::with_default_material(6, vec![6; 6], Some(earth)).test_value();
         world.set_world_height(12);
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
 
         // Sitting on the ground in the border column, pushing left.
         let mirror = engine.rng.clone();
-        assert!(engine.pxs_system.create(
-            water,
-            math::itofix(0),
-            math::itofix(5),
-            -math::itofix(2),
-            math::C4Fixed::ZERO,
-        ));
+        assert!(create_test_pxs(&mut engine, water, 0, 5, -2, 0));
         engine.tick_pxs();
         assert_eq!(
             engine.pxs_system.iter().count(),
             0,
             "border contact inserts and deactivates the PXS"
         );
-        let landscape = engine.landscape().expect("landscape set");
+        let landscape = engine.landscape().test_value();
         assert_eq!(
             landscape.material_at(0, 5),
             Some(water),
@@ -1743,7 +1692,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // reaction kills the pixel does Deactivate free it — the droplet
         // must land in the NEXT slot, keeping the deterministic
         // chunk-major execution order.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Water]
             Name=Water
@@ -1752,29 +1701,21 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             SplashRate=0
             MaxSlide=10
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let mut engine = Engine::with_seed(3);
-        engine.set_materials(materials);
+        );
+        let water = materials.id_of("Water").test_value();
+        let mut engine = pxs_engine(3, materials);
 
         // Pixel world 12x12: a water pool in columns 0..=6 (rows 6..11)
         // with a step down to open air at column 7 — the insert slide
         // finds the ledge and re-creates the pixel as a droplet there.
-        let mut densities = vec![0i32; 128];
-        densities[20] = 25;
-        let mut names: Vec<Option<String>> = vec![None; 128];
-        names[20] = Some("Water".into());
         let mut bytes = vec![0u8; 12 * 12];
         for y in 6..12 {
             for x in 0..=6 {
                 bytes[y * 12 + x] = 20;
             }
         }
-        let grid = landscape::PixelGrid::new(12, 12, bytes, densities, names, vec![None; 128]);
-        let mut world =
-            Landscape::with_default_material(12, vec![6; 12], Some(water)).expect("builds");
+        let grid = pxs_grid(12, 12, bytes, &[(20, 25, "Water")]);
+        let mut world = Landscape::with_default_material(12, vec![6; 12], Some(water)).test_value();
         world.set_world_height(12);
         world.set_pixel_grid(grid);
         engine.set_landscape(world);
@@ -1782,13 +1723,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // Slot 0: a submerged water PXS moving down — the water-vs-water
         // move contact inserts (killing it) and the insert slides to the
         // ledge, creating the droplet DURING slot 0's execution.
-        assert!(engine.pxs_system.create(
-            water,
-            math::itofix(3),
-            math::itofix(7),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, water, 3, 7, 0, 1));
         engine.tick_pxs();
 
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
@@ -1803,13 +1738,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // The executing slot 0 freed on death; the droplet occupies slot 1
         // (C++ New() skipped the still-live slot 0). The next create must
         // reuse slot 0 and execute BEFORE the droplet.
-        assert!(engine.pxs_system.create(
-            water,
-            math::itofix(9),
-            math::itofix(2),
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-        ));
+        assert!(create_test_pxs(&mut engine, water, 9, 2, 0, 0));
         let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
         assert_eq!(
             order,
@@ -1827,44 +1756,29 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // reuse — and with it the deterministic execution order — stays
         // lockstep across a save/load boundary. Compacting the layout on
         // restore hands later creates different slots than C++.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Water]
             Name=Water
             Density=25
             Friction=0
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let mut engine = Engine::with_seed(5);
-        engine.set_materials(materials);
+        );
+        let water = materials.id_of("Water").test_value();
+        let mut engine = pxs_engine(5, materials);
 
         for x in 0..3 {
-            assert!(engine.pxs_system.create(
-                water,
-                math::itofix(x),
-                math::itofix(0),
-                math::C4Fixed::ZERO,
-                math::C4Fixed::ZERO,
-            ));
+            assert!(create_test_pxs(&mut engine, water, x, 0, 0, 0));
         }
         // Kill the middle pixel: slot 1 becomes an MNone gap.
         engine.pxs_system.clear_slot(0, 1);
 
         let state = engine.capture_state();
-        engine.restore_state(&state).expect("state restores");
+        engine.restore_state(&state).test_value();
 
         // The gap must survive: the next create reuses slot 1, keeping
         // chunk-major order [slot0, slot1, slot2] = [0, 9, 2].
-        assert!(engine.pxs_system.create(
-            water,
-            math::itofix(9),
-            math::itofix(0),
-            math::C4Fixed::ZERO,
-            math::C4Fixed::ZERO,
-        ));
+        assert!(create_test_pxs(&mut engine, water, 9, 0, 0, 0));
         let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
         assert_eq!(order, [0, 9, 2], "restore keeps the MNone gap at slot 1");
     }
@@ -1876,7 +1790,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // fixtoi(YDir,100), PxsMat, LsMat, Event — and a truthy return
         // deactivates the PXS (C4Material.cpp:818). An unresolvable name is
         // a no-op (null pScriptFunc, C4Material.cpp:809-811).
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Goo]
             Name=Goo
@@ -1899,21 +1813,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             ScriptFunc=NoSuchFunction
             TargetSpec=Earth
             CheckSlide=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let goo = materials.id_of("Goo").expect("goo exists");
-        let ooze = materials.id_of("Ooze").expect("ooze exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
+        );
+        let [goo, ooze, earth] = pxs_material_ids(&materials, ["Goo", "Ooze", "Earth"]);
 
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(21, materials);
         // World bottom below the ground surface: the y=10 contact row is
         // EARTH — at the world bottom it would be the closed border, which
         // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
@@ -1944,20 +1848,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             "System.c4g reaction script installs without a scenario host"
         );
         engine
-            .install_scenario_script(
-                "Scenario",
-                "func NoSuchFunction() { return 1; }",
-            )
-            .expect("ordinary scenario-local shadow installs");
+            .install_scenario_script("Scenario", "func NoSuchFunction() { return 1; }")
+            .test_value();
 
         let mirror = engine.rng.clone();
-        assert!(engine.pxs_system.create(
-            goo,
-            math::itofix(2),
-            math::itofix(9),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
         engine.tick_pxs();
         assert_eq!(
             engine.pxs_system.iter().count(),
@@ -1969,13 +1864,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // An ordinary scenario-local function is not owned by
         // Game.ScriptEngine, so GetSFuncWarn cannot resolve it: null
         // pScriptFunc leaves the PXS alive.
-        assert!(engine.pxs_system.create(
-            ooze,
-            math::itofix(2),
-            math::itofix(9),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, ooze, 2, 9, 0, 1));
         engine.tick_pxs();
         assert_eq!(
             engine.pxs_system.iter().count(),
@@ -1991,7 +1880,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // UNCONDITIONALLY, and a change to any of pos/speed writes all four
         // back (dirs through the lossy FIXED100 round trip) and sets
         // pfPosChanged (→ the fStopMovement snap, C4PXS.cpp:106-112).
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Goo]
             Name=Goo
@@ -2008,21 +1897,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Name=Water
             Density=25
             Friction=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let goo = materials.id_of("Goo").expect("goo exists");
-        let water = materials.id_of("Water").expect("water exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
+        );
+        let [goo, water, earth] = pxs_material_ids(&materials, ["Goo", "Water", "Earth"]);
 
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(21, materials);
         // World bottom below the ground surface: the y=10 contact row is
         // EARTH — at the world bottom it would be the closed border, which
         // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
@@ -2041,15 +1920,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 }
                 "#,
             )
-            .expect("scenario script installs");
+            .test_value();
 
-        assert!(engine.pxs_system.create(
-            goo,
-            math::itofix(2),
-            math::itofix(9),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, goo, 2, 9, 0, 1));
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
         assert_eq!(survivors.len(), 1, "falsy return keeps the pixel");
@@ -2078,7 +1951,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // (C4Material.cpp:781-790): a PXS with a slide path keeps existing
         // (snapped to its int position, fStopMovement C4PXS.cpp:106-112);
         // an enclosed PXS inserts and dies.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_with_earth(
             r#"
             [Material Sand]
             Name=Sand
@@ -2086,17 +1959,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=10
             MaxSlide=2
             SplashRate=0
-
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let sand = materials.id_of("Sand").expect("sand exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
+        );
+        let [sand, earth] = pxs_material_ids(&materials, ["Sand", "Earth"]);
 
         // Slide available: the step loop hits earth below, mrfInsertCheck
         // finds the two-column slide, the PXS survives snapped to its int
@@ -2104,24 +1969,16 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // Default gravity stays on: Sign(GravAccel) feeds the slide direction
         // (C4Material.cpp:590) and the added ydir is small enough not to
         // shift fixtoi. SplashRate=0 keeps the splash branch draw-free.
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials.clone());
+        let mut engine = pxs_engine(21, materials.clone());
         engine.set_landscape(
-            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
-                .expect("landscape builds"),
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth)).test_value(),
         );
         let mut mirror = engine.rng.clone();
         // fXDir = (0*10 + Sign(0-2))/11 + FIXED10(Random(5)-2) (C4Material.cpp:597)
         let expected_xdir = math::C4Fixed::from_raw(math::itofix(-1).val() / 11)
             + math::fixed10(mirror.random(5) - 2);
 
-        assert!(engine.pxs_system.create(
-            sand,
-            math::itofix(2),
-            math::itofix(9),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, sand, 2, 9, 0, 1));
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
         assert_eq!(survivors.len(), 1, "slide path keeps the PXS alive");
@@ -2142,19 +1999,12 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // Enclosed: no slide anywhere → insertion proceeds and the PXS dies
         // (C4Material.cpp:788-790). The liquid column only extends the world
         // height so the buried PXS stays in bounds (C4PXS.cpp:45-49).
-        let mut engine = Engine::with_seed(21);
-        engine.set_materials(materials);
+        let mut engine = pxs_engine(21, materials);
         let mut landscape = Landscape::flat_with_material(5, 10, Some(earth));
         landscape.set_liquid_column(0, vec![LiquidSegment::new(25, 28)]);
         engine.set_landscape(landscape);
         let mirror = engine.rng.clone();
-        assert!(engine.pxs_system.create(
-            sand,
-            math::itofix(2),
-            math::itofix(20),
-            math::C4Fixed::ZERO,
-            math::itofix(1),
-        ));
+        assert!(create_test_pxs(&mut engine, sand, 2, 20, 0, 1));
         engine.tick_pxs();
         assert_eq!(
             engine.pxs_system.count(),
@@ -2166,7 +2016,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
     #[test]
     fn apply_landscape_operations_executes_shake_circle() -> Result<(), EngineError> {
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Earth]
             Name=Earth
@@ -2174,12 +2024,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=25
             DigFree=1
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(9);
-        engine.set_materials(materials);
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(9, materials);
         engine.set_landscape(Landscape::flat_with_material(17, 40, Some(earth)));
 
         engine.apply_landscape_operations(vec![LandscapeOperation::ShakeCircle {
@@ -2202,7 +2049,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     fn shake_circle_clears_only_dig_free_grid_pixels_like_cpp() {
         // C4Landscape::ShakeFreePix clears DigFree material and creates a
         // PXS, but preserves other material (C4Landscape.cpp:928-938).
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Earth]
             Name=Earth
@@ -2213,32 +2060,20 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Name=Granite
             Density=100
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let granite = materials.id_of("Granite").expect("granite exists");
-        let mut engine = Engine::with_seed(9);
-        engine.set_materials(materials);
+        );
+        let [earth, granite] = pxs_material_ids(&materials, ["Earth", "Granite"]);
+        let mut engine = pxs_engine(9, materials);
 
-        let mut densities = vec![0; 128];
-        densities[30] = 100;
-        densities[40] = 100;
-        let mut names = vec![None; 128];
-        names[30] = Some("Earth".to_owned());
-        names[40] = Some("Granite".to_owned());
         let mut bytes = vec![0; 25];
         bytes[2 * 5 + 2] = 30;
         bytes[2 * 5 + 3] = 40;
-        let grid = landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
-        let mut landscape = Landscape::new(5, vec![5; 5]).expect("landscape builds");
-        landscape.set_world_height(5);
-        landscape.set_pixel_grid(grid);
+        let grid = pxs_grid(5, 5, bytes, &[(30, 100, "Earth"), (40, 100, "Granite")]);
+        let landscape = pxs_grid_world(5, 5, vec![5; 5], grid);
         engine.set_landscape(landscape);
 
         engine.execute_shake_circle_operation(Vector2::new(2, 2), 2);
 
-        let landscape = engine.landscape().expect("landscape remains set");
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.material_at(2, 2), None, "DigFree Earth clears");
         assert_eq!(
             landscape.material_at(3, 2),
@@ -2255,7 +2090,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
     #[test]
     fn blast_circle_shifts_materials_with_blast_shift_to() -> Result<(), EngineError> {
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Granite]
             Name=Granite
@@ -2268,20 +2103,16 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Density=90
             Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let granite = materials.id_of("Granite").expect("granite exists");
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(29);
-        engine.set_materials(materials);
+        );
+        let [granite, earth] = pxs_material_ids(&materials, ["Granite", "Earth"]);
+        let mut engine = pxs_engine(29, materials);
         engine.set_landscape(Landscape::flat_with_material(25, 40, Some(granite)));
 
         engine
             .blast_circle(Vector2::new(12, 40), 10, None)
-            .expect("blast applies");
+            .test_value();
 
-        let landscape = engine.landscape().expect("landscape present");
+        let landscape = engine.landscape().test_value();
         let mut shifted_columns = 0;
         for x in 0..landscape.width() as i32 {
             if landscape.solid_material_at(x) == Some(earth) {
@@ -2303,7 +2134,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // These equivalent column/raster worlds expose ten Granite pixels
         // in the complete r=2 scan, so both ledgers must advance by ten
         // identical LCG draws.
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Granite]
             Name=Granite
@@ -2316,10 +2147,8 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Density=90
             Friction=25
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let granite = materials.id_of("Granite").expect("granite exists");
+        );
+        let granite = materials.id_of("Granite").test_value();
 
         let mut column_engine = Engine::with_seed(29);
         column_engine.set_materials(materials.clone());
@@ -2341,9 +2170,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             vec![None, Some("Granite".to_owned()), Some("Earth".to_owned())],
             vec![None; 3],
         );
-        let mut raster_world = Landscape::new(7, vec![0; 7]).expect("raster landscape builds");
-        raster_world.set_world_height(7);
-        raster_world.set_pixel_grid(grid);
+        let raster_world = pxs_grid_world(7, 7, vec![0; 7], grid);
         raster_engine.set_landscape(raster_world);
 
         let count_before = column_engine.rng.count;
@@ -2353,12 +2180,8 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         }
 
         let center = Vector2::new(3, 3);
-        let column_result = column_engine
-            .blast_circle(center, 2, None)
-            .expect("column blast applies");
-        let raster_result = raster_engine
-            .blast_circle(center, 2, None)
-            .expect("raster blast applies");
+        let column_result = column_engine.blast_circle(center, 2, None).test_value();
+        let raster_result = raster_engine.blast_circle(center, 2, None).test_value();
 
         assert_eq!(
             column_result.pixel_count_by_material.get(&granite),
@@ -2391,7 +2214,10 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             10,
             "one synced draw per BlastShiftTo pixel"
         );
-        assert_eq!(column_engine.rng, mirror, "column ledger matches C++ Random");
+        assert_eq!(
+            column_engine.rng, mirror,
+            "column ledger matches C++ Random"
+        );
         assert_eq!(
             raster_engine.rng, mirror,
             "column and faithful raster paths finish on the same ledger"
@@ -2421,9 +2247,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 Friction=25
                 "#
             ))
-            .expect("material library parses");
+            .test_value();
             let materials = MaterialSet::from_resource_library(&library);
-            let granite = materials.id_of("Granite").expect("granite exists");
+            let granite = materials.id_of("Granite").test_value();
 
             let mut engine = Engine::with_seed(31);
             engine.set_materials(materials);
@@ -2436,7 +2262,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
             let result = engine
                 .blast_circle(Vector2::new(1, 0), 0, None)
-                .expect("column blast applies");
+                .test_value();
 
             assert_eq!(
                 result.pixel_count_by_material.get(&granite),
@@ -2444,7 +2270,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                 "{case}: source pixel is pre-counted"
             );
             assert_eq!(engine.rng, mirror, "{case}: one C++ Random draw");
-            let landscape = engine.landscape().expect("landscape remains set");
+            let landscape = engine.landscape().test_value();
             assert_eq!(
                 landscape.surface_height(1),
                 Some(expected_surface),
@@ -2460,7 +2286,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
     #[test]
     fn incendiary_particles_spawn_fire_without_eroding_surface() -> Result<(), EngineError> {
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Flame]
             Name=Flame
@@ -2475,11 +2301,8 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Friction=25
             Inflammable=100
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let flame = materials.id_of("Flame").expect("flame exists");
-        let wood = materials.id_of("Wood").expect("wood exists");
+        );
+        let [flame, wood] = pxs_material_ids(&materials, ["Flame", "Wood"]);
 
         // Ignition happens via the meePXSPos check (C4PXS.cpp:51-57): when a
         // flame PXS's rounded position lies inside inflammable material,
@@ -2488,11 +2311,8 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // from above inserts at the air cell instead, in C++ too. The liquid
         // column only extends the estimated world height so the embedded PXS
         // stays in bounds (the column model has no separate map height).
-        let mut engine = Engine::with_seed(31);
-        engine.set_materials(materials);
-        engine
-            .register_definition(simple_definition(FIRE_DEFINITION_ID))
-            .expect("fire definition registers");
+        let mut engine = pxs_engine(31, materials);
+        engine.register_test_definition(simple_definition(FIRE_DEFINITION_ID));
         let mut landscape = Landscape::flat_with_material(17, 80, Some(wood));
         landscape.set_liquid_column(0, vec![LiquidSegment::new(150, 160)]);
         engine.set_landscape(landscape);
@@ -2500,9 +2320,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         let column_x = 8;
         let before_height = engine
             .landscape()
-            .expect("landscape present")
+            .test_value()
             .surface_height(column_x)
-            .expect("surface height available");
+            .test_value();
 
         engine.pxs_system.create(
             flame,
@@ -2526,9 +2346,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
         let after_height = engine
             .landscape()
-            .expect("landscape present")
+            .test_value()
             .surface_height(column_x)
-            .expect("surface height available");
+            .test_value();
         assert_eq!(
             after_height, before_height,
             "incineration should not erode the landscape surface"
@@ -2564,7 +2384,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
 
     #[test]
     fn material_particles_settle_into_landscape() -> Result<(), EngineError> {
-        let library = MaterialLibrary::parse(
+        let materials = materials_pxs_test_materials(
             r#"
             [Material Earth]
             Name=Earth
@@ -2574,21 +2394,18 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             Blast2PXSRatio=1
             SplashRate=15
         "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(19);
-        engine.set_materials(materials);
+        );
+        let earth = materials.id_of("Earth").test_value();
+        let mut engine = pxs_engine(19, materials);
         engine.set_landscape(Landscape::flat_with_material(12, 30, Some(earth)));
 
         engine
             .blast_circle(Vector2::new(6, 30), 3, None)
-            .expect("blast applies");
+            .test_value();
 
         let post_blast_surface = {
             let snapshot = engine.snapshot();
-            let landscape = snapshot.landscape.as_ref().expect("landscape present");
+            let landscape = snapshot.landscape.as_ref().test_value();
             landscape.surface()[6]
         };
         assert!(
@@ -2597,11 +2414,11 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         );
 
         for _ in 0..24 {
-            engine.tick_without_snapshot().expect("tick succeeds");
+            engine.tick_without_snapshot().test_value();
         }
 
         let snapshot = engine.snapshot();
-        let landscape = snapshot.landscape.expect("landscape present");
+        let landscape = snapshot.landscape.test_value();
         let final_surface = landscape.surface()[6];
         assert!(
             final_surface <= post_blast_surface + 1,
@@ -2759,9 +2576,7 @@ func ReadWind()
 }
 "#;
         let mut engine = Engine::with_seed(17);
-        engine
-            .register_script_definition("WIND", "Wind probe", script)
-            .expect("wind probe registers");
+        engine.register_test_script_definition("WIND", "Wind probe", script);
 
         // Keep nonzero scenario variation so the legacy runtime-field
         // compatibility path cannot mask a stale TargetWind. SetWind must
@@ -2770,10 +2585,8 @@ func ReadWind()
         weather.wind_target = -20;
         engine.set_environment(weather);
 
-        let probe = engine
-            .spawn_object(SpawnConfig::new("WIND"))
-            .expect("wind probe spawns");
-        let probe_index = engine.find_object_index(probe).expect("probe exists");
+        let probe = engine.spawn_test_object(SpawnConfig::new("WIND"));
+        let probe_index = engine.test_object_index(probe);
         assert_eq!(
             engine
                 .call_object_function(probe_index, "ForceWind", Vec::new())
@@ -2787,8 +2600,8 @@ func ReadWind()
         assert_eq!(engine.environment().base_wind, 5);
 
         for expected_frame in 1..1_000 {
-            engine.tick_without_snapshot().expect("weather tick succeeds");
-            let probe_index = engine.find_object_index(probe).expect("probe remains");
+            engine.tick_without_snapshot().test_value();
+            let probe_index = engine.test_object_index(probe);
             assert_eq!(
                 engine
                     .call_object_function(probe_index, "ReadWind", Vec::new())
@@ -2800,7 +2613,7 @@ func ReadWind()
         }
         assert_eq!(engine.frame(), 999);
 
-        engine.tick_without_snapshot().expect("Tick1000 succeeds");
+        engine.tick_without_snapshot().test_value();
         let weather = engine.environment();
         assert_eq!(weather.base_wind, 5);
         assert!(
@@ -2874,7 +2687,11 @@ func ReadWind()
         settings.wind_target = 40;
         let mut rng = LcgRng::seed_from_u64(57);
         let mut probe = rng.clone();
-        assert_eq!(probe.random(141), 70, "fixture evaluates TargetWind to zero");
+        assert_eq!(
+            probe.random(141),
+            70,
+            "fixture evaluates TargetWind to zero"
+        );
 
         settings.advance_frame(&mut rng, 1_000);
         assert_eq!(settings.wind_target, 0, "Tick1000 replaces TargetWind");
@@ -2912,8 +2729,14 @@ func ReadWind()
         settings.wind = 80;
         settings.wind_target = 80;
         settings.refresh_runtime_fields();
-        assert_eq!(settings.base_wind, 0, "script wind cannot replace scenario Std");
-        assert_eq!(settings.wind_target, 80, "normalization preserves TargetWind");
+        assert_eq!(
+            settings.base_wind, 0,
+            "script wind cannot replace scenario Std"
+        );
+        assert_eq!(
+            settings.wind_target, 80,
+            "normalization preserves TargetWind"
+        );
 
         let mut rng = LcgRng::seed_from_u64(9_001);
         settings.advance_frame(&mut rng, 1_000);
@@ -3073,8 +2896,7 @@ func ReadWind()
     "#;
 
     fn build_lift_definition(id: &str) -> Definition {
-        let mut definition =
-            Definition::from_script(id, id, PROCEDURE_MOVEMENT_SCRIPT).expect("script compiles");
+        let mut definition = test_definition(id, id, PROCEDURE_MOVEMENT_SCRIPT);
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
         actions.insert("Lift".to_string(), ActionSpec::for_procedure("lift"));
@@ -3083,7 +2905,7 @@ func ReadWind()
     }
 
     fn build_idle_definition(id: &str) -> Definition {
-        Definition::from_script(id, id, PROCEDURE_MOVEMENT_SCRIPT).expect("script compiles")
+        test_definition(id, id, PROCEDURE_MOVEMENT_SCRIPT)
     }
 
     fn build_definition() -> Definition {
@@ -3097,7 +2919,7 @@ func ReadWind()
             return { velocity = [vx, state.velocity[1]] };
         }
         "#;
-        Definition::from_script("Test", "Test", source).expect("script compiles")
+        test_definition("Test", "Test", source)
     }
 
     #[test]
@@ -3110,11 +2932,9 @@ func ReadWind()
         let source = r#"
         global func Initialize(state, random) { return 1; }
         "#;
-        let definition = Definition::from_script("CLNK", "Clonk", source).expect("script compiles");
+        let definition = test_definition("CLNK", "Clonk", source);
         let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("register definition");
+        engine.register_test_definition(definition);
         let spawned = engine.spawn_object(SpawnConfig::new("CLNK").with_energy(50));
         assert!(
             spawned.is_ok(),
@@ -3126,22 +2946,20 @@ func ReadWind()
     fn home_base_production_shared_across_team_when_rule_enabled() {
         let mut engine = Engine::new();
         engine.set_teams(vec![
-            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![1, 2]),
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![1, 2])
         ]);
         engine.set_team_home_base_rule(true);
 
         let mut crew = build_definition();
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("definition registers");
+        engine.register_test_definition(crew);
         for owner in [1, 2] {
-            engine
-                .spawn_object(
-                    SpawnConfig::new("Test")
-                        .with_owner(owner)
-                        .with_alive(true)
-                        .with_crew_member(true),
-                )
-                .expect("crew spawns");
+            engine.spawn_test_object(
+                SpawnConfig::new("Test")
+                    .with_owner(owner)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            );
         }
 
         let mut production = HashMap::new();
@@ -3154,10 +2972,8 @@ func ReadWind()
             .with_team(Some(1))
             .with_home_base_production(production.clone());
 
-        engine.register_player(leader).expect("leader registered");
-        engine
-            .register_player(follower)
-            .expect("follower registered");
+        engine.register_test_player(leader);
+        engine.register_test_player(follower);
         for (id, name) in [(1, "Leader"), (2, "Follower")] {
             engine
                 .reinitialize_player_after_restore(
@@ -3171,33 +2987,42 @@ func ReadWind()
                     false,
                     false,
                 )
-                .expect("production fixture disables elimination");
-            let player = engine.player_mut(id).expect("player remains");
+                .test_value();
+            let player = engine.player_mut(id).test_value();
             player.set_production_delay(0);
             player.set_production_unit(0);
             player.set_home_base_material_entries(Vec::new());
         }
 
         for _ in 0..2099 {
-            engine.tick_without_snapshot().expect("simulation frame advances");
+            engine.tick_without_snapshot().test_value();
         }
         assert_eq!(engine.frame(), 2099);
 
-        let leader = engine.player(1).expect("leader present");
-        let follower = engine.player(2).expect("follower present");
+        let leader = engine.player(1).test_value();
+        let follower = engine.player(2).test_value();
         assert!(leader.home_base_material().get("Brick").is_none());
         assert!(follower.home_base_material().get("Brick").is_none());
-        assert_eq!((leader.production_delay(), follower.production_delay()), (59, 59));
+        assert_eq!(
+            (leader.production_delay(), follower.production_delay()),
+            (59, 59)
+        );
 
-        engine.tick_without_snapshot().expect("sixtieth Tick35 boundary advances");
+        engine.tick_without_snapshot().test_value();
         assert_eq!(engine.frame(), 2100);
 
-        let leader = engine.player(1).expect("leader present");
-        let follower = engine.player(2).expect("follower present");
+        let leader = engine.player(1).test_value();
+        let follower = engine.player(2).test_value();
         assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
         assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
-        assert_eq!((leader.production_delay(), follower.production_delay()), (0, 60));
-        assert_eq!((leader.production_unit(), follower.production_unit()), (1, 0));
+        assert_eq!(
+            (leader.production_delay(), follower.production_delay()),
+            (0, 60)
+        );
+        assert_eq!(
+            (leader.production_unit(), follower.production_unit()),
+            (1, 0)
+        );
     }
 
     #[test]
@@ -3208,45 +3033,39 @@ func ReadWind()
         // C4Player.cpp:1637-1664).
         let mut engine = Engine::new();
         engine.set_teams(vec![
-            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![99, 20, 10]),
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![99, 20, 10])
         ]);
         engine.set_team_home_base_rule(true);
 
         let mut crew = build_definition();
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("definition registers");
+        engine.register_test_definition(crew);
         for owner in [1, 5] {
-            engine
-                .spawn_object(
-                    SpawnConfig::new("Test")
-                        .with_owner(owner)
-                        .with_alive(true)
-                        .with_crew_member(true),
-                )
-                .expect("crew spawns");
+            engine.spawn_test_object(
+                SpawnConfig::new("Test")
+                    .with_owner(owner)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            );
         }
         let production = HashMap::from([("Brick".to_string(), 10)]);
-        engine
-            .register_player(
-                PlayerConfig::new(1, "Lower runtime number")
-                    .with_player_info_id(10)
-                    .with_team(Some(1))
-                    .with_home_base_production(production.clone()),
-            )
-            .expect("first player registers");
-        engine
-            .register_player(
-                PlayerConfig::new(5, "Team-order leader")
-                    .with_player_info_id(20)
-                    .with_team(Some(1))
-                    .with_home_base_production(production),
-            )
-            .expect("second player registers");
-        engine.player_mut(1).expect("follower").set_production_delay(59);
-        engine.player_mut(5).expect("leader").set_production_delay(59);
+        engine.register_test_player(
+            PlayerConfig::new(1, "Lower runtime number")
+                .with_player_info_id(10)
+                .with_team(Some(1))
+                .with_home_base_production(production.clone()),
+        );
+        engine.register_test_player(
+            PlayerConfig::new(5, "Team-order leader")
+                .with_player_info_id(20)
+                .with_team(Some(1))
+                .with_home_base_production(production),
+        );
+        engine.player_mut(1).test_value().set_production_delay(59);
+        engine.player_mut(5).test_value().set_production_delay(59);
 
         for _ in 0..34 {
-            engine.tick_without_snapshot().expect("pre-boundary frame advances");
+            engine.tick_without_snapshot().test_value();
         }
         assert_eq!(
             (
@@ -3255,11 +3074,14 @@ func ReadWind()
             ),
             (59, 59),
         );
-        engine.tick_without_snapshot().expect("Tick35 player pass");
+        engine.tick_without_snapshot().test_value();
 
-        let follower = engine.player(1).expect("follower remains");
-        let leader = engine.player(5).expect("leader remains");
-        assert_eq!((leader.production_delay(), follower.production_delay()), (0, 60));
+        let follower = engine.player(1).test_value();
+        let leader = engine.player(5).test_value();
+        assert_eq!(
+            (leader.production_delay(), follower.production_delay()),
+            (0, 60)
+        );
         assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
         assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
     }
@@ -3268,75 +3090,73 @@ func ReadWind()
     fn home_base_production_updates_empty_and_nonleader_delay_bookkeeping() {
         let mut engine = Engine::new();
         engine.set_teams(vec![
-            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10]),
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10])
         ]);
         engine.set_team_home_base_rule(true);
 
         let mut crew = build_definition();
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("definition registers");
+        engine.register_test_definition(crew);
         for owner in [1, 5] {
-            engine
-                .spawn_object(
-                    SpawnConfig::new("Test")
-                        .with_owner(owner)
-                        .with_alive(true)
-                        .with_crew_member(true),
-                )
-                .expect("crew spawns");
+            engine.spawn_test_object(
+                SpawnConfig::new("Test")
+                    .with_owner(owner)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            );
         }
-        engine
-            .register_player(
-                PlayerConfig::new(1, "Follower")
-                    .with_player_info_id(10)
-                    .with_team(Some(1)),
-            )
-            .expect("follower registers");
-        engine
-            .register_player(
-                PlayerConfig::new(5, "Leader")
-                    .with_player_info_id(20)
-                    .with_team(Some(1)),
-            )
-            .expect("leader registers");
-        engine.player_mut(1).expect("follower").set_production_delay(59);
-        engine.player_mut(5).expect("leader").set_production_delay(59);
+        engine.register_test_player(
+            PlayerConfig::new(1, "Follower")
+                .with_player_info_id(10)
+                .with_team(Some(1)),
+        );
+        engine.register_test_player(
+            PlayerConfig::new(5, "Leader")
+                .with_player_info_id(20)
+                .with_team(Some(1)),
+        );
+        engine.player_mut(1).test_value().set_production_delay(59);
+        engine.player_mut(5).test_value().set_production_delay(59);
 
         for _ in 0..35 {
-            engine.tick_without_snapshot().expect("frame advances");
+            engine.tick_without_snapshot().test_value();
         }
 
-        let follower = engine.player(1).expect("follower remains");
-        let leader = engine.player(5).expect("leader remains");
+        let follower = engine.player(1).test_value();
+        let leader = engine.player(5).test_value();
         assert!(leader.home_base_production_entries().is_empty());
         assert!(follower.home_base_production_entries().is_empty());
-        assert_eq!((leader.production_delay(), follower.production_delay()), (0, 60));
-        assert_eq!((leader.production_unit(), follower.production_unit()), (1, 0));
+        assert_eq!(
+            (leader.production_delay(), follower.production_delay()),
+            (0, 60)
+        );
+        assert_eq!(
+            (leader.production_unit(), follower.production_unit()),
+            (1, 0)
+        );
     }
 
     #[test]
     fn home_base_production_pauses_during_team_selection() {
         let mut engine = Engine::new();
-        engine
-            .register_player(
-                PlayerConfig::new(1, "Choosing")
-                    .with_status(PlayerStatus::TeamSelection)
-                    .with_home_base_production(HashMap::from([("Brick".to_string(), 10)]))
-                    .with_production_delay(59),
-            )
-            .expect("player registers");
+        engine.register_test_player(
+            PlayerConfig::new(1, "Choosing")
+                .with_status(PlayerStatus::TeamSelection)
+                .with_home_base_production(HashMap::from([("Brick".to_string(), 10)]))
+                .with_production_delay(59),
+        );
 
         for _ in 0..70 {
-            engine.tick_without_snapshot().expect("frame advances");
+            engine.tick_without_snapshot().test_value();
         }
         engine
             .set_player_status(1, PlayerStatus::TeamSelectionPending)
-            .expect("selection becomes pending");
+            .test_value();
         for _ in 0..70 {
-            engine.tick_without_snapshot().expect("pending-selection frame advances");
+            engine.tick_without_snapshot().test_value();
         }
 
-        let player = engine.player(1).expect("player remains");
+        let player = engine.player(1).test_value();
         assert_eq!(player.production_delay(), 59);
         assert_eq!(player.production_unit(), 0);
         assert!(player.home_base_material().get("Brick").is_none());
@@ -3348,22 +3168,17 @@ func ReadWind()
         engine.set_team_home_base_rule(true);
         let mut crew = build_definition();
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("definition registers");
+        engine.register_test_definition(crew);
         for owner in [1, 2] {
-            engine
-                .spawn_object(
-                    SpawnConfig::new("Test")
-                        .with_owner(owner)
-                        .with_alive(true)
-                        .with_crew_member(true),
-                )
-                .expect("crew spawns");
-            engine
-                .register_player(
-                    PlayerConfig::new(owner, format!("Player {owner}"))
-                        .with_team(Some(99)),
-                )
-                .expect("player registers");
+            engine.spawn_test_object(
+                SpawnConfig::new("Test")
+                    .with_owner(owner)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            );
+            engine.register_test_player(
+                PlayerConfig::new(owner, format!("Player {owner}")).with_team(Some(99)),
+            );
             engine
                 .reinitialize_player_after_restore(
                     owner,
@@ -3376,8 +3191,8 @@ func ReadWind()
                     false,
                     false,
                 )
-                .expect("production fixture disables elimination");
-            let player = engine.player_mut(owner).expect("player remains");
+                .test_value();
+            let player = engine.player_mut(owner).test_value();
             player.set_home_base_production(HashMap::from([("Brick".to_string(), 10)]));
             player.set_home_base_material_entries(Vec::new());
             player.set_production_delay(59);
@@ -3385,11 +3200,11 @@ func ReadWind()
         }
 
         for _ in 0..35 {
-            engine.tick_without_snapshot().expect("frame advances");
+            engine.tick_without_snapshot().test_value();
         }
 
         for owner in [1, 2] {
-            let player = engine.player(owner).expect("player remains");
+            let player = engine.player(owner).test_value();
             assert_eq!(player.production_delay(), 0);
             assert_eq!(player.production_unit(), 1);
             assert_eq!(player.home_base_material().get("Brick"), Some(&1));
@@ -3400,22 +3215,20 @@ func ReadWind()
     fn home_base_production_respects_rule_toggle() {
         let mut engine = Engine::new();
         engine.set_teams(vec![
-            TeamInfo::new(2, "Toggle", 0).with_player_ids(vec![1, 2]),
+            TeamInfo::new(2, "Toggle", 0).with_player_ids(vec![1, 2])
         ]);
         engine.set_team_home_base_rule(false);
 
         let mut crew = build_definition();
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("definition registers");
+        engine.register_test_definition(crew);
         for owner in [1, 2] {
-            engine
-                .spawn_object(
-                    SpawnConfig::new("Test")
-                        .with_owner(owner)
-                        .with_alive(true)
-                        .with_crew_member(true),
-                )
-                .expect("crew spawns");
+            engine.spawn_test_object(
+                SpawnConfig::new("Test")
+                    .with_owner(owner)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            );
         }
 
         let mut production = HashMap::new();
@@ -3426,20 +3239,16 @@ func ReadWind()
             .with_home_base_production(production.clone());
         let follower = PlayerConfig::new(2, "Follower").with_team(Some(2));
 
-        engine.register_player(leader).expect("leader registered");
-        engine
-            .register_player(follower)
-            .expect("follower registered");
+        engine.register_test_player(leader);
+        engine.register_test_player(follower);
 
         for _ in 0..60 {
-            engine
-                .tick_player_systems()
-                .expect("player systems advance");
+            engine.tick_player_systems().test_value();
         }
 
         {
-            let leader = engine.player(1).expect("leader present");
-            let follower = engine.player(2).expect("follower present");
+            let leader = engine.player(1).test_value();
+            let follower = engine.player(2).test_value();
             assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
             assert!(
                 follower.home_base_material().get("Brick").is_none(),
@@ -3448,25 +3257,19 @@ func ReadWind()
         }
 
         engine.set_team_home_base_rule(true);
-        let leader_material = engine
-            .player(1)
-            .expect("leader present")
-            .home_base_material()
-            .clone();
+        let leader_material = engine.player(1).test_value().home_base_material().clone();
         engine
             .set_player_home_base_material(1, leader_material)
-            .expect("update succeeds");
+            .test_value();
 
-        let follower_after = engine.player(2).expect("follower present");
+        let follower_after = engine.player(2).test_value();
         assert_eq!(follower_after.home_base_material().get("Brick"), Some(&1));
     }
 
     #[test]
     fn apply_player_commands_updates_home_base_material() {
         let mut engine = Engine::new();
-        engine
-            .register_player(PlayerConfig::new(1, "Leader"))
-            .expect("player registered");
+        engine.register_test_player(PlayerConfig::new(1, "Leader"));
 
         engine
             .apply_player_commands(vec![PlayerCommand::AdjustHomeBaseMaterial {
@@ -3474,9 +3277,9 @@ func ReadWind()
                 definition_id: "Brick".to_string(),
                 delta: 3,
             }])
-            .expect("commands applied");
+            .test_value();
 
-        let player = engine.player(1).expect("player present");
+        let player = engine.player(1).test_value();
         assert_eq!(player.home_base_material().get("Brick"), Some(&3));
     }
 
@@ -3485,20 +3288,16 @@ func ReadWind()
         let mut engine = Engine::new();
         engine.set_team_home_base_rule(true);
 
-        engine
-            .register_player(PlayerConfig::new(1, "Leader").with_team(Some(1)))
-            .expect("leader registered");
-        engine
-            .register_player(PlayerConfig::new(2, "Follower").with_team(Some(1)))
-            .expect("follower registered");
+        engine.register_test_player(PlayerConfig::new(1, "Leader").with_team(Some(1)));
+        engine.register_test_player(PlayerConfig::new(2, "Follower").with_team(Some(1)));
         let starting = vec![("ZINC".into(), 7), ("BRIK".into(), 0)];
         engine
             .player_mut(1)
-            .expect("leader")
+            .test_value()
             .set_home_base_material_entries(starting.clone());
         engine
             .player_mut(2)
-            .expect("follower")
+            .test_value()
             .set_home_base_material_entries(starting);
 
         engine
@@ -3507,10 +3306,10 @@ func ReadWind()
                 definition_id: "ROCK".to_string(),
                 delta: 2,
             }])
-            .expect("commands applied");
+            .test_value();
 
-        let leader = engine.player(1).expect("leader present");
-        let follower = engine.player(2).expect("follower present");
+        let leader = engine.player(1).test_value();
+        let follower = engine.player(2).test_value();
         let expected = &[
             ("ZINC".to_string(), 7),
             ("BRIK".to_string(), 0),
@@ -3523,18 +3322,16 @@ func ReadWind()
     #[test]
     fn apply_player_commands_grants_player_knowledge() {
         let mut engine = Engine::new();
-        engine
-            .register_player(PlayerConfig::new(1, "Scholar"))
-            .expect("player registered");
+        engine.register_test_player(PlayerConfig::new(1, "Scholar"));
 
         engine
             .apply_player_commands(vec![PlayerCommand::GrantKnowledge {
                 player_id: 1,
                 definition_id: "BRIK".to_string(),
             }])
-            .expect("commands applied");
+            .test_value();
 
-        let player = engine.player(1).expect("player present");
+        let player = engine.player(1).test_value();
         assert!(
             player.knowledge().any(|id| id == "BRIK"),
             "player gains requested knowledge"
@@ -3554,63 +3351,49 @@ func ReadWind()
             ("LOWM", CATEGORY_MAGIC),
             ("NEWM", CATEGORY_MAGIC),
         ] {
-            let mut definition =
-                Definition::from_script(id, id, "").expect("definition compiles");
+            let mut definition = test_definition(id, id, "");
             definition.set_category(category);
-            engine
-                .register_definition(definition)
-                .expect("definition registers");
+            engine.register_test_definition(definition);
         }
-        engine
-            .register_player(PlayerConfig::new(7, "Mage").with_magic(vec![
-                "HIGH".into(),
-                "OBJE".into(),
-                "LOWM".into(),
-            ]))
-            .expect("player registers");
-        engine
-            .register_definition(
-                Definition::from_script(
-                    "CALL",
-                    "Caller",
-                    r#"#strict
-                    func Probe(player, high, new_magic) {
-                        var no_magic;
-                        return [
-                            GetPlrMagic(player, high),
-                            GetPlrMagic(player, no_magic, 0),
-                            GetPlrMagic(player, no_magic, 1),
-                            GetPlrMagic(player, no_magic, -1),
-                            GetPlrMagic(99, high),
-                            SetPlrMagic(player, new_magic),
-                            GetPlrMagic(player, new_magic),
-                            GetPlrMagic(player, no_magic, 2),
-                            SetPlrMagic(player, high, true),
-                            GetPlrMagic(player, high),
-                            SetPlrMagic(player, high, true)
-                        ];
-                    }
-                    "#,
-                )
-                .expect("caller compiles"),
-            )
-            .expect("caller registers");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine.register_test_player(PlayerConfig::new(7, "Mage").with_magic(vec![
+            "HIGH".into(),
+            "OBJE".into(),
+            "LOWM".into(),
+        ]));
+        engine.register_test_definition(test_definition(
+            "CALL",
+            "Caller",
+            r#"#strict
+        func Probe(player, high, new_magic) {
+            var no_magic;
+            return [
+                GetPlrMagic(player, high),
+                GetPlrMagic(player, no_magic, 0),
+                GetPlrMagic(player, no_magic, 1),
+                GetPlrMagic(player, no_magic, -1),
+                GetPlrMagic(99, high),
+                SetPlrMagic(player, new_magic),
+                GetPlrMagic(player, new_magic),
+                GetPlrMagic(player, no_magic, 2),
+                SetPlrMagic(player, high, true),
+                GetPlrMagic(player, high),
+                SetPlrMagic(player, high, true)
+            ];
+        }
+        "#,
+        ));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let caller_index = engine.test_object_index(caller);
 
-        let result = engine
-            .call_object_function(
-                caller_index,
-                "Probe",
-                vec![
-                    Value::Int(7),
-                    Value::C4Id("HIGH".into()),
-                    Value::C4Id("NEWM".into()),
-                ],
-            )
-            .expect("Probe runs");
+        let result = engine.call_test_object_function(
+            caller_index,
+            "Probe",
+            vec![
+                Value::Int(7),
+                Value::C4Id("HIGH".into()),
+                Value::C4Id("NEWM".into()),
+            ],
+        );
 
         assert_eq!(
             result,
@@ -3645,28 +3428,24 @@ func ReadWind()
         // C4Def::Value for a loaded ID and null for an unloaded/zero ID
         // (C4Script.cpp:1385-1389,6896). MagiClonk uses this exact helper for
         // both mana checks and the post-Activate energy deduction.
-        let mut spell =
-            Definition::from_script("MBRG", "Bridge spell", "").expect("spell compiles");
+        let mut spell = test_definition("MBRG", "Bridge spell", "");
         spell.set_value(10);
-        let caller = Definition::from_script(
+        let caller = test_definition(
             "CALL",
             "Caller",
             r#"#strict
-func Probe(known, missing)
-{
-  return [Value(known), Value(missing), Value()];
-}
-"#,
-        )
-        .expect("caller compiles");
+        func Probe(known, missing)
+        {
+          return [Value(known), Value(missing), Value()];
+        }
+        "#,
+        );
 
         let mut engine = Engine::new();
-        engine.register_definition(spell).expect("spell registers");
-        engine.register_definition(caller).expect("caller registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let index = engine.find_object_index(object).expect("caller index");
+        engine.register_test_definition(spell);
+        engine.register_test_definition(caller);
+        let object = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let index = engine.test_object_index(object);
 
         assert_eq!(
             engine
@@ -3690,52 +3469,46 @@ func Probe(known, missing)
         // priorities synchronously run Fx<Name>Effect and an annul result
         // (-2) calls the accepting effect's Fx<Name>Add, returning its number
         // (C4Script.cpp:5546-5556; C4Effect.cpp:271-317).
-        let definition = Definition::from_script(
+        let definition = test_definition(
             "CALL",
             "Caller",
             r#"#strict 2
-func EmptyGlobal() { var no_target; return CheckEffect("Probe", no_target, 100, 0); }
-func Install()
-{
-  var no_target;
-  AddEffect("World", no_target, 200, 0, this());
-  return AddEffect("Shield", this(), 200, 0, this());
-}
-func Probe()
-{
-  var no_target;
-  return [
-    CheckEffect("PriorityOne", no_target, 1, 0),
-    CheckEffect("GlobalDenied", no_target, 100, 0),
-    CheckEffect("Denied", this(), 100, 7, 42),
-    CheckEffect("Merge", this(), 100, 9, 6),
-    CheckEffect("Clean", this(), 300, 0)
-  ];
-}
-func FxWorldEffect() { SetR(99); return(-1); }
-func FxShieldEffect(szNew, pTarget, iNumber, iUnused, iValue)
-{
-  if (szNew == "Denied" && pTarget == this() && iNumber > 0 && !iUnused && iValue == 42) return(-1);
-  if (szNew == "Merge") return(-2);
-  return(0);
-}
-func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
-{
-  if (pTarget == this() && szNew == "Merge" && iInterval == 9) SetR(iValue);
-  return(0);
-}
-"#,
-        )
-        .expect("caller compiles");
+        func EmptyGlobal() { var no_target; return CheckEffect("Probe", no_target, 100, 0); }
+        func Install()
+        {
+          var no_target;
+          AddEffect("World", no_target, 200, 0, this());
+          return AddEffect("Shield", this(), 200, 0, this());
+        }
+        func Probe()
+        {
+          var no_target;
+          return [
+            CheckEffect("PriorityOne", no_target, 1, 0),
+            CheckEffect("GlobalDenied", no_target, 100, 0),
+            CheckEffect("Denied", this(), 100, 7, 42),
+            CheckEffect("Merge", this(), 100, 9, 6),
+            CheckEffect("Clean", this(), 300, 0)
+          ];
+        }
+        func FxWorldEffect() { SetR(99); return(-1); }
+        func FxShieldEffect(szNew, pTarget, iNumber, iUnused, iValue)
+        {
+          if (szNew == "Denied" && pTarget == this() && iNumber > 0 && !iUnused && iValue == 42) return(-1);
+          if (szNew == "Merge") return(-2);
+          return(0);
+        }
+        func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
+        {
+          if (pTarget == this() && szNew == "Merge" && iInterval == 9) SetR(iValue);
+          return(0);
+        }
+        "#,
+        );
 
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("caller registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("CALL").with_owner(1))
-            .expect("caller spawns");
-        let index = engine.find_object_index(object).expect("caller index");
+        let (mut engine, object) =
+            pxs_default_fixture(definition, SpawnConfig::new("CALL").with_owner(1));
+        let index = engine.test_object_index(object);
 
         assert_eq!(
             engine
@@ -3744,9 +3517,7 @@ func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
             Value::Nil,
             "a missing effect-list head returns null, not integer zero"
         );
-        let shield = engine
-            .call_object_function(index, "Install", vec![])
-            .expect("effects install");
+        let shield = engine.call_test_object_function(index, "Install", vec![]);
         let shield_number = match shield {
             Value::Int(number) if number > 0 => number,
             other => panic!("AddEffect returns the Shield number, got {other:?}"),
@@ -3776,47 +3547,40 @@ func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
 
     #[test]
     fn removed_effects_stay_linked_dead_until_the_next_execute() {
-        let definition = Definition::from_script(
+        let definition = test_definition(
             "CALL",
             "Caller",
             r#"#strict 2
-local silent_number;
+        local silent_number;
 
-func RemoveAndReplace()
-{
-  var old_number = AddEffect("Old", this(), 100, 0, this());
-  EffectVar(0, this(), old_number) = 77;
-  var removed = RemoveEffect(0, this(), old_number);
-  var old_lookup = GetEffect(0, this(), old_number);
-  var old_var = EffectVar(0, this(), old_number);
-  var replacement = AddEffect("New", this(), 200, 0, this());
-  return [old_number, replacement, old_var, old_lookup, removed];
-}
+        func RemoveAndReplace()
+        {
+          var old_number = AddEffect("Old", this(), 100, 0, this());
+          EffectVar(0, this(), old_number) = 77;
+          var removed = RemoveEffect(0, this(), old_number);
+          var old_lookup = GetEffect(0, this(), old_number);
+          var old_var = EffectVar(0, this(), old_number);
+          var replacement = AddEffect("New", this(), 200, 0, this());
+          return [old_number, replacement, old_var, old_lookup, removed];
+        }
 
-func RemoveWithoutCalls()
-{
-  silent_number = AddEffect("Silent", this(), 100, 0, this());
-  EffectVar(0, this(), silent_number) = 88;
-  var removed = RemoveEffect(0, this(), silent_number, true);
-  return [silent_number, removed, GetEffect(0, this(), silent_number), EffectVar(0, this(), silent_number)];
-}
+        func RemoveWithoutCalls()
+        {
+          silent_number = AddEffect("Silent", this(), 100, 0, this());
+          EffectVar(0, this(), silent_number) = 88;
+          var removed = RemoveEffect(0, this(), silent_number, true);
+          return [silent_number, removed, GetEffect(0, this(), silent_number), EffectVar(0, this(), silent_number)];
+        }
 
-func ProbeSilent()
-{
-  return [GetEffect(0, this(), silent_number), EffectVar(0, this(), silent_number)];
-}
-"#,
-        )
-        .expect("caller compiles");
+        func ProbeSilent()
+        {
+          return [GetEffect(0, this(), silent_number), EffectVar(0, this(), silent_number)];
+        }
+        "#,
+        );
 
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("caller registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let index = engine.find_object_index(object).expect("caller index");
+        let (mut engine, object) = pxs_default_fixture(definition, SpawnConfig::new("CALL"));
+        let index = engine.test_object_index(object);
 
         assert_eq!(
             engine
@@ -3849,7 +3613,7 @@ func ProbeSilent()
             Value::Array(vec![Value::Int(3), Value::Int(88)])
         );
 
-        engine.tick_without_snapshot().expect("next effect Execute cleans dead nodes");
+        engine.tick_without_snapshot().test_value();
         assert_eq!(
             engine
                 .call_object_function(index, "ProbeSilent", vec![])
@@ -3888,53 +3652,36 @@ global func FxTwinStop(state, int number, int reason) { return nil; }
 global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
 "#;
 
-        let calls: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let calls = Arc::clone(&calls);
-            hooks.set_on_call(move |name, args| {
-                calls
-                    .lock()
-                    .unwrap()
-                    .push((name.to_owned(), args.to_vec()));
-            });
-        }
+        let (calls, hooks) = pxs_call_hooks(|name, args| Some((name.to_owned(), args.to_vec())));
 
-        let mut definition =
-            Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        let mut definition = test_definition("CALL", "Caller", script);
         definition.set_debugger_hooks(hooks);
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("caller registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
+        let (mut engine, object) = pxs_default_fixture(definition, SpawnConfig::new("CALL"));
 
-        let initial = engine.object_snapshot(object).expect("caller remains live");
+        let initial = engine.test_object_snapshot(object);
         let first_number = initial
             .effects
             .iter()
             .find(|effect| effect.name == "Twin" && effect.priority == 100)
-            .expect("first Twin exists")
+            .test_value()
             .number;
         let second_number = initial
             .effects
             .iter()
             .find(|effect| effect.name == "Twin" && effect.priority == 200)
-            .expect("second Twin exists")
+            .test_value()
             .number;
         assert!(first_number < second_number);
 
-        engine.tick_without_snapshot().expect("indexed removal frame succeeds");
-        let after_remove = engine.object_snapshot(object).expect("caller remains live");
+        engine.tick_without_snapshot().test_value();
+        let after_remove = engine.test_object_snapshot(object);
         assert!(after_remove.effects.iter().any(|effect| {
             effect.number == first_number && effect.name == "Twin" && effect.priority == 100
         }));
         assert!(after_remove.effects.iter().any(|effect| {
             effect.number == second_number && effect.name == "Twin" && effect.priority == 0
         }));
-        let index = engine.find_object_index(object).expect("caller index");
+        let index = engine.test_object_index(object);
         assert_eq!(
             engine
                 .call_object_function(index, "FirstTwin", vec![])
@@ -3944,7 +3691,7 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
 
         let stop_calls = calls
             .lock()
-            .unwrap()
+            .test_value()
             .iter()
             .filter(|(name, _)| name == "FxTwinStop")
             .cloned()
@@ -3957,7 +3704,7 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             "C4Effect::Kill supplies only target and number; the typed script parameter nil-fills internally"
         );
 
-        engine.tick_without_snapshot().expect("next Execute cleans selected Twin");
+        engine.tick_without_snapshot().test_value();
         assert_eq!(
             engine
                 .object_snapshot(object)
@@ -3977,41 +3724,36 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
         // so Check returns integer zero; a truly empty list returns nil. The
         // checker walk also re-tests IsDead at each node, so Killer removing
         // the later Victim prevents Victim's callback from running.
-        let definition = Definition::from_script(
+        let definition = test_definition(
             "CALL",
             "Caller",
             r#"
-func RemoveOnlyThenCheck()
-{
-  var no_name;
-  var iOnly = AddEffect("Only", this(), 200, 0, this());
-  RemoveEffect(no_name, this(), iOnly, true);
-  return CheckEffect("AfterRemove", this(), 100, 0);
-}
-func InstallWalk()
-{
-  AddEffect("Killer", this(), 100, 0, this());
-  return AddEffect("Victim", this(), 200, 0, this());
-}
-func Walk() { return CheckEffect("Probe", this(), 50, 0); }
-func FxKillerEffect(szNew, pTarget)
-{
-  RemoveEffect("Victim", this(), 0, true);
-  return(0);
-}
-func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } return(0); }
-"#,
-        )
-        .expect("caller compiles");
+        func RemoveOnlyThenCheck()
+        {
+          var no_name;
+          var iOnly = AddEffect("Only", this(), 200, 0, this());
+          RemoveEffect(no_name, this(), iOnly, true);
+          return CheckEffect("AfterRemove", this(), 100, 0);
+        }
+        func InstallWalk()
+        {
+          AddEffect("Killer", this(), 100, 0, this());
+          return AddEffect("Victim", this(), 200, 0, this());
+        }
+        func Walk() { return CheckEffect("Probe", this(), 50, 0); }
+        func FxKillerEffect(szNew, pTarget)
+        {
+          RemoveEffect("Victim", this(), 0, true);
+          return(0);
+        }
+        func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } return(0); }
+        "#,
+        );
 
         let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("caller registers");
-        let removed = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("first caller spawns");
-        let removed_index = engine.find_object_index(removed).expect("first caller index");
+        engine.register_test_definition(definition);
+        let removed = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let removed_index = engine.test_object_index(removed);
         assert_eq!(
             engine
                 .call_object_function(removed_index, "RemoveOnlyThenCheck", vec![])
@@ -4026,7 +3768,7 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } retu
             Value::Int(0),
             "command folding keeps the dead list head linked"
         );
-        engine.tick_without_snapshot().expect("effect Execute cleans the dead head");
+        engine.tick_without_snapshot().test_value();
         assert_eq!(
             engine
                 .call_object_function(removed_index, "Walk", vec![])
@@ -4035,13 +3777,9 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } retu
             "the next Execute unlinks the dead final node"
         );
 
-        let walked = engine
-            .spawn_object(SpawnConfig::new("CALL").with_owner(1))
-            .expect("second caller spawns");
-        let walked_index = engine.find_object_index(walked).expect("second caller index");
-        engine
-            .call_object_function(walked_index, "InstallWalk", vec![])
-            .expect("checker chain installs");
+        let walked = engine.spawn_test_object(SpawnConfig::new("CALL").with_owner(1));
+        let walked_index = engine.test_object_index(walked);
+        engine.call_test_object_function(walked_index, "InstallWalk", vec![]);
         assert_eq!(
             engine
                 .call_object_function(walked_index, "Walk", vec![])
@@ -4064,35 +3802,26 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } retu
         // its FxAdd returns -1, Check performs one full Kill of THAT numbered
         // acceptor and returns -2. The lower same-name peer must survive and
         // FxStop must run exactly once.
-        let definition = Definition::from_script(
+        let definition = test_definition(
             "CALL",
             "Caller",
             r#"#strict 2
-func Install()
-{
-  SetR(1);
-  var iFirst = AddEffect("Shield", this(), 100, 0, this());
-  var iSecond = AddEffect("Shield", this(), 200, 0, this());
-  return [iFirst, iSecond];
-}
-func Probe() { return CheckEffect("Merge", this(), 50, 0); }
-func FxShieldEffect(szNew) { if (szNew == "Merge") return(-2); return(0); }
-func FxShieldAdd() { return(-1); }
-func FxShieldStop() { SetR(GetR() + 1); return(0); }
-"#,
-        )
-        .expect("caller compiles");
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("caller registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let index = engine.find_object_index(object).expect("caller index");
-        let installed = engine
-            .call_object_function(index, "Install", vec![])
-            .expect("same-name effects install");
+        func Install()
+        {
+          SetR(1);
+          var iFirst = AddEffect("Shield", this(), 100, 0, this());
+          var iSecond = AddEffect("Shield", this(), 200, 0, this());
+          return [iFirst, iSecond];
+        }
+        func Probe() { return CheckEffect("Merge", this(), 50, 0); }
+        func FxShieldEffect(szNew) { if (szNew == "Merge") return(-2); return(0); }
+        func FxShieldAdd() { return(-1); }
+        func FxShieldStop() { SetR(GetR() + 1); return(0); }
+        "#,
+        );
+        let (mut engine, object) = pxs_default_fixture(definition, SpawnConfig::new("CALL"));
+        let index = engine.test_object_index(object);
+        let installed = engine.call_test_object_function(index, "Install", vec![]);
         let Value::Array(numbers) = installed else {
             panic!("Install returns effect numbers")
         };
@@ -4111,7 +3840,7 @@ func FxShieldStop() { SetR(GetR() + 1); return(0); }
                 .expect("annul/add-deny check runs"),
             Value::Int(-2)
         );
-        let snapshot = engine.object_snapshot(object).expect("caller remains live");
+        let snapshot = engine.test_object_snapshot(object);
         assert_eq!(snapshot.rotation, 2, "the acceptor Stop ran exactly once");
         assert_eq!(
             snapshot
@@ -4130,7 +3859,7 @@ func FxShieldStop() { SetR(GetR() + 1); return(0); }
                 .any(|effect| effect.number == second && effect.priority == 0),
             "Kill leaves the annulled acceptor linked until Execute"
         );
-        engine.tick_without_snapshot().expect("effect Execute cleans the dead acceptor");
+        engine.tick_without_snapshot().test_value();
         assert_eq!(
             engine
                 .object_snapshot(object)
@@ -4145,49 +3874,40 @@ func FxShieldStop() { SetR(GetR() + 1); return(0); }
 
     #[test]
     fn check_effect_annul_calls_temp_brackets_add_in_cpp_order() {
-        let definition = Definition::from_script(
+        let definition = test_definition(
             "CALL",
             "Caller",
             r#"
-func Install()
-{
-  var iShield = AddEffect("Shield", this(), 100, 0, this());
-  AddEffect("Upper", this(), 200, 0, this());
-  SetR(0);
-  return iShield;
-}
-func Probe() { return CheckEffect("Merge", this(), 50, 0); }
-func FxShieldEffect() { return(-3); }
-func FxShieldAdd()
-{
-  if (GetEffectCount("*", this(), -100) != 1) return(-1);
-  SetR(GetR() * 10 + GetEffectCount("*", this(), 100));
-  return(0);
-}
-func FxUpperStop(pTarget, iNumber, iTemp, fTemp)
-{
-  if (iTemp == 1 && fTemp) SetR(GetR() * 10 + 1);
-  return(0);
-}
-func FxUpperStart(pTarget, iNumber, iTemp)
-{
-  if (iTemp == 1) SetR(GetR() * 10 + 3);
-  return(0);
-}
-"#,
-        )
-        .expect("caller compiles");
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("caller registers");
-        let object = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let index = engine.find_object_index(object).expect("caller index");
-        let shield = engine
-            .call_object_function(index, "Install", vec![])
-            .expect("effects install");
+        func Install()
+        {
+          var iShield = AddEffect("Shield", this(), 100, 0, this());
+          AddEffect("Upper", this(), 200, 0, this());
+          SetR(0);
+          return iShield;
+        }
+        func Probe() { return CheckEffect("Merge", this(), 50, 0); }
+        func FxShieldEffect() { return(-3); }
+        func FxShieldAdd()
+        {
+          if (GetEffectCount("*", this(), -100) != 1) return(-1);
+          SetR(GetR() * 10 + GetEffectCount("*", this(), 100));
+          return(0);
+        }
+        func FxUpperStop(pTarget, iNumber, iTemp, fTemp)
+        {
+          if (iTemp == 1 && fTemp) SetR(GetR() * 10 + 1);
+          return(0);
+        }
+        func FxUpperStart(pTarget, iNumber, iTemp)
+        {
+          if (iTemp == 1) SetR(GetR() * 10 + 3);
+          return(0);
+        }
+        "#,
+        );
+        let (mut engine, object) = pxs_default_fixture(definition, SpawnConfig::new("CALL"));
+        let index = engine.test_object_index(object);
+        let shield = engine.call_test_object_function(index, "Install", vec![]);
         assert_eq!(
             engine
                 .call_object_function(index, "Probe", vec![])
@@ -4219,13 +3939,10 @@ func FxUpperStart(pTarget, iNumber, iTemp)
             ("NEWM", CATEGORY_MAGIC, 50),
             ("OBJE", CATEGORY_OBJECT, 5),
         ] {
-            let mut definition =
-                Definition::from_script(id, id, "").expect("definition compiles");
+            let mut definition = test_definition(id, id, "");
             definition.set_category(category);
             definition.set_value(value);
-            engine
-                .register_definition(definition)
-                .expect("definition registers");
+            engine.register_test_definition(definition);
         }
         let mut explicit = PlayerStart::default();
         explicit.magic = vec![
@@ -4256,7 +3973,7 @@ func FxUpperStart(pTarget, iNumber, iTemp)
                     auto_context_menu: false,
                     startup_player_count: 1,
                 })
-                .expect("player joins");
+                .test_value();
         }
 
         assert_eq!(
@@ -4307,9 +4024,9 @@ func FxUpperStart(pTarget, iNumber, iTemp)
                 ("HIGM".into(), 0),
             ]
         );
-        let encoded = captured.to_json_string().expect("state serializes");
-        let decoded = EngineState::from_json_str(&encoded).expect("state deserializes");
-        engine.restore_state(&decoded).expect("state restores");
+        let encoded = captured.to_json_string().test_value();
+        let decoded = EngineState::from_json_str(&encoded).test_value();
+        engine.restore_state(&decoded).test_value();
         assert_eq!(
             engine
                 .player(0)
@@ -4339,20 +4056,18 @@ func FxUpperStart(pTarget, iNumber, iTemp)
     #[test]
     fn apply_player_commands_revokes_player_knowledge() {
         let mut engine = Engine::new();
-        engine
-            .register_player(
-                PlayerConfig::new(1, "Scholar").with_knowledge(vec!["BRIK".to_string()]),
-            )
-            .expect("player registered");
+        engine.register_test_player(
+            PlayerConfig::new(1, "Scholar").with_knowledge(vec!["BRIK".to_string()]),
+        );
 
         engine
             .apply_player_commands(vec![PlayerCommand::RevokeKnowledge {
                 player_id: 1,
                 definition_id: "BRIK".to_string(),
             }])
-            .expect("commands applied");
+            .test_value();
 
-        let player = engine.player(1).expect("player present");
+        let player = engine.player(1).test_value();
         assert!(
             player.knowledge().all(|id| id != "BRIK"),
             "player no longer knows revoked definition"
@@ -4371,12 +4086,10 @@ func FxUpperStart(pTarget, iNumber, iTemp)
             .with_home_base_material(material.clone());
         let follower = PlayerConfig::new(2, "Follower").with_team(Some(3));
 
-        engine.register_player(leader).expect("leader registered");
-        engine
-            .register_player(follower)
-            .expect("follower registered");
+        engine.register_test_player(leader);
+        engine.register_test_player(follower);
 
-        let follower_before = engine.player(2).expect("follower present");
+        let follower_before = engine.player(2).test_value();
         assert!(
             follower_before.home_base_material().is_empty(),
             "rule disabled keeps member inventory separate"
@@ -4384,32 +4097,24 @@ func FxUpperStart(pTarget, iNumber, iTemp)
 
         engine.set_team_home_base_rule(true);
 
-        let follower_after = engine.player(2).expect("follower present");
+        let follower_after = engine.player(2).test_value();
         assert_eq!(follower_after.home_base_material().get("Brick"), Some(&5));
     }
 
     #[test]
     fn path_free_host_function_queries_landscape() {
-        let mut definition =
-            Definition::from_script("PathTester", "PathTester", PATHFINDING_HELPER_SCRIPT)
-                .expect("script compiles");
+        let mut definition = test_definition("PathTester", "PathTester", PATHFINDING_HELPER_SCRIPT);
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
         definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_definition(definition);
         engine.set_landscape(Landscape::flat(32, 8));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("PathTester"))
-            .expect("spawn succeeds");
+        let id = engine.spawn_test_object(SpawnConfig::new("PathTester"));
 
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.energy, 1);
     }
 
@@ -4424,17 +4129,9 @@ func Initialize()
     overflow_result = Pow(2, 31);
 }
 "#;
-        let definition =
-            Definition::from_script("P162", "Pow short arguments", script).expect("script compiles");
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let object = engine
-            .spawn_object(SpawnConfig::new("P162"))
-            .expect("short Pow calls do not abort Initialize");
-        let index = engine.find_object_index(object).expect("object exists");
+        let definition = test_definition("P162", "Pow short arguments", script);
+        let (engine, object) = pxs_default_fixture(definition, SpawnConfig::new("P162"));
+        let index = engine.test_object_index(object);
         let locals = &engine.objects[index].state.local_vars;
 
         assert_eq!(locals.get("short_result"), Some(&Value::Int(1)));
@@ -4455,12 +4152,9 @@ func Initialize()
     short_path = PathFree(6, 6);
 }
 "#;
-        let definition = Definition::from_script("F162", "PathFree short arguments", script)
-            .expect("script compiles");
+        let definition = test_definition("F162", "PathFree short arguments", script);
         let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_definition(definition);
 
         // The nil-padded destination is (0,0), so the (6,6)->(0,0) ray
         // crosses the only solid pixel at (3,3).
@@ -4468,23 +4162,12 @@ func Initialize()
         pixels[3 * 7 + 3] = 1;
         let mut densities = vec![0_i32; 2];
         densities[1] = 100;
-        let grid = landscape::PixelGrid::new(
-            7,
-            7,
-            pixels,
-            densities,
-            vec![None; 2],
-            vec![None; 2],
-        );
-        let mut landscape = Landscape::new(7, vec![0; 7]).expect("landscape builds");
-        landscape.set_world_height(7);
-        landscape.set_pixel_grid(grid);
+        let grid = landscape::PixelGrid::new(7, 7, pixels, densities, vec![None; 2], vec![None; 2]);
+        let landscape = pxs_grid_world(7, 7, vec![0; 7], grid);
         engine.set_landscape(landscape);
 
-        let object = engine
-            .spawn_object(SpawnConfig::new("F162"))
-            .expect("short PathFree call does not abort Initialize");
-        let index = engine.find_object_index(object).expect("object exists");
+        let object = engine.spawn_test_object(SpawnConfig::new("F162"));
+        let index = engine.test_object_index(object);
 
         assert_eq!(
             engine.objects[index].state.local_vars.get("short_path"),
@@ -4502,17 +4185,9 @@ func Initialize()
     distance = ObjectDistance();
 }
 "#;
-        let definition = Definition::from_script("D162", "ObjectDistance no arguments", script)
-            .expect("script compiles");
-        let mut engine = Engine::new();
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let object = engine
-            .spawn_object(SpawnConfig::new("D162"))
-            .expect("empty ObjectDistance call does not abort Initialize");
-        let index = engine.find_object_index(object).expect("object exists");
+        let definition = test_definition("D162", "ObjectDistance no arguments", script);
+        let (engine, object) = pxs_default_fixture(definition, SpawnConfig::new("D162"));
+        let index = engine.test_object_index(object);
 
         assert_eq!(
             engine.objects[index].state.local_vars.get("distance"),
@@ -4534,30 +4209,21 @@ func Initialize()
         actions.insert("Idle".to_string(), ActionSpec::default().with_length(1));
         definition.configure_actions(Some("Walk".to_string()), actions);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Test"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("Test"))
-            .expect("spawn succeeds");
-
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action.name, "Walk");
         assert_eq!(snapshot.action.phase, 0);
         assert_eq!(snapshot.action.ticks, 0);
 
-        let snapshot = engine.tick().expect("first tick succeeds");
-        let object = snapshot.object(id).expect("object present");
+        let snapshot = engine.test_tick();
+        let object = snapshot.object(id).test_value();
         assert_eq!(object.action.name, "Walk");
         assert_eq!(object.action.phase, 1);
         assert_eq!(object.action.ticks, 0);
 
-        let snapshot = engine.tick().expect("second tick succeeds");
-        let object = snapshot.object(id).expect("object present");
+        let snapshot = engine.test_tick();
+        let object = snapshot.object(id).test_value();
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.action.phase, 0);
         assert_eq!(object.action.ticks, 0);
@@ -4565,21 +4231,13 @@ func Initialize()
 
     #[test]
     fn menu_command_invokes_definition_script() {
-        let mut definition =
-            Definition::from_script("Crew", "Crew", MENU_COMMAND_SCRIPT).expect("script compiles");
+        let mut definition = test_definition("Crew", "Crew", MENU_COMMAND_SCRIPT);
         definition.set_crew_member(true);
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
         definition.configure_actions(Some("Idle".to_string()), actions);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("Crew").with_owner(1))
-            .expect("spawn succeeds");
+        let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Crew").with_owner(1));
 
         let selection = MenuCommandSelection {
             primary_id: id,
@@ -4590,12 +4248,10 @@ func Initialize()
 
         let handled = engine
             .menu_command(id, MenuCommandKind::Focus, selection)
-            .expect("menu command succeeds");
+            .test_value();
         assert!(handled, "script should report handled command");
 
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(
             snapshot.rotation, 42,
             "script should update object rotation via SetR"
@@ -4612,46 +4268,35 @@ func Initialize()
         );
         definition.configure_actions(Some("Loop".to_string()), actions);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Test"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("Test"))
-            .expect("spawn succeeds");
-
-        let initial = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let initial = engine.test_object_snapshot(id);
         assert_eq!(initial.action.phase, 0);
         assert_eq!(initial.action.ticks, 0);
 
-        let after_first = engine.tick().expect("first tick succeeds");
-        let object = after_first.object(id).expect("object present");
+        let after_first = engine.test_tick();
+        let object = after_first.object(id).test_value();
         assert_eq!(object.action.phase, 0);
         assert_eq!(object.action.ticks, 1);
 
-        let after_second = engine.tick().expect("second tick succeeds");
-        let object = after_second.object(id).expect("object present");
+        let after_second = engine.test_tick();
+        let object = after_second.object(id).test_value();
         assert_eq!(object.action.phase, 1);
         assert_eq!(object.action.ticks, 0);
 
-        let after_third = engine.tick().expect("third tick succeeds");
-        let object = after_third.object(id).expect("object present");
+        let after_third = engine.test_tick();
+        let object = after_third.object(id).test_value();
         assert_eq!(object.action.phase, 1);
         assert_eq!(object.action.ticks, 1);
 
-        let after_fourth = engine.tick().expect("fourth tick succeeds");
-        let object = after_fourth.object(id).expect("object present");
+        let after_fourth = engine.test_tick();
+        let object = after_fourth.object(id).test_value();
         assert_eq!(object.action.phase, 2);
         assert_eq!(object.action.ticks, 0);
     }
 
     #[test]
     fn action_start_and_end_callbacks_fire() {
-        use std::sync::{Arc, Mutex};
-
         let script = r#"
         global func Initialize(state, random) { return 0; }
         global func Step(state, frame, random) { return 0; }
@@ -4660,17 +4305,9 @@ func Initialize()
         global func OnWalkStart(state, action) { return 0; }
         "#;
 
-        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let call_log = Arc::clone(&call_log);
-            hooks.set_on_call(move |name, _args| {
-                call_log.lock().unwrap().push(name.to_string());
-            });
-        }
+        let (call_log, hooks) = pxs_call_hooks(|name, _args| Some(name.to_string()));
 
-        let mut definition =
-            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut definition = test_definition("Actor", "Actor", script);
         definition.set_debugger_hooks(hooks);
 
         let mut actions = HashMap::new();
@@ -4690,16 +4327,12 @@ func Initialize()
         definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = Engine::with_seed(5);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_definition(definition);
 
-        engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        engine.spawn_test_object(SpawnConfig::new("Actor"));
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
@@ -4708,10 +4341,10 @@ func Initialize()
             assert_eq!(walk_start, 0);
         }
 
-        engine.tick_without_snapshot().expect("first tick succeeds");
+        engine.tick_without_snapshot().test_value();
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
@@ -4720,10 +4353,10 @@ func Initialize()
             assert_eq!(walk_start, 1);
         }
 
-        engine.tick_without_snapshot().expect("second tick succeeds");
+        engine.tick_without_snapshot().test_value();
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
@@ -4752,40 +4385,13 @@ protected func OnOldAbort()
     return 1;
 }
 "#;
-        let call_log = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let call_log = Arc::clone(&call_log);
-            hooks.set_on_call(move |name, _args| {
-                if name == "OnNewStart" || name == "OnOldAbort" {
-                    call_log.lock().unwrap().push(name.to_string());
-                }
-            });
-        }
-        let mut definition =
-            Definition::from_script("ACBI", "Action callback init", script).expect("compiles");
-        definition.set_debugger_hooks(hooks);
-        definition.set_c4_callback_convention(true);
-        definition.configure_actions(
-            Some("Old".to_string()),
-            HashMap::from([
-                (
-                    "Old".to_string(),
-                    ActionSpec::default().with_abort_call("OnOldAbort"),
-                ),
-                (
-                    "New".to_string(),
-                    ActionSpec::default().with_start_call("OnNewStart"),
-                ),
-            ]),
-        );
+        let (call_log, hooks) = pxs_call_hooks(|name, _args| {
+            matches!(name, "OnNewStart" | "OnOldAbort").then(|| name.to_string())
+        });
+        let definition = start_abort_definition("ACBI", "Action callback init", script, hooks);
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        engine
-            .spawn_object(SpawnConfig::new("ACBI"))
-            .expect("object spawns");
+        engine.register_test_definition(definition);
+        engine.spawn_test_object(SpawnConfig::new("ACBI"));
 
         assert_eq!(
             call_log.lock().unwrap().as_slice(),
@@ -4806,49 +4412,20 @@ func FxSwitchStart(object target, int number, int temp)
 func OnNewStart() { return 1; }
 func OnOldAbort() { return 1; }
 "#;
-        let call_log = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let call_log = Arc::clone(&call_log);
-            hooks.set_on_call(move |name, _args| {
-                if name == "OnNewStart" || name == "OnOldAbort" {
-                    call_log.lock().unwrap().push(name.to_string());
-                }
-            });
-        }
-        let mut definition =
-            Definition::from_script("ACEF", "Action callback effect", script).expect("compiles");
-        definition.set_debugger_hooks(hooks);
-        definition.set_c4_callback_convention(true);
-        definition.configure_actions(
-            Some("Old".to_string()),
-            HashMap::from([
-                (
-                    "Old".to_string(),
-                    ActionSpec::default().with_abort_call("OnOldAbort"),
-                ),
-                (
-                    "New".to_string(),
-                    ActionSpec::default().with_start_call("OnNewStart"),
-                ),
-            ]),
-        );
+        let (call_log, hooks) = pxs_call_hooks(|name, _args| {
+            matches!(name, "OnNewStart" | "OnOldAbort").then(|| name.to_string())
+        });
+        let definition = start_abort_definition("ACEF", "Action callback effect", script, hooks);
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_definition(definition);
         let object_id = ObjectId::new(77);
-        engine
-            .spawn_object(
-                SpawnConfig::new("ACEF")
-                    .with_id(object_id)
-                    .add_effect(
-                        EffectState::new("Switch")
-                            .with_priority(100)
-                            .with_command_target(Some(object_id.as_u64() as i32)),
-                    ),
-            )
-            .expect("object spawns");
+        engine.spawn_test_object(
+            SpawnConfig::new("ACEF").with_id(object_id).add_effect(
+                EffectState::new("Switch")
+                    .with_priority(100)
+                    .with_command_target(Some(object_id.as_u64() as i32)),
+            ),
+        );
 
         assert_eq!(
             call_log.lock().unwrap().as_slice(),
@@ -4864,21 +4441,10 @@ func OnOldAbort() { return 1; }
         // a same-action call (C4Object.cpp:4104-4105, 4132-4146), then runs
         // StartCall before AbortCall and passes that saved phase
         // (C4Object.cpp:4171-4193; default call mask C4Object.h:307-309).
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let calls = Arc::clone(&calls);
-            hooks.set_on_call(move |name, args| {
-                if matches!(name, "OnLoopStart" | "OnLoopAbort") {
-                    calls.lock().unwrap().push((name.to_string(), args.to_vec()));
-                }
-            });
-        }
-        let mut definition = Definition::from_script(
-            "LOOP",
-            "Loop actor",
-            "#strict\npublic func ResetLoop() { return SetAction(\"Loop\"); }\npublic func ResetLoopForced() { var no_value; return SetAction(\"Loop\", no_value, no_value, true); }\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n",
-        )?;
+        let (calls, hooks) = pxs_call_hooks(|name, args| {
+            matches!(name, "OnLoopStart" | "OnLoopAbort").then(|| (name.to_string(), args.to_vec()))
+        });
+        let mut definition = test_definition("LOOP", "Loop actor", "#strict\npublic func ResetLoop() { return SetAction(\"Loop\"); }\npublic func ResetLoopForced() { var no_value; return SetAction(\"Loop\", no_value, no_value, true); }\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n");
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
         definition.configure_actions(
@@ -4902,13 +4468,13 @@ func OnOldAbort() { return 1; }
                 .with_action(action)
                 .with_loaded(true),
         )?;
-        let index = engine.find_object_index(id).expect("actor exists");
+        let index = engine.test_object_index(id);
         assert_eq!(
             engine.call_object_function(index, "ResetLoop", Vec::new())?,
             Value::Bool(true)
         );
 
-        let first_calls = calls.lock().unwrap().clone();
+        let first_calls = calls.lock().test_value().clone();
         assert_eq!(first_calls.len(), 2, "observed callbacks: {first_calls:?}");
         assert_eq!(first_calls[0].0, "OnLoopStart");
         assert_eq!(first_calls[1].0, "OnLoopAbort");
@@ -4918,7 +4484,7 @@ func OnOldAbort() { return 1; }
         assert_eq!(action.ticks, 0, "same-name SetAction resets PhaseDelay");
         assert_eq!(action.time, 42, "same-name SetAction preserves Time");
 
-        calls.lock().unwrap().clear();
+        calls.lock().test_value().clear();
         assert_eq!(
             engine.call_object_function(index, "ResetLoopForced", Vec::new())?,
             Value::Bool(true)
@@ -4938,9 +4504,7 @@ func OnOldAbort() { return 1; }
         // nested Start/Abort before resuming the outer End(Root); it has no
         // SetAction-specific depth cap (C4Object.cpp:4171-4197, 5485).
         const LAST_ACTION: usize = 20;
-        let mut script = String::from(
-            "#strict 2\nprotected func EndRoot() { return 1; }\n",
-        );
+        let mut script = String::from("#strict 2\nprotected func EndRoot() { return 1; }\n");
         let mut actions = HashMap::from([(
             "Root".to_string(),
             ActionSpec::default()
@@ -4970,21 +4534,12 @@ func OnOldAbort() { return 1; }
             );
         }
 
-        let callback_log = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let callback_log = Arc::clone(&callback_log);
-            hooks.set_on_call(move |name, _args| {
-                if name.starts_with("Start")
-                    || name.starts_with("Abort")
-                    || name == "EndRoot"
-                {
-                    callback_log.lock().unwrap().push(name.to_string());
-                }
-            });
-        }
+        let (callback_log, hooks) = pxs_call_hooks(|name, _args| {
+            (name.starts_with("Start") || name.starts_with("Abort") || name == "EndRoot")
+                .then(|| name.to_string())
+        });
 
-        let mut definition = Definition::from_script("SACD", "SetAction depth", &script)?;
+        let mut definition = test_definition("SACD", "SetAction depth", &script);
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
         definition.configure_actions(Some("Root".to_string()), actions);
@@ -5008,7 +4563,7 @@ func OnOldAbort() { return 1; }
         );
         expected.push("EndRoot".to_string());
         assert_eq!(callback_log.lock().unwrap().as_slice(), expected);
-        let index = engine.find_object_index(object).expect("object remains");
+        let index = engine.test_object_index(object);
         assert_eq!(engine.objects[index].state.action.name, "A20");
         Ok(())
     }
@@ -5029,16 +4584,16 @@ func OnOldAbort() { return 1; }
                 }
             });
         }
-        let mut definition = Definition::from_script(
+        let mut definition = test_definition(
             "SACR",
             "SetAction recursion",
             r#"#strict 2
-public func Trigger() { return SetAction("Loop"); }
-public func Healthy() { return 73; }
-protected func LoopStart() { SetAction("Loop"); return 1; }
-protected func LoopAbort(int phase) { return 1; }
-"#,
-        )?;
+        public func Trigger() { return SetAction("Loop"); }
+        public func Healthy() { return 73; }
+        protected func LoopStart() { SetAction("Loop"); return 1; }
+        protected func LoopAbort(int phase) { return 1; }
+        "#,
+        );
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
         definition.configure_actions(
@@ -5065,7 +4620,7 @@ protected func LoopAbort(int phase) { return 1; }
                 records: Arc::clone(&records),
             },
         );
-        let index = engine.find_object_index(object).expect("object exists");
+        let index = engine.test_object_index(object);
         let result = tracing::subscriber::with_default(subscriber, || {
             engine.call_object_function(index, "Trigger", Vec::new())
         })?;
@@ -5075,13 +4630,13 @@ protected func LoopAbort(int phase) { return 1; }
             callback_count.load(std::sync::atomic::Ordering::Relaxed) > 16,
             "callbacks continue beyond the removed Rust-only limit"
         );
-        let records = records.lock().expect("diagnostic records lock");
+        let records = records.lock().test_value();
         assert!(records.iter().any(|record| {
-            record.message
-                == "SetAction callback error; continuing like the C++ fail-safe exec"
-                && record.error.as_deref().is_some_and(|error| {
-                    error.contains("internal error: value stack overflow!")
-                })
+            record.message == "SetAction callback error; continuing like the C++ fail-safe exec"
+                && record
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("internal error: value stack overflow!"))
         }));
         assert!(!records
             .iter()
@@ -5096,8 +4651,7 @@ protected func LoopAbort(int phase) { return 1; }
     }
 
     #[test]
-    fn phase_call_set_phase_suppresses_same_tick_next_action_like_cpp(
-    ) -> Result<(), EngineError> {
+    fn phase_call_set_phase_suppresses_same_tick_next_action_like_cpp() -> Result<(), EngineError> {
         let script = r#"#strict 2
 local seen_action;
 protected func OnPhase()
@@ -5108,7 +4662,7 @@ protected func OnPhase()
 }
 func ReadSeen() { return seen_action; }
 "#;
-        let mut definition = Definition::from_script("PHCL", "Phase callback", script)?;
+        let mut definition = test_definition("PHCL", "Phase callback", script);
         definition.set_c4_callback_convention(true);
         definition.configure_actions(
             None,
@@ -5134,7 +4688,7 @@ func ReadSeen() { return seen_action; }
 
         engine.tick_without_snapshot()?;
 
-        let index = engine.find_object_index(object).expect("object remains");
+        let index = engine.test_object_index(object);
         assert_eq!(engine.objects[index].state.action.name, "Loop");
         assert_eq!(engine.objects[index].state.action.phase, 0);
         assert_eq!(
@@ -5151,25 +4705,15 @@ func ReadSeen() { return seen_action; }
         // was removed or its definition changed (C4Object.cpp:4178-4198).
         // RemoveObject clears Status (C4Script.cpp:456-460); ChangeDef swaps
         // Def in place (C4Object.cpp:1207-1227).
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let calls = Arc::clone(&calls);
-            hooks.set_on_call(move |name, _args| {
-                if matches!(
-                    name,
-                    "RemoveOnStart" | "OldAbort" | "ChangeOnStart" | "AbortAfterChange"
-                ) {
-                    calls.lock().unwrap().push(name.to_string());
-                }
-            });
-        }
+        let (calls, hooks) = pxs_call_hooks(|name, _args| {
+            matches!(
+                name,
+                "RemoveOnStart" | "OldAbort" | "ChangeOnStart" | "AbortAfterChange"
+            )
+            .then(|| name.to_string())
+        });
 
-        let mut remove_def = Definition::from_script(
-            "RMOV",
-            "Remove on start",
-            "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func RemoveOnStart() { RemoveObject(); return(1); }\nprotected func OldAbort(int iPhase) { return(1); }\n",
-        )?;
+        let mut remove_def = test_definition("RMOV", "Remove on start", "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func RemoveOnStart() { RemoveObject(); return(1); }\nprotected func OldAbort(int iPhase) { return(1); }\n");
         remove_def.set_c4_callback_convention(true);
         remove_def.set_debugger_hooks(hooks.clone());
         remove_def.configure_actions(
@@ -5192,9 +4736,7 @@ func ReadSeen() { return seen_action; }
                 .with_action(ActionState::new("Old"))
                 .with_loaded(true),
         )?;
-        let remove_index = remove_engine
-            .find_object_index(removed)
-            .expect("remove actor exists");
+        let remove_index = remove_engine.test_object_index(removed);
         assert_eq!(
             remove_engine.call_object_function(remove_index, "Trigger", Vec::new())?,
             Value::Bool(true)
@@ -5202,12 +4744,12 @@ func ReadSeen() { return seen_action; }
         assert!(remove_engine.objects[remove_index].destroyed);
         assert_eq!(calls.lock().unwrap().as_slice(), ["RemoveOnStart"]);
 
-        calls.lock().unwrap().clear();
-        let mut changed_def = Definition::from_script(
+        calls.lock().test_value().clear();
+        let mut changed_def = test_definition(
             "NEWD",
             "Changed definition",
             "#strict\nprotected func AbortAfterChange(int iPhase) { return(1); }\n",
-        )?;
+        );
         changed_def.set_c4_callback_convention(true);
         changed_def.set_debugger_hooks(hooks.clone());
         changed_def.configure_actions(
@@ -5220,11 +4762,7 @@ func ReadSeen() { return seen_action; }
                 ),
             ]),
         );
-        let mut swap_def = Definition::from_script(
-            "SWAP",
-            "Change on start",
-            "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func ChangeOnStart() { ChangeDef(NEWD); return(1); }\n",
-        )?;
+        let mut swap_def = test_definition("SWAP", "Change on start", "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func ChangeOnStart() { ChangeDef(NEWD); return(1); }\n");
         swap_def.set_c4_callback_convention(true);
         swap_def.set_debugger_hooks(hooks);
         swap_def.configure_actions(
@@ -5245,9 +4783,7 @@ func ReadSeen() { return seen_action; }
                 .with_action(ActionState::new("Old"))
                 .with_loaded(true),
         )?;
-        let swap_index = swap_engine
-            .find_object_index(swapped)
-            .expect("swap actor exists");
+        let swap_index = swap_engine.test_object_index(swapped);
         assert_eq!(
             swap_engine.call_object_function(swap_index, "Trigger", Vec::new())?,
             Value::Bool(true)
@@ -5265,7 +4801,7 @@ func Read() { return [starts, abort_phase]; }
 protected func TurnStart() { starts += 1; return 1; }
 protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 "#;
-        let mut target = Definition::from_script("SDTG", "SetDir target", target_script)?;
+        let mut target = test_definition("SDTG", "SetDir target", target_script);
         target.set_c4_callback_convention(true);
         target.configure_actions(
             None,
@@ -5287,11 +4823,11 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
                 ),
             ]),
         );
-        let caller = Definition::from_script(
+        let caller = test_definition(
             "SDCL",
             "SetDir caller",
             "#strict 2\nfunc TurnOther(object target) { return SetDir(1, target); }\n",
-        )?;
+        );
         let mut engine = Engine::new();
         engine.register_definition(target)?;
         engine.register_definition(caller)?;
@@ -5302,7 +4838,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
                 .with_direction(Direction::Left)
                 .with_loaded(true),
         )?;
-        let target_index = engine.find_object_index(target).expect("target exists");
+        let target_index = engine.test_object_index(target);
         {
             let action = &mut engine.objects[target_index].state.action;
             action.phase = 7;
@@ -5311,7 +4847,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             action.data = 9;
         }
         let caller = engine.spawn_object(SpawnConfig::new("SDCL"))?;
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let caller_index = engine.test_object_index(caller);
 
         assert_eq!(
             engine.call_object_function(
@@ -5321,12 +4857,17 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             )?,
             Value::Bool(true)
         );
-        let target_index = engine.find_object_index(target).expect("target remains");
+        let target_index = engine.test_object_index(target);
         let state = &engine.objects[target_index].state;
         assert_eq!(state.direction, Direction::Right);
         assert_eq!(state.action.name, "Turn");
         assert_eq!(
-            (state.action.phase, state.action.ticks, state.action.time, state.action.data),
+            (
+                state.action.phase,
+                state.action.ticks,
+                state.action.time,
+                state.action.data
+            ),
             (0, 0, 0, 0)
         );
         assert_eq!(
@@ -5338,8 +4879,6 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 
     #[test]
     fn forced_action_change_triggers_abort_callbacks() {
-        use std::sync::{Arc, Mutex};
-
         let script = r#"
         global func Initialize(state, random) { return 0; }
         global func Step(state, frame, random) { return 0; }
@@ -5349,17 +4888,9 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         global func OnRunStart(state, action) { return 0; }
         "#;
 
-        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let call_log = Arc::clone(&call_log);
-            hooks.set_on_call(move |name, _args| {
-                call_log.lock().unwrap().push(name.to_string());
-            });
-        }
+        let (call_log, hooks) = pxs_call_hooks(|name, _args| Some(name.to_string()));
 
-        let mut definition =
-            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut definition = test_definition("Actor", "Actor", script);
         definition.set_debugger_hooks(hooks);
 
         let mut actions = HashMap::new();
@@ -5377,17 +4908,10 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         );
         definition.configure_actions(Some("Idle".to_string()), actions);
 
-        let mut engine = Engine::with_seed(11);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        let (mut engine, id) = pxs_fixture(11, definition, SpawnConfig::new("Actor"));
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_abort = calls.iter().filter(|name| *name == "OnIdleAbort").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
@@ -5400,10 +4924,10 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 
         engine
             .apply_object_update(id, ObjectUpdate::new().with_action("Run"))
-            .expect("update succeeds");
+            .test_value();
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
             let idle_abort = calls.iter().filter(|name| *name == "OnIdleAbort").count();
             let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
@@ -5422,28 +4946,15 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         // only parameter, `Exec(this, {C4VInt(iLastPhase)})`
         // (C4Object.cpp:4182). Content like COWB's AbortJumpDrawGun(int
         // iPhase) feeds that straight into SetPhase.
-        use std::sync::{Arc, Mutex};
-
         let script = r#"
         global func OnIdleStart(a) { return 0; }
         global func OnIdleAbort(iPhase) { return 0; }
         "#;
 
-        let call_log: Arc<Mutex<Vec<(String, Vec<clonk_script::Value>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let call_log = Arc::clone(&call_log);
-            hooks.set_on_call(move |name, args| {
-                call_log
-                    .lock()
-                    .unwrap()
-                    .push((name.to_string(), args.to_vec()));
-            });
-        }
+        let (call_log, hooks) =
+            pxs_call_hooks(|name, args| Some((name.to_string(), args.to_vec())));
 
-        let mut definition =
-            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut definition = test_definition("Actor", "Actor", script);
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
 
@@ -5458,23 +4969,17 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         actions.insert("Run".to_string(), ActionSpec::default());
         definition.configure_actions(Some("Idle".to_string()), actions);
 
-        let mut engine = Engine::with_seed(11);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let id = engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        let (mut engine, id) = pxs_fixture(11, definition, SpawnConfig::new("Actor"));
         engine
             .apply_object_update(id, ObjectUpdate::new().with_action("Run"))
-            .expect("update succeeds");
+            .test_value();
 
-        let calls = call_log.lock().unwrap().clone();
+        let calls = call_log.lock().test_value().clone();
         let start_args = calls
             .iter()
             .find(|(name, _)| name == "OnIdleStart")
             .map(|(_, args)| args.clone())
-            .expect("start callback ran");
+            .test_value();
         assert!(
             start_args
                 .iter()
@@ -5485,7 +4990,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .iter()
             .find(|(name, _)| name == "OnIdleAbort")
             .map(|(_, args)| args.clone())
-            .expect("abort callback ran");
+            .test_value();
         assert_eq!(
             abort_args.first(),
             Some(&clonk_script::Value::Nil),
@@ -5495,30 +5000,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 
     #[test]
     fn non_forced_action_update_respects_no_other_action() {
-        let script = r#"
-        global func Initialize(state, random) { return 0; }
-        global func Step(state, frame, random) { return 0; }
-        "#;
-
-        let mut definition =
-            Definition::from_script("Actor", "Actor", script).expect("script compiles");
-
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_no_other_action(true),
-        );
-        actions.insert("Run".to_string(), ActionSpec::default());
-        definition.configure_actions(Some("Idle".to_string()), actions);
-
-        let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        let (mut engine, id) = no_other_action_fixture(7);
 
         engine
             .apply_object_update(
@@ -5526,55 +5008,26 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
                 ObjectUpdate::new()
                     .with_action_update(ActionUpdate::default().with_name("Run").with_force(false)),
             )
-            .expect("update succeeds");
+            .test_value();
 
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action.name, "Idle");
     }
 
     #[test]
     fn forced_action_update_overrides_no_other_action() {
-        let script = r#"
-        global func Initialize(state, random) { return 0; }
-        global func Step(state, frame, random) { return 0; }
-        "#;
-
-        let mut definition =
-            Definition::from_script("Actor", "Actor", script).expect("script compiles");
-
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_no_other_action(true),
-        );
-        actions.insert("Run".to_string(), ActionSpec::default());
-        definition.configure_actions(Some("Idle".to_string()), actions);
-
-        let mut engine = Engine::with_seed(13);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        let (mut engine, id) = no_other_action_fixture(13);
 
         engine
             .apply_object_update(id, ObjectUpdate::new().with_action("Run"))
-            .expect("update succeeds");
+            .test_value();
 
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action.name, "Run");
     }
 
     #[test]
     fn action_phase_callbacks_fire() {
-        use std::sync::{Arc, Mutex};
-
         let script = r#"
         global func Initialize(state, random) { return 0; }
         global func Step(state, frame, random) { return 0; }
@@ -5582,17 +5035,9 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         global func OnWalkStart(state, action) { return 0; }
         "#;
 
-        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = DebuggerHooks::new();
-        {
-            let call_log = Arc::clone(&call_log);
-            hooks.set_on_call(move |name, _args| {
-                call_log.lock().unwrap().push(name.to_string());
-            });
-        }
+        let (call_log, hooks) = pxs_call_hooks(|name, _args| Some(name.to_string()));
 
-        let mut definition =
-            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut definition = test_definition("Actor", "Actor", script);
         definition.set_debugger_hooks(hooks);
 
         let mut actions = HashMap::new();
@@ -5610,50 +5055,41 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         );
         definition.configure_actions(Some("Idle".to_string()), actions);
 
-        let mut engine = Engine::with_seed(2);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        let (mut engine, id) = pxs_fixture(2, definition, SpawnConfig::new("Actor"));
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
             assert_eq!(idle_phase, 0);
         }
 
-        engine.tick_without_snapshot().expect("first tick succeeds");
+        engine.tick_without_snapshot().test_value();
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
             assert_eq!(idle_phase, 1);
         }
 
-        engine.tick_without_snapshot().expect("second tick succeeds");
+        engine.tick_without_snapshot().test_value();
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
             assert_eq!(idle_phase, 2);
         }
 
-        engine.tick_without_snapshot().expect("third tick succeeds");
+        engine.tick_without_snapshot().test_value();
 
         {
-            let calls = call_log.lock().unwrap().clone();
+            let calls = call_log.lock().test_value().clone();
             let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
             let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
             assert_eq!(idle_phase, 3);
             assert_eq!(walk_start, 1);
         }
 
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action.name, "Walk");
         assert_eq!(snapshot.action.phase, 0);
     }
@@ -5665,8 +5101,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         global func Step(state, frame, random) { return 0; }
         "#;
 
-        let mut definition =
-            Definition::from_script("Stepper", "Stepper", script).expect("script compiles");
+        let mut definition = test_definition("Stepper", "Stepper", script);
 
         let mut actions = HashMap::new();
         actions.insert(
@@ -5679,48 +5114,31 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         );
         definition.configure_actions(Some("Pulse".to_string()), actions);
 
-        let mut engine = Engine::with_seed(7);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (mut engine, id) = pxs_fixture(7, definition, SpawnConfig::new("Stepper"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("Stepper"))
-            .expect("spawn succeeds");
-
-        let after_first = engine.tick().expect("first tick succeeds");
-        let object = after_first.object(id).expect("object present");
+        let after_first = engine.test_tick();
+        let object = after_first.object(id).test_value();
         assert_eq!(object.action.phase, 2);
 
-        let after_second = engine.tick().expect("second tick succeeds");
-        let object = after_second.object(id).expect("object present");
+        let after_second = engine.test_tick();
+        let object = after_second.object(id).test_value();
         assert_eq!(object.action.phase, 4);
 
-        let after_third = engine.tick().expect("third tick succeeds");
-        let object = after_third.object(id).expect("object present");
+        let after_third = engine.test_tick();
+        let object = after_third.object(id).test_value();
         assert_eq!(object.action.phase, 0);
     }
 
     #[test]
     fn host_get_effect_queries_effect_stack() {
-        let definition = Definition::from_script("EffectUser", "Effect User", EFFECT_HOST_SCRIPT)
-            .expect("script compiles");
+        let definition = test_definition("EffectUser", "Effect User", EFFECT_HOST_SCRIPT);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("EffectUser"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("EffectUser"))
-            .expect("spawn succeeds");
+        engine.tick_without_snapshot().test_value();
+        engine.tick_without_snapshot().test_value();
 
-        engine.tick_without_snapshot().expect("first tick runs");
-        engine.tick_without_snapshot().expect("second tick runs");
-
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         // C++ list order ascends by |priority| (C4Effect.cpp:80-94).
         assert_eq!(snapshot.effects.len(), 2);
         assert_eq!(snapshot.effects[0].name, "Spark");
@@ -5732,31 +5150,21 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
 
     #[test]
     fn host_add_effect_and_remove_effect_via_helpers() {
-        let definition = Definition::from_script(
+        let definition = test_definition(
             "EffectBridge",
             "Effect Bridge",
             EFFECT_HOST_ADD_REMOVE_SCRIPT,
-        )
-        .expect("script compiles");
+        );
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("EffectBridge"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("EffectBridge"))
-            .expect("spawn succeeds");
-
-        let snapshot = engine
-            .object_snapshot(id)
-            .expect("object snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.effects.len(), 2);
         assert_eq!(snapshot.effects[0].name, "Spark");
         assert_eq!(snapshot.effects[1].name, "Glow");
 
-        let first_tick = engine.tick().expect("first tick succeeds");
-        let object = first_tick.object(id).expect("object present");
+        let first_tick = engine.test_tick();
+        let object = first_tick.object(id).test_value();
         assert!(object
             .effects
             .iter()
@@ -5766,36 +5174,31 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .iter()
             .any(|effect| effect.name == "Glow" && effect.priority == 0));
 
-        let second_tick = engine.tick().expect("second tick succeeds");
-        let object = second_tick.object(id).expect("object present");
+        let second_tick = engine.test_tick();
+        let object = second_tick.object(id).test_value();
         assert_eq!(object.effects.len(), 1);
         assert_eq!(object.effects[0].name, "Spark");
         assert_eq!(object.effects[0].priority, 0);
 
-        let third_tick = engine.tick().expect("third tick succeeds");
-        let object = third_tick.object(id).expect("object present");
+        let third_tick = engine.test_tick();
+        let object = third_tick.object(id).test_value();
         assert!(object.effects.is_empty());
     }
 
     #[test]
     fn host_helpers_modify_global_effects() {
         let definition =
-            Definition::from_script("GlobalEffect", "Global Effect", GLOBAL_EFFECT_HELPER_SCRIPT)
-                .expect("script compiles");
+            test_definition("GlobalEffect", "Global Effect", GLOBAL_EFFECT_HELPER_SCRIPT);
 
         let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_definition(definition);
 
-        engine
-            .spawn_object(SpawnConfig::new("GlobalEffect"))
-            .expect("spawn succeeds");
+        engine.spawn_test_object(SpawnConfig::new("GlobalEffect"));
 
         assert_eq!(engine.global_effects().len(), 1);
         assert_eq!(engine.global_effects()[0].name, "WorldPulse");
 
-        engine.tick_without_snapshot().expect("first tick succeeds");
+        engine.tick_without_snapshot().test_value();
 
         assert!(engine.global_effects().is_empty());
     }
@@ -5805,34 +5208,25 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let mut definition = build_definition();
         definition.configure_actions(Some("Idle".to_string()), HashMap::new());
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (mut engine, id) = pxs_fixture(
+            0,
+            definition,
+            SpawnConfig::new("Test")
+                .with_velocity(Vector2::new(3, 0))
+                .with_energy(50),
+        );
 
-        let id = engine
-            .spawn_object(
-                SpawnConfig::new("Test")
-                    .with_velocity(Vector2::new(3, 0))
-                    .with_energy(50),
-            )
-            .expect("spawn succeeds");
-
-        engine.tick_without_snapshot().expect("initial tick runs");
+        engine.tick_without_snapshot().test_value();
 
         engine
             .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Inactive))
-            .expect("status update applies");
+            .test_value();
 
-        let before = engine
-            .object_snapshot(id)
-            .expect("snapshot available before tick");
+        let before = engine.test_object_snapshot(id);
 
-        engine.tick_without_snapshot().expect("tick with inactive object runs");
+        engine.tick_without_snapshot().test_value();
 
-        let after = engine
-            .object_snapshot(id)
-            .expect("snapshot available after tick");
+        let after = engine.test_object_snapshot(id);
 
         assert_eq!(after.velocity, before.velocity);
         assert_eq!(after.position, before.position);
@@ -5845,118 +5239,82 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let mut definition = build_definition();
         definition.configure_actions(Some("Idle".to_string()), HashMap::new());
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(
-                SpawnConfig::new("Test")
-                    .with_status(ObjectStatus::Inactive)
-                    .with_owner(1)
-                    .with_crew_member(true),
-            )
-            .expect("spawn succeeds");
+        let (mut engine, id) = pxs_fixture(
+            0,
+            definition,
+            SpawnConfig::new("Test")
+                .with_status(ObjectStatus::Inactive)
+                .with_owner(1)
+                .with_crew_member(true),
+        );
 
         engine
             .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Inactive))
-            .expect("status update applies");
+            .test_value();
 
         let state = engine.capture_state();
 
         let mut restored = Engine::with_seed(0);
-        restored
-            .register_definition(build_definition())
-            .expect("definition registers");
-        restored.restore_state(&state).expect("state restores");
+        restored.register_test_definition(build_definition());
+        restored.restore_state(&state).test_value();
 
-        let snapshot = restored
-            .object_snapshot(id)
-            .expect("restored object available");
+        let snapshot = restored.test_object_snapshot(id);
         assert_eq!(snapshot.status, ObjectStatus::Inactive);
         assert!(restored.crew_members(1).is_empty());
         // Elimination is Tick35-gated (C4Player.cpp:225-235): the restored
         // crewless owner eliminates once the game runs to the boundary.
         assert!(!restored.is_owner_eliminated(1));
         for _ in 0..35 {
-            restored.tick_without_snapshot().expect("tick succeeds");
+            restored.tick_without_snapshot().test_value();
         }
         assert!(restored.is_owner_eliminated(1));
     }
 
     #[test]
     fn host_random_consumes_engine_rng() {
-        let definition = Definition::from_script("RandomUser", "Random User", RANDOM_HELPER_SCRIPT)
-            .expect("script compiles");
+        let definition = test_definition("RandomUser", "Random User", RANDOM_HELPER_SCRIPT);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-
-        let id = engine
-            .spawn_object(SpawnConfig::new("RandomUser"))
-            .expect("spawn succeeds");
+        let (mut engine, id) = pxs_fixture(0, definition, SpawnConfig::new("RandomUser"));
 
         let mut expected_rng = LcgRng::seed_from_u64(0);
         let _ = expected_rng.random(i32::MAX); // Initialize random argument
         let _ = expected_rng.random(i32::MAX); // First tick random argument
         let first_expected = expected_rng.random(10);
 
-        let first_tick = engine.tick().expect("first tick succeeds");
-        let object = first_tick.object(id).expect("object present");
+        let first_tick = engine.test_tick();
+        let object = first_tick.object(id).test_value();
         assert_eq!(object.energy, first_expected);
 
         let _ = expected_rng.random(i32::MAX); // Second tick random argument
         let second_expected = expected_rng.random(10);
 
-        let second_tick = engine.tick().expect("second tick succeeds");
-        let object = second_tick.object(id).expect("object present");
+        let second_tick = engine.test_tick();
+        let object = second_tick.object(id).test_value();
         assert_eq!(object.energy, second_expected);
     }
 
     #[test]
     fn action_procedure_surfaces_in_state_value() {
-        let mut definition =
-            Definition::from_script("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT)
-                .expect("script compiles");
+        let mut definition = test_definition("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT);
         let mut actions = HashMap::new();
         actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
         definition.configure_actions(Some("Fly".to_string()), actions);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Airborne"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("Airborne"))
-            .expect("spawn succeeds");
-
-        let snapshot = engine.object_snapshot(id).expect("snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.energy, 7);
     }
 
     #[test]
     fn snapshot_includes_action_procedure() {
-        let mut definition =
-            Definition::from_script("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT)
-                .expect("script compiles");
+        let mut definition = test_definition("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT);
         let mut actions = HashMap::new();
         actions.insert("Fly".to_string(), ActionSpec::for_procedure("flight"));
         definition.configure_actions(Some("Fly".to_string()), actions);
 
-        let mut engine = Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let (engine, id) = pxs_fixture(0, definition, SpawnConfig::new("Airborne"));
 
-        let id = engine
-            .spawn_object(SpawnConfig::new("Airborne"))
-            .expect("spawn succeeds");
-
-        let snapshot = engine.object_snapshot(id).expect("snapshot available");
+        let snapshot = engine.test_object_snapshot(id);
         assert_eq!(snapshot.action_procedure.as_deref(), Some("flight"));
     }
-

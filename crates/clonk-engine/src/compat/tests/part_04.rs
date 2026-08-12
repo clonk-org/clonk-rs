@@ -11,8 +11,7 @@
                 "#strict 3\n\
                  func Explicit() { return ReloadDef(TEST); }\n\
                  func Local() { return ReloadDef(); }",
-            )
-            .expect("ReloadDef probes compile");
+            ).test_value();
 
         assert_eq!(
             script
@@ -35,8 +34,7 @@
                 "#strict 3\n\
                  func Named() { return ReloadParticle(\"Smoke\"); }\n\
                  func Unnamed() { return ReloadParticle(); }",
-            )
-            .expect("ReloadParticle probes compile");
+            ).test_value();
 
         assert_eq!(
             script.call("Named", &[]).expect("named reload executes"),
@@ -59,9 +57,9 @@
     // engine has not created yet. The engine then does the work.
     #[test]
     fn reload_particle_answers_synchronously_and_the_engine_applies_it() {
-        let dir = tempfile::tempdir().expect("temp particle root");
+        let dir = tempfile::tempdir().test_value();
         let group = dir.path().join("Smoke.c4d");
-        std::fs::create_dir_all(&group).expect("create particle group");
+        std::fs::create_dir_all(&group).test_value();
 
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -71,8 +69,7 @@
                  func Known() { return ReloadParticle(\"Smoke\"); }\n\
                  func Unknown() { return ReloadParticle(\"NoSuchParticle\"); }\n\
                  func Pathless() { return ReloadParticle(\"Sparks\"); }",
-            )
-            .expect("ReloadParticle probes compile");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
         // One definition backed by a real group, one with no Filename at all —
@@ -86,15 +83,13 @@
         };
         engine
             .particle_system
-            .register_def(core("Smoke"), 4, 1.0)
-            .expect("register a particle def");
+            .register_def(core("Smoke"), 4, 1.0).test_value();
         assert!(engine
             .particle_system
             .set_def_source_path("Smoke", Some(group.clone())));
         engine
             .particle_system
-            .register_def(core("Sparks"), 4, 1.0)
-            .expect("register a simulation-only particle def");
+            .register_def(core("Sparks"), 4, 1.0).test_value();
 
         let world = engine.host_world_context();
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -115,7 +110,7 @@
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("live ReloadParticle probes execute");
+        result.test_value();
 
         // Only the accepted name is staged, and the engine does the work once.
         assert_eq!(engine.apply_particle_reload_requests(), 0);
@@ -133,14 +128,13 @@
     // C4Script.cpp:5143-5159 -> C4Game::ReloadDef (C4Game.cpp:2322-2367).
     #[test]
     fn reload_def_answers_synchronously_and_defaults_to_the_callers_definition() {
-        let dir = tempfile::tempdir().expect("temp group root");
+        let dir = tempfile::tempdir().test_value();
         let group = dir.path().join("Rock.c4d");
-        std::fs::create_dir_all(&group).expect("create definition group");
+        std::fs::create_dir_all(&group).test_value();
         std::fs::write(
             group.join("DefCore.txt"),
             "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
-        )
-        .expect("write DefCore");
+        ).test_value();
 
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -150,18 +144,14 @@
                  func Known() { return ReloadDef(ROCK); }\n\
                  func Pathless() { return ReloadDef(STON); }\n\
                  func Own() { return ReloadDef(); }",
-            )
-            .expect("ReloadDef probes compile");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
         for (id, path) in [("ROCK", Some(group.clone())), ("STON", None)] {
             let mut definition =
-                crate::Definition::from_script(id.to_string(), id.to_string(), "")
-                    .expect("script definition compiles");
+                test_definition(id.to_string(), id.to_string(), "");
             definition.set_source_path(path);
-            engine
-                .register_definition(definition)
-                .expect("register definition");
+            engine.register_test_definition(definition);
         }
 
         let world = engine.host_world_context();
@@ -184,7 +174,7 @@
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("live ReloadDef probes execute");
+        result.test_value();
 
         // Only the accepted id was staged, and the engine does the work once.
         assert_eq!(engine.apply_definition_reload_requests(), 1);
@@ -210,8 +200,7 @@
                  func Halt() { PauseGame(); return 7; }\n\
                  func Toggle() { PauseGame(true); return 8; }\n\
                  func ReturnValue() { return PauseGame(false); }",
-            )
-            .expect("PauseGame probes compile");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
         let world = engine.host_world_context();
@@ -232,7 +221,7 @@
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("live PauseGame probes execute");
+        result.test_value();
         assert_eq!(
             engine.take_pause_game_requests(),
             vec![
@@ -260,7 +249,7 @@
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("replay PauseGame probes execute");
+        result.test_value();
         assert!(engine.take_pause_game_requests().is_empty());
 
         let sync_requests = Rc::new(RefCell::new(Vec::new()));
@@ -269,11 +258,10 @@
             .with_pause_game_requests(false, Rc::clone(&sync_requests));
         let (result, _) = with_effect_context(None, &[], sync_world, 1, || {
             script
-                .call("Halt", &[])
-                .expect("synchronized halt probe executes");
+                .call("Halt", &[]).test_value();
             Ok::<_, RuntimeError>(())
         });
-        result.expect("non-replay synchronized PauseGame executes");
+        result.test_value();
         assert_eq!(*sync_requests.borrow(), vec![PauseGameRequest::Halt]);
     }
 
@@ -285,19 +273,16 @@
             .load_script(
                 "#strict 3\n\
                  func Probe() { return [SetFilmView(), SetFilmView(42), SetFilmView(-1)]; }",
-            )
-            .expect("SetFilmView probe compiles");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("film-view player registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
         let call = |engine: &crate::Engine| {
             let (result, _) =
                 with_effect_context(None, &[], engine.host_world_context(), 1, || {
                     script.call("Probe", &[])
                 });
-            result.expect("SetFilmView probe executes")
+            result.test_value()
         };
 
         assert_eq!(
@@ -382,19 +367,16 @@
         script
             .load_script(
                 "#strict 3\nfunc Probe() { SetViewOffset(0, 1, 2); SetFilmView(0); SetViewOffset(0, 3, 4); }",
-            )
-            .expect("viewport request probe compiles");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("viewport player registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
         engine.set_replay_control(true);
         engine.set_film_viewport_available(true);
         let (result, _) = with_effect_context(None, &[], engine.host_world_context(), 1, || {
             script.call("Probe", &[])
         });
-        result.expect("viewport request probe executes");
+        result.test_value();
         assert_eq!(
             engine.take_viewport_presentation_requests(),
             vec![
@@ -423,16 +405,11 @@
             .load_script(
                 "#strict 3\n\
                  func Probe() { SetFilmView(1); Sound(\"NewView\", true, nil, 100, 2); Sound(\"OldView\", true, nil, 100, 1); }",
-            )
-            .expect("same-call film-view sound probe compiles");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Old target"))
-            .expect("old film-view target registers");
-        engine
-            .register_player(crate::PlayerConfig::new(1, "New target"))
-            .expect("new film-view target registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Old target"));
+        engine.register_test_player(crate::PlayerConfig::new(1, "New target"));
         engine.set_local_players([]);
         engine.set_replay_control(true);
         engine.set_film_viewport_available(true);
@@ -442,7 +419,7 @@
             with_effect_context(None, &[], engine.host_world_context(), 1, || {
                 script.call("Probe", &[])
             });
-        result.expect("same-call film-view sound probe executes");
+        result.test_value();
         let sounds = outcome
             .audio
             .events
@@ -471,16 +448,11 @@
                 "#strict 3\n\
                  func Retarget() { SetFilmView(1); }\n\
                  func Probe() { Sound(\"NewContextView\", true, nil, 100, 2); Sound(\"OldContextView\", true, nil, 100, 1); }",
-            )
-            .expect("cross-context film-view sound probe compiles");
+            ).test_value();
 
         let mut engine = crate::Engine::new();
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Old target"))
-            .expect("old film-view target registers");
-        engine
-            .register_player(crate::PlayerConfig::new(1, "New target"))
-            .expect("new film-view target registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Old target"));
+        engine.register_test_player(crate::PlayerConfig::new(1, "New target"));
         engine.set_local_players([]);
         engine.set_replay_control(true);
         engine.set_film_viewport_available(true);
@@ -489,12 +461,12 @@
         let (result, _) = with_effect_context(None, &[], engine.host_world_context(), 1, || {
             script.call("Retarget", &[])
         });
-        result.expect("film view retarget executes");
+        result.test_value();
         let (result, outcome) =
             with_effect_context(None, &[], engine.host_world_context(), 1, || {
                 script.call("Probe", &[])
             });
-        result.expect("later-context sound probe executes");
+        result.test_value();
         let sounds = outcome
             .audio
             .events
@@ -522,8 +494,7 @@
                  func AOuter() { return BInner(); }\n\
                  func BInner() { ProfilerDelay(); return 1; }\n\
                  func EndProfile() { return StopScriptProfiler(); }",
-            )
-            .expect("script-profiler report probes compile");
+            ).test_value();
         let script = Arc::new(script);
         let world = HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));
         let records = Arc::new(Mutex::new(Vec::new()));
@@ -543,9 +514,9 @@
                 Ok::<_, RuntimeError>(())
             })
         });
-        result.expect("script-profiler report probes execute");
+        result.test_value();
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         let profiler = records
             .iter()
             .filter(|record| record.target == "clonk-script-profiler")
@@ -573,12 +544,10 @@
             .collect::<Vec<_>>();
         let outer = rows
             .iter()
-            .position(|record| record.message.ends_with("game AOuter"))
-            .expect("outer function is profiled");
+            .position(|record| record.message.ends_with("game AOuter")).test_value();
         let inner = rows
             .iter()
-            .position(|record| record.message.ends_with("game BInner"))
-            .expect("inner function is profiled");
+            .position(|record| record.message.ends_with("game BInner")).test_value();
         assert!(
             outer < inner,
             "inclusive outer time sorts before inner time"
@@ -586,9 +555,8 @@
         let elapsed = rows
             .iter()
             .map(|record| {
-                record.message[..record.message.find("ms\t").unwrap()]
-                    .parse::<u128>()
-                    .expect("profile row starts with milliseconds")
+                record.message[..record.message.find("ms\t").test_value()]
+                    .parse::<u128>().test_value()
             })
             .collect::<Vec<_>>();
         assert!(
@@ -601,8 +569,7 @@
     fn locate_func_lists_explicit_object_overload_sources_and_lines() {
         let mut appended = ScriptEngine::new();
         appended
-            .load_script("#appendto BASE\n\npublic func Initialize() { return 2; }")
-            .expect("append source compiles");
+            .load_script("#appendto BASE\n\npublic func Initialize() { return 2; }").test_value();
 
         let mut base = ScriptEngine::new();
         register_host_functions(&mut base);
@@ -612,8 +579,7 @@
              func ProbeDefinition() { return LocateFunc(\"Initialize\", 0, BASE); }\n\
              func Log() { return true; }\n\
              func ProbeNative(object target) { return LocateFunc(\"Log\", target); }",
-        )
-        .expect("base LocateFunc probe compiles");
+        ).test_value();
         base.append_overrides_from(&appended);
 
         let appended = Arc::new(appended);
@@ -640,7 +606,7 @@
             Value::Bool(true)
         );
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 6);
         assert!(records.iter().all(|record| record.level == Level::INFO));
         assert!(records.iter().all(|record| record.target == "clonk-script"));
@@ -661,8 +627,7 @@
                 "func Pick() { return 1; }\n\
                  global func Pick() { return 2; }\n\
                  global func Probe() { return LocateFunc(\"Pick\"); }",
-            )
-            .expect("mixed local/global LocateFunc probe compiles");
+            ).test_value();
         let globals = script
             .global_access_functions()
             .map(|(name, function)| (name.clone(), function.clone()))
@@ -685,7 +650,7 @@
             Value::Bool(true)
         );
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level, Level::INFO);
         assert_eq!(records[0].target, "clonk-script");
@@ -708,8 +673,7 @@
                 func WrongName(object target) { return LocateFunc(false, target); }
                 func WrongObject() { return LocateFunc("Log", 0); }
                 "#,
-            )
-            .expect("LocateFunc validation probes compile");
+            ).test_value();
         let script = Arc::new(script);
         let world = HostWorldContext::from_objects(vec![resort_order_world_object(1, "BASE")])
             .with_definition_scripts(HashMap::from([("BASE".into(), Arc::clone(&script))]));
@@ -750,9 +714,9 @@
                 Ok::<_, RuntimeError>(())
             })
         });
-        result.expect("LocateFunc validation probes succeed");
+        result.test_value();
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 6);
         let diagnostics = records
             .iter()
@@ -791,7 +755,7 @@
                 game_over(&[])
             },
         );
-        let second = result.expect("GameOver second call succeeds");
+        let second = result.test_value();
         assert_eq!(second, Value::Bool(false));
         assert!(outcome.trigger_game_over);
     }
@@ -802,8 +766,7 @@
         let world_lifetime = Rc::downgrade(
             world
                 .master_order
-                .get()
-                .expect("fixture master order is initialized"),
+                .get().test_value(),
         );
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = with_effect_context(None, &[], world, 1, || -> Result<(), RuntimeError> {
@@ -837,7 +800,7 @@
             with_effect_context_with_state(None, &[], HostWorldContext::default(), 1, true, || {
                 game_over(&[])
             });
-        let value = result.expect("GameOver call succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(!outcome.trigger_game_over);
     }
@@ -847,7 +810,7 @@
         let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
             g_back_solid(&[Value::Int(0), Value::Int(0)])
         });
-        let value = result.expect("GBackSolid without landscape succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -900,7 +863,7 @@
                 with_effect_context(None, &[], HostWorldContext::default(), 1, || {
                     get_scenario_val(&[Value::String(entry.into()), section, entry_nr])
                 });
-            result.expect("GetScenarioVal succeeds")
+            result.test_value()
         };
         let landscape = || Value::String("Landscape".into());
         assert_eq!(query("MapZoom", landscape(), Value::Int(0)), Value::Int(10));
@@ -990,7 +953,7 @@
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(5), Value::Int(12)])
         });
-        let value = result.expect("GBackSolid with landscape succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
     }
 
@@ -1006,7 +969,7 @@
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(3), Value::Int(15)])
         });
-        let value = result.expect("GBackSolid above surface succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -1032,7 +995,7 @@
         let (result, _) = with_effect_context(Some(object_context), &[], world, 9, || {
             g_back_solid(&[Value::Int(0), Value::Int(7)])
         });
-        let value = result.expect("GBackSolid with object context succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
     }
 
@@ -1079,7 +1042,7 @@
 
     #[test]
     fn get_material_reports_solid_material_from_landscape() {
-        let material = crate::MaterialId::new(3).expect("material id");
+        let material = crate::MaterialId::new(3).test_value();
         let mut landscape = Landscape::flat_with_material(32, 10, Some(material));
         landscape.set_world_height(20);
         let world = world_with(
@@ -1100,7 +1063,7 @@
 
     #[test]
     fn get_material_applies_object_relative_coordinates() {
-        let material = crate::MaterialId::new(2).expect("material id");
+        let material = crate::MaterialId::new(2).test_value();
         let mut landscape = Landscape::flat_with_material(24, 12, Some(material));
         landscape.set_world_height(20);
         let world = HostWorldContext::with_landscape(
@@ -1135,8 +1098,8 @@
         // GetPix maps closed borders to MCVehic and open borders to sky
         // (src/C4Script.cpp:2216-2220; src/C4Wrappers.h:164-167;
         // src/C4Landscape.h:144-175).
-        let earth = crate::MaterialId::new(2).expect("earth id");
-        let vehicle = crate::MaterialId::new(5).expect("vehicle id");
+        let earth = crate::MaterialId::new(2).test_value();
+        let vehicle = crate::MaterialId::new(5).test_value();
         let mut landscape = Landscape::flat_with_material(10, 5, Some(earth));
         landscape.set_world_height(20);
         landscape.set_vehicle_material(Some(vehicle));
@@ -1151,7 +1114,7 @@
             let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
                 get_material(&[Value::Int(x), Value::Int(y)])
             });
-            result.expect("GetMaterial border query succeeds")
+            result.test_value()
         };
 
         assert_eq!(query(4, 20), Value::Int(vehicle.index() as i32));
@@ -1187,7 +1150,7 @@
             ..Default::default()
         };
         texmap.set_default_material_entry("Water", 3);
-        let mut landscape = Landscape::new(6, vec![6; 6]).expect("landscape builds");
+        let mut landscape = Landscape::new(6, vec![6; 6]).test_value();
         landscape.set_world_height(6);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             6,
@@ -1228,7 +1191,7 @@
             ..Default::default()
         };
         texmap.set_default_material_entry("Vehicle", 2);
-        let mut landscape = Landscape::new(16, vec![12; 16]).expect("landscape builds");
+        let mut landscape = Landscape::new(16, vec![12; 16]).test_value();
         landscape.set_world_height(12);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             16,
@@ -1245,7 +1208,7 @@
 
     fn draw_mat_chunks_masked_world() -> HostWorldContext {
         let mut world = draw_mat_chunks_world();
-        let landscape = world.landscape_mut().expect("landscape exists");
+        let landscape = world.landscape_mut().test_value();
         for y in 4..6 {
             for x in 5..7 {
                 landscape.grid_write_byte(x, y, 2);
@@ -1301,7 +1264,7 @@
         let bytes = (0..10)
             .flat_map(|y| (0..12).map(move |x| if (x + y) % 2 == 0 { 0x80 } else { 0 }))
             .collect::<Vec<_>>();
-        let mut landscape = Landscape::new(12, vec![10; 12]).expect("landscape builds");
+        let mut landscape = Landscape::new(12, vec![10; 12]).test_value();
         landscape.set_world_height(10);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             12,
@@ -1368,7 +1331,7 @@
         .creator;
         let texmap = classifier.into_runtime_state();
         let mut landscape =
-            Landscape::new(width, vec![height as i32; width as usize]).expect("landscape builds");
+            Landscape::new(width, vec![height as i32; width as usize]).test_value();
         landscape.set_world_height(height as i32);
         let mut bytes = vec![0; width as usize * height as usize];
         if width > 2 && height > 2 {
@@ -1392,10 +1355,9 @@
 
     fn draw_map_masked_world() -> HostWorldContext {
         let mut world = draw_map_world(8, 7, 3, true);
-        let landscape = world.landscape_mut().expect("landscape exists");
+        let landscape = world.landscape_mut().test_value();
         let mut texmap = landscape
-            .raster_state()
-            .expect("raster state exists")
+            .raster_state().test_value()
             .texmap()
             .clone();
         texmap.densities[3] = 100;
@@ -1471,7 +1433,7 @@
         // Surface8 protects slots 1 and 5. The latter carries IFT, which the
         // native masks away while building its usage table.
         let bytes = vec![1, 5 | 0x80, 0, 1, 5, 0x80];
-        let mut landscape = Landscape::new(3, vec![2; 3]).expect("landscape builds");
+        let mut landscape = Landscape::new(3, vec![2; 3]).test_value();
         landscape.set_world_height(2);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             3,
@@ -1551,7 +1513,7 @@
             material_crossmap_entries: Vec::new(),
             ..Default::default()
         };
-        let mut landscape = Landscape::new(4, vec![1; 4]).expect("landscape builds");
+        let mut landscape = Landscape::new(4, vec![1; 4]).test_value();
         landscape.set_world_height(1);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             4,
@@ -1670,7 +1632,7 @@
     #[test]
     fn set_texture_index_exact_landscape_without_retained_map_moves_entry_only() {
         let mut world = draw_map_world(8, 7, 1, false);
-        let landscape = world.landscape_mut().expect("landscape exists");
+        let landscape = world.landscape_mut().test_value();
         assert!(landscape.set_mode(crate::landscape::LANDSCAPE_MODE_EXACT));
         assert!(
             landscape
@@ -1681,8 +1643,7 @@
         );
         let initial_landscape = landscape.clone();
         let initial_surface = landscape
-            .pixel_grid()
-            .expect("pixel grid exists")
+            .pixel_grid().test_value()
             .bytes()
             .to_vec();
 
@@ -1700,12 +1661,12 @@
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
 
-        let landscape = engine.landscape().expect("folded landscape exists");
+        let landscape = engine.landscape().test_value();
         assert_eq!(
             landscape.pixel_grid().expect("pixel grid").bytes(),
             initial_surface
         );
-        let raster = landscape.raster_state().expect("raster state exists");
+        let raster = landscape.raster_state().test_value();
         assert!(raster.map().is_none());
         assert_eq!(raster.texmap().material_names[1].as_deref(), Some("Earth"));
         assert_eq!(raster.texmap().material_names[2].as_deref(), Some("Earth"));
@@ -1728,17 +1689,15 @@
             height: 7,
             indices: retained_indices,
         };
-        let replay_landscape = replay_world.landscape_mut().expect("landscape exists");
+        let replay_landscape = replay_world.landscape_mut().test_value();
         assert!(replay_landscape.set_mode(crate::landscape::LANDSCAPE_MODE_STATIC));
         replay_landscape
-            .raster_state_mut()
-            .expect("raster state exists")
+            .raster_state_mut().test_value()
             .set_map(&retained_map);
         let initial_landscape = replay_world
-            .landscape_ref()
-            .expect("landscape exists")
+            .landscape_ref().test_value()
             .clone();
-        let initial_grid = initial_landscape.pixel_grid().expect("pixel grid exists");
+        let initial_grid = initial_landscape.pixel_grid().test_value();
         let initial_surface = initial_grid.bytes().to_vec();
         let initial_revision = initial_grid.revision();
         let initial_material_names = initial_grid.material_names().to_vec();
@@ -1795,8 +1754,7 @@
         // 2 visible to the next one before the authoritative Engine fold.
         replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
         let preview_landscape = replay_world
-            .landscape_ref()
-            .expect("preview landscape exists");
+            .landscape_ref().test_value();
         assert_eq!(
             preview_landscape
                 .raster_state()
@@ -1805,7 +1763,7 @@
                 .indices[..6],
             [2, 0x82, 3, 0x83, 0, 0x80]
         );
-        let preview_grid = preview_landscape.pixel_grid().expect("preview pixel grid");
+        let preview_grid = preview_landscape.pixel_grid().test_value();
         assert_eq!(preview_grid.bytes(), initial_surface);
         assert_eq!(preview_grid.revision(), initial_revision);
         assert_eq!(preview_grid.material_names(), initial_material_names);
@@ -1830,15 +1788,15 @@
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
         {
-            let landscape = engine.landscape().expect("folded landscape exists");
+            let landscape = engine.landscape().test_value();
             assert_eq!(landscape.grid_byte_at(1, 2), Some(1 | 0x80));
             assert_eq!(landscape.grid_byte_at(2, 2), Some(2));
-            let grid = landscape.pixel_grid().expect("folded pixel grid");
+            let grid = landscape.pixel_grid().test_value();
             assert_eq!(grid.bytes(), initial_surface);
             assert_eq!(grid.revision(), initial_revision);
             assert_eq!(grid.material_names(), initial_material_names);
             assert_eq!(grid.texture_names(), initial_texture_names);
-            let raster = landscape.raster_state().expect("raster state");
+            let raster = landscape.raster_state().test_value();
             assert_eq!(
                 raster.map().expect("folded retained map").indices[..6],
                 [2, 0x82, 3, 0x83, 0, 0x80]
@@ -1851,7 +1809,7 @@
 
         engine.set_editor_landscape_mode(crate::landscape::LANDSCAPE_MODE_EXACT);
         engine.set_editor_landscape_mode(crate::landscape::LANDSCAPE_MODE_STATIC);
-        let redrawn = engine.landscape().expect("redrawn landscape exists");
+        let redrawn = engine.landscape().test_value();
         assert_eq!(redrawn.grid_byte_at(0, 0), Some(2));
         assert_eq!(redrawn.grid_byte_at(1, 0), Some(0x82));
     }
@@ -1864,17 +1822,14 @@
         // (C4Landscape.cpp:2983-3007).
         let mut replay_world = remove_unused_texmap_world();
         let initial_landscape = replay_world
-            .landscape_ref()
-            .expect("landscape exists")
+            .landscape_ref().test_value()
             .clone();
         let initial_bytes = initial_landscape
-            .pixel_grid()
-            .expect("pixel grid")
+            .pixel_grid().test_value()
             .bytes()
             .to_vec();
         let initial_revision = initial_landscape
-            .pixel_grid()
-            .expect("pixel grid")
+            .pixel_grid().test_value()
             .revision();
 
         let (result, outcome) = with_effect_context(None, &[], replay_world.clone(), 1, || {
@@ -1912,10 +1867,9 @@
 
         // Separate effect callbacks clone the threaded HostWorldContext.
         replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
-        let replayed_landscape = replay_world.landscape_ref().expect("landscape exists");
+        let replayed_landscape = replay_world.landscape_ref().test_value();
         let replayed_texmap = replayed_landscape
-            .raster_state()
-            .expect("raster state")
+            .raster_state().test_value()
             .texmap();
         for slot in [1, 2, 3, 5] {
             assert!(
@@ -1952,11 +1906,11 @@
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
-        let landscape = engine.landscape().expect("folded landscape exists");
-        let folded = landscape.raster_state().expect("raster state").texmap();
+        let landscape = engine.landscape().test_value();
+        let folded = landscape.raster_state().test_value().texmap();
         assert!(folded.material_names[4].is_none());
         assert!(folded.material_names[6].is_none());
-        let grid = landscape.pixel_grid().expect("pixel grid");
+        let grid = landscape.pixel_grid().test_value();
         assert_eq!(grid.bytes(), initial_bytes);
         assert_eq!(grid.revision(), initial_revision);
         assert_eq!(
@@ -1971,8 +1925,7 @@
         // that texture entry live.
         let ordered_world = remove_unused_texmap_world();
         let ordered_initial = ordered_world
-            .landscape_ref()
-            .expect("landscape exists")
+            .landscape_ref().test_value()
             .clone();
         let draw_args = [
             Value::String("Earth-Ridge".to_string().into()),
@@ -2015,8 +1968,7 @@
         ordered_engine.set_landscape(ordered_initial);
         ordered_engine.apply_landscape_operations(ordered_outcome.landscape);
         let ordered_landscape = ordered_engine
-            .landscape()
-            .expect("ordered landscape remains");
+            .landscape().test_value();
         assert_eq!(ordered_landscape.grid_byte_at(2, 0), Some(4));
         assert_eq!(
             ordered_landscape
@@ -2036,8 +1988,7 @@
         // must survive a later operation that carries the whole texmap.
         let mut replay_world = draw_volcano_branch_world();
         let initial_landscape = replay_world
-            .landscape_ref()
-            .expect("landscape exists")
+            .landscape_ref().test_value()
             .clone();
         assert!(!initial_landscape.texture_map_entries_added());
 
@@ -2212,8 +2163,7 @@
                     return Random(1000);
                 }
                 "#,
-            )
-            .expect("runtime ScriptAlgo probe compiles");
+            ).test_value();
         let script = Arc::new(script);
         let world = draw_map_world(8, 7, 3, true).with_scenario_script(Some(Arc::clone(&script)));
 
@@ -2398,7 +2348,7 @@
             Value::String("Requested".to_string().into()),
         ];
         let world = draw_map_world(8, 7, 3, true);
-        let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
+        let initial_landscape = world.landscape_ref().test_value().clone();
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             let drew = draw_def_map(&args)?;
             let after = random(&[Value::Int(1_000)])?;
@@ -2434,7 +2384,7 @@
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape.clone());
-        let landscape = engine.landscape().expect("folded landscape exists");
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.grid_byte_at(0, 1), Some(1 | 0x80));
         assert_eq!(
             landscape
@@ -2635,8 +2585,7 @@
         ];
         let mut replay_world = draw_mat_chunks_world();
         let initial_landscape = replay_world
-            .landscape_ref()
-            .expect("landscape exists")
+            .landscape_ref().test_value()
             .clone();
         let guard = enter_random_context(LcgRng::new(seed));
         let (result, outcome) = with_effect_context(None, &[], replay_world.clone(), 1, || {
@@ -2696,10 +2645,10 @@
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
-        let landscape = engine.landscape().expect("folded landscape exists");
+        let landscape = engine.landscape().test_value();
         let actual = (0..12)
             .flat_map(|y| {
-                (0..16).map(move |x| landscape.grid_byte_at(x, y).expect("pixel is in bounds"))
+                (0..16).map(move |x| landscape.grid_byte_at(x, y).test_value())
             })
             .collect::<Vec<_>>();
 
@@ -2752,7 +2701,7 @@
         assert!(world
             .landscape_mut()
             .is_some_and(|landscape| { landscape.set_surface32_pixel(15, 5, 0x0011_2233) }));
-        let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
+        let initial_landscape = world.landscape_ref().test_value().clone();
         let guard = enter_random_context(LcgRng::new(59));
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             let drew = draw_mat_chunks(&args)?;
@@ -2769,7 +2718,7 @@
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
-        let landscape = engine.landscape().expect("folded landscape exists");
+        let landscape = engine.landscape().test_value();
         assert_eq!(
             landscape.surface32_pixel_at(15, 5),
             None,
@@ -2817,7 +2766,7 @@
 
         let mut replay_world = draw_mat_chunks_masked_world();
         replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
-        let landscape = replay_world.landscape_ref().expect("landscape exists");
+        let landscape = replay_world.landscape_ref().test_value();
         for y in 4..6 {
             for x in 5..7 {
                 assert_eq!(landscape.grid_byte_at(x, y), Some(2));
@@ -2914,7 +2863,7 @@
         assert!(world
             .landscape_mut()
             .is_some_and(|landscape| { landscape.set_surface32_pixel(6, 2, 0x0011_2233) }));
-        let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
+        let initial_landscape = world.landscape_ref().test_value().clone();
         let object_context = HostObjectContext {
             id: ObjectId::new(91),
             position: Vector2::new(30, 40),
@@ -2983,7 +2932,7 @@
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
-        let landscape = engine.landscape().expect("folded landscape exists");
+        let landscape = engine.landscape().test_value();
         let centers = [(2, 8), (3, 6), (4, 5), (5, 4), (6, 3)];
         for y in 0..10 {
             for x in 0..12 {
@@ -3012,7 +2961,7 @@
         // ty==fy must not divide by zero, and odd size 1 paints zero pixels.
         for (from_y, to_y, size) in [(4, 4, 6), (3, 7, 6), (7, 2, 1), (7, 2, -3)] {
             let world = draw_volcano_branch_world();
-            let initial = world.landscape_ref().expect("landscape exists").clone();
+            let initial = world.landscape_ref().test_value().clone();
             let args = [
                 Value::Int(0),
                 Value::Int(2),
@@ -3028,7 +2977,7 @@
             let mut engine = crate::Engine::new();
             engine.set_landscape(initial.clone());
             engine.apply_landscape_operations(outcome.landscape);
-            let actual = engine.landscape().expect("landscape exists");
+            let actual = engine.landscape().test_value();
             for y in 0..10 {
                 for x in 0..12 {
                     assert_eq!(actual.grid_byte_at(x, y), initial.grid_byte_at(x, y));

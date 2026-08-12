@@ -32,7 +32,7 @@ where
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
         if let Some(message) = visitor.message {
-            self.messages.lock().unwrap().push(message);
+            crate::support::TestValueExt::test_value(self.messages.lock()).push(message);
         }
     }
 }
@@ -62,14 +62,12 @@ fn capture_script_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
         messages: Arc::clone(&messages),
     });
     let result = subscriber::with_default(subscriber, run);
-    let captured = messages.lock().unwrap().clone();
+    let captured = crate::support::TestValueExt::test_value(messages.lock()).clone();
     (result, captured)
 }
 
 fn call(engine: &mut Engine, object: ObjectId, function: &str, args: Vec<Value>) -> Value {
-    let index = engine
-        .find_object_index(object)
-        .expect("object remains live");
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
     engine
         .call_object_function(index, function, args)
         .unwrap_or_else(|error| panic!("{function} executes: {error}"))
@@ -82,19 +80,19 @@ fn cancelling_mars_base_research_unlocks_the_door() {
     // interval (src/C4Script.cpp:5516-5543), and C4Effect::Execute then skips
     // timer callbacks for it (src/C4Effect.cpp:339-357).
     let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    engine
-        .register_player(PlayerConfig::new(PLAYER, "Mars research tester"))
-        .expect("test player registers");
+    crate::support::TestValueExt::test_value(
+        engine.register_player(PlayerConfig::new(PLAYER, "Mars research tester")),
+    );
 
-    let base = engine
-        .spawn_object(
+    let base = crate::support::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("BASE")
                 .with_owner(PLAYER)
                 .with_position(Vector2::new(300, 200)),
-        )
-        .expect("Mars base spawns");
-    let researcher = engine
-        .spawn_object(
+        ),
+    );
+    let researcher = crate::support::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("SCNK")
                 .with_loaded(true)
                 .with_owner(PLAYER)
@@ -102,10 +100,10 @@ fn cancelling_mars_base_research_unlocks_the_door() {
                 .with_alive(true)
                 .with_crew_member(true)
                 .with_container(base),
-        )
-        .expect("researching Spaceclonk spawns inside the base");
-    let bystander = engine
-        .spawn_object(
+        ),
+    );
+    let bystander = crate::support::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("SCNK")
                 .with_loaded(true)
                 .with_owner(PLAYER)
@@ -113,8 +111,8 @@ fn cancelling_mars_base_research_unlocks_the_door() {
                 .with_alive(true)
                 .with_crew_member(true)
                 .with_container(base),
-        )
-        .expect("second Spaceclonk spawns inside the base");
+        ),
+    );
 
     assert_eq!(
         call(
@@ -157,17 +155,16 @@ fn cancelling_mars_base_research_unlocks_the_door() {
     );
 
     for clonk in [researcher, bystander] {
-        let index = engine.find_object_index(clonk).expect("clonk remains live");
-        engine.objects[index]
-            .commands
-            .push_back(CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base))
-            .expect("Exit command queues");
+        let index = crate::support::TestValueExt::test_value(engine.find_object_index(clonk));
+        crate::support::TestValueExt::test_value(
+            engine.objects[index]
+                .commands
+                .push_back(CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base)),
+        );
     }
     let (_, warnings) = capture_script_warnings(|| {
         for _ in 0..30 {
-            engine
-                .tick_without_snapshot()
-                .expect("paused-base Exit frame runs");
+            crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
             if [researcher, bystander].into_iter().all(|clonk| {
                 engine
                     .object_snapshot(clonk)

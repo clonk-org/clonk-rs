@@ -7,7 +7,7 @@ struct LevelRecorder(std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String
 
 impl LevelRecorder {
     fn events(&self) -> Vec<(tracing::Level, String)> {
-        self.0.lock().expect("recorder is not poisoned").clone()
+        self.0.lock().test_value().clone()
     }
 
     fn levels_mentioning(&self, needle: &str) -> Vec<tracing::Level> {
@@ -35,7 +35,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for LevelRecord
         );
         self.0
             .lock()
-            .expect("recorder is not poisoned")
+            .test_value()
             .push((*event.metadata().level(), message));
     }
 }
@@ -61,16 +61,10 @@ fn run_failing_effect_ticks(recorder: LevelRecorder) {
     let subscriber = tracing_subscriber::registry().with(recorder);
     tracing::subscriber::with_default(subscriber, || {
         let mut engine = Engine::with_seed(11);
-        engine
-            .register_script_definition("Actor", "Actor", script)
-            .expect("definition registers");
-        engine
-            .spawn_object(SpawnConfig::new("Actor"))
-            .expect("spawn succeeds");
+        engine.register_test_script_definition("Actor", "Actor", script);
+        engine.spawn_test_object(SpawnConfig::new("Actor"));
         for _ in 1..=3 {
-            engine
-                .tick_without_snapshot()
-                .expect("the tick survives the Fx error");
+            engine.tick_without_snapshot().test_value();
         }
     });
 }
@@ -89,19 +83,12 @@ func FxProbeStop(pThis, iNumber) { UnknownFn(); return(1); }
     let subscriber = tracing_subscriber::registry().with(recorder);
     tracing::subscriber::with_default(subscriber, || {
         let mut engine = Engine::with_seed(5);
-        engine
-            .register_script_definition("HOLD", "Holder", script)
-            .expect("definition registers");
-        let holder = engine
-            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
-            .expect("spawn succeeds");
-        let index = engine.find_object_index(holder).expect("object exists");
-        engine
-            .call_object_function(index, "Boot", Vec::new())
-            .expect("the effect is added");
-        engine
-            .call_object_function(index, "Kill", Vec::new())
-            .expect("RemoveEffect survives the Fx*Stop error");
+        engine.register_test_script_definition("HOLD", "Holder", script);
+        let holder =
+            engine.spawn_test_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT));
+        let index = engine.test_object_index(holder);
+        engine.call_test_object_function(index, "Boot", Vec::new());
+        engine.call_test_object_function(index, "Kill", Vec::new());
     });
 }
 
@@ -149,13 +136,11 @@ func Construction() { UnknownFn(); return(1); }
     let subscriber = tracing_subscriber::registry().with(recorder);
     tracing::subscriber::with_default(subscriber, || {
         let mut engine = Engine::with_seed(0);
-        let parent = Definition::from_script("PRNT", "Parent", parent_script).expect("compiles");
-        engine.register_definition(parent).expect("registers");
-        let child = Definition::from_script("CHLD", "Child", child_script).expect("compiles");
-        engine.register_definition(child).expect("registers");
-        engine
-            .spawn_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT))
-            .expect("the erroring Construction is a fail-safe game call");
+        let parent = test_definition("PRNT", "Parent", parent_script);
+        engine.register_test_definition(parent);
+        let child = test_definition("CHLD", "Child", child_script);
+        engine.register_test_definition(child);
+        engine.spawn_test_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT));
     });
 }
 

@@ -8,8 +8,7 @@
              Definitions=\"First.c4d\",\"Comma,Pack.c4d\",\"First.c4d\"\n\
              Definitions=\"Ignored.c4d\"\n\
              Definition1=Fallback.c4d\n",
-        )
-        .expect("definition list parses");
+        ).test_value();
         assert_eq!(
             manifest.definition_specs,
             ["First.c4d", "Comma,Pack.c4d", "First.c4d"]
@@ -20,8 +19,7 @@
     fn modern_definition_list_preserves_post_equals_whitespace_mode() {
         let manifest = parse_legacy_scenario_text(
             "[Definitions]\nDefinitions= \"First.c4d\",\"Second.c4d\"\n",
-        )
-        .expect("definition list parses");
+        ).test_value();
         assert_eq!(manifest.definition_specs, ["\"First.c4d\",\"Second.c4d\""]);
     }
 
@@ -41,8 +39,7 @@
              AllowUserChange=0\n\
              SkipDefs=LAST\n\
              Definition1=Second.c4d\n",
-        )
-        .expect("only first definitions section and scalar values parse");
+        ).test_value();
 
         assert!(manifest.core.definitions.local_only);
         assert!(manifest.core.definitions.allow_user_change);
@@ -55,18 +52,15 @@
     fn definition_parser_preserves_modern_empty_but_ignores_numbered_empty() {
         let modern = parse_legacy_scenario_text(
             "[Definitions]\nDefinitions=\"\"\nDefinition1=Fallback.c4d\n",
-        )
-        .expect("quoted empty modern list parses");
+        ).test_value();
         assert_eq!(modern.definition_specs, [""]);
 
         let bare =
-            parse_legacy_scenario_text("[Definitions]\nDefinitions=\nDefinition1=Fallback.c4d\n")
-                .expect("bare empty modern list parses");
+            parse_legacy_scenario_text("[Definitions]\nDefinitions=\nDefinition1=Fallback.c4d\n").test_value();
         assert_eq!(bare.definition_specs, [""]);
 
         let numbered =
-            parse_legacy_scenario_text("[Definitions]\nDefinition1=\nDefinition2=Second.c4d\n")
-                .expect("empty numbered entry parses");
+            parse_legacy_scenario_text("[Definitions]\nDefinition1=\nDefinition2=Second.c4d\n").test_value();
         assert_eq!(numbered.definition_specs, ["Second.c4d"]);
     }
 
@@ -88,8 +82,7 @@
              Definition01=WrongAlias.c4d\n\
              definition1=WrongCase.c4d\n\
              Definition1=Right.c4d\n",
-        )
-        .expect("exact definitions names parse");
+        ).test_value();
 
         assert!(manifest.core.definitions.local_only);
         assert!(manifest.core.definitions.allow_user_change);
@@ -107,8 +100,7 @@
              AllowUserChange\t =1\n\
              SkipDefs\t =GOOD\n\
              Definitions\t =Tabbed.c4d\n",
-        )
-        .expect("tab-separated definitions names parse");
+        ).test_value();
 
         assert!(tabbed.core.definitions.local_only);
         assert!(tabbed.core.definitions.allow_user_change);
@@ -126,8 +118,7 @@
              Definitions =WrongModern.c4d\n\
              Definition1 =WrongNumbered.c4d\n\
              Definition1=Right.c4d\n",
-        )
-        .expect("spaces remain part of definitions names");
+        ).test_value();
 
         assert!(!spaced.core.definitions.local_only);
         assert!(!spaced.core.definitions.allow_user_change);
@@ -139,16 +130,15 @@
     fn modern_definition_paths_normalize_classic_backslashes() {
         let manifest = parse_legacy_scenario_text(
             r#"[Definitions]
-Definitions="Western.c4f\\Misc.c4d"
-"#,
-        )
-        .expect("modern definition path parses");
+        Definitions="Western.c4f\\Misc.c4d"
+        "#,
+        ).test_value();
         assert_eq!(manifest.definition_specs, ["Western.c4f/Misc.c4d"]);
     }
 
     #[test]
     fn loads_flat_landscape_scenario() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         // Keep the moving fixture in C4D_Object: C4Object::SyncClearance
         // zeroes C4D_StaticBack velocity before players join
         // (C4Object.cpp:3830-3850; C4Game.cpp:473-475).
@@ -166,18 +156,18 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         assert_eq!(scenario.name(), Some("Temp Scenario"));
         assert_eq!(scenario.configured_ticks(), Some(240));
         assert_eq!(scenario.ground_height_hint(), Some(42));
         assert!(scenario.has_initial_objects());
 
         let mut engine = Engine::with_seed(0);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 1);
 
         let snapshot = engine.snapshot();
@@ -188,14 +178,14 @@ Definitions="Western.c4f\\Misc.c4d"
         assert_eq!(object.velocity, Vector2::new(1, -1));
         assert_eq!(object.energy, 99);
 
-        let landscape = engine.landscape().expect("landscape set");
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.surface_height(0), Some(42));
         assert!(scenario.physics().is_none());
     }
 
     #[test]
     fn applies_action_configuration_from_manifest() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -215,33 +205,33 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::with_seed(5);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         let id = created[0];
 
-        let initial = engine.object_snapshot(id).expect("object snapshot");
+        let initial = engine.object_snapshot(id).test_value();
         assert_eq!(initial.action.name, "Walk");
         assert_eq!(initial.action.phase, 0);
 
-        let snapshot = engine.tick().expect("tick succeeds");
-        let object = snapshot.object(id).expect("object present");
+        let snapshot = engine.tick().test_value();
+        let object = snapshot.object(id).test_value();
         assert_eq!(object.action.name, "Walk");
         assert_eq!(object.action.phase, 1);
 
-        let snapshot = engine.tick().expect("second tick succeeds");
-        let object = snapshot.object(id).expect("object present");
+        let snapshot = engine.tick().test_value();
+        let object = snapshot.object(id).test_value();
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.action.phase, 0);
     }
 
     #[test]
     fn seeds_initial_action_and_effects_from_manifest() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -267,13 +257,13 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::with_seed(0);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 1);
 
         let snapshot = engine.snapshot();
@@ -292,7 +282,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn seeds_initial_status_from_manifest() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -312,29 +302,29 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::with_seed(0);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         let id = created[0];
 
         let snapshot = engine.snapshot();
-        let object = snapshot.object(id).expect("object present");
+        let object = snapshot.object(id).test_value();
         assert_eq!(object.status, ObjectStatus::Inactive);
         let initial_phase = object.action.phase;
 
-        let ticked = engine.tick().expect("tick succeeds");
-        let object = ticked.object(id).expect("object present");
+        let ticked = engine.tick().test_value();
+        let object = ticked.object(id).test_value();
         assert_eq!(object.status, ObjectStatus::Inactive);
         assert_eq!(object.action.phase, initial_phase);
     }
 
     #[test]
     fn spawns_contents_with_container_handles() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -348,34 +338,32 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/chest.aul"), TEST_SCRIPT).expect("write script");
-        std::fs::write(dir.path().join("scripts/gem.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/chest.aul"), TEST_SCRIPT);
+        write_test_file(dir.path().join("scripts/gem.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::with_seed(0);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 2);
 
         let snapshot = engine.snapshot();
         let chest = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "Chest")
-            .expect("chest present");
+            .find(|object| object.definition_id == "Chest").test_value();
         let gem = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "Gem")
-            .expect("gem present");
+            .find(|object| object.definition_id == "Gem").test_value();
         assert_eq!(gem.container, Some(chest.id));
         assert!(chest.contents.contains(&gem.id));
     }
 
     #[test]
     fn errors_on_unknown_container_handle() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -388,10 +376,10 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/chest.aul"), TEST_SCRIPT).expect("write script");
-        std::fs::write(dir.path().join("scripts/gem.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/chest.aul"), TEST_SCRIPT);
+        write_test_file(dir.path().join("scripts/gem.aul"), TEST_SCRIPT);
 
         let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
         match error {
@@ -406,7 +394,7 @@ Definitions="Western.c4f\\Misc.c4d"
         // containment loads without error. The sequential spawn model
         // breaks ONE edge (documented divergence) — both objects must
         // exist, with one containment intact.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -420,16 +408,14 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/crate.aul"), TEST_SCRIPT).expect("write script");
-        std::fs::write(dir.path().join("scripts/barrel.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/crate.aul"), TEST_SCRIPT);
+        write_test_file(dir.path().join("scripts/barrel.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::with_seed(0);
-        let created = scenario
-            .apply(&mut engine)
-            .expect("apply degrades the cycle");
+        let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 2, "both cycle members spawn");
         let contained_count = created
             .iter()
@@ -441,7 +427,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn errors_on_unknown_definition_reference() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -453,9 +439,9 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
         let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
         match error {
@@ -466,14 +452,14 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn manifest_missing_returns_error() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
         assert!(matches!(error, ScenarioError::ManifestMissing));
     }
 
     #[test]
     fn loads_physics_overrides() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -488,19 +474,19 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let physics = scenario.physics().expect("physics present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let physics = scenario.physics().test_value();
         assert_eq!(physics.gravity, 2);
         assert_eq!(physics.max_fall_speed, 8);
         assert_eq!(physics.max_rise_speed, -10);
         assert_eq!(physics.max_horizontal_speed, 7);
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.physics();
         assert_eq!(configured.gravity, 2);
         assert_eq!(configured.max_fall_speed, 8);
@@ -510,7 +496,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn loads_environment_settings_and_applies_to_engine() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -525,12 +511,12 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.wind, -3);
         assert_eq!(environment.wind_variation, 0);
         assert_eq!(environment.wind_period, 0);
@@ -539,7 +525,7 @@ Definitions="Western.c4f\\Misc.c4d"
         assert!(environment.sky_color.is_none());
 
         let mut engine = Engine::with_seed(0);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 1);
 
         let configured = engine.environment();
@@ -553,7 +539,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn loads_environment_variation_and_temperature() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -571,12 +557,12 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.wind, 4);
         assert_eq!(environment.wind_variation, 6);
         assert_eq!(environment.wind_period, 180);
@@ -584,7 +570,7 @@ Definitions="Western.c4f\\Misc.c4d"
         assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.environment();
         assert_eq!(configured.wind, 4);
         assert_eq!(configured.wind_variation, 6);
@@ -597,7 +583,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn loads_environment_climate_and_temperature_cycle() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -617,12 +603,12 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.climate, 8);
         assert_eq!(environment.temperature, -4);
         assert_eq!(environment.temperature_variation, 6);
@@ -631,7 +617,7 @@ Definitions="Western.c4f\\Misc.c4d"
         assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.environment();
         assert_eq!(configured.climate, 8);
         assert_eq!(configured.temperature, -4);
@@ -643,7 +629,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn loads_environment_time_settings() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -660,19 +646,19 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.wind, 1);
         assert_eq!(environment.time_of_day, 2355);
         assert_eq!(environment.time_speed, 120);
         assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.environment();
         assert_eq!(configured.wind, 1);
         assert_eq!(configured.time_of_day, 2355);
@@ -682,7 +668,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn loads_environment_precipitation_with_clamping() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -698,17 +684,17 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.wind, 2);
         assert_eq!(environment.precipitation, 100);
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.environment();
         assert_eq!(configured.wind, 2);
         assert_eq!(configured.precipitation, 100);
@@ -716,7 +702,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn loads_environment_sky_color_from_array() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -732,23 +718,23 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.sky_color, Some(RgbColor::new(18, 42, 200)));
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.environment();
         assert_eq!(configured.sky_color, Some(RgbColor::new(18, 42, 200)));
     }
 
     #[test]
     fn loads_environment_sky_color_from_hex() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r##"
         {
             "definitions": [
@@ -764,23 +750,23 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "##;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
-        let environment = scenario.environment().expect("environment present");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.sky_color, Some(RgbColor::new(0x7F, 0x9A, 0xC3)));
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         let configured = engine.environment();
         assert_eq!(configured.sky_color, Some(RgbColor::new(0x7F, 0x9A, 0xC3)));
     }
 
     #[test]
     fn scenario_without_environment_resets_engine_to_default() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -792,17 +778,17 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/mover.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         assert!(scenario.environment().is_none());
 
         let mut engine = Engine::with_seed(0);
         engine.set_environment(EnvironmentSettings::new(5));
         assert!(engine.gamma.set_ramp(0, [0, 0x646464, 0xc8c8c8]));
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         let configured = engine.environment();
         assert_eq!(configured, EnvironmentSettings::default());
@@ -811,7 +797,7 @@ Definitions="Western.c4f\\Misc.c4d"
 
     #[test]
     fn scenario_tracks_crew_member_flags() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let manifest = r#"
         {
             "definitions": [
@@ -824,24 +810,22 @@ Definitions="Western.c4f\\Misc.c4d"
         }
         "#;
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/crew.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::create_dir_all(dir.path().join("scripts")).test_value();
+        write_test_file(dir.path().join("Scenario.json"), manifest);
+        write_test_file(dir.path().join("scripts/crew.aul"), TEST_SCRIPT);
 
-        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let scenario = Scenario::load_from_path(dir.path()).test_value();
         let mut engine = Engine::with_seed(0);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
 
         assert_eq!(created.len(), 2);
         let first = engine
-            .object_snapshot(created[0])
-            .expect("first object snapshot");
+            .object_snapshot(created[0]).test_value();
         assert!(first.crew_member);
         assert_eq!(first.owner, 1);
 
         let second = engine
-            .object_snapshot(created[1])
-            .expect("second object snapshot");
+            .object_snapshot(created[1]).test_value();
         assert!(!second.crew_member);
         assert_eq!(second.owner, 2);
     }
@@ -957,7 +941,7 @@ global func Step(state, frame, random)
         };
 
         let mut engine = Engine::with_seed(11);
-        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let created = apply_test_scenario(&scenario, &mut engine);
         assert_eq!(created.len(), 2);
         assert!(!engine.base_reject_entrance_enabled);
         assert!(!engine.base_regenerate_energy_enabled);
@@ -966,14 +950,14 @@ global func Step(state, frame, random)
 
         let mut energies: Vec<i32> = created
             .iter()
-            .map(|id| engine.object_snapshot(*id).expect("object snapshot").energy)
+            .map(|id| engine.object_snapshot(*id).test_value().energy)
             .collect();
         energies.sort_unstable();
         assert_eq!(energies, vec![0, 77]);
 
         let owners: Vec<i32> = created
             .iter()
-            .map(|id| engine.object_snapshot(*id).expect("object snapshot").owner)
+            .map(|id| engine.object_snapshot(*id).test_value().owner)
             .collect();
         assert!(owners.contains(&42));
     }
@@ -1093,12 +1077,12 @@ global func Step(state, frame, random)
         };
 
         let mut engine = Engine::with_seed(7);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         let initial_snapshot = engine.snapshot();
         assert_eq!(initial_snapshot.objects.len(), 1);
 
-        let snapshot = engine.tick().expect("tick succeeds");
+        let snapshot = engine.tick().test_value();
         assert_eq!(snapshot.objects.len(), 2);
         assert!(snapshot.objects.iter().any(|object| object.owner == 99));
     }
@@ -1130,7 +1114,7 @@ global func Step(state, frame, random)
             }
             let mut warning = DefinitionWarning::default();
             event.record(&mut warning);
-            self.warnings.lock().unwrap().push(warning);
+            self.warnings.lock().test_value().push(warning);
         }
     }
 
@@ -1162,7 +1146,7 @@ global func Step(state, frame, random)
             warnings: Arc::clone(&warnings),
         });
         let result = subscriber::with_default(subscriber, run);
-        let captured = warnings.lock().unwrap().clone();
+        let captured = warnings.lock().test_value().clone();
         (result, captured)
     }
 
@@ -1259,43 +1243,40 @@ global func Step(state, frame, random)
     ) -> std::path::PathBuf {
         let defs_root = dir.join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
-        std::fs::create_dir_all(&good).expect("definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&good).test_value();
+        write_test_file(
             good.join("DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write defcore");
-        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        );
+        write_test_file(good.join("Script.c"), "// fine\n");
         write_test_definition_graphics(&good);
 
         if let Some((id, script)) = extra_def {
             let extra = defs_root.join(format!("{id}.c4d"));
-            std::fs::create_dir_all(&extra).expect("extra definition dir");
-            std::fs::write(
+            std::fs::create_dir_all(&extra).test_value();
+            write_test_file(
                 extra.join("DefCore.txt"),
                 format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n"),
-            )
-            .expect("write extra defcore");
-            std::fs::write(extra.join("Script.c"), script).expect("write extra script");
+            );
+            write_test_file(extra.join("Script.c"), script);
             write_test_definition_graphics(&extra);
         }
 
         let scenario_dir = dir.join("Resilience.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Resilience\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=120,160\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(scenario_dir.join("Script.c"), scenario_script).expect("write script");
+        );
+        write_test_file(scenario_dir.join("Script.c"), scenario_script);
         scenario_dir
     }
 
     #[test]
     fn combined_runtime_group_restores_live_round_results_component() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("RoundResults.txt"),
             concat!(
                 "[RoundResults]\r\n",
@@ -1312,18 +1293,12 @@ global func Step(state, frame, random)
                 "NetResult=\"server detail\"\r\n",
                 "NetResult=LeagueOK\r\n",
             ),
-        )
-        .expect("write live RoundResults.txt");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
-        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
-            .expect("combined runtime scenario loads");
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("runtime scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         let restored = engine.capture_state().round_results;
         assert_eq!(restored.goal_counts, vec![("GOOD".to_owned(), 0)]);
@@ -1350,35 +1325,29 @@ global func Step(state, frame, random)
 
     #[test]
     fn missing_round_results_component_uses_cpp_melee_default() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let source =
-            std::fs::read_to_string(scenario_dir.join("Scenario.txt")).expect("read scenario core");
-        std::fs::write(
+            std::fs::read_to_string(scenario_dir.join("Scenario.txt")).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             format!("{source}\n[Game]\nGoals=MELE=1\n"),
-        )
-        .expect("write melee core");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("melee scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("melee scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         assert!(engine.capture_state().round_results.hide_settlement_score);
     }
 
     #[test]
     fn malformed_round_results_component_fails_combined_group_load() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        std::fs::write(scenario_dir.join("RoundResults.txt"), b"[Wrong]\r\n")
-            .expect("write malformed results");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        write_test_file(scenario_dir.join("RoundResults.txt"), b"[Wrong]\r\n");
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         assert!(matches!(
             Scenario::load_from_path_with(&scenario_dir, &resolver),
@@ -1388,12 +1357,10 @@ global func Step(state, frame, random)
 
     #[test]
     fn legacy_group_loading_reports_monotonic_nonempty_decode_status() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
-        let group = Group::open(&scenario_dir).expect("open legacy scenario group");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let group = Group::open(&scenario_dir).test_value();
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let mut reported = Vec::new();
 
         Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
@@ -1404,8 +1371,7 @@ global func Step(state, frame, random)
             None,
             None,
             |progress, log| reported.push((progress, log)),
-        )
-        .expect("legacy scenario loads with progress reporting");
+        ).test_value();
 
         let checkpoints = reported
             .iter()
@@ -1430,11 +1396,11 @@ global func Step(state, frame, random)
         // Network clients and hosts enter the same InitGame first/second-part
         // milestones after their respective 7 checkpoint
         // (src/C4Game.cpp:456-457,2551-2721).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
-        let group = Group::open(&scenario_dir).expect("open network scenario group");
+        let group = Group::open(&scenario_dir).test_value();
         let definitions =
-            Group::open(dir.path().join("Defs.c4d")).expect("open network definitions");
+            Group::open(dir.path().join("Defs.c4d")).test_value();
         let mut reported = Vec::new();
 
         Scenario::load_network_from_group_with_languages_and_seed_and_packs_and_progress(
@@ -1446,8 +1412,7 @@ global func Step(state, frame, random)
             0,
             &LanguagePacks::default(),
             |progress, log| reported.push((progress, log)),
-        )
-        .expect("network scenario loads with progress reporting");
+        ).test_value();
 
         assert_eq!(
             reported
@@ -1461,30 +1426,26 @@ global func Step(state, frame, random)
 
     #[test]
     fn missing_defcore_id_skips_only_parent_and_still_loads_its_child() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let broken = dir.path().join("Defs.c4d/Broken.c4d");
         let child = broken.join("Child.c4d");
-        std::fs::create_dir_all(&child).expect("nested definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&child).test_value();
+        write_test_file(
             broken.join("DefCore.txt"),
             "[DefCore]\nName=Broken\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write malformed parent defcore");
-        std::fs::write(
+        );
+        write_test_file(
             child.join("DefCore.txt"),
             "[DefCore]\nid=CHLD\nName=Child\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write child defcore");
-        std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+        );
+        write_test_file(child.join("Script.c"), "// child\n");
         write_test_definition_graphics(&child);
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let (loaded, warnings) =
             capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
-        let scenario = loaded.expect("one malformed definition does not abort the scenario");
+        let scenario = loaded.test_value();
         let mut ids = scenario
             .definitions
             .iter()
@@ -1505,39 +1466,34 @@ global func Step(state, frame, random)
 
     #[test]
     fn zero_size_defcore_is_skipped_and_zero_size_actmap_uses_defaults() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
 
         let empty_core = dir.path().join("Defs.c4d/EmptyCore.c4d");
         let child = empty_core.join("Child.c4d");
-        std::fs::create_dir_all(&child).expect("nested definition dir");
-        std::fs::write(empty_core.join("DefCore.txt"), []).expect("empty parent DefCore");
-        std::fs::write(
+        std::fs::create_dir_all(&child).test_value();
+        write_test_file(empty_core.join("DefCore.txt"), []);
+        write_test_file(
             child.join("DefCore.txt"),
             "[DefCore]\nid=CHLD\nName=Child\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write child DefCore");
-        std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+        );
+        write_test_file(child.join("Script.c"), "// child\n");
         write_test_definition_graphics(&child);
 
         let empty_act = dir.path().join("Defs.c4d/EmptyAct.c4d");
-        std::fs::create_dir_all(&empty_act).expect("empty-ActMap definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&empty_act).test_value();
+        write_test_file(
             empty_act.join("DefCore.txt"),
             "[DefCore]\nid=EACT\nName=Empty ActMap\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write empty-ActMap DefCore");
-        std::fs::write(empty_act.join("Script.c"), "// empty ActMap\n")
-            .expect("write empty-ActMap script");
-        std::fs::write(empty_act.join("ActMap.txt"), []).expect("empty ActMap");
+        );
+        write_test_file(empty_act.join("Script.c"), "// empty ActMap\n");
+        write_test_file(empty_act.join("ActMap.txt"), []);
         write_test_definition_graphics(&empty_act);
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let (loaded, warnings) =
             capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
-        let scenario = loaded.expect("zero-size text components do not abort the scenario");
+        let scenario = loaded.test_value();
         let mut ids = scenario
             .definitions
             .iter()
@@ -1560,41 +1516,34 @@ global func Step(state, frame, random)
         }));
 
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("scenario with skipped empty definition starts");
+        apply_test_scenario(&scenario, &mut engine);
     }
 
     #[test]
     fn malformed_actmap_skips_only_parent_warns_and_still_loads_its_child() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let broken = dir.path().join("Defs.c4d/BadAct.c4d");
         let tail = broken.join("Tail.c4d");
-        std::fs::create_dir_all(&tail).expect("nested definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&tail).test_value();
+        write_test_file(
             broken.join("DefCore.txt"),
             "[DefCore]\nid=BACT\nName=Bad ActMap\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write parent defcore");
-        std::fs::write(broken.join("Script.c"), "// parent\n").expect("write parent script");
-        std::fs::write(broken.join("ActMap.txt"), "malformed action map\n")
-            .expect("write malformed action map");
+        );
+        write_test_file(broken.join("Script.c"), "// parent\n");
+        write_test_file(broken.join("ActMap.txt"), "malformed action map\n");
         write_test_definition_graphics(&broken);
-        std::fs::write(
+        write_test_file(
             tail.join("DefCore.txt"),
             "[DefCore]\nid=TAIL\nName=Tail\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write nested defcore");
-        std::fs::write(tail.join("Script.c"), "// tail\n").expect("write nested script");
+        );
+        write_test_file(tail.join("Script.c"), "// tail\n");
         write_test_definition_graphics(&tail);
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let (loaded, warnings) =
             capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
-        let scenario = loaded.expect("one malformed ActMap does not abort the scenario");
+        let scenario = loaded.test_value();
         let mut ids = scenario
             .definitions
             .iter()
@@ -1615,43 +1564,35 @@ global func Step(state, frame, random)
 
     #[test]
     fn mismatched_owner_overlay_skips_only_parent_and_still_loads_its_child() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let broken = dir.path().join("Defs.c4d/BadGfx.c4d");
         let child = broken.join("Child.c4d");
-        std::fs::create_dir_all(&child).expect("nested definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&child).test_value();
+        write_test_file(
             broken.join("DefCore.txt"),
             "[DefCore]\nid=BGFX\nName=Bad Graphics\nColorByOwner=1\n",
-        )
-        .expect("write parent DefCore");
-        std::fs::write(broken.join("Script.c"), "// parent\n").expect("write parent script");
+        );
+        write_test_file(broken.join("Script.c"), "// parent\n");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
-            .save(broken.join("Graphics.png"))
-            .expect("write base graphics");
+            .save(broken.join("Graphics.png")).test_value();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
-            .save(broken.join("Overlay.png"))
-            .expect("write base overlay");
+            .save(broken.join("Overlay.png")).test_value();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([136, 0, 0, 255]))
-            .save(broken.join("GraphicsBad.png"))
-            .expect("write named graphics");
+            .save(broken.join("GraphicsBad.png")).test_value();
         image::RgbaImage::from_pixel(2, 1, image::Rgba([64, 64, 64, 255]))
-            .save(broken.join("OverlayBad.png"))
-            .expect("write wrong-size overlay");
-        std::fs::write(
+            .save(broken.join("OverlayBad.png")).test_value();
+        write_test_file(
             child.join("DefCore.txt"),
             "[DefCore]\nid=CHLD\nName=Child\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write child DefCore");
-        std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+        );
+        write_test_file(child.join("Script.c"), "// child\n");
         write_test_definition_graphics(&child);
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let (loaded, warnings) =
             capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
-        let scenario = loaded.expect("bad graphics reject only their definition");
+        let scenario = loaded.test_value();
         let mut ids = scenario
             .definitions
             .iter()
@@ -1674,12 +1615,12 @@ global func Step(state, frame, random)
     fn definition_load_skip_ladder_matches_cpp() {
         fn write_core(root: &Path, name: &str, source: &str) -> PathBuf {
             let path = root.join(format!("{name}.c4d"));
-            std::fs::create_dir_all(&path).expect("definition directory");
-            std::fs::write(path.join("DefCore.txt"), source).expect("write DefCore");
+            std::fs::create_dir_all(&path).test_value();
+            write_test_file(path.join("DefCore.txt"), source);
             path
         }
 
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let defs = dir.path().join("Defs.c4d");
 
@@ -1699,64 +1640,52 @@ global func Step(state, frame, random)
 
         let variant_only = write_core(&defs, "VariantOnly", "[DefCore]\nid=VARI\n");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]))
-            .save(variant_only.join("GraphicsAlt.png"))
-            .expect("write non-base graphics");
+            .save(variant_only.join("GraphicsAlt.png")).test_value();
 
         let corrupt_png = write_core(&defs, "CorruptPng", "[DefCore]\nid=CORR\n");
-        std::fs::write(corrupt_png.join("Graphics.png"), b"not a png").expect("write corrupt PNG");
+        write_test_file(corrupt_png.join("Graphics.png"), b"not a png");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([7, 8, 9, 255]))
-            .save(corrupt_png.join("Graphics.bmp"))
-            .expect("write valid BMP fallback candidate");
+            .save(corrupt_png.join("Graphics.bmp")).test_value();
 
         let mislabeled_png = write_core(&defs, "MislabeledPng", "[DefCore]\nid=MSLB\n");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([13, 14, 15, 255]))
-            .save_with_format(mislabeled_png.join("Graphics.png"), image::ImageFormat::Bmp)
-            .expect("write BMP bytes under the PNG base name");
+            .save_with_format(mislabeled_png.join("Graphics.png"), image::ImageFormat::Bmp).test_value();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([16, 17, 18, 255]))
-            .save(mislabeled_png.join("Graphics.bmp"))
-            .expect("write valid BMP fallback candidate");
+            .save(mislabeled_png.join("Graphics.bmp")).test_value();
 
         let corrupt_additional = write_core(&defs, "CorruptAdditional", "[DefCore]\nid=CADD\n");
         write_test_definition_graphics(&corrupt_additional);
-        std::fs::write(corrupt_additional.join("GraphicsBad.png"), b"not a png")
-            .expect("write corrupt recognized additional Graphics");
+        write_test_file(corrupt_additional.join("GraphicsBad.png"), b"not a png");
 
         let dual_base = write_core(&defs, "DualBase", "[DefCore]\nid=DUAL\nColorByOwner=1\n");
         write_test_definition_graphics(&dual_base);
         image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
-            .save(dual_base.join("Overlay.png"))
-            .expect("write PNG-sized overlay");
+            .save(dual_base.join("Overlay.png")).test_value();
         image::RgbaImage::from_pixel(2, 1, image::Rgba([19, 20, 21, 255]))
-            .save(dual_base.join("Graphics.bmp"))
-            .expect("write losing BMP base candidate");
+            .save(dual_base.join("Graphics.bmp")).test_value();
 
         let bad_overlay = write_core(&defs, "BadOverlay", "[DefCore]\nid=OVLY\nColorByOwner=1\n");
         write_test_definition_graphics(&bad_overlay);
         image::RgbaImage::from_pixel(2, 1, image::Rgba([32, 32, 32, 255]))
-            .save(bad_overlay.join("Overlay.png"))
-            .expect("write mismatched overlay");
+            .save(bad_overlay.join("Overlay.png")).test_value();
 
         let particle = write_core(&defs, "Particle", "[DefCore]\nid=PART\n");
         write_test_definition_graphics(&particle);
-        std::fs::write(
+        write_test_file(
             particle.join("Particle.txt"),
             b"[Particle]\nName=ScenarioParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=Std\nFace=0,0,1,1,0,0\n",
-        )
-        .expect("write particle definition");
+        );
         let particle_child = write_core(&particle, "Child", "[DefCore]\nid=CHLD\n");
         write_test_definition_graphics(&particle_child);
 
         let bitmap = write_core(&defs, "Bitmap", "[DefCore]\nid=BMAP\n");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 11, 12, 255]))
-            .save(bitmap.join("Graphics.bmp"))
-            .expect("write legacy base bitmap");
+            .save(bitmap.join("Graphics.bmp")).test_value();
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let (loaded, warnings) =
             capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
-        let scenario = loaded.expect("rejected definitions do not abort the scenario");
+        let scenario = loaded.test_value();
         let mut ids = scenario
             .definitions
             .iter()
@@ -1816,13 +1745,10 @@ global func Step(state, frame, random)
         }));
 
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("valid particle resources apply after object definitions");
+        apply_test_scenario(&scenario, &mut engine);
         let particle = engine
             .particle_system()
-            .get_def("ScenarioParticle")
-            .expect("scenario definition traversal registers Particle.txt groups");
+            .get_def("ScenarioParticle").test_value();
         assert_eq!(particle.length, 1);
         assert!(particle.graphics.is_some());
     }
@@ -1834,9 +1760,8 @@ global func Step(state, frame, random)
     ) -> std::path::PathBuf {
         let scenario_dir = write_resilience_fixture(dir, None, "// no script\n");
         let definition_dir = dir.join("Defs.c4d/Good.c4d");
-        std::fs::write(definition_dir.join("Script.c"), script).expect("write definition script");
-        std::fs::write(definition_dir.join("StringTblUS.txt"), string_table)
-            .expect("write definition string table");
+        write_test_file(definition_dir.join("Script.c"), script);
+        write_test_file(definition_dir.join("StringTblUS.txt"), string_table);
         scenario_dir
     }
 
@@ -1844,15 +1769,11 @@ global func Step(state, frame, random)
         dir: &tempfile::TempDir,
         scenario_dir: &std::path::Path,
     ) -> (Engine, Vec<ObjectId>) {
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        let created = scenario
-            .apply(&mut engine)
-            .expect("apply tolerates script errors like C++");
+        let created = apply_test_scenario(&scenario, &mut engine);
         (engine, created)
     }
 
@@ -1861,31 +1782,28 @@ global func Step(state, frame, random)
         // C4Game loads ScenarioLangStringTable before Script.c and
         // C4ScriptHost::MakeScript replaces `$key$` before Preparse
         // (C4Game.cpp:229-230,3336-3341; C4ScriptHost.cpp:66-82).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
             "#strict\nglobal func Initialize() { Message(\"$MsgIntro2a$\"); }\n",
         );
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("StringTblUS.txt"),
             "MsgIntro2a=Come with me, princess!\n",
-        )
-        .expect("write string table");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        );
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
-        let script = &scenario.script.as_ref().expect("scenario script").source;
+            load_test_scenario(&scenario_dir, &resolver);
+        let script = &scenario.script.as_ref().test_value().source;
 
         assert!(script.contains("\"Come with me, princess!\""));
         assert!(!script.contains("$MsgIntro2a$"));
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
-        let snapshot = engine.tick().expect("scenario ticks");
+        apply_test_scenario(&scenario, &mut engine);
+        let snapshot = engine.tick().test_value();
         assert_eq!(snapshot.hud.messages.len(), 1);
         assert_eq!(snapshot.hud.messages[0].lines, ["Come with me, princess!"]);
         assert!(snapshot.audio.iter().all(|command| !matches!(
@@ -1900,7 +1818,7 @@ global func Step(state, frame, random)
         // C4ScriptHost::MakeScript replaces `$key$` before Preparse
         // (C4Def.cpp:625-633; C4ScriptHost.cpp:46-82). Localized context text
         // such as `Put/Get` must not make an otherwise valid definition fail.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_definition_localization_fixture(
             dir.path(),
             "#strict\n\
@@ -1911,20 +1829,14 @@ global func Step(state, frame, random)
              }\n",
             "Reloaded=Reloaded %dx {{%i}}.\nActionLabel=Put/Get\n",
         );
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("localized definition compiles");
-        let id = engine
-            .spawn_object(SpawnConfig::new("GOOD"))
-            .expect("GOOD spawns");
-        let index = engine.find_object_index(id).expect("GOOD object index");
+        apply_test_scenario(&scenario, &mut engine);
+        let id = engine.spawn_test_object(SpawnConfig::new("GOOD"));
+        let index = engine.test_object_index(id);
 
         assert_eq!(
             engine
@@ -1936,43 +1848,34 @@ global func Step(state, frame, random)
 
     #[test]
     fn definition_string_table_loads_from_language_pack() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_definition_localization_fixture(
             dir.path(),
             "#strict\nfunc PackLabel() { return \"$PackLabel$\"; }\n",
             "",
         );
-        std::fs::remove_file(dir.path().join("Defs.c4d/Good.c4d/StringTblUS.txt"))
-            .expect("keep definition string table pack-only");
+        std::fs::remove_file(dir.path().join("Defs.c4d/Good.c4d/StringTblUS.txt")).test_value();
 
         let language_container = dir.path().join("Language.c4g");
         let pack_definition = language_container.join("Finnish.c4g/Defs.c4d/Good.c4d");
-        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_definition).test_value();
+        write_test_file(
             pack_definition.join("StringTblUS.txt"),
             "PackLabel=Packed value\n",
-        )
-        .expect("pack-only definition string table");
+        );
         let resolver = LanguagePackResolver {
-            filesystem: FileSystemResolver {
-                roots: vec![dir.path().to_path_buf()],
-            },
+            filesystem: test_resolver(vec![dir.path().to_path_buf()]),
             language_packs: LanguagePacks::discover(
                 std::slice::from_ref(&language_container),
                 &[dir.path().to_path_buf()],
             ),
         };
 
-        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
-            .expect("scenario loads from pack-localized definition");
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("pack-localized definition compiles");
-        let id = engine
-            .spawn_object(SpawnConfig::new("GOOD"))
-            .expect("GOOD spawns");
-        let index = engine.find_object_index(id).expect("GOOD object index");
+        apply_test_scenario(&scenario, &mut engine);
+        let id = engine.spawn_test_object(SpawnConfig::new("GOOD"));
+        let index = engine.test_object_index(id);
 
         assert_eq!(
             engine
@@ -1984,7 +1887,7 @@ global func Step(state, frame, random)
 
     #[test]
     fn scenario_script_string_table_loads_from_language_pack() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1993,26 +1896,22 @@ global func Step(state, frame, random)
         );
         let language_container = dir.path().join("Language.c4g");
         let pack_scenario = language_container.join("Finnish.c4g/Resilience.c4s");
-        std::fs::create_dir_all(&pack_scenario).expect("pack scenario path");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_scenario).test_value();
+        write_test_file(
             pack_scenario.join("StringTblUS.txt"),
             "ScenarioPack=localized scenario\n",
-        )
-        .expect("pack-only scenario string table");
+        );
         let resolver = LanguagePackResolver {
-            filesystem: FileSystemResolver {
-                roots: vec![dir.path().to_path_buf()],
-            },
+            filesystem: test_resolver(vec![dir.path().to_path_buf()]),
             language_packs: LanguagePacks::discover(
                 std::slice::from_ref(&language_container),
                 &[dir.path().to_path_buf()],
             ),
         };
 
-        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
-            .expect("scenario loads from pack-localized Script.c");
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         assert_eq!(
             engine
                 .script_globals
@@ -2027,22 +1926,20 @@ global func Step(state, frame, random)
 
     #[test]
     fn definition_clonk_names_cross_load_only_after_local_marker() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let definition_dir = dir.path().join("Defs.c4d/Good.c4d");
         let language_container = dir.path().join("Language.c4g");
         let pack_definition = language_container.join("Finnish.c4g/Defs.c4d/Good.c4d");
-        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_definition).test_value();
+        write_test_file(
             pack_definition.join("ClonkNamesUS.txt"),
             "Pack One\nPack Two\n",
-        )
-        .expect("pack ClonkNames component");
-        std::fs::write(
+        );
+        write_test_file(
             pack_definition.join("ClonkNamesDE.txt"),
             b"Pack J\xfcrgen\n",
-        )
-        .expect("German pack ClonkNames component");
+        );
         let packs = LanguagePacks::discover(
             std::slice::from_ref(&language_container),
             &[dir.path().to_path_buf()],
@@ -2051,20 +1948,16 @@ global func Step(state, frame, random)
             Scenario::load_from_path_with_languages(
                 &scenario_dir,
                 &LanguagePackResolver {
-                    filesystem: FileSystemResolver {
-                        roots: vec![dir.path().to_path_buf()],
-                    },
+                    filesystem: test_resolver(vec![dir.path().to_path_buf()]),
                     language_packs: packs.clone(),
                 },
                 languages,
-            )
-            .expect("scenario loads")
+            ).test_value()
         };
 
         let mut without_marker = Engine::with_seed(0);
         load(&["DE", "US"])
-            .apply(&mut without_marker)
-            .expect("pack-only ClonkNames scenario applies");
+            .apply(&mut without_marker).test_value();
         assert_eq!(
             without_marker
                 .definitions
@@ -2074,15 +1967,13 @@ global func Step(state, frame, random)
             "C4Def's local ClonkNames*.txt marker gate rejects a pack-only list"
         );
 
-        std::fs::write(
+        write_test_file(
             definition_dir.join("ClonkNamesFI.txt"),
             "local marker for an unselected language\n",
-        )
-        .expect("local ClonkNames marker");
+        );
         let mut us_first = Engine::with_seed(0);
         load(&["US", "DE"])
-            .apply(&mut us_first)
-            .expect("marker-enabled ClonkNames scenario applies");
+            .apply(&mut us_first).test_value();
         assert_eq!(
             us_first
                 .definitions
@@ -2093,8 +1984,7 @@ global func Step(state, frame, random)
 
         let mut de_first = Engine::with_seed(0);
         load(&["DE", "US"])
-            .apply(&mut de_first)
-            .expect("German-first ClonkNames scenario applies");
+            .apply(&mut de_first).test_value();
         assert_eq!(
             de_first
                 .definitions
@@ -2115,8 +2005,7 @@ global func Step(state, frame, random)
             (NATIVE_SCRIPT_NAME, b"// native\n".as_slice()),
         ] {
             packed
-                .add_file_bytes_with_metadata(name.to_vec(), source.to_vec(), 1, false)
-                .expect("add native-order System entry");
+                .add_file_bytes_with_metadata(name.to_vec(), source.to_vec(), 1, false).test_value();
         }
         packed
             .add_packed_child_bytes_with_metadata(
@@ -2125,17 +2014,14 @@ global func Step(state, frame, random)
                 0,
                 1,
                 false,
-            )
-            .expect("add child-marked System entry");
+            ).test_value();
         packed
-            .add_file_bytes_with_metadata(b"Alpha.c".to_vec(), b"// alpha\n".to_vec(), 1, false)
-            .expect("add final native-order System entry");
+            .add_file_bytes_with_metadata(b"Alpha.c".to_vec(), b"// alpha\n".to_vec(), 1, false).test_value();
         let group = Group::from_raw_memory(
             PathBuf::from("System.c4g"),
             packed.pack_raw().expect("pack native-order System group"),
-        )
-        .expect("open native-order System group");
-        let entries = group.entries().expect("enumerate native-order scripts");
+        ).test_value();
+        let entries = group.entries().test_value();
         assert_eq!(
             entries
                 .iter()
@@ -2160,7 +2046,7 @@ global func Step(state, frame, random)
             );
         }
 
-        let scripts = load_system_scripts(&group).expect("load exact native-byte scripts");
+        let scripts = load_system_scripts(&group).test_value();
         assert_eq!(
             scripts
                 .iter()
@@ -2189,12 +2075,12 @@ global func Step(state, frame, random)
 
     #[test]
     fn system_script_enumeration_keeps_failed_host_and_continues() {
-        let directory = tempdir().expect("System directory");
-        std::fs::create_dir(directory.path().join("Bad.c")).expect("child-marked script directory");
-        std::fs::write(directory.path().join("Good.c"), "// good\n").expect("write later script");
-        let group = Group::open(directory.path()).expect("open System directory");
+        let directory = test_tempdir();
+        std::fs::create_dir(directory.path().join("Bad.c")).test_value();
+        write_test_file(directory.path().join("Good.c"), "// good\n");
+        let group = Group::open(directory.path()).test_value();
 
-        let scripts = load_system_scripts(&group).expect("failed script load is nonfatal");
+        let scripts = load_system_scripts(&group).test_value();
         assert_eq!(
             scripts
                 .iter()
@@ -2213,32 +2099,28 @@ global func Step(state, frame, random)
 
     #[test]
     fn system_script_string_table_keeps_candidate_major_pack_priority() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let install = dir.path().join("install");
         let system_path = install.join("System.c4g");
-        std::fs::create_dir_all(&system_path).expect("local System.c4g");
-        std::fs::write(
+        std::fs::create_dir_all(&system_path).test_value();
+        write_test_file(
             system_path.join("Probe.c"),
             "global func SystemPackLabel() { return \"$Label$\"; }\n",
-        )
-        .expect("system script");
-        std::fs::write(system_path.join("StringTblUS.txt"), "Label=Local later\n")
-            .expect("local localized table");
+        );
+        write_test_file(system_path.join("StringTblUS.txt"), "Label=Local later\n");
 
         let language_container = install.join("Language.c4g");
         let pack_system = language_container.join("Finnish.c4g/System.c4g");
-        std::fs::create_dir_all(&pack_system).expect("pack System.c4g");
-        std::fs::write(pack_system.join("StringTbl.txt"), "Label=Pack first\n")
-            .expect("pack unsuffixed table");
+        std::fs::create_dir_all(&pack_system).test_value();
+        write_test_file(pack_system.join("StringTbl.txt"), "Label=Pack first\n");
 
-        let system = Group::open(&system_path).expect("open local System.c4g");
+        let system = Group::open(&system_path).test_value();
         let packs = LanguagePacks::discover(
             std::slice::from_ref(&language_container),
             std::slice::from_ref(&install),
         );
         let components = packs.component_groups(&system, None, None);
-        let scripts = load_system_scripts_with_components(&system, &components, &["US"])
-            .expect("load localized System scripts");
+        let scripts = load_system_scripts_with_components(&system, &components, &["US"]).test_value();
         assert_eq!(scripts.len(), 1);
         assert!(scripts[0].1.contains("return \"Pack first\""));
         assert!(!scripts[0].1.contains("Local later"));
@@ -2247,7 +2129,7 @@ global func Step(state, frame, random)
 
     #[test]
     fn scenario_and_definition_system_scripts_cross_load_pack_tables() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -2258,49 +2140,42 @@ global func Step(state, frame, random)
              }\n",
         );
         let definition_system = dir.path().join("Defs.c4d/System.c4g");
-        std::fs::create_dir_all(&definition_system).expect("definition System.c4g");
-        std::fs::write(
+        std::fs::create_dir_all(&definition_system).test_value();
+        write_test_file(
             definition_system.join("DefSystem.c"),
             "global func DefSystemValue() { return \"$DefValue$\"; }\n",
-        )
-        .expect("definition System script");
+        );
         let scenario_system = scenario_dir.join("System.c4g");
-        std::fs::create_dir_all(&scenario_system).expect("scenario System.c4g");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_system).test_value();
+        write_test_file(
             scenario_system.join("ScenarioSystem.c"),
             "global func ScenarioSystemValue() { return \"$ScenarioValue$\"; }\n",
-        )
-        .expect("scenario System script");
+        );
 
         let language_container = dir.path().join("Language.c4g");
         let pack_definition_system = language_container.join("Finnish.c4g/Defs.c4d/System.c4g");
-        std::fs::create_dir_all(&pack_definition_system).expect("pack definition System path");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_definition_system).test_value();
+        write_test_file(
             pack_definition_system.join("StringTblUS.txt"),
             "DefValue=definition pack\n",
-        )
-        .expect("definition System pack table");
+        );
         let pack_scenario_system = language_container.join("Finnish.c4g/Resilience.c4s/System.c4g");
-        std::fs::create_dir_all(&pack_scenario_system).expect("pack scenario System path");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_scenario_system).test_value();
+        write_test_file(
             pack_scenario_system.join("StringTblUS.txt"),
             "ScenarioValue=scenario pack\n",
-        )
-        .expect("scenario System pack table");
+        );
 
         let resolver = LanguagePackResolver {
-            filesystem: FileSystemResolver {
-                roots: vec![dir.path().to_path_buf()],
-            },
+            filesystem: test_resolver(vec![dir.path().to_path_buf()]),
             language_packs: LanguagePacks::discover(
                 std::slice::from_ref(&language_container),
                 &[dir.path().to_path_buf()],
             ),
         };
-        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
-            .expect("scenario loads with pack-localized System scripts");
+        let scenario = load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         assert_eq!(
             engine
                 .script_globals
@@ -2325,28 +2200,26 @@ global func Step(state, frame, random)
 
     #[test]
     fn network_loader_threads_language_packs_to_authoritative_definitions() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_definition_localization_fixture(
             dir.path(),
             "#strict\nfunc NetworkPackLabel() { return \"$NetworkLabel$\"; }\n",
             "",
         );
-        std::fs::remove_file(dir.path().join("Defs.c4d/Good.c4d/StringTblUS.txt"))
-            .expect("keep network definition table pack-only");
+        std::fs::remove_file(dir.path().join("Defs.c4d/Good.c4d/StringTblUS.txt")).test_value();
         let language_container = dir.path().join("Language.c4g");
         let pack_definition = language_container.join("Finnish.c4g/Defs.c4d/Good.c4d");
-        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_definition).test_value();
+        write_test_file(
             pack_definition.join("StringTblUS.txt"),
             "NetworkLabel=network pack\n",
-        )
-        .expect("pack-only network definition table");
+        );
         let packs = LanguagePacks::discover(
             std::slice::from_ref(&language_container),
             &[dir.path().to_path_buf()],
         );
         let definitions =
-            [Group::open(dir.path().join("Defs.c4d")).expect("authoritative definition group")];
+            [Group::open(dir.path().join("Defs.c4d")).test_value()];
 
         let scenario = Scenario::load_network_from_path_with_languages_and_seed_and_packs(
             &scenario_dir,
@@ -2356,16 +2229,11 @@ global func Step(state, frame, random)
             &["US"],
             0,
             &packs,
-        )
-        .expect("network scenario loads with local language packs");
+        ).test_value();
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("network scenario applies");
-        let id = engine
-            .spawn_object(SpawnConfig::new("GOOD"))
-            .expect("GOOD spawns");
-        let index = engine.find_object_index(id).expect("GOOD object index");
+        apply_test_scenario(&scenario, &mut engine);
+        let id = engine.spawn_test_object(SpawnConfig::new("GOOD"));
+        let index = engine.test_object_index(id);
         assert_eq!(
             engine
                 .call_object_function(index, "NetworkPackLabel", Vec::new())
@@ -2376,9 +2244,9 @@ global func Step(state, frame, random)
 
     #[test]
     fn legacy_scenario_and_definition_scripts_preserve_native_bytes() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// replaced below\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Script.c"),
             [
                 b"#strict\nglobal func Initialize() { Message(\"".as_slice(),
@@ -2386,46 +2254,38 @@ global func Step(state, frame, random)
                 b"\"); }\n",
             ]
             .concat(),
-        )
-        .expect("write raw scenario script");
+        );
 
         let definition_dir = dir.path().join("Defs.c4d/Good.c4d");
-        std::fs::write(
+        write_test_file(
             definition_dir.join("Script.c"),
             b"#strict\nfunc RawLabel() { return \"$RawLabel$\"; }\n",
-        )
-        .expect("write definition script");
-        std::fs::write(
+        );
+        write_test_file(
             definition_dir.join("StringTblUS.txt"),
             [b"RawLabel=".as_slice(), &[0xe9, 0xff], b"\n"].concat(),
-        )
-        .expect("write raw definition string table");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         assert!(scenario
             .script
             .as_ref()
             .is_some_and(|script| clonk_script::c4_string_bytes(&script.source).contains(&0xff)));
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("raw scripts compile");
+        apply_test_scenario(&scenario, &mut engine);
         let snapshot = engine.snapshot();
         assert_eq!(
             clonk_script::c4_string_bytes(&snapshot.hud.messages[0].lines[0]),
             [0xe9, 0xff]
         );
 
-        let object = engine
-            .spawn_object(SpawnConfig::new("GOOD"))
-            .expect("GOOD spawns");
-        let index = engine.find_object_index(object).expect("GOOD index");
+        let object = engine.spawn_test_object(SpawnConfig::new("GOOD"));
+        let index = engine.test_object_index(object);
         let value = engine
-            .call_object_function(index, "RawLabel", Vec::new())
-            .expect("localized raw definition function runs");
+            .call_object_function(index, "RawLabel", Vec::new()).test_value();
         assert_eq!(
             value,
             clonk_script::Value::String(clonk_script::c4_string_from_bytes(&[0xe9, 0xff]).into())
@@ -2439,34 +2299,27 @@ global func Step(state, frame, random)
         // before Preparse (C4Def.cpp:625-633; C4ScriptHost.cpp:46-82).
         // Hazard's HHKS definition relies on an unquoted key expanding to a
         // C4Script array literal (Killstats.c4d/StringTblUS.txt:1-6).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_definition_localization_fixture(
             dir.path(),
             "#strict\nfunc Messages() { return $Messages$; }\n",
             "Messages=[\"first\",\"second\"]\n",
         );
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let definition = scenario
             .definitions
             .iter()
-            .find(|definition| definition.id == "GOOD")
-            .expect("GOOD definition exists");
+            .find(|definition| definition.id == "GOOD").test_value();
 
         assert!(definition.script.contains("return [\"first\",\"second\"]"));
         assert!(!definition.script.contains("$Messages$"));
         let mut engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut engine)
-            .expect("localized definition compiles");
-        let id = engine
-            .spawn_object(SpawnConfig::new("GOOD"))
-            .expect("GOOD spawns");
-        let index = engine.find_object_index(id).expect("GOOD object index");
+        apply_test_scenario(&scenario, &mut engine);
+        let id = engine.spawn_test_object(SpawnConfig::new("GOOD"));
+        let index = engine.test_object_index(id);
 
         assert_eq!(
             engine
@@ -2484,30 +2337,25 @@ global func Step(state, frame, random)
         // C4ComponentHost tries each LanguageEx code in order after the
         // unsuffixed StringTbl.txt candidate (C4ComponentHost.cpp:65-89;
         // C4Components.h:56).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
             "#strict\nglobal func Localized() { return \"$MsgIntro2a$\"; }\n",
         );
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("StringTblUS.txt"),
             "MsgIntro2a=Come with me, princess!\n",
-        )
-        .expect("write US string table");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("StringTblDE.txt"),
             "MsgIntro2a=Komm mit mir, Prinzessin!\n",
-        )
-        .expect("write DE string table");
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        );
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with_languages(&scenario_dir, &resolver, &["DE", "US"])
-                .expect("scenario loads");
-        let script = &scenario.script.as_ref().expect("scenario script").source;
+            Scenario::load_from_path_with_languages(&scenario_dir, &resolver, &["DE", "US"]).test_value();
+        let script = &scenario.script.as_ref().test_value().source;
 
         assert!(script.contains("\"Komm mit mir, Prinzessin!\""));
         assert!(!script.contains("\"Come with me, princess!\""));
@@ -2520,36 +2368,30 @@ global func Step(state, frame, random)
             scenario_dir: &std::path::Path,
             languages: &[&str],
         ) -> String {
-            let resolver = FileSystemResolver {
-                roots: vec![root.to_path_buf()],
-            };
+            let resolver = test_resolver(vec![root.to_path_buf()]);
             Scenario::load_from_path_with_languages(scenario_dir, &resolver, languages)
                 .expect("scenario components load")
-                .script
-                .expect("scenario host exists")
+                .script.test_value()
                 .source
         }
 
         // A scenario may consist only of a localized Script{}.c component;
         // each LanguageEx segment is narrowed to two native bytes.
-        let localized = tempdir().expect("localized tempdir");
+        let localized = test_tempdir();
         let localized_scenario = write_resilience_fixture(localized.path(), None, "// remove me\n");
-        std::fs::remove_file(localized_scenario.join("Script.c")).expect("remove base script");
-        std::fs::write(
+        std::fs::remove_file(localized_scenario.join("Script.c")).test_value();
+        write_test_file(
             localized_scenario.join("ScriptDE.c"),
             b"// $Assembly$\0ignored localized tail",
-        )
-        .expect("write localized-only script");
-        std::fs::write(
+        );
+        write_test_file(
             localized_scenario.join("StringTblDE.txt"),
             b"Assembly=localized only\n",
-        )
-        .expect("write two-byte-code string table");
-        std::fs::write(
+        );
+        write_test_file(
             localized_scenario.join("ScriptOld.c"),
             b"// must stay excluded",
-        )
-        .expect("write unrelated script");
+        );
         let source = loaded_source(localized.path(), &localized_scenario, &["DE-extra", "US"]);
         assert_eq!(
             clonk_script::c4_string_bytes(&source),
@@ -2560,28 +2402,23 @@ global func Step(state, frame, random)
         // its segment falls through to US. C4Script restarts at the empty DE
         // file, which still contributes one LF and suppresses US. Every
         // successful component gets its own leading LF and its own NUL bound.
-        let assembled = tempdir().expect("assembled tempdir");
+        let assembled = test_tempdir();
         let assembled_scenario =
             write_resilience_fixture(assembled.path(), None, "// base\0hidden base");
-        std::fs::create_dir(assembled_scenario.join("ScriptDE.c"))
-            .expect("create unreadable preferred component");
-        std::fs::write(
+        std::fs::create_dir(assembled_scenario.join("ScriptDE.c")).test_value();
+        write_test_file(
             assembled_scenario.join("ScriptUS.c"),
             b"// localized US\0hidden localized tail",
-        )
-        .expect("write fallback localized component");
-        std::fs::write(assembled_scenario.join("C4ScriptDE.c"), b"")
-            .expect("write empty preferred legacy component");
-        std::fs::write(
+        );
+        write_test_file(assembled_scenario.join("C4ScriptDE.c"), b"");
+        write_test_file(
             assembled_scenario.join("C4ScriptUS.c"),
             b"// losing legacy component",
-        )
-        .expect("write losing legacy component");
-        std::fs::write(
+        );
+        write_test_file(
             assembled_scenario.join("ScriptOld.c"),
             b"// must stay excluded",
-        )
-        .expect("write unrelated script");
+        );
         let source = loaded_source(assembled.path(), &assembled_scenario, &["DE", "US"]);
         assert_eq!(
             clonk_script::c4_string_bytes(&source),
@@ -2590,10 +2427,9 @@ global func Step(state, frame, random)
 
         // SCopySegment over an empty LanguageEx still yields one empty code:
         // Script.c is selected by both the first and second template segment.
-        let empty = tempdir().expect("empty-language tempdir");
+        let empty = test_tempdir();
         let empty_scenario = write_resilience_fixture(empty.path(), None, "// base");
-        std::fs::write(empty_scenario.join("C4Script.c"), b"// legacy")
-            .expect("write empty-code legacy component");
+        write_test_file(empty_scenario.join("C4Script.c"), b"// legacy");
         let source = loaded_source(empty.path(), &empty_scenario, &[]);
         assert_eq!(
             clonk_script::c4_string_bytes(&source),
@@ -2628,8 +2464,7 @@ global func Step(state, frame, random)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("join succeeds");
+            }).test_value();
         engine
             .snapshot()
             .objects
@@ -2650,7 +2485,7 @@ global func Step(state, frame, random)
     fn crew_infos_promote_physicals_by_rank_like_cpp() {
         let mut engine = Engine::with_seed(3);
         let mut clonk =
-            Definition::from_script("CLNK", "Clonk", "#strict\n").expect("clonk compiles");
+            Definition::from_script("CLNK", "Clonk", "#strict\n").test_value();
         clonk.set_crew_member(true);
         clonk.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         clonk.set_physical(crate::PhysicalInfo {
@@ -2661,7 +2496,7 @@ global func Step(state, frame, random)
             fight: 50_000,
             ..crate::PhysicalInfo::default()
         });
-        engine.register_definition(clonk).expect("clonk registers");
+        engine.register_test_definition(clonk);
 
         engine
             .join_player(crate::JoinPlayerConfig {
@@ -2713,14 +2548,12 @@ global func Step(state, frame, random)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("join succeeds");
+            }).test_value();
 
         let crew = engine
             .objects
             .iter()
-            .find(|object| object.definition_id == "CLNK")
-            .expect("crew spawned");
+            .find(|object| object.definition_id == "CLNK").test_value();
         assert_eq!(
             crew.state.energy, 55_000,
             "rank-1 promotion: max(50000, 55*1000) (C4InfoCore.cpp:212)"
@@ -2742,9 +2575,7 @@ global func Step(state, frame, random)
             }),
             "persistent info physicals remain promoted by the info rank"
         );
-        let crew_index = engine
-            .find_object_index(crew.id)
-            .expect("crew remains in the engine");
+        let crew_index = engine.test_object_index(crew.id);
         assert_eq!(
             engine.object_physical(crew_index),
             crate::PhysicalInfo {

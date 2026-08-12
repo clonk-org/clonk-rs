@@ -57,19 +57,13 @@
 
         let mut engine = crate::Engine::new();
         let mut definition =
-            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
-                .expect("script definition compiles");
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "").test_value();
         definition.set_source_path(Some(group.clone()));
-        engine
-            .register_definition(definition)
-            .expect("register definition");
-        let object = engine
-            .spawn_object(crate::SpawnConfig::new("WIPF"))
-            .expect("spawn a live object");
+        engine.register_test_definition(definition);
+        let object = engine.spawn_test_object(crate::SpawnConfig::new("WIPF"));
         let before = engine
             .snapshot()
-            .object(object)
-            .expect("the object is live")
+            .object(object).test_value()
             .clone();
 
         // A named graphic that the reloaded definition no longer supplies must
@@ -86,9 +80,7 @@
 
         assert!(engine.reload_definition("WIPF", false));
 
-        let index = engine
-            .find_object_index(object)
-            .expect("the object is not removed: its own definition can serve it");
+        let index = engine.test_object_index(object);
         assert_eq!(
             engine.objects[index]
                 .state
@@ -105,8 +97,7 @@
         // reinitialise one.
         let snapshot = engine.snapshot();
         let live = snapshot
-            .object(object)
-            .expect("the object survives a successful reload");
+            .object(object).test_value();
         assert_eq!(live.position, before.position);
         assert_eq!(live.rotation, before.rotation);
         assert_eq!(live.energy, before.energy);
@@ -126,19 +117,16 @@
 
         let mut engine = crate::Engine::new();
         let mut definition =
-            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "")
-                .expect("script definition compiles");
+            crate::Definition::from_script("WIPF".to_string(), "placeholder".to_string(), "").test_value();
         definition.set_source_path(Some(group.clone()));
-        engine
-            .register_definition(definition)
-            .expect("register definition");
+        engine.register_test_definition(definition);
         assert_eq!(engine.definition("WIPF").map(crate::Definition::name), Some("placeholder"));
 
         assert!(
             engine.reload_definition("WIPF", false),
             "a real shipped group reloads"
         );
-        let reloaded = engine.definition("WIPF").expect("the definition survives");
+        let reloaded = engine.definition("WIPF").test_value();
         assert_eq!(reloaded.source_path(), Some(group.as_path()));
         // The name came from DefCore.txt on disk, replacing the placeholder —
         // so the rebuild really re-read the group rather than keeping what was
@@ -152,11 +140,11 @@
     // each group is registered once.
     #[test]
     fn only_unpacked_definition_groups_are_offered_to_the_file_monitor() {
-        let dir = tempfile::tempdir().expect("temp root");
+        let dir = tempfile::tempdir().test_value();
         let unpacked = dir.path().join("Rock.c4d");
-        std::fs::create_dir_all(&unpacked).expect("create unpacked group");
+        std::fs::create_dir_all(&unpacked).test_value();
         let packed = dir.path().join("Packed.c4d");
-        std::fs::write(&packed, b"packed group bytes").expect("write packed group");
+        write_test_file(&packed, b"packed group bytes");
 
         let mut engine = crate::Engine::new();
         for (id, path) in [
@@ -165,12 +153,9 @@
             ("SCRP", None),
         ] {
             let mut definition =
-                crate::Definition::from_script(id.to_string(), id.to_string(), "")
-                    .expect("script definition compiles");
+                crate::Definition::from_script(id.to_string(), id.to_string(), "").test_value();
             definition.set_source_path(path);
-            engine
-                .register_definition(definition)
-                .expect("register definition");
+            engine.register_test_definition(definition);
         }
 
         // A packed group has no directory to observe, and a script-only
@@ -183,12 +168,9 @@
         // Two definitions sharing one group register it once — C++ skips a
         // location it already has.
         let mut sibling =
-            crate::Definition::from_script("ROK2".to_string(), "Rock 2".to_string(), "")
-                .expect("script definition compiles");
+            crate::Definition::from_script("ROK2".to_string(), "Rock 2".to_string(), "").test_value();
         sibling.set_source_path(Some(unpacked.clone()));
-        engine
-            .register_definition(sibling)
-            .expect("register sibling definition");
+        engine.register_test_definition(sibling);
         assert_eq!(engine.monitored_definition_directories(), vec![unpacked]);
     }
 
@@ -196,23 +178,19 @@
     // definition's own stored group, and a failed load removes it outright.
     #[test]
     fn reloading_a_definition_reopens_its_group_and_removes_it_on_failure() {
-        let dir = tempfile::tempdir().expect("temp group root");
+        let dir = tempfile::tempdir().test_value();
         let group_path = dir.path().join("Rock.c4d");
-        std::fs::create_dir_all(&group_path).expect("create definition group");
-        std::fs::write(
+        std::fs::create_dir_all(&group_path).test_value();
+        write_test_file(
             group_path.join("DefCore.txt"),
             "[DefCore]\nid=ROCK\nVersion=4,9,8\nName=Rock\n",
-        )
-        .expect("write DefCore");
+        );
 
         let mut engine = crate::Engine::new();
         let mut definition =
-            crate::Definition::from_script("ROCK".to_string(), "Rock".to_string(), "")
-                .expect("script definition compiles");
+            crate::Definition::from_script("ROCK".to_string(), "Rock".to_string(), "").test_value();
         definition.set_source_path(Some(group_path.clone()));
-        engine
-            .register_definition(definition)
-            .expect("register definition");
+        engine.register_test_definition(definition);
 
         // The network refusal is the first line: nothing is re-opened and the
         // definition is untouched.
@@ -222,12 +200,9 @@
         // A definition with no stored group cannot reload, and nothing is
         // disturbed by the attempt.
         let mut pathless =
-            crate::Definition::from_script("STON".to_string(), "Stone".to_string(), "")
-                .expect("script definition compiles");
+            crate::Definition::from_script("STON".to_string(), "Stone".to_string(), "").test_value();
         pathless.set_source_path(None);
-        engine
-            .register_definition(pathless)
-            .expect("register pathless definition");
+        engine.register_test_definition(pathless);
         assert!(!engine.reload_definition("STON", false));
         assert!(
             engine.definition("STON").is_some(),
@@ -237,13 +212,13 @@
         // The group is real, so the reload succeeds and the definition keeps
         // its path for the next one.
         assert!(engine.reload_definition("ROCK", false));
-        let reloaded = engine.definition("ROCK").expect("the definition survives");
+        let reloaded = engine.definition("ROCK").test_value();
         assert_eq!(reloaded.source_path(), Some(group_path.as_path()));
 
         // Now break the group. `C4Def::Clear` has already emptied the
         // definition by the time `Load` fails, so the failure arm removes it
         // rather than restoring anything.
-        std::fs::remove_dir_all(&group_path).expect("remove the group");
+        std::fs::remove_dir_all(&group_path).test_value();
         assert!(!engine.reload_definition("ROCK", false));
         assert!(
             engine.definition("ROCK").is_none(),
@@ -258,11 +233,8 @@
         let mut engine = crate::Engine::new();
         for id in ["AAAA", "BBBB"] {
             let definition =
-                crate::Definition::from_script(id.to_string(), id.to_string(), "")
-                    .expect("script definition compiles");
-            engine
-                .register_definition(definition)
-                .expect("register definition");
+                crate::Definition::from_script(id.to_string(), id.to_string(), "").test_value();
+            engine.register_test_definition(definition);
         }
         assert!(engine.definition("AAAA").is_some());
 
@@ -278,11 +250,8 @@
 
         // The id is free again, which it would not be if the map entry were
         // the only thing dropped.
-        let definition = crate::Definition::from_script("AAAA".to_string(), "A".to_string(), "")
-            .expect("script definition compiles");
-        engine
-            .register_definition(definition)
-            .expect("the removed id can be registered again");
+        let definition = crate::Definition::from_script("AAAA".to_string(), "A".to_string(), "").test_value();
+        engine.register_test_definition(definition);
     }
 
     // C4Def.cpp:547-560 — `C4Def::Load` stores the group's own full name as
@@ -294,8 +263,7 @@
     #[test]
     fn definitions_carry_the_group_they_were_loaded_from() {
         let mut definition =
-            crate::Definition::from_script("TEST".to_string(), "Test".to_string(), "")
-                .expect("script-only definition compiles");
+            crate::Definition::from_script("TEST".to_string(), "Test".to_string(), "").test_value();
         assert!(
             definition.source_path().is_none(),
             "a definition built from script alone has no group to reload from"
@@ -314,17 +282,14 @@
 
     #[test]
     fn legacy_string_table_reuses_identity_and_overwrites_repeated_line_id() {
-        let directory = tempdir().expect("string-table directory");
-        std::fs::write(directory.path().join("Strings.txt"), b"same\r\nsame\r\n")
-            .expect("write Strings.txt");
-        let group = Group::open(directory.path()).expect("open string-table group");
-        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+        let directory = test_tempdir();
+        write_test_file(directory.path().join("Strings.txt"), b"same\r\nsame\r\n");
+        let group = Group::open(directory.path()).test_value();
+        let registrations = load_legacy_string_table(&group).test_value();
 
         assert!(clonk_script::resolve_c4_string(&registrations, 0).is_none());
-        let repeated = clonk_script::resolve_c4_string(&registrations, 1)
-            .expect("later repeated line owns the shared ID");
-        let repeated_again = clonk_script::resolve_c4_string(&registrations, 1)
-            .expect("live shared identity remains resolvable");
+        let repeated = clonk_script::resolve_c4_string(&registrations, 1).test_value();
+        let repeated_again = clonk_script::resolve_c4_string(&registrations, 1).test_value();
         assert!(repeated.ptr_eq(&repeated_again));
         assert_eq!(repeated.as_ref(), "same");
         assert_eq!(
@@ -343,14 +308,13 @@
 
     #[test]
     fn legacy_string_table_stops_the_whole_scan_at_first_nul() {
-        let directory = tempdir().expect("string-table directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Strings.txt"),
             b"first\nsecond\0third\nignored",
-        )
-        .expect("write Strings.txt");
-        let group = Group::open(directory.path()).expect("open string-table group");
-        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+        );
+        let group = Group::open(directory.path()).test_value();
+        let registrations = load_legacy_string_table(&group).test_value();
 
         assert_eq!(
             clonk_script::resolve_c4_string(&registrations, 0)
@@ -369,14 +333,12 @@
 
     #[test]
     fn legacy_string_table_preserves_non_utf8_bytes_verbatim() {
-        let directory = tempdir().expect("string-table directory");
-        std::fs::write(directory.path().join("Strings.txt"), [0xe4])
-            .expect("write raw Strings.txt");
-        let group = Group::open(directory.path()).expect("open string-table group");
-        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+        let directory = test_tempdir();
+        write_test_file(directory.path().join("Strings.txt"), [0xe4]);
+        let group = Group::open(directory.path()).test_value();
+        let registrations = load_legacy_string_table(&group).test_value();
 
-        let value = clonk_script::resolve_c4_string(&registrations, 0)
-            .expect("raw string-table entry resolves");
+        let value = clonk_script::resolve_c4_string(&registrations, 0).test_value();
         assert_eq!(clonk_script::c4_string_bytes(&value), [0xe4]);
         assert_eq!(clonk_script::c4_string_byte_len(&value), 1);
     }
@@ -403,8 +365,7 @@ global func Step(state, frame, random)
             None,
             None,
             None,
-        )
-        .expect("saved action builds");
+        ).test_value();
         assert_eq!(state.name, "Idle");
         assert_eq!(state.act_map_index, None);
     }
@@ -419,8 +380,7 @@ global func Step(state, frame, random)
             None,
             None,
             None,
-        )
-        .expect("saved action builds");
+        ).test_value();
 
         assert_eq!(state.name, "Walk");
         assert_eq!(
@@ -448,8 +408,7 @@ global func Step(state, frame, random)
         });
         let spec = converted
             .specs
-            .get("Probe")
-            .expect("runtime action retained");
+            .get("Probe").test_value();
         assert_eq!(
             spec.length,
             Some(7),
@@ -457,8 +416,7 @@ global func Step(state, frame, random)
         );
         let reflection = converted
             .reflections
-            .get("Probe")
-            .expect("exact compiler view retained");
+            .get("Probe").test_value();
         assert_eq!(
             reflection.get("Length", 0),
             Some(clonk_script::Value::Int(-3))
@@ -486,15 +444,14 @@ global func Step(state, frame, random)
             actions: vec![("Odd".to_string(), action)],
         });
 
-        let spec = converted.specs.get("Odd").expect("runtime action retained");
+        let spec = converted.specs.get("Odd").test_value();
         assert_eq!(spec.length, Some(-4));
         assert_eq!(spec.delay, Some(-6));
         assert_eq!(spec.step, Some(-11));
         assert_eq!(spec.directions, Some(-2));
         let graphics = converted
             .graphics
-            .get("Odd")
-            .expect("runtime action graphics retained");
+            .get("Odd").test_value();
         assert_eq!(graphics.length, Some(-4));
         assert_eq!(graphics.directions, -2);
         assert_eq!(graphics.flip_dir, Some(-3));
@@ -506,7 +463,7 @@ global func Step(state, frame, random)
         // state may therefore remain above FullCon even independently of a
         // later DoCon clamp decision (C4Object.cpp:2763).
         let records =
-            parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n").expect("Objects.txt parses");
+            parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n").test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(150_000));
     }
@@ -516,7 +473,7 @@ global func Step(state, frame, random)
         // C4Object::CompileFunc compiles Size directly into the raw Con field;
         // it does not interpret small values as percentages (C4Object.cpp:2777).
         let records =
-            parse_legacy_objects("[Object]\nid=PART\nSize=410\n").expect("Objects.txt parses");
+            parse_legacy_objects("[Object]\nid=PART\nSize=410\n").test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(410));
     }
@@ -526,15 +483,15 @@ global func Step(state, frame, random)
         // C4Object::CompileFunc assigns signed Size directly and its compiler
         // tail does not clamp Con (C4Object.cpp:2777,2858-2891).
         let records =
-            parse_legacy_objects("[Object]\nid=NEGC\nSize=-1\n").expect("Objects.txt parses");
+            parse_legacy_objects("[Object]\nid=NEGC\nSize=-1\n").test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(-1));
     }
 
     #[test]
     fn scenario_value_store_follows_c4value_compiler_indexing_and_types() {
-        let directory = tempdir().expect("scenario directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Scenario.txt"),
             "[Head]\n\
              Version=4,9\n\
@@ -567,10 +524,9 @@ global func Step(state, frame, random)
              \n\
              [Disasters]\n\
              Volcano=12,3,0,100\n",
-        )
-        .expect("scenario core");
-        let group = Group::open(directory.path()).expect("scenario group");
-        let manifest = parse_legacy_scenario_manifest(&group).expect("parsed scenario core");
+        );
+        let group = Group::open(directory.path()).test_value();
+        let manifest = parse_legacy_scenario_manifest(&group).test_value();
         let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
 
         assert_eq!(
@@ -697,14 +653,11 @@ global func Step(state, frame, random)
         engine.set_scenario_values(values.clone());
         let encoded = engine
             .capture_state()
-            .to_json_string()
-            .expect("scenario values serialize with engine state");
-        let state = crate::EngineState::from_json_str(&encoded)
-            .expect("scenario values deserialize with engine state");
+            .to_json_string().test_value();
+        let state = crate::EngineState::from_json_str(&encoded).test_value();
         let mut restored = Engine::new();
         restored
-            .restore_state(&state)
-            .expect("scenario values restore into a fresh engine");
+            .restore_state(&state).test_value();
         assert_eq!(restored.scenario_values.as_ref(), &values);
 
         let defaults = ScenarioValueStore::default();
@@ -747,8 +700,7 @@ global func Step(state, frame, random)
              \n\
              [Weather]\n\
              Wind=100,0,-100,100\n",
-        )
-        .expect("main core parses");
+        ).test_value();
         let section = parse_legacy_scenario_text(
             "[Head]\n\
              Title=Ignored title\n\
@@ -767,10 +719,8 @@ global func Step(state, frame, random)
              \n\
              [Landscape]\n\
              Sky=Clouds\n",
-        )
-        .expect("section core parses");
-        let compiled = overlay_legacy_scenario_manifest(&main, section)
-            .expect("section compiles over main core");
+        ).test_value();
+        let compiled = overlay_legacy_scenario_manifest(&main, section).test_value();
 
         assert_eq!(compiled.title.as_deref(), Some("Main title"));
         assert_eq!(compiled.core.head.title, "Main title");
@@ -865,13 +815,12 @@ global func Step(state, frame, random)
             Some(&ScenarioValue::Bool(false))
         );
 
-        let directory = tempdir().expect("section directory");
-        std::fs::write(
+        let directory = test_tempdir();
+        write_test_file(
             directory.path().join("Landscape.txt"),
             "map Next { seed=11; };",
-        )
-        .expect("section landscape script");
-        let group = Group::open(directory.path()).expect("section group opens");
+        );
+        let group = Group::open(directory.path()).test_value();
         let mut classifier = MapPixelClassifier::from_slots(
             [0; 128],
             vec![None; 128],
@@ -880,10 +829,9 @@ global func Step(state, frame, random)
         );
         let landscape =
             load_legacy_landscape_body_for_test(&group, &compiled, Some(&mut classifier), 0, 1)
-                .expect("section landscape loads")
-                .expect("section landscape exists");
-        let raster = landscape.raster_state().expect("section raster state");
-        let map = raster.map().expect("section retains its generated map");
+                .expect("section landscape loads").test_value();
+        let raster = landscape.raster_state().test_value();
+        let map = raster.map().test_value();
         assert_eq!((map.width, map.height), (100, 50));
         assert_eq!(raster.map_zoom(), 10);
     }
@@ -945,21 +893,19 @@ global func Step(state, frame, random)
     );
 
     fn json_scenario_without_legacy_core() -> Scenario {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("Scenario.json"),
             r#"{"definitions":[{"id":"TEST","script":"Script.c"}]}"#,
-        )
-        .expect("write JSON fixture");
-        std::fs::write(dir.path().join("Script.c"), TEST_SCRIPT).expect("write test script");
-        Scenario::load_from_path(dir.path()).expect("JSON fixture loads")
+        );
+        write_test_file(dir.path().join("Script.c"), TEST_SCRIPT);
+        Scenario::load_from_path(dir.path()).test_value()
     }
 
     fn scenario_with_retained_legacy_core(source: &str) -> Scenario {
         let mut scenario = json_scenario_without_legacy_core();
         scenario.legacy_core = Some(
-            parse_legacy_scenario_text(source)
-                .expect("legacy core parses")
+            parse_legacy_scenario_text(source).test_value()
                 .core,
         );
         scenario
@@ -971,18 +917,16 @@ global func Step(state, frame, random)
         // scenario-derived MaxPlayers default before InitLocal admits players
         // (pristine 9ffa0a5d src/C4Game.cpp:162-166,231-248;
         // src/C4GameParameters.cpp:408-422,553-558).
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("Scenario.txt"),
             "[Head]\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Missing.c4d\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             dir.path().join("Parameters.txt"),
             "[Parameters]\nRandomSeed=73\nMaxPlayers=2\n",
-        )
-        .expect("write parameters");
-        let group = Group::open(dir.path()).expect("open scenario group");
+        );
+        let group = Group::open(dir.path()).test_value();
 
         let expected = OfflineScenarioStartupPreflight {
             max_players: 2,
@@ -1001,9 +945,8 @@ global func Step(state, frame, random)
             expected,
         );
 
-        std::fs::remove_file(dir.path().join("Parameters.txt"))
-            .expect("remove parameter component");
-        let group = Group::open(dir.path()).expect("reopen scenario without parameters");
+        std::fs::remove_file(dir.path().join("Parameters.txt")).test_value();
+        let group = Group::open(dir.path()).test_value();
         let expected = OfflineScenarioStartupPreflight {
             max_players: 4,
             random_seed: None,
@@ -1023,12 +966,11 @@ global func Step(state, frame, random)
         );
 
         let savegame = dir.path().join("Savegame.c4s");
-        std::fs::create_dir(&savegame).expect("create savegame fixture");
-        std::fs::write(
+        std::fs::create_dir(&savegame).test_value();
+        write_test_file(
             savegame.join("Scenario.txt"),
             "[Head]\nSaveGame=1\nMaxPlayer=4\n",
-        )
-        .expect("write savegame core");
+        );
         assert_eq!(
             Scenario::preflight_offline_startup_from_path(&savegame)
                 .expect("offline savegame preflight succeeds"),
@@ -1041,21 +983,19 @@ global func Step(state, frame, random)
         );
 
         let replay = dir.path().join("Replay.c4s");
-        std::fs::create_dir(&replay).expect("create replay fixture");
-        std::fs::write(
+        std::fs::create_dir(&replay).test_value();
+        write_test_file(
             replay.join("Scenario.txt"),
             "[Head]\nReplay=1\nMaxPlayer=4\n",
-        )
-        .expect("write replay core");
+        );
         assert!(matches!(
             Scenario::preflight_offline_startup_from_path(&replay),
             Err(ScenarioError::OfflineStartupReplayUnsupported)
         ));
 
         let json = dir.path().join("Json.c4s");
-        std::fs::create_dir(&json).expect("create JSON fixture");
-        std::fs::write(json.join("Scenario.json"), "{\"definitions\":[]}")
-            .expect("write JSON manifest");
+        std::fs::create_dir(&json).test_value();
+        write_test_file(json.join("Scenario.json"), "{\"definitions\":[]}");
         assert!(matches!(
             Scenario::preflight_offline_startup_from_path(&json),
             Err(ScenarioError::OfflineStartupJsonUnsupported)
@@ -1071,14 +1011,12 @@ global func Step(state, frame, random)
         // then enters the restore branch on
         // RestorePlayerInfos.GetActivePlayerCount(true) alone, "for savegames
         // or regular scenarios with restore infos" (src/C4Game.cpp:2841-2843).
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
-            .expect("write scenario core");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(dir.path().join("Scenario.txt"), "[Head]\nMaxPlayer=4\n");
+        write_test_file(
             dir.path().join("SavePlayerInfos.txt"),
             "[PlayerInfoList]\nLastPlayerID=1\n",
-        )
-        .expect("write restore infos");
+        );
 
         assert_eq!(
             Scenario::preflight_offline_startup_from_path(dir.path())
@@ -1104,5 +1042,5 @@ global func Step(state, frame, random)
     }
 
     fn legacy_cstring(bytes: &[u8]) -> LegacyCString {
-        LegacyCString::from_bytes(bytes.to_vec()).expect("fixture has no interior NUL")
+        LegacyCString::from_bytes(bytes.to_vec()).test_value()
     }

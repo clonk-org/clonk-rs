@@ -10,21 +10,20 @@ fn set_plr_show_command_stages_runtime_flash_and_enables_command_display() -> Re
     let mut engine = Engine::new();
     engine.set_show_commands_request_store(requests.clone());
     engine.register_player(PlayerConfig::new(3, "Player 3"))?;
-    engine.register_definition(
+    engine.register_definition(crate::support::TestValueExt::test_value(
         Definition::from_script(
             "SHCM",
             "Show-command probe",
             r#"#strict 3
-func Probe(int player, int command)
-{
-    return SetPlrShowCommand(player, command);
-}
-"#,
-        )
-        .expect("show-command probe compiles"),
-    )?;
+        func Probe(int player, int command)
+        {
+            return SetPlrShowCommand(player, command);
+        }
+        "#,
+        ),
+    ))?;
     let probe = engine.spawn_object(SpawnConfig::new("SHCM"))?;
-    let probe_index = engine.find_object_index(probe).expect("probe remains live");
+    let probe_index = crate::support::TestValueExt::test_value(engine.find_object_index(probe));
 
     assert_eq!(
         engine.call_object_function(

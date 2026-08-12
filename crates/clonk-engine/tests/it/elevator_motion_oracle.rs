@@ -21,26 +21,24 @@ const UP_POSITION_PREFIX: [i32; 23] = [
 
 fn load_tutorial07() -> (Engine, i32) {
     let mut engine = load_tutorial(7, 0);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 7 elevator oracle".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial07 oracle player joins")
-        .number();
+    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial 7 elevator oracle".to_owned(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: true,
+        startup_player_count: 1,
+    }))
+    .number();
     (engine, owner)
 }
 
@@ -67,9 +65,7 @@ struct CaseFrameExpectation {
 }
 
 fn assert_case_frame(engine: &Engine, elevator_case: ObjectId, expected: CaseFrameExpectation) {
-    let case = engine
-        .object_snapshot(elevator_case)
-        .expect("Tutorial07 elevator case remains alive");
+    let case = crate::support::TestValueExt::test_value(engine.object_snapshot(elevator_case));
     let fixed_y = raw_fixed(
         case.fixed_position.map(|position| position.y),
         case.position.y,
@@ -139,10 +135,9 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
     // Tutorial07 with LC_PIN_SEED=0. This covers all 680x480 pixels, not
     // selected terrain samples (C4Landscape.cpp:554-580).
     let engine = load_tutorial(7, 0);
-    let grid = engine
-        .landscape()
-        .and_then(Landscape::pixel_grid)
-        .expect("Tutorial07 retains its classic Surface8 plane");
+    let grid = crate::support::TestValueExt::test_value(
+        engine.landscape().and_then(Landscape::pixel_grid),
+    );
     assert_eq!((grid.width(), grid.height()), (680, 480));
     let hash = grid
         .bytes()
@@ -161,20 +156,15 @@ fn tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact() -> Result<()
     // C4Object.cpp:5268-5287 and C4Movement.cpp:218-265. The ignored
     // Tutorial07ElevatorOracle.c4s probe captured every fixed frame.
     let (mut engine, owner) = load_tutorial07();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial07 joins one selected CLNK");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let elevator_case =
-        object_with_definition(&engine, "ELEC").expect("Tutorial07 places a ready elevator case");
+        crate::support::TestValueExt::test_value(object_with_definition(&engine, "ELEC"));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     player.wait_until("Tutorial07 says Good luck", 2_000, |engine| {
         tutorial_message_contains(engine, "Good luck")
     })?;
-    let landscape = player
-        .engine()
-        .landscape()
-        .expect("Tutorial07 keeps its static landscape");
+    let landscape = crate::support::TestValueExt::test_value(player.engine().landscape());
     assert_eq!(
         [335, 336, 337, 338].map(|y| landscape.is_solid_at(88, y)),
         [false; 4],
@@ -197,16 +187,14 @@ fn tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact() -> Result<()
     }
 
     player.press(COM_DIG)?;
-    let down_start = player
-        .engine()
-        .object_snapshot(elevator_case)
-        .map(|case| {
+    let down_start = crate::support::TestValueExt::test_value(
+        player.engine().object_snapshot(elevator_case).map(|case| {
             raw_fixed(
                 case.fixed_position.map(|position| position.y),
                 case.position.y,
             )
-        })
-        .expect("ELEC exists at Drill start");
+        }),
+    );
     assert_eq!(down_start, 12_779_520, "C++ starts ELEC at y=195");
     for tick in 0..=77 {
         let stopped = tick == 77;
@@ -251,16 +239,14 @@ fn tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact() -> Result<()
     player.release(COM_DIG)?;
     player.ticks(20)?;
     player.press(COM_UP)?;
-    let up_start = player
-        .engine()
-        .object_snapshot(elevator_case)
-        .map(|case| {
+    let up_start = crate::support::TestValueExt::test_value(
+        player.engine().object_snapshot(elevator_case).map(|case| {
             raw_fixed(
                 case.fixed_position.map(|position| position.y),
                 case.position.y,
             )
-        })
-        .expect("ELEC exists at Ride start");
+        }),
+    );
     assert_eq!(up_start, 21_430_272, "C++ starts ascent at y=327");
     for tick in 0..=81 {
         let stopped = tick == 81;

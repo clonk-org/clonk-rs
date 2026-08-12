@@ -3,30 +3,29 @@
 
 #[test]
 fn initial_record_uses_the_preinitialize_game_snapshot() {
-    let directory = tempdir().expect("initial record fixture");
+    let directory = tempdir();
     let scenario_path = directory.path().join("Snapshot.c4s");
-    fs::create_dir(&scenario_path).expect("create scenario group");
+    fs::create_dir(&scenario_path).test_value();
     install_record_test_definitions(directory.path());
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Snapshot\n\n[Definitions]\nDefinition1=Objects.c4d\n",
     )
-    .expect("write scenario core");
+    .test_value();
     fs::write(
         scenario_path.join("PlayerInfos.txt"),
         b"stale initial roster",
     )
-    .expect("write stale initial roster");
-    fs::write(scenario_path.join("CtrlRec.txt"), b"copied text stream")
-        .expect("write copied text stream");
+    .test_value();
+    fs::write(scenario_path.join("CtrlRec.txt"), b"copied text stream").test_value();
     fs::write(
         scenario_path.join("RecPlayerInfos.txt"),
         b"copied final roster",
     )
-    .expect("write copied final roster");
+    .test_value();
     let scenario_data =
         Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
-            .expect("load record scenario");
+            .test_value();
     let scenario = FrontendScenario::from_command_line(&scenario_path);
     let mut app = new_state_only_menu_app(320, 200);
     app.recordings_dir = Some(directory.path().join("Records.c4f"));
@@ -47,18 +46,10 @@ fn initial_record_uses_the_preinitialize_game_snapshot() {
         None,
         None,
     )
-    .expect("prepare initial record");
-    let packed = app
-        .recording_template
-        .as_ref()
-        .expect("recording template")
-        .group
-        .pack()
-        .expect("pack recording template");
-    let record =
-        Group::from_memory(PathBuf::from("Snapshot.c4s"), packed).expect("open recording template");
-    let game = String::from_utf8(record.read_file("Game.txt").expect("record Game.txt"))
-        .expect("Game.txt is ASCII");
+    .test_value();
+    let packed = app.recording_template.test_ref().group.pack().test_value();
+    let record = Group::from_memory(PathBuf::from("Snapshot.c4s"), packed).test_value();
+    let game = String::from_utf8(record.read_file("Game.txt").test_value()).test_value();
 
     assert!(!record.exists("PlayerInfos.txt"));
     assert_eq!(
@@ -83,28 +74,26 @@ fn initial_record_uses_the_preinitialize_game_snapshot() {
 
 #[test]
 fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice() {
-    let directory = tempdir().expect("loaded initial record fixture");
+    let directory = tempdir();
     let scenario_path = directory.path().join("Loaded.c4s");
     let section_path = scenario_path.join("SectArchive.c4g");
-    fs::create_dir_all(&section_path).expect("create scenario section");
+    fs::create_dir_all(&section_path).test_value();
     install_record_test_definitions(directory.path());
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Loaded record\n\n[Definitions]\nDefinition1=Objects.c4d\n",
     )
-    .expect("write scenario core");
+    .test_value();
     fs::write(
         scenario_path.join("Game.txt"),
         "[Game]\nTime=999\n\n[Player999]\nWealth=777\n",
     )
-    .expect("write stale source game");
-    fs::write(scenario_path.join("Title.png"), b"original scenario title")
-        .expect("write original scenario title");
-    fs::write(section_path.join("Archive.bin"), b"section payload")
-        .expect("write scenario section payload");
+    .test_value();
+    fs::write(scenario_path.join("Title.png"), b"original scenario title").test_value();
+    fs::write(section_path.join("Archive.bin"), b"section payload").test_value();
     let scenario_data =
         Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
-            .expect("load record scenario");
+            .test_value();
     let scenario = FrontendScenario::from_command_line(&scenario_path);
     let mut app = new_state_only_menu_app(320, 200);
     app.recordings_dir = Some(directory.path().join("Records.c4f"));
@@ -121,19 +110,16 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
             ..Default::default()
         });
 
-    app.engine
-        .register_definition(
-            clonk_engine::Definition::from_script(
-                "TST1",
-                "Recorded object",
-                "static PostMaterialization;",
-            )
-            .expect("compile object definition"),
+    app.engine.register_test_definition(
+        clonk_engine::Definition::from_script(
+            "TST1",
+            "Recorded object",
+            "static PostMaterialization;",
         )
-        .expect("register object definition");
+        .test_value(),
+    );
     app.engine
-        .spawn_object(clonk_engine::SpawnConfig::new("TST1").with_id(ObjectId::new(41)))
-        .expect("spawn recorded object");
+        .spawn_test_object(clonk_engine::SpawnConfig::new("TST1").with_id(ObjectId::new(41)));
     let mut landscape = clonk_engine::Landscape::flat(2, 1);
     assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
     landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
@@ -161,9 +147,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
         ..PlayerState::default()
     }];
     restored.last_player_info_id = 17;
-    app.engine
-        .restore_state(&restored)
-        .expect("restore loaded runtime fixture");
+    app.engine.restore_state(&restored).test_value();
 
     app.prepare_recording_for(
         &scenario,
@@ -176,20 +160,13 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
         None,
         None,
     )
-    .expect("prepare loaded initial record");
+    .test_value();
     // InitPlayers performs this only after InitControl has snapshotted
     // the initial record's current roster.
     app.control_player_infos
         .resume_joined_savegame_player(17, 0, false);
-    let packed = app
-        .recording_template
-        .as_ref()
-        .expect("recording template")
-        .group
-        .pack()
-        .expect("pack recording template");
-    let record =
-        Group::from_memory(PathBuf::from("Loaded.c4s"), packed).expect("open recording template");
+    let packed = app.recording_template.test_ref().group.pack().test_value();
+    let record = Group::from_memory(PathBuf::from("Loaded.c4s"), packed).test_value();
     assert_eq!(
         record
             .read_file("SavePlayerInfos.txt")
@@ -201,11 +178,9 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
         b"saved game screenshot"
     );
     let initial_players = clonk_network::decode_player_info_list_ini(
-        &record
-            .read_file("PlayerInfos.txt")
-            .expect("pre-resume current roster"),
+        &record.read_file("PlayerInfos.txt").test_value(),
     )
-    .expect("decode pre-resume current roster");
+    .test_value();
     assert_eq!(initial_players.clients[0].players[0].id, 117);
     assert_eq!(initial_players.clients[0].players[0].flags, 0);
     assert_eq!(
@@ -214,44 +189,34 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
         "live takeover rows resume only after fInitial"
     );
 
-    let objects = String::from_utf8(record.read_file("Objects.txt").expect("record Objects.txt"))
-        .expect("Objects.txt is ASCII");
+    let objects = String::from_utf8(record.read_file("Objects.txt").test_value()).test_value();
     assert!(objects.contains("id=TST1\r\n"));
     assert!(objects.contains("Number=41\r\n"));
     let landscape = clonk_resources::bitmap::IndexedBitmap::decode(
-        &record
-            .read_file("Landscape.bmp")
-            .expect("record Landscape.bmp"),
+        &record.read_file("Landscape.bmp").test_value(),
     )
-    .expect("decode exact record landscape");
+    .test_value();
     assert_eq!((landscape.width, landscape.height), (2, 1));
     assert_eq!(landscape.indices, [0, 1]);
     assert!(record.exists("Landscape.png"));
-    let strings = record.read_file("Strings.txt").expect("record Strings.txt");
+    let strings = record.read_file("Strings.txt").test_value();
     assert!(strings
         .windows(b"materialized string".len())
         .any(|window| window == b"materialized string"));
-    let section = record
-        .open_child("SectArchive.c4g")
-        .expect("record scenario section");
+    let section = record.open_child("SectArchive.c4g").test_value();
     assert_eq!(
         section.read_file("Archive.bin").expect("section payload"),
         b"section payload"
     );
 
-    let scenario_core = String::from_utf8(
-        record
-            .read_file("Scenario.txt")
-            .expect("record Scenario.txt"),
-    )
-    .expect("Scenario.txt is ASCII");
+    let scenario_core =
+        String::from_utf8(record.read_file("Scenario.txt").test_value()).test_value();
     for expected in ["SaveGame=1", "NoInitialize=1", "Replay=1"] {
         assert!(scenario_core.contains(expected), "missing {expected}");
     }
 
-    let game = String::from_utf8(record.read_file("Game.txt").expect("record Game.txt"))
-        .expect("Game.txt is ASCII");
-    let player_start = game.find("[Player17]").expect("reconstructed player tail");
+    let game = String::from_utf8(record.read_file("Game.txt").test_value()).test_value();
+    let player_start = game.find("[Player17]").test_value();
     assert!(!game.contains("[Player999]"));
     assert!(game[player_start..].contains("Wealth=99\r\n"));
     assert_eq!(game.matches("[Player").count(), 1);
@@ -259,11 +224,11 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     let post_materialization = app
         .engine
         .capture_initial_record_game_data(false)
-        .expect("capture post-materialization initial projection");
+        .test_value();
     let expected_game = clonk_engine::serialize_initial_network_game(&post_materialization, None)
         .expect("serialize post-materialization initial projection")
-        .expect("initial projection emits Game.txt");
-    let expected_game = String::from_utf8(expected_game).expect("expected Game.txt is ASCII");
+        .test_value();
+    let expected_game = String::from_utf8(expected_game).test_value();
     assert_eq!(
         game[..player_start].trim_end(),
         expected_game.trim_end(),
@@ -275,7 +240,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
 
 #[test]
 fn classic_recdump_writes_cpp_text_and_binary_outputs() {
-    let directory = tempdir().expect("record-dump tempdir");
+    let directory = tempdir();
     let text_path = directory.path().join("dump.TXT");
     let leading_dot_text_path = directory.path().join(".tXt");
     let binary_path = directory.path().join("dump.c4b");
@@ -297,11 +262,10 @@ fn classic_recdump_writes_cpp_text_and_binary_outputs() {
         clonk_engine::RCT_FRAME,
     ];
 
-    let chunks = clonk_network::decode_control_record(&input).expect("decode replay fixture");
-    write_classic_record_dump(&chunks, &text_path).expect("write text /recdump");
-    write_classic_record_dump(&chunks, &leading_dot_text_path)
-        .expect("write leading-dot text /recdump");
-    write_classic_record_dump(&chunks, &binary_path).expect("write binary /recdump");
+    let chunks = clonk_network::decode_control_record(&input).test_value();
+    write_classic_record_dump(&chunks, &text_path).test_value();
+    write_classic_record_dump(&chunks, &leading_dot_text_path).test_value();
+    write_classic_record_dump(&chunks, &binary_path).test_value();
 
     let expected_text = concat!(
         "[Rec]\r\n",
@@ -377,12 +341,12 @@ fn classic_record_stream_forms_share_one_last_assignment() {
 fn classic_record_stream_is_converted_and_activated() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated record-stream user data");
-    let working_directory = env::current_dir().expect("record-stream working directory");
+    let user_data = tempdir();
+    let working_directory = env::current_dir().test_value();
     let fixture = tempfile::Builder::new()
         .prefix("lc-record-stream-")
         .tempdir_in(&working_directory)
-        .expect("record-stream fixture");
+        .test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
 
     let origin_path = fixture.path().join("Origin.c4s");
@@ -390,44 +354,38 @@ fn classic_record_stream_is_converted_and_activated() {
     let definition_path = definition_root.join("Good.c4d");
     let origin_reference = origin_path
         .strip_prefix(&working_directory)
-        .expect("origin is below the working directory")
+        .test_value()
         .to_string_lossy()
         .replace('\\', "/");
     let definition_reference = definition_root
         .strip_prefix(paths.install_root())
-        .expect("definitions are below the install root")
+        .test_value()
         .to_string_lossy()
         .replace('\\', "/");
-    fs::create_dir_all(&origin_path).expect("create record origin");
-    fs::create_dir_all(&definition_path).expect("create record definition");
+    fs::create_dir_all(&origin_path).test_value();
+    fs::create_dir_all(&definition_path).test_value();
     fs::write(
         definition_path.join("DefCore.txt"),
         "[DefCore]\nid=GOOD\nName=Record fixture\nCategory=1\n",
     )
-    .expect("write record definition core");
-    fs::write(definition_path.join("Script.c"), "// record fixture\n")
-        .expect("write record definition script");
+    .test_value();
+    fs::write(definition_path.join("Script.c"), "// record fixture\n").test_value();
     write_test_definition_graphics(&definition_path);
-    fs::write(
-            origin_path.join("Scenario.txt"),
-            format!(
-                "[Head]\nTitle=Origin\nIcon=2\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1={}\n",
-                definition_reference
-            ),
-        )
-        .expect("write origin scenario core");
-    fs::write(origin_path.join("OriginOnly.txt"), b"copied from origin")
-        .expect("write origin-only component");
-    fs::write(origin_path.join("Layer.txt"), b"origin").expect("write origin layer");
+    fs::write(origin_path.join("Scenario.txt"), format!(
+        "[Head]\nTitle=Origin\nIcon=2\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1={}\n",
+        definition_reference
+    )).test_value();
+    fs::write(origin_path.join("OriginOnly.txt"), b"copied from origin").test_value();
+    fs::write(origin_path.join("Layer.txt"), b"origin").test_value();
     let mut origin_child = MutableGroup::new("OriginChild.c4g");
     origin_child
         .add_file("OriginChild.txt", b"origin child".to_vec())
-        .expect("add origin child component");
+        .test_value();
     fs::write(
         origin_path.join("OriginChild.c4g"),
-        origin_child.pack().expect("pack origin child"),
+        origin_child.pack().test_value(),
     )
-    .expect("write packed origin child");
+    .test_value();
 
     let mut initial = MutableGroup::new("Initial.c4s");
     initial
@@ -439,38 +397,35 @@ fn classic_record_stream_is_converted_and_activated() {
                     definition_reference
                 )
                 .into_bytes(),
-            )
-            .expect("add initial scenario core");
+            ).test_value();
     initial
         .add_file("Layer.txt", b"initial".to_vec())
-        .expect("add initial overlay");
+        .test_value();
     initial
         .add_file("InitialOnly.txt", b"initial component".to_vec())
-        .expect("add initial-only component");
+        .test_value();
     let mut initial_child = MutableGroup::new("InitialChild.c4g");
     initial_child
         .add_file("InitialChild.txt", b"initial child".to_vec())
-        .expect("add initial child component");
+        .test_value();
     initial
         .add_child("InitialChild.c4g", initial_child)
-        .expect("add packed initial child");
-    let initial = initial.pack().expect("pack streamed initial save");
+        .test_value();
+    let initial = initial.pack().test_value();
     let initial_child_raw =
         Group::from_top_level_memory(PathBuf::from("Initial.c4s"), initial.clone())
             .expect("reopen streamed initial save")
             .open_child("InitialChild.c4g")
             .expect("open original initial child")
             .raw_image()
-            .expect("capture original initial child image");
+            .test_value();
 
-    let ignored_name = LegacyCString::from_bytes(b"ignored-initial-name.tmp".to_vec())
-        .expect("valid initial stream filename");
-    let mut raw = clonk_network::encode_league_stream_file_chunk(&ignored_name, &initial)
-        .expect("encode initial stream file");
+    let ignored_name = LegacyCString::from_bytes(b"ignored-initial-name.tmp".to_vec()).test_value();
+    let mut raw =
+        clonk_network::encode_league_stream_file_chunk(&ignored_name, &initial).test_value();
     let mut append_file = |delta: u8, name: &[u8], data: &[u8]| {
-        let name = LegacyCString::from_bytes(name.to_vec()).expect("valid stream filename");
-        let mut chunk = clonk_network::encode_league_stream_file_chunk(&name, data)
-            .expect("encode later stream file");
+        let name = LegacyCString::from_bytes(name.to_vec()).test_value();
+        let mut chunk = clonk_network::encode_league_stream_file_chunk(&name, data).test_value();
         chunk[0] = delta;
         raw.extend_from_slice(&chunk);
     };
@@ -478,23 +433,15 @@ fn classic_record_stream_is_converted_and_activated() {
     let mut later_child = MutableGroup::new("WrongSortName.tmp");
     later_child
         .add_file("LaterChild.txt", b"later child".to_vec())
-        .expect("add later child component");
-    append_file(
-        3,
-        b"LaterChild.c4g",
-        &later_child.pack().expect("pack later child"),
-    );
+        .test_value();
+    append_file(3, b"LaterChild.c4g", &later_child.pack().test_value());
     append_file(4, b"CtrlRec.c4b", b"must be replaced");
     raw.extend_from_slice(&[5, clonk_engine::RCT_FRAME]);
 
     let stream_path = fixture.path().join("League.c4r");
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    encoder.write_all(&raw).expect("compress classic stream");
-    fs::write(
-        &stream_path,
-        encoder.finish().expect("finish classic stream compression"),
-    )
-    .expect("write classic stream");
+    encoder.write_all(&raw).test_value();
+    fs::write(&stream_path, encoder.finish().test_value()).test_value();
 
     let classic = parse_classic_command_line(&[
         OsString::from(format!("/stream:{}", stream_path.display())),
@@ -504,12 +451,9 @@ fn classic_record_stream_is_converted_and_activated() {
         classic.record_stream.as_deref(),
         Some(stream_path.as_path())
     );
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("initialize record-stream app");
-    app.apply_classic_command_line(&classic)
-        .expect("apply record-stream command line");
-    app.launch_classic_command_line_scenario()
-        .expect("defer record stream until boot completes");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
+    app.apply_classic_command_line(&classic).test_value();
+    app.launch_classic_command_line_scenario().test_value();
     assert!(app.auto_start_classic_command_line_scenario);
     wait_for_running_with_attempts(&mut app, 2_400);
 
@@ -535,7 +479,7 @@ fn classic_record_stream_is_converted_and_activated() {
             "folder-backed conversion must retain {child} as a packed file"
         );
     }
-    let output = Group::open(&output_path).expect("open converted record");
+    let output = Group::open(&output_path).test_value();
     assert_eq!(
         output
             .read_file("OriginOnly.txt")
@@ -584,15 +528,14 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     // restores Game.txt runtime state (C4PlayerInfo.cpp:1395-1421,1448-1518,
     // 1524-1607).
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("replay recreation user data");
-    let content = tempdir().expect("replay recreation content");
+    let user_data = tempdir();
+    let content = tempdir();
     let frontend = install_minimal_prepared_host_fixture(content.path());
-    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let replay_path = frontend.path.clone().test_value();
     let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
-        .expect("read replay scenario core")
+        .test_value()
         .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
-    fs::write(replay_path.join("Scenario.txt"), scenario_core)
-        .expect("mark fixture as a replayed savegame");
+    fs::write(replay_path.join("Scenario.txt"), scenario_core).test_value();
     fs::write(
         replay_path.join("Game.txt"),
         concat!(
@@ -603,20 +546,18 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             "[Player6]\nStatus=1\nIndex=4\nID=6\nWealth=29\n",
         ),
     )
-    .expect("write replay runtime state");
+    .test_value();
     fs::write(
         replay_path.join("CtrlRec.c4b"),
         [0, clonk_engine::RCT_FRAME],
     )
-    .expect("write replay control stream");
+    .test_value();
     fs::write(
         replay_path.join("Teams.txt"),
         b"[Teams]\nActive=1\nAutoGenerateTeams=1\n",
     )
-    .expect("write auto-generated replay teams");
-    let native = |bytes: &[u8]| {
-        LegacyCString::from_bytes(bytes.to_vec()).expect("test native string has no NUL")
-    };
+    .test_value();
+    let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let recorded_resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -625,16 +566,16 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         ..Default::default()
     };
     let fallback_profile_path = user_data.path().join("Local.c4p");
-    fs::create_dir(&fallback_profile_path).expect("create installed fallback replay profile");
+    fs::create_dir(&fallback_profile_path).test_value();
     fs::write(
         fallback_profile_path.join("Player.txt"),
         "[Player]\nName=Local recorded profile\nScore=37\n[Preferences]\nControl=1\nMouse=0\n",
     )
-    .expect("write installed fallback replay profile");
+    .test_value();
     let fallback_profile_filename = LegacyCString::from_bytes(
         clonk_resources::path_to_legacy_bytes(&fallback_profile_path),
     )
-    .expect("fallback replay profile path has no NUL");
+    .test_value();
     let stale_resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 18,
@@ -643,16 +584,16 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         ..Default::default()
     };
     let stale_resource_path = user_data.path().join("Wrong.c4p");
-    fs::create_dir(&stale_resource_path).expect("create stale replay resource profile");
+    fs::create_dir(&stale_resource_path).test_value();
     fs::write(
         stale_resource_path.join("Player.txt"),
         "[Player]\nName=Wrong resource profile\nScore=99\n",
     )
-    .expect("write stale replay resource profile");
+    .test_value();
     let missing_profile_filename = LegacyCString::from_bytes(
         clonk_resources::path_to_legacy_bytes(&user_data.path().join("Missing.c4p")),
     )
-    .expect("missing replay profile path has no NUL");
+    .test_value();
     let current_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 100,
         clients: vec![
@@ -748,44 +689,41 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     };
     fs::write(
         replay_path.join("PlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&current_infos)
-            .expect("encode replay current infos"),
+        clonk_network::encode_player_info_list_ini(&current_infos).test_value(),
     )
-    .expect("write replay current infos");
+    .test_value();
     fs::write(
         replay_path.join("SavePlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&restore_infos)
-            .expect("encode replay restore infos"),
+        clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
     )
-    .expect("write replay restore infos");
+    .test_value();
     let profile_path = replay_path.join("Recreate-7.c4p");
-    fs::create_dir(&profile_path).expect("create recorded replay profile");
+    fs::create_dir(&profile_path).test_value();
     fs::write(
         profile_path.join("Player.txt"),
         "[Player]\nName=Recorded profile\nScore=31\n[Preferences]\nControl=0\nMouse=0\n",
     )
-    .expect("write recorded replay profile");
+    .test_value();
     let packed_replay_path = content.path().join("PackedReplay.c4s");
-    let replay_group = Group::open(&replay_path).expect("open folder replay group");
+    let replay_group = Group::open(&replay_path).test_value();
     fs::write(
         &packed_replay_path,
         MutableGroup::from_group(&replay_group)
-            .expect("copy folder replay group")
+            .test_value()
             .pack()
-            .expect("pack replay group"),
+            .test_value(),
     )
-    .expect("write packed replay group");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("initialize replay app");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.admission_resources
         .mark_complete(stale_resource.id, stale_resource_path);
     app.start_scenario(FrontendScenario::from_command_line(&packed_replay_path))
-        .expect("start resumed-savegame replay");
+        .test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    let player = app.engine.player(2).expect("recreated replay player 2");
+    let player = app.engine.test_player(2);
     assert_eq!(
         (
             player.player_info_id(),
@@ -804,10 +742,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             "Replay",
         )
     );
-    let resumed_info = app
-        .control_player_infos
-        .get(7)
-        .expect("resumed replay player info");
+    let resumed_info = app.control_player_infos.get(7).test_value();
     assert!(
         resumed_info.filename.is_empty(),
         "DeleteTempFile clears the extracted Recreate filename after the join"
@@ -837,7 +772,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         .players
         .into_iter()
         .find(|result| result.player_info_id == 6)
-        .expect("failed provisional replay player result");
+        .test_value();
     assert_eq!(
         (
             failed_result.total_playing_time,
@@ -849,10 +784,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     // A failed/missing Recreate extraction leaves the original filename in
     // place, so RecreatePlayers can still load the installed profile
     // (C4PlayerInfo.cpp:1468-1504,1566-1603).
-    let local_player = app
-        .engine
-        .player(3)
-        .expect("unknown-client replay player from installed profile");
+    let local_player = app.engine.test_player(3);
     assert_eq!(
         (
             local_player.player_info_id(),
@@ -920,7 +852,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             },
         )],
     )
-    .expect("execute absent-client replay update");
+    .test_value();
     assert!(
         app.engine.player(2).is_some(),
         "ClientUpdate is a no-op when Parameters.Clients has no matching row"
@@ -938,7 +870,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             },
         )],
     )
-    .expect("execute absent-client replay removal");
+    .test_value();
     assert!(app.engine.player(2).is_none());
     assert!(app.engine.player(3).is_some());
     reset_cached_app_paths();
@@ -950,30 +882,29 @@ fn savegame_replay_empty_current_packet_does_not_adopt_restore_players() {
     // packet count, so one retained empty packet suppresses adoption of the
     // restore list (C4PlayerInfo.cpp:1422-1439; C4PlayerInfo.h:373).
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("empty-packet replay user data");
-    let content = tempdir().expect("empty-packet replay content");
+    let user_data = tempdir();
+    let content = tempdir();
     let frontend = install_minimal_prepared_host_fixture(content.path());
-    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let replay_path = frontend.path.clone().test_value();
     let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
-        .expect("read replay scenario core")
+        .test_value()
         .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
-    fs::write(replay_path.join("Scenario.txt"), scenario_core)
-        .expect("mark fixture as a replayed savegame");
+    fs::write(replay_path.join("Scenario.txt"), scenario_core).test_value();
     fs::write(
         replay_path.join("Game.txt"),
         b"[Player7]\nStatus=1\nIndex=2\nID=7\n",
     )
-    .expect("write saved script runtime");
+    .test_value();
     fs::write(
         replay_path.join("Objects.txt"),
         b"[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=262144\nOwner=2\nX=10\nY=10\n",
     )
-    .expect("write unassociated saved-player crew object");
+    .test_value();
     fs::write(
         replay_path.join("CtrlRec.c4b"),
         [0, clonk_engine::RCT_FRAME],
     )
-    .expect("write replay control stream");
+    .test_value();
     let current_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 91,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -999,22 +930,18 @@ fn savegame_replay_empty_current_packet_does_not_adopt_restore_players() {
     };
     fs::write(
         replay_path.join("PlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&current_infos)
-            .expect("encode empty current packet"),
+        clonk_network::encode_player_info_list_ini(&current_infos).test_value(),
     )
-    .expect("write empty current packet");
+    .test_value();
     fs::write(
         replay_path.join("SavePlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&restore_infos)
-            .expect("encode replay restore infos"),
+        clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
     )
-    .expect("write replay restore infos");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("initialize empty-packet replay app");
-    app.start_scenario(frontend)
-        .expect("start empty-packet savegame replay");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
+    app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
     assert!(app.engine.player(2).is_none());
@@ -1036,24 +963,21 @@ fn savegame_replay_removed_restore_rows_do_not_gain_associations() {
     // players, so even an otherwise exact match stays unassociated
     // (C4Game.cpp:2827-2851; C4PlayerInfo.cpp:1371-1393).
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("removed-restore replay user data");
-    let content = tempdir().expect("removed-restore replay content");
+    let user_data = tempdir();
+    let content = tempdir();
     let frontend = install_minimal_prepared_host_fixture(content.path());
-    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let replay_path = frontend.path.clone().test_value();
     let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
-        .expect("read replay scenario core")
+        .test_value()
         .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
-    fs::write(replay_path.join("Scenario.txt"), scenario_core)
-        .expect("mark fixture as a replayed savegame");
-    fs::write(replay_path.join("Game.txt"), b"[Game]\nTime=11\n").expect("write replay game state");
+    fs::write(replay_path.join("Scenario.txt"), scenario_core).test_value();
+    fs::write(replay_path.join("Game.txt"), b"[Game]\nTime=11\n").test_value();
     fs::write(
         replay_path.join("CtrlRec.c4b"),
         [0, clonk_engine::RCT_FRAME],
     )
-    .expect("write replay control stream");
-    let native = |bytes: &[u8]| {
-        LegacyCString::from_bytes(bytes.to_vec()).expect("test native string has no NUL")
-    };
+    .test_value();
+    let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let current_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 91,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -1085,27 +1009,21 @@ fn savegame_replay_removed_restore_rows_do_not_gain_associations() {
     };
     fs::write(
         replay_path.join("PlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&current_infos).expect("encode current infos"),
+        clonk_network::encode_player_info_list_ini(&current_infos).test_value(),
     )
-    .expect("write current infos");
+    .test_value();
     fs::write(
         replay_path.join("SavePlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&restore_infos)
-            .expect("encode removed restore infos"),
+        clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
     )
-    .expect("write removed restore infos");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("initialize removed-restore replay app");
-    app.start_scenario(frontend)
-        .expect("start removed-restore savegame replay");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
+    app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    let current = app
-        .control_player_infos
-        .get(91)
-        .expect("current replay player info");
+    let current = app.control_player_infos.get(91).test_value();
     assert_eq!(current.savegame_player, 0);
     assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
     reset_cached_app_paths();
@@ -1117,21 +1035,20 @@ fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
     // even when every restore row is Removed and InitPlayers has no work
     // (C4GameParameters.cpp:379-399; C4Game.cpp:2827-2851).
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("removed-only replay user data");
-    let content = tempdir().expect("removed-only replay content");
+    let user_data = tempdir();
+    let content = tempdir();
     let frontend = install_minimal_prepared_host_fixture(content.path());
-    let replay_path = frontend.path.clone().expect("fixture scenario path");
+    let replay_path = frontend.path.clone().test_value();
     let scenario_core = fs::read_to_string(replay_path.join("Scenario.txt"))
-        .expect("read replay scenario core")
+        .test_value()
         .replacen("[Head]\n", "[Head]\nReplay=1\nSaveGame=1\n", 1);
-    fs::write(replay_path.join("Scenario.txt"), scenario_core)
-        .expect("mark fixture as a replayed savegame");
-    fs::write(replay_path.join("Game.txt"), b"[Game]\nTime=11\n").expect("write replay game state");
+    fs::write(replay_path.join("Scenario.txt"), scenario_core).test_value();
+    fs::write(replay_path.join("Game.txt"), b"[Game]\nTime=11\n").test_value();
     fs::write(
         replay_path.join("CtrlRec.c4b"),
         [0, clonk_engine::RCT_FRAME],
     )
-    .expect("write replay control stream");
+    .test_value();
     let restore_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 7,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -1147,16 +1064,13 @@ fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
     };
     fs::write(
         replay_path.join("SavePlayerInfos.txt"),
-        clonk_network::encode_player_info_list_ini(&restore_infos)
-            .expect("encode removed-only restore infos"),
+        clonk_network::encode_player_info_list_ini(&restore_infos).test_value(),
     )
-    .expect("write removed-only restore infos");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("initialize removed-only replay app");
-    app.start_scenario(frontend)
-        .expect("start removed-only savegame replay");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
+    app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
     assert_eq!(app.control_player_infos.retained_rows_snapshot().0, 7);
@@ -1168,23 +1082,20 @@ fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
 fn unusable_classic_record_stream_exits_without_showing_startup() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated bad record-stream user data");
-    let fixture = tempdir().expect("bad record-stream fixture");
+    let user_data = tempdir();
+    let fixture = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let stream_path = fixture.path().join("Broken.c4r");
-    fs::write(&stream_path, b"not a zlib stream").expect("write unusable record stream");
+    fs::write(&stream_path, b"not a zlib stream").test_value();
     let classic = parse_classic_command_line(&[stream_path.clone().into_os_string()]);
-    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths))
-        .expect("initialize bad record-stream app");
-    app.apply_classic_command_line(&classic)
-        .expect("apply bad record-stream command line");
-    app.launch_classic_command_line_scenario()
-        .expect("defer bad record stream until boot completes");
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
+    app.apply_classic_command_line(&classic).test_value();
+    app.launch_classic_command_line_scenario().test_value();
     for _ in 0..2_400 {
         if app.exit_requested {
             break;
         }
-        app.update().expect("poll deferred record-stream failure");
+        app.test_update();
         thread::sleep(Duration::from_millis(2));
     }
     assert!(app.exit_requested, "explicit unusable .c4r must terminate");
@@ -1214,17 +1125,13 @@ fn save_description_language_preserves_an_explicit_empty_first_segment() {
 
 #[test]
 fn default_bad_safety_restores_and_saves_defaults() {
-    let dir = tempdir().expect("config root");
+    let dir = tempdir();
     let path = dir.path().join("clonk-rust.config");
-    fs::write(
-            &path,
-            "[General]\nConfigResetSafety=7junk\nVendorPoison=keep\n\n[Graphics]\nResolutionX=1234\n\n[Vendor]\nPoison=yes\n",
-        )
-        .expect("write corrupt config");
+    fs::write(&path, "[General]\nConfigResetSafety=7junk\nVendorPoison=keep\n\n[Graphics]\nResolutionX=1234\n\n[Vendor]\nPoison=yes\n").test_value();
 
     assert!(validate_or_repair_startup_config(&path, false).expect("repair default config"));
 
-    let repaired = Config::load(&path).expect("reload repaired config");
+    let repaired = Config::load(&path).test_value();
     assert_eq!(
         repaired.get_in(Some("General"), "ConfigResetSafety"),
         Some("42")
@@ -1241,16 +1148,16 @@ fn default_bad_safety_restores_and_saves_defaults() {
 
 #[test]
 fn default_zero_resolution_restores_and_saves_defaults() {
-    let dir = tempdir().expect("config root");
+    let dir = tempdir();
     let path = dir.path().join("clonk-rust.config");
     fs::write(
         &path,
         "[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=0junk\nResolutionY=777\n",
     )
-    .expect("write zero-resolution config");
+    .test_value();
 
     assert!(validate_or_repair_startup_config(&path, false).expect("repair zero resolution"));
-    let repaired = Config::load(&path).expect("reload repaired config");
+    let repaired = Config::load(&path).test_value();
     assert_eq!(
         repaired.get_in(Some("Graphics"), "ResolutionX"),
         Some("800")
@@ -1266,16 +1173,16 @@ fn one_shot_sample_stops_at_the_cpp_twenty_instance_limit() {
     // NewInstance refuses a 21st non-looping instance of one resolved
     // sample before it asks SDL_mixer for another channel
     // (C4SoundSystem.cpp:337-338; C4SoundSystem.h:130).
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let scenario = dir.path().join("Goldrush.c4s");
-    fs::create_dir_all(&scenario).expect("create scenario group");
-    fs::write(scenario.join("HorseWalk1.wav"), silent_pcm_wav(10_000)).expect("write horse sound");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("HorseWalk1.wav"), silent_pcm_wav(10_000)).test_value();
 
     let options = AudioOptions {
         max_channels: 20,
         ..AudioOptions::default()
     };
-    let mut audio = AudioContext::try_new(options).expect("audio context");
+    let mut audio = AudioContext::try_new(options).test_value();
     audio.configure_scenario(Some(&scenario));
 
     let horses: Vec<_> = (0..21)
@@ -1283,7 +1190,7 @@ fn one_shot_sample_stops_at_the_cpp_twenty_instance_limit() {
             make_object(
                 index + 1,
                 "HORS",
-                Vector2::new(i32::try_from(index).expect("index fits") * 51, 100),
+                Vector2::new(i32::try_from(index).test_value() * 51, 100),
             )
         })
         .collect();
@@ -1300,21 +1207,20 @@ fn one_shot_sample_stops_at_the_cpp_twenty_instance_limit() {
                 &snapshot,
                 &[audio_viewport(0, OWNER_NONE, horses[0].position)],
             )
-            .expect("C++ silently rejects the sample after twenty instances");
+            .test_value();
     }
     assert_eq!(audio.active_channels.len(), 20);
 }
 
 #[test]
 fn save_file_version_deserializes_legacy_integer() {
-    let version: SaveFileVersion = serde_json::from_str("1").expect("parse legacy version");
+    let version: SaveFileVersion = serde_json::from_str("1").test_value();
     assert_eq!(version, SaveFileVersion::new(1, 0, 0));
 }
 
 #[test]
 fn save_file_version_deserializes_string() {
-    let version: SaveFileVersion =
-        serde_json::from_str("\"2.3.4\"").expect("parse semantic string version");
+    let version: SaveFileVersion = serde_json::from_str("\"2.3.4\"").test_value();
     assert_eq!(version, SaveFileVersion::new(2, 3, 4));
 }
 
@@ -1347,7 +1253,7 @@ fn migration_allows_previous_minor_version() {
         engine_state,
     };
 
-    let migrated = migrate_save_file(save).expect("legacy save should migrate to current schema");
+    let migrated = migrate_save_file(save).test_value();
     assert_eq!(migrated.version, SAVE_FILE_VERSION);
 }
 
@@ -1394,20 +1300,19 @@ fn saved_scenario_round_trips_basic_metadata() {
 fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated player-gate user data");
-    let scenario_group = tempdir().expect("player-gate scenario");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let app = new_menu_app_with_paths(640, 480, &paths);
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_group.path().to_path_buf());
 
-    persist_config_value(&paths, "General", "Participants", "Alice.c4p;Bob.c4p")
-        .expect("configure two participant modules");
+    persist_config_value(&paths, "General", "Participants", "Alice.c4p;Bob.c4p").test_value();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nMinPlayer=1\nMaxPlayer=1\n",
     )
-    .expect("write maximum-one scenario");
+    .test_value();
     assert_eq!(
         app.local_scenario_player_count_error(&scenario)
             .expect("inspect regular scenario"),
@@ -1418,7 +1323,7 @@ fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nMinPlayer=2\nMaxPlayer=0\nSaveGame=1\n",
     )
-    .expect("write savegame scenario");
+    .test_value();
     assert_eq!(
         app.local_scenario_player_count_error(&scenario)
             .expect("inspect savegame scenario"),
@@ -1426,12 +1331,12 @@ fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
         "savegames raise a stale maximum to the minimum player count"
     );
 
-    persist_config_value(&paths, "General", "Participants", "").expect("clear participant modules");
+    persist_config_value(&paths, "General", "Participants", "").test_value();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nMinPlayer=9\nMaxPlayer=0\nReplay=1\n",
     )
-    .expect("write replay scenario");
+    .test_value();
     assert_eq!(
         app.local_scenario_player_count_error(&scenario)
             .expect("inspect replay scenario"),
@@ -1449,16 +1354,15 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     // dialog (C4StartupScenSelDlg.cpp:754-781, 1681-1692).
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated no-participant user data");
-    let scenario_group = tempdir().expect("no-participant scenario");
+    let user_data = tempdir();
+    let scenario_group = tempdir();
     fs::write(
         scenario_group.path().join("Scenario.txt"),
         "[Head]\nTitle=No participants\nMaxPlayer=4\n\n[Definitions]\nAllowUserChange=true\n",
     )
-    .expect("write scenario core");
+    .test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "General", "Participants", "")
-        .expect("clear startup participants");
+    persist_config_value(&paths, "General", "Participants", "").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let mut scenario = FrontendScenario::fallback();
     scenario.identifier = "NoParticipants.c4s".to_string();
@@ -1466,8 +1370,8 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     scenario.path = Some(scenario_group.path().to_path_buf());
     scenario.allow_user_change = Some(true);
     let scenarios = vec![scenario.clone()];
-    let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("scenario browser menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
     app.open_scenario_browser();
@@ -1482,7 +1386,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
             },
         )]
     })
-    .expect("C++ player-count failure is a handled modal");
+    .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
@@ -1507,30 +1411,21 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
         Some(clonk_frontend::message_dialog::MessageDialogButton::Ok)
     );
     let mut frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut frame)
-        .expect("classic error dialog renders over the scenario browser");
-    let ok = app
-        .top_message_dialog_layout()
-        .expect("scenario error layout")
-        .buttons[0]
-        .rect;
+    app.test_render(&mut frame);
+    let ok = app.top_message_dialog_layout().test_value().buttons[0].rect;
     let ok_point = PhysicalPosition::new(f64::from(ok.x + ok.w / 2), f64::from(ok.y + ok.h / 2));
-    app.handle_cursor_moved(ok_point)
-        .expect("hover scenario error OK button");
+    app.test_cursor(ok_point);
     assert!(app.message_dialogs[0].state.has_pointer_hover());
     assert_eq!(
         app.menu_state.pointer_position(),
         None,
         "the exclusive startup popup owns pointer movement"
     );
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press scenario error OK button");
-    app.handle_cursor_moved(PhysicalPosition::new(ok_point.x + 1.0, ok_point.y))
-        .expect("retain OK capture across ordinary mouse jitter");
+    app.test_left_button(ElementState::Pressed);
+    app.test_cursor(PhysicalPosition::new(ok_point.x + 1.0, ok_point.y));
     assert!(app.message_dialogs[0].state.has_pointer_capture());
     assert!(app.message_dialogs[0].state.has_pointer_hover());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release scenario error OK button");
+    app.test_left_button(ElementState::Released);
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert!(app.status_text.is_empty());
@@ -1544,26 +1439,22 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
             },
         )]
     })
-    .expect("reopen C++ player-count failure");
+    .test_value();
     let close = app
         .top_message_dialog_layout()
-        .expect("reopened scenario error layout")
+        .test_value()
         .close_button
-        .expect("scenario error title close");
+        .test_value();
     let close_point = PhysicalPosition::new(
         f64::from(close.x + close.w / 2),
         f64::from(close.y + close.h / 2),
     );
-    app.handle_cursor_moved(close_point)
-        .expect("hover scenario error title close");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press scenario error title close");
-    app.handle_cursor_moved(PhysicalPosition::new(close_point.x + 1.0, close_point.y))
-        .expect("retain title-close capture across ordinary mouse jitter");
+    app.test_cursor(close_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_cursor(PhysicalPosition::new(close_point.x + 1.0, close_point.y));
     assert!(app.message_dialogs[0].state.has_pointer_capture());
     assert!(app.message_dialogs[0].state.has_pointer_hover());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release scenario error title close");
+    app.test_left_button(ElementState::Released);
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert!(app.loading_state.is_none());
@@ -1575,19 +1466,20 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
 #[test]
 fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated replay-roster user data");
-    let content = tempdir().expect("minimal replay-roster content");
+    let user_data = tempdir();
+    let content = tempdir();
     let frontend = install_minimal_prepared_host_fixture(content.path());
-    let scenario_path = frontend.path.clone().expect("fixture scenario path");
+    let scenario_path = frontend.path.clone().test_value();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let mut staged = prepare_minimal_host_lobby(&app, frontend);
 
     let core_path = scenario_path.join("Scenario.txt");
-    let core = fs::read_to_string(&core_path)
-        .expect("read regular staged scenario")
-        .replacen("[Head]\n", "[Head]\nReplay=1\n", 1);
-    fs::write(&core_path, core).expect("turn staged fixture into a replay");
+    let core =
+        fs::read_to_string(&core_path)
+            .test_value()
+            .replacen("[Head]\n", "[Head]\nReplay=1\n", 1);
+    fs::write(&core_path, core).test_value();
     let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
     staged.scenario = load_scenario_with_definition_load(
         &scenario_path,
@@ -1595,7 +1487,7 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
         &startup_language_sequence(Some(&paths)),
         &staged.definition_load,
     )
-    .expect("reload replay-marked staged scenario");
+    .test_value();
     assert!(staged
         .scenario
         .lobby_metadata()
@@ -1612,13 +1504,13 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
         clonk_engine::ClientCoreControlData {
             client_id: 0,
             activated: true,
-            name: LegacyCString::from_bytes(b"Exact Host".to_vec()).unwrap(),
+            name: LegacyCString::from_bytes(b"Exact Host".to_vec()).test_value(),
             ..Default::default()
         },
         clonk_engine::ClientCoreControlData {
             client_id: 7,
             activated: true,
-            name: LegacyCString::from_bytes(b"Remote".to_vec()).unwrap(),
+            name: LegacyCString::from_bytes(b"Remote".to_vec()).test_value(),
             ..Default::default()
         },
     ]);
@@ -1626,7 +1518,7 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
         id,
         flags,
         player_type,
-        name: LegacyCString::from_bytes(format!("Player {id}").into_bytes()).unwrap(),
+        name: LegacyCString::from_bytes(format!("Player {id}").into_bytes()).test_value(),
         ..Default::default()
     };
     app.control_player_infos.replace_snapshot(
@@ -1663,12 +1555,7 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
 
     app.sync_classic_lobby_roster();
 
-    let rows = app
-        .classic_host_lobby
-        .as_ref()
-        .expect("live classic lobby")
-        .controller
-        .rows();
+    let rows = app.classic_host_lobby.test_ref().controller.rows();
     assert_eq!(
         rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
         vec![
@@ -1703,13 +1590,11 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
 
 #[test]
 fn singleton_default_music_replays_without_a_second_random_draw() {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let global = dir.path().join("Music.c4g");
-    fs::create_dir_all(&global).expect("create global music group");
-    fs::write(global.join("Only.ogg"), b"only").expect("write music fixture");
-    let resolver =
-        MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
-            .expect("build music resolver");
+    fs::create_dir_all(&global).test_value();
+    fs::write(global.join("Only.ogg"), b"only").test_value();
+    let resolver = MusicResolver::with_global_group(Group::open(&global).test_value()).test_value();
     let mut draws = 0;
 
     let first = resolver
@@ -1718,13 +1603,13 @@ fn singleton_default_music_replays_without_a_second_random_draw() {
             assert_eq!(range, 1, "SafeRandom(1) is still consumed initially");
             0
         })
-        .expect("initial singleton selection");
+        .test_value();
     let recent = Arc::clone(&first.identity);
     let second = resolver
         .select_default_with(Some(&recent), |_| {
             panic!("sole recent fallback must not consume SafeRandom")
         })
-        .expect("recent singleton fallback");
+        .test_value();
 
     assert_eq!(draws, 1);
     assert!(Arc::ptr_eq(&second.identity, &recent));
@@ -1732,9 +1617,9 @@ fn singleton_default_music_replays_without_a_second_random_draw() {
 
 #[test]
 fn duplicate_music_records_exclude_only_the_record_that_started() {
-    let dir = tempdir().expect("tempdir");
-    fs::write(dir.path().join("Shared.ogg"), b"shared").expect("write music fixture");
-    let source = Arc::new(Group::open(dir.path()).expect("open music fixture root"));
+    let dir = tempdir();
+    fs::write(dir.path().join("Shared.ogg"), b"shared").test_value();
+    let source = Arc::new(Group::open(dir.path()).test_value());
     let catalog = MusicCatalog {
         assets: vec![
             MusicAsset::for_test_path(Arc::clone(&source), PathBuf::from("Shared.ogg")),
@@ -1747,14 +1632,14 @@ fn duplicate_music_records_exclude_only_the_record_that_started() {
             assert_eq!(range, 2);
             0
         })
-        .expect("first duplicate record");
+        .test_value();
     let recent = Arc::clone(&first.identity);
     let second = catalog
         .select_enabled_with(None, Some(&recent), |range| {
             assert_eq!(range, 1);
             0
         })
-        .expect("other duplicate record remains eligible");
+        .test_value();
 
     assert_eq!(first.full_path_bytes, second.full_path_bytes);
     assert!(!Arc::ptr_eq(&first.identity, &second.identity));
@@ -1764,16 +1649,16 @@ fn duplicate_music_records_exclude_only_the_record_that_started() {
 fn menu_dump_writes_main_menu_png_at_1280x720() {
     clonk_logging::init();
 
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(dir.path())),
     ]);
-    let app_paths = Arc::new(AppPaths::discover().expect("discover exact menu resources"));
+    let app_paths = Arc::new(test_app_paths());
     let path = dir.path().join("menu.png");
     run_menu_dump(
         &path,
@@ -1786,13 +1671,13 @@ fn menu_dump_writes_main_menu_png_at_1280x720() {
             record_enabled: false,
         },
     )
-    .expect("dump startup menu frame");
+    .test_value();
 
     // PNG IHDR: width/height are big-endian u32 at byte offsets 16/20.
-    let png = fs::read(&path).expect("read dumped png");
+    let png = fs::read(&path).test_value();
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "not a PNG file");
-    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
-    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    let width = u32::from_be_bytes(png[16..20].try_into().test_value());
+    let height = u32::from_be_bytes(png[20..24].try_into().test_value());
     assert_eq!((width, height), (1280, 720));
 }
 
@@ -1802,24 +1687,23 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let player_root = user_data.path().join("Players");
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
-    fs::create_dir_all(paths.config_file().parent().expect("config parent"))
-        .expect("create config parent");
-    config.save(paths.config_file()).expect("save config");
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    config.save(paths.config_file()).test_value();
 
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
     Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .insert(
             "Portrait1.png".to_string(),
@@ -1828,8 +1712,7 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
     app.open_player_selection_dialog();
     app.open_new_startup_player_properties();
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("new editor")
+        .test_mut()
         .controller
         .set_name("");
     app.process_startup_player_properties_actions(vec![
@@ -1849,10 +1732,9 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
         .is_some_and(|pending| pending.controller.validation_error().is_none()));
     assert!(app.startup_player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss empty-name modal");
+        .test_value();
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("new editor")
+        .test_mut()
         .controller
         .set_name("Created");
     app.process_startup_player_properties_actions(vec![
@@ -1861,7 +1743,7 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
 
     let created = player_root.join("Created.c4p");
     assert!(created.is_file());
-    let created_group = Group::open(&created).expect("open created player");
+    let created_group = Group::open(&created).test_value();
     assert!(created_group.read_file("Player.txt").is_ok());
     assert!(created_group.read_file("Portrait.png").is_ok());
     assert!(created_group.read_file("BigIcon.png").is_ok());
@@ -1889,8 +1771,7 @@ fn player_properties_save_refreshes_selection_and_renamed_participant() {
 
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("edit editor")
+        .test_mut()
         .controller
         .set_name("Renamed");
     app.process_startup_player_properties_actions(vec![
@@ -1916,32 +1797,30 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
         MessageDialogButtons, MessageDialogIcon, MessageDialogResult, MessageDialogSize,
     };
 
-    let user_data = tempdir().expect("save-failure user data");
+    let user_data = tempdir();
     let (_guard, paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
     app.startup_player_properties_dialog = None;
 
     let old = player_root.join("Old.c4p");
-    fs::create_dir(&old).expect("create selected player group");
-    fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").expect("write selected player core");
-    persist_config_value(&paths, "General", "Participants", old.to_string_lossy())
-        .expect("activate selected player");
+    fs::create_dir(&old).test_value();
+    fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
+    persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
     assert_eq!(app.startup_player_files.len(), 1);
     assert!(app.startup_player_files[0].render_model.activated);
 
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("open player-properties form")
+        .test_mut()
         .controller
         .set_name("Renamed");
 
     // Cross the same partial-save boundary as a native group-open or
     // close failure: the filesystem rename succeeds, then opening the
     // destination as a player group fails.
-    fs::remove_dir_all(&old).expect("remove valid group behind open form");
-    fs::write(&old, b"not a C4Group").expect("replace source with corrupt packed group");
+    fs::remove_dir_all(&old).test_value();
+    fs::write(&old, b"not a C4Group").test_value();
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
@@ -1958,7 +1837,7 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     );
     assert!(app.startup_player_files.is_empty());
     assert!(app.startup_player_models.is_empty());
-    let selector = app.startup_player_dialog.as_ref().expect("player selector");
+    let selector = app.startup_player_dialog.test_ref();
     assert!(selector.player_activations().is_empty());
     assert_eq!(selector.selected_index(), None);
     assert!(app.selected_player_file.is_none());
@@ -1970,10 +1849,7 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
         Some("")
     );
 
-    let modal = app
-        .message_dialogs
-        .last()
-        .expect("classic save-error dialog");
+    let modal = app.message_dialogs.last().test_value();
     assert_eq!(modal.state.caption(), "Error");
     assert!(modal.state.message().starts_with("Error opening file \""));
     assert!(modal
@@ -1989,7 +1865,7 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
     ));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss save-error dialog");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
     assert!(app.startup_player_properties_dialog.is_none());
     assert!(app.startup_player_files.is_empty());
@@ -2005,37 +1881,32 @@ fn startup_player_properties_post_validation_save_failure_opens_classic_error_di
 fn startup_player_properties_save_failure_modal_names_step_and_path() {
     use clonk_frontend::message_dialog::MessageDialogResult;
 
-    let user_data = tempdir().expect("step-context user data");
+    let user_data = tempdir();
     let (_guard, paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
     app.startup_player_properties_dialog = None;
 
     let old = player_root.join("Old.c4p");
-    fs::create_dir(&old).expect("create selected player group");
-    fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").expect("write selected player core");
-    persist_config_value(&paths, "General", "Participants", old.to_string_lossy())
-        .expect("activate selected player");
+    fs::create_dir(&old).test_value();
+    fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
+    persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("open player-properties form")
+        .test_mut()
         .controller
         .set_name("Renamed");
 
     // The source group vanishes behind the open form, so the rename step
     // fails and must report itself with both filenames like C++'s
     // IDS_FAIL_RENAME/IDS_ERR_RENAMEFILE composition.
-    fs::remove_dir_all(&old).expect("remove source group behind open form");
+    fs::remove_dir_all(&old).test_value();
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
 
     let renamed = player_root.join("Renamed.c4p");
-    let modal = app
-        .message_dialogs
-        .last()
-        .expect("classic rename-error dialog");
+    let modal = app.message_dialogs.last().test_value();
     assert_eq!(modal.state.caption(), "Error");
     let message = modal.state.message().to_string();
     let expected_body = format!(
@@ -2052,7 +1923,7 @@ fn startup_player_properties_save_failure_modal_names_step_and_path() {
         "rename modal must keep the underlying error detail: {message}"
     );
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss rename-error dialog");
+        .test_value();
 
     // The remaining storage steps compose the same way; pin each branch's
     // localized step string and path.
@@ -2099,10 +1970,9 @@ fn startup_player_properties_save_failure_modal_names_step_and_path() {
 #[test]
 fn runtime_point_filtering_reloads_after_advanced_config_save() {
     let _lock = env_lock().lock();
-    let fixture = tempdir().expect("point-filtering configuration");
+    let fixture = tempdir();
     let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
-    fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=true\n")
-        .expect("enable point filtering");
+    fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=true\n").test_value();
 
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
@@ -2113,8 +1983,7 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
         .expect("loader render config remains materialized")
         .point_filtering());
 
-    fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=false\n")
-        .expect("disable point filtering");
+    fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=false\n").test_value();
     app.synchronize_advanced_options_runtime();
     assert!(!app.graphics.point_filtering());
     assert!(!app
@@ -2124,16 +1993,16 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
 }
 
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
-    let file = File::open(path).expect("open screenshot");
+    let file = File::open(path).test_value();
     let decoder = png::Decoder::new(io::BufReader::new(file));
-    let mut reader = decoder.read_info().expect("read screenshot header");
+    let mut reader = decoder.read_info().test_value();
     let mut buffer = vec![
         0;
         reader
             .output_buffer_size()
             .expect("screenshot buffer size fits usize")
     ];
-    let info = reader.next_frame(&mut buffer).expect("decode screenshot");
+    let info = reader.next_frame(&mut buffer).test_value();
     assert_eq!(info.color_type, ColorType::Rgb);
     assert_eq!(info.bit_depth, BitDepth::Eight);
     buffer.truncate(info.buffer_size());
@@ -2149,7 +2018,7 @@ fn fnv1a_png_bytes(bytes: &[u8]) -> u64 {
 #[test]
 fn rgba_png_encoding_preserves_png_017_bytes() {
     let pixels = [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8];
-    let encoded = encode_rgba_png(2, 2, &pixels).expect("encode RGBA PNG");
+    let encoded = encode_rgba_png(2, 2, &pixels).test_value();
 
     assert_eq!(encoded.len(), 86);
     assert_eq!(fnv1a_png_bytes(&encoded), 11_539_277_311_474_003_906);
@@ -2158,7 +2027,7 @@ fn rgba_png_encoding_preserves_png_017_bytes() {
 #[test]
 fn screenshot_png_encoding_preserves_png_017_bytes() {
     let pixels = [1, 2, 3, 255, 5, 6, 7, 128, 1, 2, 3, 64, 5, 6, 7, 0];
-    let encoded = encode_screenshot_png(2, 2, &pixels).expect("encode screenshot PNG");
+    let encoded = encode_screenshot_png(2, 2, &pixels).test_value();
 
     assert_eq!(encoded.len(), 82);
     assert_eq!(fnv1a_png_bytes(&encoded), 8_588_350_724_413_462_130);
@@ -2166,14 +2035,13 @@ fn screenshot_png_encoding_preserves_png_017_bytes() {
 
 #[test]
 fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
-    let directory = tempdir().expect("save thumbnail directory");
+    let directory = tempdir();
     let save_path = directory.path().join("round.c4s");
     let thumbnail_path = save_path.with_extension("png");
     let mut app = new_running_sandbox_app();
     app.retained_gpu_presentation_active = true;
 
-    app.write_save_thumbnail(&save_path)
-        .expect("queue retained GPU thumbnail");
+    app.write_save_thumbnail(&save_path).test_value();
 
     assert_eq!(
         app.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>(),
@@ -2187,17 +2055,17 @@ fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
 
 #[test]
 fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
-    let encoded = encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255])
-        .expect("encode retained GPU thumbnail");
+    let encoded =
+        encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]).test_value();
     let decoder = png::Decoder::new(io::Cursor::new(encoded));
-    let mut reader = decoder.read_info().expect("read thumbnail header");
+    let mut reader = decoder.read_info().test_value();
     let mut buffer = vec![
         0;
         reader
             .output_buffer_size()
             .expect("thumbnail buffer size fits usize")
     ];
-    let info = reader.next_frame(&mut buffer).expect("decode thumbnail");
+    let info = reader.next_frame(&mut buffer).test_value();
 
     assert_eq!(
         (info.width, info.height),
@@ -2213,22 +2081,17 @@ fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
 /// (C4GraphicsSystem.cpp:503-525).
 #[test]
 fn startup_f9_saves_the_presented_classic_gui_frame() {
-    let install = tempdir().expect("screenshot install root");
-    let user_data = tempdir().expect("screenshot user data");
-    fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
-    fs::write(
-        install.path().join("planet/System.c4g/LanguageUS.txt"),
-        b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n",
-    )
-    .expect("fixture screenshot language resources");
+    let install = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
+    fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n").test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("fixture app paths");
-    paths.ensure_user_dirs().expect("fixture user directories");
-    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
-        .expect("fixture runtime language selection");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
     let mut app = new_menu_app(320, 200);
     app.app_paths = Some(paths);
@@ -2240,10 +2103,8 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
 
     // Ctrl+F9 is Fullscreen-only, so it queues nothing in GUI scope.
     app.keyboard_modifiers = ModifiersState::CONTROL;
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("Ctrl+F9 stays inert on the startup screens");
-    app.handle_key(VirtualKeyCode::F9, ElementState::Released)
-        .expect("release Ctrl+F9");
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F9, ElementState::Released);
     assert!(app.pending_screenshots.is_empty());
 
     // Bare F9 queues the presented-frame capture on every startup view.
@@ -2257,10 +2118,8 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
         StartupView::About,
     ] {
         app.startup_view = view;
-        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-            .expect("startup F9 queues a capture");
-        app.handle_key(VirtualKeyCode::F9, ElementState::Released)
-            .expect("release F9");
+        app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::F9, ElementState::Released);
         assert_eq!(
             app.pending_screenshots
                 .pop_back()
@@ -2271,11 +2130,10 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     }
 
     // The queued capture writes through the same numbered slot and log text.
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("startup F9 queues a capture");
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     let outcome = app
         .save_next_screenshot(Some(&presented), 4, 2, 1.0)
-        .expect("screenshot request was pending");
+        .test_value();
     assert!(
         outcome.result.is_ok(),
         "startup screenshot failed: {:?}",
@@ -2291,11 +2149,10 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
     assert_eq!((width, height), (4, 2));
 
     // A second capture reuses the next free slot, like the running path.
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("startup F9 queues a second capture");
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     let second = app
         .save_next_screenshot(Some(&presented), 4, 2, 1.0)
-        .expect("second screenshot request was pending");
+        .test_value();
     assert_eq!(
         second.path,
         install.path().join("Screenshots/Screenshot002.png")
@@ -2304,22 +2161,17 @@ fn startup_f9_saves_the_presented_classic_gui_frame() {
 
 #[test]
 fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
-    let install = tempdir().expect("screenshot install root");
-    let user_data = tempdir().expect("screenshot user data");
-    fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
-    fs::write(
-            install.path().join("planet/System.c4g/LanguageUS.txt"),
-            b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n",
-        )
-        .expect("fixture screenshot language resources");
+    let install = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
+    fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n").test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("fixture app paths");
-    paths.ensure_user_dirs().expect("fixture user directories");
-    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
-        .expect("fixture runtime language selection");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
     let mut app = new_running_sandbox_app();
     app.app_paths = Some(paths);
@@ -2334,15 +2186,14 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
         180, 190, 200, 210, 220, 230, 240, 250, 249, 248, 247,
     ];
 
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("running F9 is implemented");
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     assert_eq!(
         app.pending_screenshots.front().map(|request| request.kind),
         Some(ScreenshotKind::PresentedFrame)
     );
     let first_outcome = app
         .save_next_screenshot(Some(&presented), 4, 2, 2.0)
-        .expect("screenshot request was pending");
+        .test_value();
     assert!(
         first_outcome.result.is_ok(),
         "presented screenshot failed: {:?}",
@@ -2375,16 +2226,14 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     );
 
     let mut logical_frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut logical_frame)
-        .expect("establish the first active viewport");
-    let landscape = app.snapshot.landscape.as_ref().expect("sandbox landscape");
-    let expected_width =
-        scaled_screenshot_extent(landscape.width(), 1.5).expect("scaled landscape width");
+    app.test_render(&mut logical_frame);
+    let landscape = app.snapshot.landscape.test_ref();
+    let expected_width = scaled_screenshot_extent(landscape.width(), 1.5).test_value();
     let expected_height = scaled_screenshot_extent(
         u32::try_from(landscape.estimated_height()).expect("positive landscape height"),
         1.5,
     )
-    .expect("scaled landscape height");
+    .test_value();
     let installed_gamma = app
         .graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
@@ -2395,8 +2244,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
 
     app.start_running_chat(RunningChatMode::All);
     app.keyboard_modifiers = ModifiersState::CONTROL;
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("running Ctrl+F9 is implemented");
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     assert_eq!(
         app.pending_screenshots.front().map(|request| request.kind),
         Some(ScreenshotKind::FullLandscape)
@@ -2417,7 +2265,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     app.clear_message_board_log();
     let second_outcome = app
         .save_next_screenshot(Some(&presented), 4, 2, 1.5)
-        .expect("full screenshot request was pending");
+        .test_value();
     assert!(
         second_outcome.result.is_ok(),
         "full-landscape screenshot failed: {:?}",
@@ -2447,12 +2295,10 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
         "screenshots do not end the game"
     );
 
-    app.close_running_chat().expect("close running chat");
+    app.close_running_chat().test_value();
     app.keyboard_modifiers = ModifiersState::empty();
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("first repeated screenshot keydown");
-    app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-        .expect("second repeated screenshot keydown");
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
     assert_eq!(
         app.pending_screenshots
             .iter()
@@ -2468,27 +2314,21 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
 
 #[test]
 fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
-    let install = tempdir().expect("screenshot install root");
-    let user_data = tempdir().expect("screenshot user data");
-    fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
-    fs::write(
-            install.path().join("planet/System.c4g/LanguageUS.txt"),
-            b"IDS_PRC_SCREENSHOT=Localized success: %s\nIDS_PRC_SCREENSHOTERROR=Localized failure: %s\n",
-        )
-        .expect("fixture localized screenshot resources");
+    let install = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
+    fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_PRC_SCREENSHOT=Localized success: %s\nIDS_PRC_SCREENSHOTERROR=Localized failure: %s\n").test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("fixture app paths");
-    paths.ensure_user_dirs().expect("fixture user directories");
-    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
-        .expect("fixture runtime language selection");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
     let mut app = new_running_sandbox_app();
     app.app_paths = Some(paths);
-    app.reload_application_language_resources()
-        .expect("reload localized screenshot resources after replacing fixture paths");
+    app.reload_application_language_resources().test_value();
     app.set_display_mode(DisplayMode::Window);
     let expected_path = install.path().join("Screenshots/Screenshot001.png");
 
@@ -2497,11 +2337,8 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
         (ModifiersState::CONTROL, ScreenshotKind::FullLandscape),
     ] {
         app.keyboard_modifiers = modifiers;
-        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
-            .expect("running screenshot shortcut is implemented");
-        let outcome = app
-            .save_next_screenshot(None, 4, 2, 1.0)
-            .expect("screenshot request was pending");
+        app.test_key(VirtualKeyCode::F9, ElementState::Pressed);
+        let outcome = app.save_next_screenshot(None, 4, 2, 1.0).test_value();
         assert_eq!(outcome.kind, kind);
         assert_eq!(outcome.path, expected_path);
         assert!(outcome
@@ -2534,17 +2371,16 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
 #[test]
 fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated definition-font user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let definition_root = tempdir().expect("custom definition root");
+        .test_value();
+    let definition_root = tempdir();
     let custom_objects = definition_root.path().join("Objects.c4d");
-    fs::create_dir_all(&custom_objects).expect("custom Objects.c4d");
-    fs::write(custom_objects.join("Endeavour.ttf"), b"override")
-        .expect("definition-root font override");
+    fs::create_dir_all(&custom_objects).test_value();
+    fs::write(custom_objects.join("Endeavour.ttf"), b"override").test_value();
 
     let mut frontend = FrontendScenario::fallback();
     frontend.identifier = "Tutorial.c4f/Tutorial01.c4s".to_string();
@@ -2557,7 +2393,7 @@ fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
     let app = new_menu_app_with_paths(320, 200, &paths);
 
     let setup = build_scenario_loader(&frontend, &definition_load, &paths, app.assets.as_ref())
-        .expect("definition-root vector font is ignored");
+        .test_value();
     for name in CLASSIC_GLOBAL_GUI_FONTS {
         assert!(
             !setup.refreshed_global_gui_failures.contains_key(name),
@@ -2567,7 +2403,7 @@ fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
 
     let resolution = app
         .loaded_game_global_gui_resolution(&frontend, Some(&definition_load))
-        .expect("resolve saved-game target GUI groups");
+        .test_value();
     for name in CLASSIC_GLOBAL_GUI_FONTS {
         assert!(
             !resolution.failures.contains_key(name),
@@ -2576,7 +2412,7 @@ fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
     }
     app.assets
         .require_classic_global_gui_bootstrap_resources(&resolution.failures)
-        .expect("definition-root vector file does not poison global GUI resources");
+        .test_value();
 }
 
 #[test]
@@ -2592,19 +2428,15 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("advanced-options user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
-    fs::write(
-            paths.config_file(),
-            "# standalone note\n[General]\nLanguageEx=DE\nName=Old # keep this note\nFPS=yes\nVersion=347\nConfigResetSafety=42\nVendorExtension=keep\n[Graphics]\nSmokeLevel=200\n[Vendor]\nTemplate=\"<i>keep</i>\"\nEscaped=\"\\101\\x42\\33\"\n",
-        )
-        .expect("seed typed config");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "# standalone note\n[General]\nLanguageEx=DE\nName=Old # keep this note\nFPS=yes\nVersion=347\nConfigResetSafety=42\nVendorExtension=keep\n[Graphics]\nSmokeLevel=200\n[Vendor]\nTemplate=\"<i>keep</i>\"\nEscaped=\"\\101\\x42\\33\"\n").test_value();
 
     let mut app = new_menu_app_with_paths(1280, 720, &paths);
     install_classic_test_assets(&mut app);
@@ -2613,25 +2445,19 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     let layout = clonk_frontend::startup_options_dlg::options_dlg_layout(
         1280,
         720,
-        app.assets.clonk_fonts.as_deref().expect("GUI fonts"),
-        app.assets
-            .options_book_fonts
-            .as_deref()
-            .expect("options book fonts"),
+        app.assets.clonk_fonts.as_deref().test_value(),
+        app.assets.options_book_fonts.as_deref().test_value(),
     );
     let advanced_point = PhysicalPosition::new(
         f64::from(layout.advanced_button.x + layout.advanced_button.w / 2),
         f64::from(layout.advanced_button.y + layout.advanced_button.h / 2),
     );
-    let before_warning = fs::read(paths.config_file()).expect("config before warning");
-    app.handle_cursor_moved(advanced_point)
-        .expect("hover Advanced settings");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Advanced settings");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release Advanced settings");
+    let before_warning = fs::read(paths.config_file()).test_value();
+    app.test_cursor(advanced_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
 
-    let warning = app.message_dialogs.last().expect("advanced warning");
+    let warning = app.message_dialogs.last().test_value();
     assert_eq!(warning.state.buttons(), MessageDialogButtons::OK_CANCEL);
     assert_eq!(
         warning.state.focused_button(),
@@ -2640,38 +2466,30 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
     assert!(app.startup_options_advanced_dialog.is_none());
     app.finish_message_dialog(MessageDialogResult::Cancel)
-        .expect("cancel warning");
+        .test_value();
     assert_eq!(
         fs::read(paths.config_file()).expect("config after warning cancel"),
         before_warning
     );
 
     {
-        let options = app
-            .startup_options_dialog
-            .as_mut()
-            .expect("Options dialog before advanced editor");
+        let options = app.startup_options_dialog.test_mut();
         options.restore_sheet(OptionsSheet::Network);
         options
             .network_mut()
             .set_text(NetworkTextField::LocalName, "Unsaved host".to_string());
     }
-    let before_editor_open =
-        fs::read(paths.config_file()).expect("config before opening advanced editor");
+    let before_editor_open = fs::read(paths.config_file()).test_value();
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
-        .expect("reopen advanced warning");
+        .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("accept advanced warning");
+        .test_value();
     assert_eq!(
         fs::read(paths.config_file()).expect("config after opening advanced editor"),
         before_editor_open,
         "opening Advanced must not persist or rewrite Options configuration"
     );
-    let controller = &app
-        .startup_options_advanced_dialog
-        .as_ref()
-        .expect("advanced editor")
-        .controller;
+    let controller = &app.startup_options_advanced_dialog.test_ref().controller;
     assert_eq!(controller.labels().caption, "Erweiterte Einstellungen");
     assert_eq!(controller.labels().save, "&Speichern");
     assert_eq!(controller.labels().cancel, "Abbrechen");
@@ -2728,20 +2546,15 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
 
     let mut rendered = vec![0_u8; 1280 * 720 * 4];
-    app.render(&mut rendered).expect("render advanced modal");
+    app.test_render(&mut rendered);
     assert!(rendered.iter().any(|byte| *byte != 0));
 
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt for Advanced hotkey");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("ignore Alt+Enter");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("release ignored Alt+Enter");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert!(app.startup_options_advanced_dialog.is_some());
-    app.handle_key(VirtualKeyCode::KeyS, ElementState::Pressed)
-        .expect("invoke localized Advanced Save hotkey");
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Alt");
+    app.test_key(VirtualKeyCode::KeyS, ElementState::Pressed);
+    app.test_modifiers(ModifiersState::empty());
     assert!(app.startup_options_advanced_dialog.is_none());
     assert_eq!(
         Config::load(paths.config_file())
@@ -2758,9 +2571,9 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         OptionsSheet::Network
     );
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
-        .expect("reopen after Alt+S");
+        .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("accept warning after Alt+S");
+        .test_value();
 
     let slot = GamepadSlot::new(0);
     let sourced = |gamepad, cluster, event| SourcedGamepadEvent {
@@ -2780,7 +2593,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         )],
         true,
     )
-    .expect("ignore non-primary Advanced GUI button");
+    .test_value();
     app.process_sourced_gamepad_event_batch(
         [sourced(
             0,
@@ -2793,15 +2606,11 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         )],
         false,
     )
-    .expect("ignore Advanced GUI button while gamepad GUI is disabled");
+    .test_value();
     assert!(app.startup_options_advanced_dialog.is_some());
 
     {
-        let controller = &mut app
-            .startup_options_advanced_dialog
-            .as_mut()
-            .expect("advanced editor for clustered input")
-            .controller;
+        let controller = &mut app.startup_options_advanced_dialog.test_mut().controller;
         while controller.focus()
             != clonk_frontend::startup_options_advanced::AdvancedConfigFocus::Save
         {
@@ -2820,9 +2629,9 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         )],
         true,
     )
-    .expect("press focused Advanced Save");
+    .test_value();
     app.process_sourced_gamepad_event_batch([sourced(0, 3, GamepadEvent::Clear { slot })], true)
-        .expect("clear held Advanced button");
+        .test_value();
     app.process_sourced_gamepad_event_batch(
         [
             sourced(
@@ -2846,7 +2655,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         ],
         true,
     )
-    .expect("release cleared Advanced button without saving");
+    .test_value();
     assert!(app.startup_options_advanced_dialog.is_some());
 
     app.process_sourced_gamepad_event_batch(
@@ -2872,20 +2681,16 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         ],
         true,
     )
-    .expect("Advanced raw High owns its Cancel alias cluster");
+    .test_value();
     assert!(app.startup_options_advanced_dialog.is_none());
     assert_eq!(app.startup_view, StartupView::Options);
     assert!(app.startup_options_dialog.is_some());
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
-        .expect("reopen after clustered gamepad cancel");
+        .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("accept reopened advanced warning");
+        .test_value();
 
-    let controller = &mut app
-        .startup_options_advanced_dialog
-        .as_mut()
-        .expect("advanced editor")
-        .controller;
+    let controller = &mut app.startup_options_advanced_dialog.test_mut().controller;
     assert!(controller.set_value(
         "General",
         "Name",
@@ -2930,7 +2735,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         AdvancedConfigValue::ReadOnly("999".to_string()),
     ));
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
-        .expect("save advanced settings");
+        .test_value();
 
     assert!(app.startup_options_advanced_dialog.is_none());
     assert_eq!(app.startup_view, StartupView::Options);
@@ -2955,7 +2760,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
             .frontend_music,
         "the recreated Sound sheet must use the advanced value"
     );
-    let saved = Config::load(paths.config_file()).expect("reload advanced config");
+    let saved = Config::load(paths.config_file()).test_value();
     assert_eq!(saved.get_in(Some("General"), "Name"), Some("New name"));
     assert_eq!(saved.get_in(Some("General"), "FPS"), Some("1"));
     assert_eq!(saved.get_in(Some("General"), "Record"), Some("1"));
@@ -2999,8 +2804,8 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     });
     app.persist_open_options_config()
         .expect("open Options config")
-        .expect("normal Options resave");
-    let resaved = Config::load(paths.config_file()).expect("reload normal Options resave");
+        .test_value();
+    let resaved = Config::load(paths.config_file()).test_value();
     assert!(resaved
         .get_in(Some("Sound"), "MenuMusic")
         .is_some_and(|value| !parse_config_bool(value)));
@@ -3010,21 +2815,18 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         "normal Options persistence must not undo the advanced binding"
     );
     let options_before_cancel = {
-        let options = app
-            .startup_options_dialog
-            .as_mut()
-            .expect("Options dialog before cancel path");
+        let options = app.startup_options_dialog.test_mut();
         options.network_mut().set_text(
             NetworkTextField::LocalName,
             "Keep this unsaved edit".to_string(),
         );
         options as *const _ as usize
     };
-    let before_cancel = fs::read(paths.config_file()).expect("config before editor cancel");
+    let before_cancel = fs::read(paths.config_file()).test_value();
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
-        .expect("open cancel-path warning");
+        .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("open cancel-path editor");
+        .test_value();
     assert_eq!(
         fs::read(paths.config_file()).expect("config after cancel-path open"),
         before_cancel
@@ -3041,8 +2843,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         ));
     let cancel = app
         .startup_options_advanced_dialog
-        .as_ref()
-        .expect("cancel-path editor")
+        .test_ref()
         .controller
         .layout()
         .cancel_button;
@@ -3050,15 +2851,10 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
         (cancel.x + cancel.w / 2) as f32,
         (cancel.y + cancel.h / 2) as f32,
     );
-    app.handle_touch(TouchPhase::Started, cancel_point)
-        .expect("touch advanced Cancel");
-    app.handle_touch(TouchPhase::Ended, cancel_point)
-        .expect("release advanced Cancel");
+    app.test_touch(TouchPhase::Started, cancel_point);
+    app.test_touch(TouchPhase::Ended, cancel_point);
     assert!(app.startup_options_advanced_dialog.is_none());
-    let options_after_cancel = app
-        .startup_options_dialog
-        .as_ref()
-        .expect("same Options dialog after advanced Cancel");
+    let options_after_cancel = app.startup_options_dialog.test_ref();
     assert_eq!(
         options_after_cancel as *const _ as usize,
         options_before_cancel
@@ -3074,13 +2870,13 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
-        .expect("open save-failure warning");
+        .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("open save-failure editor");
-    fs::remove_file(paths.config_file()).expect("remove config before forced save failure");
-    fs::create_dir(paths.config_file()).expect("block config file with a directory");
+        .test_value();
+    fs::remove_file(paths.config_file()).test_value();
+    fs::create_dir(paths.config_file()).test_value();
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
-        .expect("surface advanced save failure");
+        .test_value();
     assert!(
         app.startup_options_advanced_dialog.is_some(),
         "a failed Save keeps the draft editor open"
@@ -3095,9 +2891,9 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
     assert!(app.status_text.is_empty());
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("close save error");
+        .test_value();
     assert!(app.startup_options_advanced_dialog.is_some());
-    fs::remove_dir(paths.config_file()).expect("remove blocked config path");
+    fs::remove_dir(paths.config_file()).test_value();
     reset_cached_app_paths();
 }
 
@@ -3114,7 +2910,7 @@ fn options_gamepad_capture_records_the_exact_axis_key() {
         control: ControlBindingId::Dig as usize,
     };
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
-        .expect("open gamepad axis capture");
+        .test_value();
     let slot = GamepadSlot::new(0);
     app.process_sourced_gamepad_event_batch(
         [
@@ -3139,7 +2935,7 @@ fn options_gamepad_capture_records_the_exact_axis_key() {
         ],
         true,
     )
-    .expect("capture exact axis before its semantic alias");
+    .test_value();
 
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
@@ -3201,7 +2997,7 @@ fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
             control: control as usize,
         };
         app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
-            .expect("open gamepad capture");
+            .test_value();
 
         let mut manager = GamepadManager::disabled();
         let events = manager.feed_raw_event(slot, raw_event);
@@ -3214,7 +3010,7 @@ fn options_gamepad_capture_accepts_full_classic_raw_event_space() {
             "{raw_event:?} must reach the classic axis space"
         );
         app.process_sourced_gamepad_event_batch(events, true)
-            .expect("capture the raw axis identity");
+            .test_value();
 
         assert!(app.message_dialogs.is_empty(), "capture closed its modal");
         assert_eq!(
@@ -3233,19 +3029,16 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    persist_config_value(&paths, "General", "ShowLogTimestamps", "1")
-        .expect("seed timestamp config");
-    persist_config_value(&paths, "Sound", "MaxChannels", "37")
-        .expect("seed preserved sound config");
-    persist_config_value(&paths, "Sound", "VendorExtension", "keep-me")
-        .expect("seed preserved sound extension");
+    let paths = test_app_paths();
+    persist_config_value(&paths, "General", "ShowLogTimestamps", "1").test_value();
+    persist_config_value(&paths, "Sound", "MaxChannels", "37").test_value();
+    persist_config_value(&paths, "Sound", "VendorExtension", "keep-me").test_value();
     let mut app = GameApp::new(
         1280,
         720,
@@ -3265,15 +3058,11 @@ fn options_dialog_saves_log_timestamps_when_closed() {
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     wait_for_menu(&mut app);
     app.open_options_menu();
-    let gui = app.assets.clonk_fonts.as_deref().expect("GUI fonts");
-    let book = app
-        .assets
-        .options_book_fonts
-        .as_deref()
-        .expect("options book fonts");
+    let gui = app.assets.clonk_fonts.as_deref().test_value();
+    let book = app.assets.options_book_fonts.as_deref().test_value();
     let checkbox = clonk_frontend::startup_options_dlg::options_dlg_layout(1280, 720, gui, book)
         .timestamps_check;
     let point = PhysicalPosition::new(
@@ -3281,11 +3070,9 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         f64::from(checkbox.y + checkbox.h / 2),
     );
 
-    app.handle_cursor_moved(point).expect("hover Timestamps");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Timestamps");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release Timestamps");
+    app.test_cursor(point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(
         !app.startup_options_dialog
             .as_ref()
@@ -3302,10 +3089,8 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         "C++ defers Config.Save until DoBack"
     );
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold Ctrl");
-    app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("global frontend-sound toggle");
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert!(
         app.startup_options_dialog
             .as_ref()
@@ -3322,13 +3107,12 @@ fn options_dialog_saves_log_timestamps_when_closed() {
             .menu_sound_enabled,
         "live audio configuration remains authoritative"
     );
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Ctrl");
+    app.test_modifiers(ModifiersState::empty());
 
     {
         use clonk_frontend::startup_options_graphics::GraphicsDisplayMode;
         use clonk_frontend::startup_options_network::NetworkPortId;
-        let dialog = app.startup_options_dialog.as_mut().unwrap();
+        let dialog = app.startup_options_dialog.as_mut().test_value();
         dialog
             .graphics_mut()
             .set_display_mode(GraphicsDisplayMode::Window);
@@ -3346,11 +3130,10 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         .rebind_button(1, ControlBindingId::Up, 1, 4);
     app.gamepad_gui_control = true;
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("close options");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
     assert_eq!(app.startup_view, StartupView::MainMenu);
-    let config = Config::load(paths.config_file()).expect("config after close");
+    let config = Config::load(paths.config_file()).test_value();
     assert_eq!(
         config.get_in(Some("General"), "ShowLogTimestamps"),
         Some("0")
@@ -3406,7 +3189,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
         Some("Gamepad0"),
         "Button7",
         input::legacy_gamepad_axis_key(1, 0, false)
-            .expect("physical gamepad two axis key")
+            .test_value()
             .to_string(),
     );
     let mut app = new_running_sandbox_app();
@@ -3415,7 +3198,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
     let secondary = primary + 1;
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
-        .expect("register secondary local player");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.local_controls = LocalControlRegistry::default();
     app.local_controls.initialize(LocalControlInit {
@@ -3436,7 +3219,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
     });
 
     let slot = GamepadSlot::new(1);
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::Axis {
             slot,
             axis: LegacyGamepadAxis::new(0, false),
@@ -3447,8 +3230,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
             button: ControlButton::Left,
             state: ElementState::Pressed,
         },
-    ])
-    .expect("press configured gamepad-two axis");
+    ]);
 
     let pressed = |app: &GameApp, owner| {
         app.engine
@@ -3456,7 +3238,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
             .players
             .into_iter()
             .find(|player| player.id == owner)
-            .expect("local player")
+            .test_value()
             .control
             .pressed_coms
     };
@@ -3472,7 +3254,7 @@ fn axis_binding_routes_to_configured_set_not_physical_slot() {
 /// segment — so a scenario inside the root and one outside it shorten alike.
 #[test]
 fn initial_record_origin_is_relative_to_cpp_executable_root() {
-    let paths = AppPaths::discover().expect("discover repository install");
+    let paths = test_app_paths();
     let scenario = paths
         .executable_data_root()
         .join("Missions.c4f/Deep/Game.c4s");
@@ -3493,13 +3275,11 @@ fn initial_record_origin_is_relative_to_cpp_executable_root() {
 
 #[test]
 fn record_index_and_basename_match_cpp_directory_scan() {
-    let directory = tempdir().expect("record directory");
-    fs::write(directory.path().join("001-First.c4s"), b"record").expect("write first record");
-    fs::create_dir(directory.path().join("002-Unpacked.c4s"))
-        .expect("create unpacked record group");
-    fs::write(directory.path().join("mixed.C4S"), b"record").expect("write mixed-case record");
-    fs::write(directory.path().join("999-not-a-record.txt"), b"other")
-        .expect("write unrelated entry");
+    let directory = tempdir();
+    fs::write(directory.path().join("001-First.c4s"), b"record").test_value();
+    fs::create_dir(directory.path().join("002-Unpacked.c4s")).test_value();
+    fs::write(directory.path().join("mixed.C4S"), b"record").test_value();
+    fs::write(directory.path().join("999-not-a-record.txt"), b"other").test_value();
 
     assert_eq!(next_recording_index(directory.path()).unwrap(), 4);
     assert_eq!(sanitize_record_name("Scenario007"), "Scenario");
@@ -3519,7 +3299,7 @@ fn forced_recording_rejects_missing_prepared_storage() {
 
 #[test]
 fn synchronize_record_request_starts_with_the_executing_control_list() {
-    let directory = tempdir().expect("record directory");
+    let directory = tempdir();
     let output_path = directory.path().join("001-Runtime.c4s");
     let mut app = new_state_only_running_sandbox_app();
     app.recording_enabled = false;
@@ -3532,13 +3312,13 @@ fn synchronize_record_request_starts_with_the_executing_control_list() {
     };
 
     app.apply_ready_controls(0, vec![NetworkControl::Synchronize(synchronize.clone())])
-        .expect("execute runtime record synchronize");
+        .test_value();
     assert!(app.recording.is_some(), "the sync request arms recording");
     assert!(app.finish_recording().is_none());
 
-    let group = Group::open(output_path).expect("runtime record group");
-    let stream = group.read_file("CtrlRec.c4b").expect("runtime CtrlRec");
-    let mut playback = ControlRecordPlayback::from_bytes(&stream).expect("runtime playback");
+    let group = Group::open(output_path).test_value();
+    let stream = group.read_file("CtrlRec.c4b").test_value();
+    let mut playback = ControlRecordPlayback::from_bytes(&stream).test_value();
     assert_eq!(
         playback.take_controls(0),
         vec![clonk_engine::ControlPacket::Synchronize(synchronize)]
@@ -3547,7 +3327,7 @@ fn synchronize_record_request_starts_with_the_executing_control_list() {
 
 #[test]
 fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
-    let directory = tempdir().expect("record directory");
+    let directory = tempdir();
     let mut app = new_state_only_running_sandbox_app();
     install_test_recording_template(&mut app, directory.path().join("001-RuntimeJoin.c4s"));
     app.apply_synchronized_controls(
@@ -3560,7 +3340,7 @@ fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
             },
         )],
     )
-    .expect("execute unrequested CDT_Sync");
+    .test_value();
 
     assert!(app.recording.is_none());
     assert!(app.recording_template.is_some());
@@ -3576,7 +3356,7 @@ fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
             },
         )],
     )
-    .expect("the next game synchronization starts the request");
+    .test_value();
 
     assert!(!app.runtime_record_requested);
     assert!(app.recording.is_some());
@@ -3584,29 +3364,27 @@ fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
 
 #[test]
 fn save_player_files_synchronize_persists_local_player_core_and_crew() {
-    let directory = tempdir().expect("player profile directory");
+    let directory = tempdir();
     let profile_path = directory.path().join("Local.c4p");
-    fs::create_dir(&profile_path).expect("create unpacked local profile");
+    fs::create_dir(&profile_path).test_value();
     fs::write(
         profile_path.join("Player.txt"),
         b"[Player]\nName=Stale\nScore=1\n",
     )
-    .expect("stale player core");
-    fs::write(profile_path.join("C4Player.c4b"), b"obsolete core").expect("obsolete binary core");
-    fs::write(profile_path.join("KeepRoot.dat"), b"root sentinel").expect("profile sentinel");
-    fs::write(profile_path.join(".local-metadata"), b"ignored sentinel")
-        .expect("ignored profile metadata");
+    .test_value();
+    fs::write(profile_path.join("C4Player.c4b"), b"obsolete core").test_value();
+    fs::write(profile_path.join("KeepRoot.dat"), b"root sentinel").test_value();
+    fs::write(profile_path.join(".local-metadata"), b"ignored sentinel").test_value();
     for (filename, name) in [("Hero.c4i", "Hero"), ("Idle.c4i", "Idle")] {
         let child = profile_path.join(filename);
-        fs::create_dir(&child).expect("create stale crew child");
+        fs::create_dir(&child).test_value();
         fs::write(
             child.join("ObjectInfo.txt"),
             format!("[ObjectInfo]\nid=CLNK\nName={name}\n"),
         )
-        .expect("stale crew core");
-        fs::write(child.join("KeepCrew.dat"), format!("{name} sentinel")).expect("crew sentinel");
-        fs::write(child.join(".crew-metadata"), format!("{name} metadata"))
-            .expect("ignored crew metadata");
+        .test_value();
+        fs::write(child.join("KeepCrew.dat"), format!("{name} sentinel")).test_value();
+        fs::write(child.join(".crew-metadata"), format!("{name} metadata")).test_value();
     }
 
     let mut app = new_state_only_synthetic_crew_running_sandbox_app();
@@ -3654,7 +3432,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         .players
         .iter_mut()
         .find(|player| player.id == player_number)
-        .expect("sandbox player state");
+        .test_value();
     player.player_info_id = info_id;
     player.at_client = clonk_engine::PlayerAtClient::HOST;
     player.status = clonk_engine::PlayerStatus::Active;
@@ -3676,12 +3454,9 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         ],
     );
     state.crew_info_order.insert(player_number, vec![0, 1]);
+    app.engine.restore_state(&state).test_value();
     app.engine
-        .restore_state(&state)
-        .expect("install synchronized player state");
-    app.engine
-        .player_mut(player_number)
-        .expect("sandbox player")
+        .test_player_mut(player_number)
         .set_game_join_time(10);
     app.engine.set_local_players([player_number]);
     app.control_player_infos.replace_snapshot(
@@ -3713,9 +3488,9 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         })
     };
     app.apply_synchronized_controls(0, vec![synchronize()])
-        .expect("save local player profile");
+        .test_value();
 
-    let saved = PlayerFile::load_from_path(&profile_path).expect("reload saved profile");
+    let saved = PlayerFile::load_from_path(&profile_path).test_value();
     assert_eq!(saved.name, "Persistent Player");
     assert_eq!(
         (
@@ -3735,7 +3510,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         .crew
         .iter()
         .find(|crew| crew.name == "Hero")
-        .expect("active crew persisted");
+        .test_value();
     assert_eq!(
         (hero.experience, hero.death_count, hero.total_playing_time),
         (321, 2, 22)
@@ -3748,12 +3523,12 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         .crew
         .iter()
         .find(|crew| crew.name == "Idle")
-        .expect("idle crew persisted");
+        .test_value();
     assert_eq!(
         idle.total_playing_time, 11,
         "idle crew has no active-time delta"
     );
-    let saved_group = Group::open(&profile_path).expect("saved profile remains a C4Group");
+    let saved_group = Group::open(&profile_path).test_value();
     assert_eq!(
         saved_group.read_file("KeepRoot.dat").unwrap(),
         b"root sentinel"
@@ -3780,10 +3555,10 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     // unchecked copy leaves a fresh temp group that Save fills. Recreate
     // it at the same game time and also prove the ledgers are not counted
     // twice at consecutive SavePlrs boundaries.
-    fs::remove_dir_all(&profile_path).expect("remove admitted local profile");
+    fs::remove_dir_all(&profile_path).test_value();
     app.apply_synchronized_controls(1, vec![synchronize()])
-        .expect("recreate missing local player profile");
-    let recreated = PlayerFile::load_from_path(&profile_path).expect("reload recreated profile");
+        .test_value();
+    let recreated = PlayerFile::load_from_path(&profile_path).test_value();
     assert_eq!(recreated.total_playing_time, 55);
     assert_eq!(
         recreated
@@ -3794,7 +3569,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
             .total_playing_time,
         22
     );
-    let recreated_group = Group::open(&profile_path).expect("recreated profile C4Group");
+    let recreated_group = Group::open(&profile_path).test_value();
     assert!(!recreated_group.exists("KeepRoot.dat"));
     assert!(!recreated_group.exists("C4Player.c4b"));
     assert!(fs::read_dir(directory.path())
@@ -3807,28 +3582,24 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
 
     // SavePlrs inside control replay is a complete no-op for both the
     // mutable time checkpoint and the app-owned profile write.
-    let profile_before_replay = fs::read(&profile_path).expect("snapshot recreated profile");
+    let profile_before_replay = fs::read(&profile_path).test_value();
     let mut replay_state = app.engine.capture_state();
     replay_state.game_time = 30;
     replay_state
         .players
         .iter_mut()
         .find(|player| player.id == player_number)
-        .expect("replay player state")
+        .test_value()
         .score = 901;
+    app.engine.restore_state(&replay_state).test_value();
     app.engine
-        .restore_state(&replay_state)
-        .expect("advance live replay state");
-    app.engine
-        .player_mut(player_number)
-        .expect("replay player")
+        .test_player_mut(player_number)
         .set_game_join_time(25);
-    app.control_playback = Some(
-        ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).expect("open replay marker"),
-    );
+    app.control_playback =
+        Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.engine.set_replay_control(true);
     app.apply_synchronized_controls(2, vec![synchronize()])
-        .expect("replay SavePlrs is suppressed");
+        .test_value();
     assert_eq!(fs::read(&profile_path).unwrap(), profile_before_replay);
     assert_eq!(
         (
@@ -3848,7 +3619,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
     let replay_hero = replay_roster
         .iter()
         .find(|crew| crew.name == "Hero")
-        .expect("replay hero remains");
+        .test_value();
     assert_eq!(
         (replay_hero.total_playing_time, replay_hero.in_action_time),
         (22, 25)
@@ -3857,7 +3628,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
 
 #[test]
 fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
-    let directory = tempdir().expect("record directory");
+    let directory = tempdir();
     let output_path = directory.path().join("001-ConsoleRuntime.c4s");
     let mut app = new_state_only_running_sandbox_app();
     install_test_recording_template(&mut app, output_path);
@@ -3896,21 +3667,21 @@ fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
             },
         )],
     )
-    .expect("execute queued runtime-record synchronization");
+    .test_value();
     assert!(!app.runtime_record_requested);
     assert!(app.recording.is_some());
 }
 
 #[test]
 fn developer_console_save_as_preserves_unpacked_group_representation() {
-    let directory = tempdir().expect("save-as root");
+    let directory = tempdir();
     let destination = directory.path().join("Copy.c4s");
     let mut group = MutableGroup::new("Source.c4s");
     group
         .add_file("Scenario.txt", b"[Head]\nTitle=Copy\n".to_vec())
-        .expect("add scenario head");
+        .test_value();
 
-    persist_console_save_group(&group, &destination, true).expect("persist unpacked Save As copy");
+    persist_console_save_group(&group, &destination, true).test_value();
     assert!(destination.is_dir());
     assert_eq!(
         fs::read(destination.join("Scenario.txt")).unwrap(),
@@ -3920,22 +3691,21 @@ fn developer_console_save_as_preserves_unpacked_group_representation() {
 
 #[test]
 fn folder_live_save_material_respects_existing_directory_representation() {
-    let directory = tempdir().expect("folder Material root");
+    let directory = tempdir();
     let destination = directory.path().join("Live.c4s");
     let material = destination.join("Material.c4g");
-    fs::create_dir_all(&material).expect("create unpacked material group");
-    fs::write(material.join("Keep.dat"), b"keep").expect("write material sibling");
-    fs::write(material.join("TexMap.txt"), b"old").expect("write old texture map");
+    fs::create_dir_all(&material).test_value();
+    fs::write(material.join("Keep.dat"), b"keep").test_value();
+    fs::write(material.join("TexMap.txt"), b"old").test_value();
 
     let mut patch = MutableGroup::new("Material.c4g");
     patch
         .add_file("TexMap.txt", b"new texture map".to_vec())
-        .expect("add texture patch");
+        .test_value();
     let mut journal = developer_console_save::FolderSaveJournal::default();
-    journal.merge_material_group(patch.pack_raw().expect("compose material patch"));
+    journal.merge_material_group(patch.pack_raw().test_value());
 
-    replay_folder_save_journal(&journal, &destination, b"Folder maker")
-        .expect("merge unpacked Material.c4g");
+    replay_folder_save_journal(&journal, &destination, b"Folder maker").test_value();
 
     assert!(material.is_dir());
     assert_eq!(fs::read(material.join("Keep.dat")).unwrap(), b"keep");
@@ -3950,14 +3720,11 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
     let mut app = new_running_sandbox_app();
     let packet = recorded_right_control(app.local_owner);
     let mut writer = ControlRecordWriter::new();
-    writer
-        .record_packet(1, &packet)
-        .expect("encode replay control");
-    app.control_playback =
-        Some(ControlRecordPlayback::from_bytes(&writer.finish(1)).expect("open replay stream"));
+    writer.record_packet(1, &packet).test_value();
+    app.control_playback = Some(ControlRecordPlayback::from_bytes(&writer.finish(1)).test_value());
     app.engine.set_replay_control(true);
 
-    app.update().expect("advance frame zero");
+    app.test_update();
     assert_eq!(app.engine.frame(), 1);
     assert_eq!(
         app.engine
@@ -3970,7 +3737,7 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
         "frame-one control must not execute during frame zero"
     );
 
-    app.update().expect("execute frame-one replay control");
+    app.test_update();
     assert_eq!(app.engine.frame(), 2);
     assert_ne!(
         app.engine
@@ -3986,9 +3753,9 @@ fn ctrlrec_control_executes_at_start_of_recorded_frame() {
 
 #[test]
 fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
-    let directory = tempdir().expect("replay control groups");
+    let directory = tempdir();
     let replay_path = directory.path().join("TextWins.c4s");
-    fs::create_dir(&replay_path).expect("create dual-format replay");
+    fs::create_dir(&replay_path).test_value();
     let mut app = new_running_sandbox_app();
     let player = app.local_owner;
     let text = format!(
@@ -4023,7 +3790,7 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
         clonk_engine::COM_UP,
         player = player,
     );
-    fs::write(replay_path.join("CtrlRec.txt"), text.as_bytes()).expect("write C++ text record");
+    fs::write(replay_path.join("CtrlRec.txt"), text.as_bytes()).test_value();
 
     let binary_control =
         clonk_engine::ControlPacket::PlayerControl(clonk_engine::PlayerControlData {
@@ -4033,31 +3800,23 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
             by_client: 0,
         });
     let mut binary = ControlRecordWriter::new();
-    binary.record_packet(0, &binary_control).unwrap();
-    fs::write(replay_path.join("CtrlRec.c4b"), binary.finish(1))
-        .expect("write deliberately different binary record");
+    binary.record_packet(0, &binary_control).test_value();
+    fs::write(replay_path.join("CtrlRec.c4b"), binary.finish(1)).test_value();
 
-    let replay_group = Group::open(&replay_path).expect("open dual-format replay");
-    let replay_chunks =
-        replay_control_record_chunks(&replay_group).expect("text record takes precedence");
+    let replay_group = Group::open(&replay_path).test_value();
+    let replay_chunks = replay_control_record_chunks(&replay_group).test_value();
     let dump_path = directory.path().join("preferred.txt");
-    write_classic_record_dump(&replay_chunks, &dump_path)
-        .expect("dump the authoritative text record");
-    let dump = fs::read_to_string(&dump_path).unwrap();
+    write_classic_record_dump(&replay_chunks, &dump_path).test_value();
+    let dump = fs::read_to_string(&dump_path).test_value();
     assert!(dump.contains(&format!("    Com={}\r\n", clonk_engine::COM_RIGHT)));
     assert!(dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_UP)));
     assert!(!dump.contains(&format!("  Com={}\r\n", clonk_engine::COM_LEFT)));
     app.control_playback = Some(ControlRecordPlayback::from_chunks(replay_chunks));
     app.engine.set_replay_control(true);
     app.engine.set_control_host(false);
-    app.update().expect("execute frame-zero text controls");
+    app.test_update();
 
-    let pressed = app
-        .engine
-        .player(player)
-        .expect("sandbox player remains")
-        .control
-        .pressed_coms;
+    let pressed = app.engine.test_player(player).control.pressed_coms;
     assert_ne!(pressed & (1 << clonk_engine::COM_RIGHT), 0);
     assert_ne!(pressed & (1 << clonk_engine::COM_UP), 0);
     assert_eq!(
@@ -4067,27 +3826,26 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
     );
 
     let binary_only_path = directory.path().join("BinaryFallback.c4s");
-    fs::create_dir(&binary_only_path).expect("create binary-only replay");
+    fs::create_dir(&binary_only_path).test_value();
     let mut binary = ControlRecordWriter::new();
-    binary.record_packet(0, &binary_control).unwrap();
-    fs::write(binary_only_path.join("CtrlRec.c4b"), binary.finish(1))
-        .expect("write fallback binary record");
-    let binary_only = Group::open(&binary_only_path).unwrap();
+    binary.record_packet(0, &binary_control).test_value();
+    fs::write(binary_only_path.join("CtrlRec.c4b"), binary.finish(1)).test_value();
+    let binary_only = Group::open(&binary_only_path).test_value();
     let mut fallback =
-        ControlRecordPlayback::from_chunks(replay_control_record_chunks(&binary_only).unwrap());
+        ControlRecordPlayback::from_chunks(replay_control_record_chunks(&binary_only).test_value());
     assert_eq!(fallback.take_controls(0), vec![binary_control.clone()]);
 
     let invalid_text_path = directory.path().join("InvalidTextWins.c4s");
-    fs::create_dir(&invalid_text_path).expect("create malformed text replay");
+    fs::create_dir(&invalid_text_path).test_value();
     fs::write(
         invalid_text_path.join("CtrlRec.txt"),
         b"[Rec]\nFrame=0\nType=1\nID=255\n",
     )
-    .unwrap();
+    .test_value();
     let mut binary = ControlRecordWriter::new();
-    binary.record_packet(0, &binary_control).unwrap();
-    fs::write(invalid_text_path.join("CtrlRec.c4b"), binary.finish(1)).unwrap();
-    let invalid_text = Group::open(&invalid_text_path).unwrap();
+    binary.record_packet(0, &binary_control).test_value();
+    fs::write(invalid_text_path.join("CtrlRec.c4b"), binary.finish(1)).test_value();
+    let invalid_text = Group::open(&invalid_text_path).test_value();
     let error = replay_control_record_chunks(&invalid_text)
         .expect_err("loaded malformed text must not fall back to binary");
     assert!(error.contains("invalid CtrlRec.txt"));
@@ -4097,14 +3855,12 @@ fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
 #[test]
 fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
     let mut app = new_classic_running_sandbox_app();
-    app.control_playback = Some(
-        ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END])
-            .expect("open end-only replay"),
-    );
+    app.control_playback =
+        Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.engine.set_replay_control(true);
     app.engine.set_control_host(false);
 
-    app.update().expect("finish replay");
+    app.test_update();
 
     assert!(app.control_playback.is_none());
     assert!(app.engine.is_control_host());
@@ -4115,13 +3871,13 @@ fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
 fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
             owner,
             vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
         )
-        .expect("place film target away from every scroll bound");
+        .test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
     app.mouse_control = false;
@@ -4129,8 +3885,7 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     app.display_flags.show_commands = false;
     app.film_view_player = Some(owner);
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("render the film-assigned physical observer viewport");
+    app.test_render(&mut frame);
     let before = app.graphics.active_viewport_projections()[0];
     assert_eq!(before.owner, owner);
     assert!(before.is_no_owner_viewport);
@@ -4142,15 +3897,14 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
             before.logical_height,
             true,
         )
-        .expect("freeze the unrelated film target in free-scrolling mode");
-    let player_viewports = app.engine.player(owner).unwrap().viewports().to_vec();
+        .test_value();
+    let player_viewports = app.engine.player(owner).test_value().viewports().to_vec();
     let left = GuiPoint::new(
         before.rect.x as f32,
         (before.rect.y + before.rect.height as i32 / 2) as f32,
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
-        .expect("move passive film pointer onto the left edge");
+    app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
 
     let after_move = app.graphics.active_viewport_projections()[0];
     assert_eq!(after_move.target_x, before.target_x - 10);
@@ -4169,20 +3923,16 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     // fIsNoOwnerViewport. MouseControl remains assigned to NO_OWNER, so
     // its retained VpX/VpY must continue through that owner change.
     assert!(app.set_physical_film_view(OWNER_NONE));
-    app.render(&mut frame)
-        .expect("retarget the same physical observer viewport");
+    app.test_render(&mut frame);
     let retargeted = app.graphics.active_viewport_projections()[0];
     assert_eq!(retargeted.owner, OWNER_NONE);
     assert!(retargeted.is_no_owner_viewport);
 
-    app.update()
-        .expect("classified observer continues scrolling after retarget");
+    app.test_update();
 
     let after_tick = app.graphics.active_viewport_projections()[0];
     assert_eq!(after_tick.target_x, retargeted.target_x - 10);
-    let scroll = app
-        .ingame_edge_scroll
-        .expect("retarget preserves the retained observer edge state");
+    let scroll = app.ingame_edge_scroll.test_value();
     assert!(scroll.observer);
     assert_eq!(scroll.owner, OWNER_NONE);
     assert_eq!(
@@ -4201,14 +3951,14 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
         .iter()
         .find(|player| player.id == local_owner)
         .cloned()
-        .expect("sandbox local player");
+        .test_value();
     let local_focus = local
         .viewports
         .first()
         .and_then(|viewport| viewport.focus)
         .or(local.cursor)
         .or_else(|| local.crew.first().copied())
-        .expect("sandbox local focus");
+        .test_value();
 
     let film_focus = ObjectId::new(
         snapshot
@@ -4219,10 +3969,7 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
             .unwrap_or(0)
             + 1,
     );
-    let mut film_object = snapshot
-        .object(local_focus)
-        .expect("sandbox focus object")
-        .clone();
+    let mut film_object = snapshot.object(local_focus).test_value().clone();
     film_object.id = film_focus;
     snapshot.objects.push(film_object);
 
@@ -4243,9 +3990,8 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
     snapshot.players = vec![split_local, film_player.clone()];
     snapshot.hud.local_players = vec![local_owner, film_player.id];
 
-    let ordinary = collect_viewport_inputs(&snapshot).expect("ordinary viewports");
-    let film = collect_viewport_inputs_with_film_view(&snapshot, Some(film_player.id))
-        .expect("valid replay film target");
+    let ordinary = collect_viewport_inputs(&snapshot).test_value();
+    let film = collect_viewport_inputs_with_film_view(&snapshot, Some(film_player.id)).test_value();
     assert_eq!(film.len(), ordinary.len());
     assert_eq!(film[0].owner, film_player.id);
     assert_eq!(film[0].center, Vector2::new(700, 800));
@@ -4285,8 +4031,8 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
         "only the first physical viewport is retargeted"
     );
 
-    let ownerless = collect_viewport_inputs_with_film_view(&snapshot, Some(OWNER_NONE))
-        .expect("NO_OWNER is a valid temporary target");
+    let ownerless =
+        collect_viewport_inputs_with_film_view(&snapshot, Some(OWNER_NONE)).test_value();
     assert_eq!(ownerless[0].owner, OWNER_NONE);
     assert_eq!(ownerless[0].center, ordinary[0].center);
     assert_eq!(ownerless[0].zoom, ordinary[0].zoom);
@@ -4298,14 +4044,14 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
         .players
         .iter_mut()
         .find(|player| player.id == film_player.id)
-        .expect("film target remains registered");
+        .test_value();
     target.viewports[0].focus = None;
     target.cursor = None;
     target.view_cursor = None;
     target.crew.clear();
     no_target_focus.hud.local_players = vec![local_owner];
-    let unfocused = collect_viewport_inputs_with_film_view(&no_target_focus, Some(film_player.id))
-        .expect("a valid player does not require a focus object");
+    let unfocused =
+        collect_viewport_inputs_with_film_view(&no_target_focus, Some(film_player.id)).test_value();
     assert_eq!(unfocused[0].owner, film_player.id);
     assert_eq!(unfocused[0].center, Vector2::new(700, 800));
     assert_eq!(unfocused[0].focus, ordinary[0].focus);
@@ -4315,12 +4061,12 @@ fn replay_film_view_retargets_only_the_existing_primary_viewport() {
         .players
         .iter_mut()
         .find(|player| player.id == film_player.id)
-        .expect("film target remains registered")
+        .test_value()
         .viewports
         .clear();
     let without_local_slot =
         collect_viewport_inputs_with_film_view(&no_target_viewport, Some(film_player.id))
-            .expect("a valid film target does not need its own local viewport");
+            .test_value();
     assert_eq!(without_local_slot[0].owner, film_player.id);
     assert_eq!(without_local_slot[0].center, ordinary[0].center);
 }
@@ -4334,7 +4080,7 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
     for player in [second, third] {
         app.engine
             .register_player(PlayerConfig::new(player, format!("Player {player}")))
-            .expect("register cycle player");
+            .test_value();
     }
     app.clear_physical_viewport_states();
     let observer = app.ownerless_physical_viewport_state();
@@ -4381,19 +4127,13 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
         "invalid player selects First"
     );
 
-    app.engine
-        .remove_player(second)
-        .expect("remove second player");
-    app.engine
-        .remove_player(third)
-        .expect("remove third player");
+    app.engine.remove_player(second).test_value();
+    app.engine.remove_player(third).test_value();
     app.runtime_flash_message = Some(observer_flash.clone());
     assert!(!app.cycle_primary_viewport_player(true));
     assert_eq!(app.runtime_flash_message, Some(observer_flash.clone()));
 
-    app.engine
-        .remove_player(first)
-        .expect("remove final player");
+    app.engine.remove_player(first).test_value();
     assert!(app.set_physical_film_view(OWNER_NONE));
     assert!(!app.cycle_primary_viewport_player(true));
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
@@ -4403,7 +4143,7 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
 fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let cursor = app.engine.test_crew_cursor(owner);
 
     for (replay, film, overlays_visible) in [
         (0, 0, true),
@@ -4420,19 +4160,17 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
                     ..ObjectUpdate::default()
                 },
             )
-            .expect("clear prior script menu");
+            .test_value();
         set_test_scenario_head_flags(&mut app, replay, film);
         app.snapshot.hud.messages.clear();
 
         let message_board = app.message_board.clone();
         let mut without_menu = vec![0_u8; 320 * 200 * 4];
-        app.render(&mut without_menu)
-            .expect("render menu-free frame");
+        app.test_render(&mut without_menu);
         install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
         app.message_board = message_board;
         let mut with_menu = vec![0_u8; 320 * 200 * 4];
-        app.render(&mut with_menu)
-            .expect("render script-menu frame");
+        app.test_render(&mut with_menu);
         assert_eq!(
             with_menu != without_menu,
             overlays_visible,
@@ -4448,13 +4186,12 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
                 ..ObjectUpdate::default()
             },
         )
-        .expect("clear matrix script menu");
+        .test_value();
     set_test_scenario_head_flags(&mut app, 1, 1);
     app.snapshot.hud.messages.clear();
     let message_board = app.message_board.clone();
     let mut without_message = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut without_message)
-        .expect("render clean film frame");
+    app.test_render(&mut without_message);
 
     app.snapshot.hud.messages = vec![clonk_engine::MessageSnapshot {
         id: 1,
@@ -4472,8 +4209,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     }];
     app.message_board = message_board.clone();
     let mut with_message = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut with_message)
-        .expect("film replay still renders game messages");
+    app.test_render(&mut with_message);
     assert_ne!(
         with_message, without_message,
         "the clean film viewport must retain Game.Messages"
@@ -4494,7 +4230,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         ),
     );
     app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
-    let viewport = app.graphics.viewport_rect(owner).expect("film viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let pointer = GuiPoint::new(
         viewport.x as f32 + viewport.width as f32 / 2.0,
         viewport.y as f32 + viewport.height as f32 / 2.0,
@@ -4506,8 +4242,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     });
     app.message_board = message_board;
     let mut with_hidden_menus = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut with_hidden_menus)
-        .expect("hidden film menus skip their render preflights");
+    app.test_render(&mut with_hidden_menus);
     assert_eq!(
         with_hidden_menus, with_message,
         "script and player menus contribute no film-replay pixels"
@@ -4544,14 +4279,13 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
                 ..ObjectUpdate::default()
             },
         )
-        .expect("clear hidden script menu");
+        .test_value();
     let next_owner = owner + 1;
     app.engine
         .register_player(PlayerConfig::new(next_owner, "Second film player"))
-        .expect("register second film player");
+        .test_value();
     assert!(app.set_physical_film_view(owner));
-    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
-        .expect("production film-view key dispatch remains active");
+    app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(next_owner));
 }
 
@@ -4562,7 +4296,7 @@ fn bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
     let second = first + 1;
     app.engine
         .register_player(PlayerConfig::new(second, "Second film player"))
-        .expect("register second film player");
+        .test_value();
     assert!(app.set_physical_film_view(first));
 
     assert!(!app.handle_film_view_key_for_mode(
@@ -4645,10 +4379,10 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
                 .or(player.cursor)
                 .or_else(|| player.crew.first().copied())
         })
-        .expect("sandbox viewport focus");
+        .test_value();
     app.engine
         .register_player(PlayerConfig::new(film_player, "Film target"))
-        .expect("film target registers");
+        .test_value();
     app.engine
         .replace_player_viewports(
             film_player,
@@ -4656,26 +4390,21 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
                 .with_focus(Some(focus))
                 .with_zoom(2.0)],
         )
-        .expect("film target viewport installs");
+        .test_value();
     app.engine.clear_scenario_script();
-    app.engine
-            .install_scenario_script_with_convention(
-                "FilmView.c",
-                &format!(
-                    "#strict 3\nfunc Probe() {{ SetViewOffset({local_owner}, 17, 19); return SetFilmView({film_player}); }}"
-                ),
-                true,
-            )
-            .expect("film-view probe installs");
+    app.engine.install_scenario_script_with_convention("FilmView.c",
+    &format!(
+        "#strict 3\nfunc Probe() {{ SetViewOffset({local_owner}, 17, 19); return SetFilmView({film_player}); }}"
+    ),
+    true,).test_value();
 
     app.engine.set_replay_control(false);
     app.engine
         .call_scenario_script_function("Probe", Vec::new())
-        .expect("live film-view probe executes");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0; app.graphics.surface().pixels().len()];
-    app.render_running(&mut frame, false)
-        .expect("live no-op viewport renders");
+    app.render_running(&mut frame, false).test_value();
     assert_eq!(app.film_view_player, None);
     assert_eq!(
         app.graphics.active_viewport_projections()[0].owner,
@@ -4685,10 +4414,9 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
     app.engine.set_replay_control(true);
     app.engine
         .call_scenario_script_function("Probe", Vec::new())
-        .expect("replay film-view probe executes");
+        .test_value();
     app.snapshot = app.engine.snapshot();
-    app.render_running(&mut frame, false)
-        .expect("retargeted replay viewport renders");
+    app.render_running(&mut frame, false).test_value();
     assert_eq!(app.film_view_player, Some(film_player));
     assert_eq!(
         app.graphics.active_viewport_projections()[0].owner,
@@ -4696,7 +4424,7 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
     );
     let inputs =
         collect_viewport_inputs_from_physical_state(&app.snapshot, &app.physical_viewports)
-            .expect("retargeted physical input remains projectable");
+            .test_value();
     assert_eq!(inputs[0].offset, Vector2::new(17, 19));
 }
 
@@ -4757,7 +4485,7 @@ fn every_physical_owned_viewport_requires_a_player_and_slot_before_any_pixels() 
         .players
         .iter_mut()
         .find(|player| player.id == local_owner)
-        .expect("sandbox local player")
+        .test_value()
         .viewports
         .clear();
     assert_running_viewport_boundary(
@@ -4785,13 +4513,13 @@ fn focusless_owned_slot_renders_in_normal_cursor_mode() {
                 .or_else(|| player.crew.first().copied())
         })
         .filter(|focus| app.snapshot.object(*focus).is_some())
-        .expect("sandbox first viewport has a live focus");
+        .test_value();
     let player = app
         .snapshot
         .players
         .iter_mut()
         .find(|player| player.id == local_owner)
-        .expect("sandbox local player");
+        .test_value();
     player.viewports[0].focus = Some(valid_focus);
     player.cursor = None;
     player.crew.clear();
@@ -4801,8 +4529,7 @@ fn focusless_owned_slot_renders_in_normal_cursor_mode() {
             .with_zoom(1.25),
     );
 
-    let inputs = collect_viewport_inputs(&app.snapshot)
-        .expect("owned viewport centers do not require a live cursor object");
+    let inputs = collect_viewport_inputs(&app.snapshot).test_value();
     assert_eq!(inputs.len(), 2);
     assert_eq!(inputs[0].focus.map(|focus| focus.id), Some(valid_focus));
     assert!(inputs[1].focus.is_none());
@@ -4811,8 +4538,7 @@ fn focusless_owned_slot_renders_in_normal_cursor_mode() {
     assert_eq!(inputs[1].zoom, 1.25);
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render_running(&mut frame, false)
-        .expect("focusless normal-mode viewport renders from its persisted center");
+    app.render_running(&mut frame, false).test_value();
     assert_eq!(app.graphics.active_viewport_projections().len(), 2);
 }
 
@@ -4858,7 +4584,7 @@ fn view_offset_and_film_view_share_one_physical_request_order() {
         };
         app.engine
             .register_player(PlayerConfig::new(target, "Remote film target"))
-            .expect("register film target");
+            .test_value();
         app.engine.clear_scenario_script();
         app.engine
             .install_scenario_script_with_convention(
@@ -4866,14 +4592,14 @@ fn view_offset_and_film_view_share_one_physical_request_order() {
                 &format!("#strict 3\nfunc Probe() {{ {body} }}"),
                 true,
             )
-            .expect("install ordered viewport probe");
+            .test_value();
         app.engine.set_replay_control(true);
         app.set_runtime_flash_message("Film Init clears me", RuntimeHelpCharset::Windows1252)
-            .expect("install observer flash");
+            .test_value();
 
         app.engine
             .call_scenario_script_function("Probe", Vec::new())
-            .expect("execute ordered viewport probe");
+            .test_value();
         let _ = app.apply_pending_viewport_presentation_requests();
 
         assert_eq!(app.physical_viewports[0].displayed_player, target);
@@ -4895,18 +4621,18 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
     assert!(app.physical_viewports[0].is_no_owner_viewport);
     app.engine.clear_scenario_script();
     app.engine
-            .install_scenario_script_with_convention(
-                "OwnerlessViewportOffset.c",
-                &format!(
-                    "#strict 3\nfunc Probe() {{ SetFilmView({target}); SetViewOffset({target}, 13, 17); }}"
-                ),
-                true,
-            )
-            .expect("install ownerless offset probe");
+        .install_scenario_script_with_convention(
+            "OwnerlessViewportOffset.c",
+            &format!(
+        "#strict 3\nfunc Probe() {{ SetFilmView({target}); SetViewOffset({target}, 13, 17); }}"
+    ),
+            true,
+        )
+        .test_value();
     app.engine.set_replay_control(true);
     app.engine
         .call_scenario_script_function("Probe", Vec::new())
-        .expect("execute ownerless offset probe");
+        .test_value();
     let _ = app.apply_pending_viewport_presentation_requests();
     assert_eq!(
         app.physical_viewports[0].preserved_offset,
@@ -4915,8 +4641,7 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("render film-assigned ownerless viewport");
+    app.test_render(&mut frame);
     assert_eq!(app.physical_viewports[0].preserved_offset, Vector2::ZERO);
     assert!(app.physical_viewports[0].is_no_owner_viewport);
 }
@@ -4934,13 +4659,13 @@ fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
     ] {
         app.engine
             .register_player(PlayerConfig::new(player, name))
-            .expect("register viewport-order player");
+            .test_value();
         app.engine
             .set_player_runtime_control(
                 player,
                 clonk_engine::PlayerRuntimeControl::new(control_set, 0),
             )
-            .expect("install viewport layout control");
+            .test_value();
     }
     assert!(app.create_physical_viewport(lower_layout, true, true, false));
     assert!(app.set_physical_film_view(high_layout_target));
@@ -4982,7 +4707,7 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
     let remote = primary + 2;
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary local"))
-        .expect("register secondary");
+        .test_value();
     let control = app.local_controls.initialize(LocalControlInit {
         owner: secondary,
         preferred_set: 1,
@@ -4993,17 +4718,17 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
     });
     app.engine
         .set_player_runtime_control(secondary, control.runtime_control())
-        .expect("install secondary control");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.engine
         .register_player(PlayerConfig::new(remote, "Remote film target"))
-        .expect("register remote target");
+        .test_value();
     let _ = app.create_physical_viewport(secondary, false, true, true);
     assert!(app.set_physical_film_view(remote));
     app.ui_sound_log.clear();
 
     app.remove_runtime_player_with_viewport_feedback(remote)
-        .expect("close the retargeted primary");
+        .test_value();
 
     assert_eq!(
         app.physical_viewports
@@ -5033,7 +4758,7 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
             .take()
             .expect("captured scenario values"),
     )
-    .expect("serialize scenario values");
+    .test_value();
     for (name, value) in [("Replay", 1), ("Film", 1)] {
         let target = scenario_values["sections"]
             .as_array_mut()
@@ -5046,14 +4771,11 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
             .and_then(|entries| entries.iter_mut().find(|entry| entry["name"] == name))
             .and_then(|entry| entry["values"].as_array_mut())
             .and_then(|values| values.first_mut())
-            .expect("Head replay-film reflection entry");
+            .test_value();
         *target = serde_json::json!({ "Int": value });
     }
-    state.scenario_values =
-        Some(serde_json::from_value(scenario_values).expect("deserialize scenario values"));
-    app.engine
-        .restore_state(&state)
-        .expect("restore replay-film state");
+    state.scenario_values = Some(serde_json::from_value(scenario_values).test_value());
+    app.engine.restore_state(&state).test_value();
     app.engine.set_replay_control(true);
     app.local_controls = LocalControlRegistry::default();
     app.engine.set_local_players([]);
@@ -5073,7 +4795,7 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
         "zero-view replay film creates the first-player viewport non-silently"
     );
 
-    app.engine.remove_player(first).expect("remove sole player");
+    app.engine.remove_player(first).test_value();
     app.snapshot = app.engine.snapshot();
     app.ui_sound_log.clear();
     app.initialize_physical_viewports(false);
@@ -5087,13 +4809,13 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
 
     app.engine
         .register_player(PlayerConfig::new(first, "Late replay player"))
-        .expect("register late player");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     app.set_runtime_flash_message(
         "Late replay Init clears me",
         RuntimeHelpCharset::Windows1252,
     )
-    .expect("install pre-retarget flash");
+    .test_value();
     app.check_fullscreen_physical_viewports(false);
     assert_eq!(app.physical_viewports[0].displayed_player, first);
     assert!(
@@ -5110,13 +4832,13 @@ fn removing_a_remote_film_target_closes_its_physical_viewport_once() {
     let film_player = app.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(film_player, "Film target"))
-        .expect("register remote film target");
+        .test_value();
     app.film_view_player = Some(film_player);
     app.snapshot = app.engine.snapshot();
     app.ui_sound_log.clear();
 
     app.remove_runtime_player_with_viewport_feedback(film_player)
-        .expect("remove current film target");
+        .test_value();
 
     assert_eq!(app.film_view_player, None);
     assert_eq!(
@@ -5136,7 +4858,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
     let film_player = local_player + 1;
     app.engine
         .register_player(PlayerConfig::new(film_player, "Film target"))
-        .expect("register film target");
+        .test_value();
     let film_control = app.local_controls.initialize(LocalControlInit {
         owner: film_player,
         preferred_set: 1,
@@ -5147,7 +4869,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
     });
     app.engine
         .set_player_runtime_control(film_player, film_control.runtime_control())
-        .expect("install second local control");
+        .test_value();
     app.engine.set_local_players([local_player, film_player]);
 
     let mut state = app.engine.capture_state();
@@ -5157,7 +4879,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
             .take()
             .expect("captured scenario values"),
     )
-    .expect("serialize scenario values");
+    .test_value();
     for name in ["Replay", "Film"] {
         let value = scenario_values["sections"]
             .as_array_mut()
@@ -5170,14 +4892,11 @@ fn film_target_removal_recreates_the_first_player_viewport() {
             .and_then(|entries| entries.iter_mut().find(|entry| entry["name"] == name))
             .and_then(|entry| entry["values"].as_array_mut())
             .and_then(|values| values.first_mut())
-            .expect("Head replay-film reflection entry");
+            .test_value();
         *value = serde_json::json!({ "Int": 1 });
     }
-    state.scenario_values =
-        Some(serde_json::from_value(scenario_values).expect("deserialize film scenario values"));
-    app.engine
-        .restore_state(&state)
-        .expect("restore film-mode engine state");
+    state.scenario_values = Some(serde_json::from_value(scenario_values).test_value());
+    app.engine.restore_state(&state).test_value();
     app.engine.set_replay_control(true);
     app.film_view_player = Some(film_player);
     app.snapshot = app.engine.snapshot();
@@ -5195,7 +4914,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
     );
 
     app.remove_runtime_player_with_viewport_feedback(film_player)
-        .expect("remove both physical viewports targeting the film player");
+        .test_value();
 
     assert_eq!(app.film_view_player, Some(local_player));
     assert_eq!(
@@ -5232,16 +4951,12 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
         source_title_png: None,
         engine_state: app.engine.capture_state(),
     };
-    app.audio
-        .as_mut()
-        .expect("test audio")
-        .options
-        .music_enabled = true;
+    app.audio.test_mut().options.music_enabled = true;
     app.runtime_music_enabled = true;
     app.set_runtime_flash_message("not serialized", RuntimeHelpCharset::Windows1252)
-        .expect("install transient flash");
+        .test_value();
 
-    app.apply_loaded_game(save).expect("restore sandbox save");
+    app.apply_loaded_game(save).test_value();
 
     assert!(
         app.audio
@@ -5269,7 +4984,7 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
         .players
         .iter_mut()
         .find(|player| player.id == owner)
-        .expect("saved sandbox player");
+        .test_value();
     saved_player.at_client = clonk_engine::PlayerAtClient::new(77);
     saved_player.at_client_name = Some("stale client".to_string());
     saved_player.control_set = 7;
@@ -5300,9 +5015,9 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
         engine_state,
     };
 
-    app.apply_loaded_game(save).expect("restore sandbox save");
+    app.apply_loaded_game(save).test_value();
 
-    let player = app.engine.player(owner).expect("restored sandbox player");
+    let player = app.engine.test_player(owner);
     assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
     assert_eq!(player.at_client(), clonk_engine::PlayerAtClient::HOST);
     assert_eq!(player.at_client_name(), "Local");
@@ -5322,18 +5037,8 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
 fn saved_game_skips_removed_current_player_without_deleting_objects() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let info_id = app
-        .engine
-        .player(owner)
-        .expect("sandbox player")
-        .player_info_id();
-    let object = app
-        .engine
-        .snapshot()
-        .objects
-        .first()
-        .expect("sandbox object")
-        .id;
+    let info_id = app.engine.test_player(owner).player_info_id();
+    let object = app.engine.snapshot().objects.first().test_value().id;
     app.control_player_infos
         .apply(clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -5367,13 +5072,10 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
         engine_state: app.engine.capture_state(),
     };
 
-    app.apply_loaded_game(save).expect("restore sandbox save");
+    app.apply_loaded_game(save).test_value();
 
     assert!(app.engine.player(owner).is_none());
-    let object = app
-        .engine
-        .object_snapshot(object)
-        .expect("saved object is retained");
+    let object = app.engine.test_object_snapshot(object);
     assert_eq!(object.owner, clonk_engine::OWNER_NONE);
 }
 
@@ -5396,9 +5098,7 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
     arm_graphical_engine_debug_mode(&mut allowed, enabled_config);
     let state = allowed.capture_state();
     let mut restored = Engine::new();
-    restored
-        .restore_state(&state)
-        .expect("restore process-independent round state");
+    restored.restore_state(&state).test_value();
     assert!(!restored.debug_mode(), "DebugMode is not serialized");
     arm_graphical_engine_debug_mode(&mut restored, enabled_config);
     assert!(restored.debug_mode(), "round restore reapplies AlwaysDebug");
@@ -5412,7 +5112,7 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
 
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated AlwaysDebug config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     persist_native_config_values(
         &paths,
@@ -5422,11 +5122,10 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
             clonk_app_netplay::NativeConfigValue::RawAscii("true"),
         )],
     )
-    .expect("enable native AlwaysDebug");
+    .test_value();
 
-    persist_config_value(&paths, "Network", "Comment", "preserve debug")
-        .expect("save unrelated config value");
-    let saved = fs::read(paths.config_file()).expect("read unrelated config save");
+    persist_config_value(&paths, "Network", "Comment", "preserve debug").test_value();
+    let saved = fs::read(paths.config_file()).test_value();
     assert_eq!(
         clonk_app_netplay::configured_native_boolean(&saved, "General", "DebugMode"),
         Some(true)
@@ -5439,7 +5138,7 @@ fn always_debug_survives_rust_saves_and_rearms_restored_rounds() {
 
 #[test]
 fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
-    let fixture = tempdir().expect("savegame path fixture");
+    let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
     let configured_folder = fixture.path().join("Configured Saves.c4f");
     let (_guard, paths) = exact_loader_test_paths(&user_data, None);
@@ -5449,7 +5148,7 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
         "SaveGameFolder",
         configured_folder.to_string_lossy().into_owned(),
     )
-    .expect("configure nondefault savegame folder");
+    .test_value();
 
     let mut app = new_state_only_lightweight_running_sandbox_app();
     app.app_paths = Some(paths.clone());
@@ -5495,8 +5194,7 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
         "a regular directory is not Game.pParentGroup"
     );
 
-    persist_config_value(&paths, "General", "SaveGameFolder", "Relative Saves.c4f")
-        .expect("configure relative savegame folder");
+    persist_config_value(&paths, "General", "SaveGameFolder", "Relative Saves.c4f").test_value();
     assert_eq!(
         configured_savegame_directory(Some(&paths)),
         paths.install_root().join("Relative Saves.c4f")
@@ -5507,7 +5205,7 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
         "SaveGameFolder",
         configured_folder.to_string_lossy().into_owned(),
     )
-    .expect("restore absolute savegame folder");
+    .test_value();
 
     assert!(looks_like_cpp_integer("+999999999999999999999999"));
     assert!(looks_like_cpp_integer("-01"));
@@ -5520,7 +5218,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
     // children (C4StartupScenSelDlg.cpp:948-958, 1431-1439, 1669-1678).
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let fixture = tempdir().expect("savegame browser fixture");
+    let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
     let save_root = fixture.path().join("External Savegames.c4f");
     let scenario_saves = save_root.join("Missions.c4f");
@@ -5532,32 +5230,28 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         "SaveGameFolder",
         save_root.to_string_lossy().into_owned(),
     )
-    .expect("configure external native savegame folder");
+    .test_value();
 
-    fs::create_dir_all(&scenario_saves).expect("create native savegame folders");
-    fs::write(save_root.join("Title.txt"), b"US:Savegames")
-        .expect("write localized savegame-folder title");
-    fs::write(scenario_saves.join("Title.txt"), b"US:Cave mission saves")
-        .expect("write localized scenario-save folder title");
+    fs::create_dir_all(&scenario_saves).test_value();
+    fs::write(save_root.join("Title.txt"), b"US:Savegames").test_value();
+    fs::write(scenario_saves.join("Title.txt"), b"US:Cave mission saves").test_value();
     let mut saved = MutableGroup::new("Missions1.c4s");
     saved
             .add_file(
                 "Scenario.txt",
                 b"[Head]\nTitle=Resume cave mission\nSaveGame=1\nNoInitialize=1\nMinPlayer=0\nMaxPlayer=0\n"
                     .to_vec(),
-            )
-            .expect("add saved Scenario.txt");
+            ).test_value();
     saved
         .add_file("Game.txt", b"[Game]\nFrame=37\n".to_vec())
-        .expect("add saved Game.txt");
-    fs::write(&saved_scenario, saved.pack().expect("pack native savegame"))
-        .expect("write native savegame");
+        .test_value();
+    fs::write(&saved_scenario, saved.pack().test_value()).test_value();
 
     let entries = load_frontend_scenarios_from_paths(&paths);
     let savegames = entries
         .iter()
         .find(|entry| entry.path.as_deref() == Some(save_root.as_path()))
-        .expect("configured native savegame folder is a root playlist");
+        .test_value();
     assert_eq!(savegames.title, "Savegames");
     assert_eq!(savegames.kind, ScenarioKind::Folder);
     assert_eq!(
@@ -5569,20 +5263,20 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         .children
         .iter()
         .find(|entry| entry.path.as_deref() == Some(scenario_saves.as_path()))
-        .expect("savegame playlist contains its scenario folder");
+        .test_value();
     let resume = mission
         .children
         .iter()
         .find(|entry| entry.path.as_deref() == Some(saved_scenario.as_path()))
-        .expect("scenario save folder contains the individual resume");
+        .test_value();
     assert_eq!(resume.title, "Resume cave mission");
     assert_eq!(resume.kind, ScenarioKind::Scenario);
 
     let player_root = fixture.path().join("Players");
-    fs::create_dir(&player_root).expect("create resume participant folder");
+    fs::create_dir(&player_root).test_value();
     configure_test_startup_participant(&paths, &player_root);
-    let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
-        .expect("savegame browser menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&entries, false), test_font(), None).test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.menu_state = MenuState::new(menu, entries.clone());
     app.scenario_catalog = build_scenario_catalog(&entries);
@@ -5593,13 +5287,13 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
         kind: entry.kind,
     };
     app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(savegames))])
-        .expect("open Savegames playlist");
+        .test_value();
     app.process_menu_actions(vec![StartupMenuAction::OpenEntry(summary(mission))])
-        .expect("open scenario save folder");
+        .test_value();
     let (selected, _) = app
         .process_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
-        .expect("select individual native savegame");
-    let selected = selected.expect("savegame selection requests a scenario start");
+        .test_value();
+    let selected = selected.test_value();
     assert_eq!(
         app.scenario_catalog
             .get(&selected)
@@ -5609,7 +5303,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
     );
 
     app.handle_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
-        .expect("clicking the individual savegame enters the native loader");
+        .test_value();
     assert_eq!(app.mode, AppMode::Loading);
     assert_eq!(
         app.loading_state
@@ -5622,7 +5316,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
 
 #[test]
 fn savegame_slot_probe_uses_c4group_validity() {
-    let fixture = tempdir().expect("slot validity fixture");
+    let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
     let save_root = fixture.path().join("Savegames.c4f");
     let (_guard, paths) = exact_loader_test_paths(&user_data, None);
@@ -5632,7 +5326,7 @@ fn savegame_slot_probe_uses_c4group_validity() {
         "SaveGameFolder",
         save_root.to_string_lossy().into_owned(),
     )
-    .expect("configure slot validity folder");
+    .test_value();
 
     let mut app = new_state_only_lightweight_running_sandbox_app();
     app.app_paths = Some(paths);
@@ -5647,21 +5341,15 @@ fn savegame_slot_probe_uses_c4group_validity() {
     );
 
     let slot_root = save_root.join("Probe.c4f");
-    fs::create_dir_all(&slot_root).expect("create slot validity folder");
-    fs::write(slot_root.join("Probe1.c4s"), b"{\"not\":\"a group\"}")
-        .expect("write malformed slot");
+    fs::create_dir_all(&slot_root).test_value();
+    fs::write(slot_root.join("Probe1.c4s"), b"{\"not\":\"a group\"}").test_value();
     let mut packed = MutableGroup::new("Probe2.c4s");
     packed
         .add_file("Scenario.txt", b"[Head]\nTitle=Packed\n".to_vec())
-        .expect("compose packed group");
-    fs::write(
-        slot_root.join("Probe2.c4s"),
-        packed.pack().expect("pack valid slot"),
-    )
-    .expect("write valid packed slot");
-    fs::create_dir(slot_root.join("Probe3.c4s")).expect("create valid folder group");
-    fs::write(slot_root.join("Probe4.c4s"), [0x1f, 0x8b, 0x08])
-        .expect("write truncated packed slot");
+        .test_value();
+    fs::write(slot_root.join("Probe2.c4s"), packed.pack().test_value()).test_value();
+    fs::create_dir(slot_root.join("Probe3.c4s")).test_value();
+    fs::write(slot_root.join("Probe4.c4s"), [0x1f, 0x8b, 0x08]).test_value();
 
     let slots = app.savegame_slots();
     assert!(slots[0].free, "plain files are not occupied C4Groups");
@@ -5673,7 +5361,7 @@ fn savegame_slot_probe_uses_c4group_validity() {
 
 #[test]
 fn save_demo_folder_controls_recording_directory() {
-    let fixture = tempdir().expect("recording path fixture");
+    let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
     let absolute_records = fixture.path().join("Absolute Records.c4f");
     let (_guard, paths) = exact_loader_test_paths(&user_data, None);
@@ -5683,8 +5371,7 @@ fn save_demo_folder_controls_recording_directory() {
         paths.install_root().join("Records.c4f")
     );
 
-    persist_config_value(&paths, "General", "SaveDemoFolder", "Relative Records.c4f")
-        .expect("configure relative recording folder");
+    persist_config_value(&paths, "General", "SaveDemoFolder", "Relative Records.c4f").test_value();
     let relative_records = paths.install_root().join("Relative Records.c4f");
     assert_eq!(paths.recordings_dir(), relative_records);
 
@@ -5700,7 +5387,7 @@ fn save_demo_folder_controls_recording_directory() {
             record_enabled: true,
         },
     )
-    .expect("initialize app with configured recording folder");
+    .test_value();
     assert_eq!(
         app.recordings_dir.as_deref(),
         Some(relative_records.as_path())
@@ -5712,20 +5399,20 @@ fn save_demo_folder_controls_recording_directory() {
         "SaveDemoFolder",
         absolute_records.to_string_lossy().into_owned(),
     )
-    .expect("configure absolute recording folder");
+    .test_value();
     assert_eq!(paths.recordings_dir(), absolute_records);
 }
 
 #[test]
 fn game_app_uses_selected_user_root_for_scenario_discovery() {
-    let fixture = tempdir().expect("selected user-root fixture");
+    let fixture = tempdir();
     let selected_user = fixture.path().join("selected-user");
     let ambient_user = fixture.path().join("ambient-user");
     let config_file = fixture.path().join("selected.config");
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     fs::write(
         &config_file,
         format!(
@@ -5733,29 +5420,27 @@ fn game_app_uses_selected_user_root_for_scenario_discovery() {
             selected_user.display()
         ),
     )
-    .expect("write selected config");
+    .test_value();
     let _selected_guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", None),
         ("LC_CONFIG_FILE", None),
     ]);
-    let paths = AppPaths::discover_with_config_file(Some(&config_file))
-        .expect("discover selected app paths");
-    paths.ensure_user_dirs().expect("selected user directories");
+    let paths = AppPaths::discover_with_config_file(Some(&config_file)).test_value();
+    paths.ensure_user_dirs().test_value();
     let scenario = paths.scenario_dir().join("L016Configured.c4s");
-    fs::create_dir_all(&scenario).expect("selected user scenario directory");
+    fs::create_dir_all(&scenario).test_value();
     fs::write(
         scenario.join("Scenario.json"),
         br#"{"name":"Selected User Scenario"}"#,
     )
-    .expect("selected user scenario metadata");
+    .test_value();
 
     // Make a fresh ambient discovery disagree with the already-selected
     // paths. The constructor must pass its AppPaths into the worker.
     let _ambient_guard = EnvGuard::set(&[("LC_USER_DATA_DIR", Some(&ambient_user))]);
-    let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-        .expect("initialize app with selected user root");
+    let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
     assert_eq!(paths.user_data_dir(), selected_user);
     assert_eq!(paths.config_file(), config_file);
@@ -5776,14 +5461,13 @@ fn quick_save_round_trips_state() {
         let _guard = EnvGuard::set(&[]);
         reset_cached_app_paths();
 
-        let mut app =
-            test_game_app(320, 200, AudioOptions::default(), None).expect("initialise app");
+        let mut app = test_game_app(320, 200, AudioOptions::default(), None).test_value();
         install_classic_test_assets(&mut app);
         app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start sandbox scenario");
+            .test_value();
 
         for _ in 0..5 {
-            app.update().expect("tick before save");
+            app.test_update();
         }
         assert_eq!(
             app.snapshot.game_time, 0,
@@ -5795,16 +5479,12 @@ fn quick_save_round_trips_state() {
         );
         let saved_frame = app.snapshot.frame;
         let saved_game_time = app.snapshot.game_time;
-        let saved_player_info_id = app
-            .engine
-            .player(app.local_owner)
-            .expect("local player before save")
-            .player_info_id();
+        let saved_player_info_id = app.engine.test_player(app.local_owner).player_info_id();
         let saved_big_icon = ImageData::new(1, 1, vec![12, 34, 56, 255]);
         app.runtime_player_big_icons
             .insert(saved_player_info_id, saved_big_icon.clone());
 
-        app.quick_save().expect("quick save succeeds");
+        app.quick_save().test_value();
         assert!(
             app.last_save_path
                 .as_ref()
@@ -5819,7 +5499,7 @@ fn quick_save_round_trips_state() {
         );
 
         for _ in 0..3 {
-            app.update().expect("advance after save");
+            app.test_update();
         }
         assert!(
             app.sec1_timer().expect("later saved-game clock pulse"),
@@ -5831,7 +5511,7 @@ fn quick_save_round_trips_state() {
         );
         assert!(app.snapshot.game_time > saved_game_time);
 
-        app.quick_load().expect("quick load succeeds");
+        app.quick_load().test_value();
         assert_eq!(
             app.snapshot.frame, saved_frame,
             "quick load should restore saved frame"
@@ -5862,17 +5542,17 @@ fn quick_save_persists_across_sessions() {
 
     reset_cached_app_paths();
 
-    let fixture = tempdir().unwrap();
+    let fixture = tempdir();
     let user_dir = fixture.path().join("user-data");
-    fs::create_dir_all(&user_dir).unwrap();
+    fs::create_dir_all(&user_dir).test_value();
     let scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
     let scripts_dir = scenario_dir.join("scripts");
-    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).test_value();
     fs::write(
         scenario_dir.join("Scenario.txt"),
         "[Head]\nTitle=Alpha Mission\n",
     )
-    .unwrap();
+    .test_value();
     fs::write(
         scenario_dir.join("Scenario.json"),
         r#"
@@ -5895,8 +5575,8 @@ fn quick_save_persists_across_sessions() {
             }
             "#,
     )
-    .unwrap();
-    fs::write(scripts_dir.join("mover.aul"), walker_script()).unwrap();
+    .test_value();
+    fs::write(scripts_dir.join("mover.aul"), walker_script()).test_value();
 
     let quicksave_path = user_dir.join(SAVE_DIR_NAME).join(QUICK_SAVE_FILE);
 
@@ -5906,23 +5586,19 @@ fn quick_save_persists_across_sessions() {
         reset_cached_app_paths();
 
         let saved_frame = {
-            let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-                .expect("initialise app");
+            let mut app =
+                test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
-            let scenario = app
-                .scenario_catalog
-                .get("Alpha.c4s")
-                .cloned()
-                .expect("scenario discovered");
-            app.start_scenario(scenario).expect("start disk scenario");
+            let scenario = app.scenario_catalog.get("Alpha.c4s").cloned().test_value();
+            app.start_scenario(scenario).test_value();
             wait_for_running(&mut app);
 
             for _ in 0..5 {
-                app.update().expect("advance simulation before save");
+                app.test_update();
             }
             let frame_before_save = app.snapshot.frame;
 
-            app.quick_save().expect("quick save succeeds");
+            app.quick_save().test_value();
             assert!(
                 quicksave_path.exists(),
                 "expected quick save file to be written"
@@ -5936,8 +5612,8 @@ fn quick_save_persists_across_sessions() {
         };
 
         {
-            let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-                .expect("initialise app after restart");
+            let mut app =
+                test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
             // Boot loading is asynchronous; let it settle to the menu before
             // asserting the fresh session is at the menu (not mid-game).
@@ -5955,7 +5631,7 @@ fn quick_save_persists_across_sessions() {
                 "new session should start in menu"
             );
 
-            app.quick_load().expect("quick load succeeds");
+            app.quick_load().test_value();
 
             assert!(
                 matches!(app.mode, AppMode::Running),
@@ -5987,22 +5663,17 @@ fn quick_save_persists_across_sessions() {
 /// (C4PlayerInfo.cpp:1383-1391; C4Config.cpp:1514).
 #[test]
 fn offline_wild_takeover_logs_and_presents_hideable_warning() {
-    let install = tempdir().expect("takeover install root");
-    let user_data = tempdir().expect("takeover user data");
-    fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
-    fs::write(
-        install.path().join("planet/System.c4g/LanguageUS.txt"),
-        b"IDS_MSG_PLAYERASSIGNMENT=Participant %s will continue for player %s from the savegame.\n          IDS_MSG_FREESAVEGAMEPLRS=Player assignment\n          IDS_MSG_DONTSHOW=&Don't display this message in the future.\n",
-    )
-    .expect("fixture takeover language resources");
+    let install = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
+    fs::write(install.path().join("planet/System.c4g/LanguageUS.txt"), b"IDS_MSG_PLAYERASSIGNMENT=Participant %s will continue for player %s from the savegame.\n          IDS_MSG_FREESAVEGAMEPLRS=Player assignment\n          IDS_MSG_DONTSHOW=&Don't display this message in the future.\n").test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("fixture app paths");
-    paths.ensure_user_dirs().expect("fixture user directories");
-    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
-        .expect("fixture runtime language selection");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
 
     let takeovers = vec![
         crate::offline_savegame::OfflineWildTakeover {
@@ -6021,8 +5692,7 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     app.startup_tooltip_resources = load_runtime_language_table(Some(&paths))
         .map(|table| table.entries)
         .unwrap_or_default();
-    app.report_offline_wild_takeovers(&takeovers)
-        .expect("present the takeover warnings");
+    app.report_offline_wild_takeovers(&takeovers).test_value();
     assert_eq!(app.message_dialogs.len(), 2);
     assert_eq!(
         app.message_dialogs[0].state.message(),
@@ -6045,7 +5715,7 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     // C4Gui.cpp/C4GuiDialogs.cpp), so the file is written at the next save
     // surface. This test's subject is the stored value, so it flushes here.
     app.flush_deferred_config();
-    let config = Config::load(paths.config_file()).expect("reload config");
+    let config = Config::load(paths.config_file()).test_value();
     assert_eq!(
         config.get_in(Some("Startup"), "HideMsgPlrTakeOver"),
         Some("1")
@@ -6056,13 +5726,12 @@ fn offline_wild_takeover_logs_and_presents_hideable_warning() {
     hidden.app_paths = Some(paths.clone());
     hidden
         .report_offline_wild_takeovers(&takeovers)
-        .expect("hidden warnings still assign and log");
+        .test_value();
     assert!(hidden.message_dialogs.is_empty());
 
     // An empty set never opens a dialog at all.
     let mut none = new_menu_app(320, 200);
     none.app_paths = Some(paths.clone());
-    none.report_offline_wild_takeovers(&[])
-        .expect("no wild matches, no warning");
+    none.report_offline_wild_takeovers(&[]).test_value();
     assert!(none.message_dialogs.is_empty());
 }

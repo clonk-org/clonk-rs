@@ -11,23 +11,20 @@
         // FindSolidGround settling each position. Crew objects are created
         // at JOIN time — never at scenario load (C4Game::InitPlayers queues
         // CID_JoinPlr; nothing spawns crew during load).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Join\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
              [Player1]\nCrew=GOOD=2\nWealth=20,5,0,250\n",
-        )
-        .expect("write scenario core");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(7);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
         assert_eq!(
             engine.snapshot().objects.len(),
             0,
@@ -35,7 +32,7 @@
         );
 
         let mut replay = engine.rng.clone();
-        let landscape = engine.landscape().expect("landscape set").clone();
+        let landscape = engine.landscape().test_value().clone();
         let world_width = landscape.width() as i32;
         let world_height = landscape.estimated_height();
         assert_eq!((world_width, world_height), (640, 400));
@@ -84,8 +81,7 @@
                 auto_context_menu: false,
             })
             .expect("join succeeds")
-            .initialized()
-            .expect("join initializes");
+            .initialized().test_value();
         assert_eq!(joined.number, 0);
         assert_eq!((joined.start_x, joined.start_y), (ptx, pty));
         assert!(joined.first_base.is_none());
@@ -94,7 +90,7 @@
         // same LCG state.
         assert_eq!(engine.rng, replay, "RNG stream stays lockstep");
 
-        let player = engine.player(0).expect("player registered");
+        let player = engine.player(0).test_value();
         assert_eq!(player.wealth(), expected_wealth);
         assert_eq!(player.color_index(), 3, "free PrefColor is taken as-is");
 
@@ -114,8 +110,7 @@
             .iter()
             .map(|object| {
                 engine
-                    .crew_object_info(object.id)
-                    .expect("crew info recorded")
+                    .crew_object_info(object.id).test_value()
                     .name
                     .clone()
             })
@@ -127,13 +122,12 @@
     fn def_core_blast_incinerate_reaches_the_engine_definition() {
         // BlastIncinerate (C4Def.cpp:315) must survive the resource-core
         // apply so C4Object::Blast can consult it (C4Object.cpp:1421-1423).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\nBlastIncinerate=50\n",
-        )
-        .expect("write defcore");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert_eq!(
@@ -156,30 +150,27 @@
         // (Explode.c:93-94 -> C4Object::Blast, C4Object.cpp:1416), and
         // the run stays script-error free (the former 'script error in
         // Hit of FLNT' harness class).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
         let defs_root = dir.path().join("Defs.c4d");
         let flint = defs_root.join("Flint.c4d");
-        std::fs::create_dir_all(&flint).expect("flint dir");
-        std::fs::write(
+        std::fs::create_dir_all(&flint).test_value();
+        write_test_file(
             flint.join("DefCore.txt"),
             "[DefCore]\nid=FLNX\nName=Flint\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
-        )
-        .expect("flint defcore");
-        std::fs::write(
+        );
+        write_test_file(
             flint.join("Script.c"),
             "#strict\npublic func ExplodeSize() { return(18); }\nprotected func Hit() { Explode(ExplodeSize()); }\n",
-        )
-        .expect("flint script");
+        );
         write_test_definition_graphics(&flint);
         let bystander = defs_root.join("Bystander.c4d");
-        std::fs::create_dir_all(&bystander).expect("bystander dir");
-        std::fs::write(
+        std::fs::create_dir_all(&bystander).test_value();
+        write_test_file(
             bystander.join("DefCore.txt"),
             "[DefCore]\nid=BYST\nName=Bystander\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
-        )
-        .expect("bystander defcore");
-        std::fs::write(bystander.join("Script.c"), "#strict\n").expect("bystander script");
+        );
+        write_test_file(bystander.join("Script.c"), "#strict\n");
         write_test_definition_graphics(&bystander);
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
@@ -189,7 +180,7 @@
         let system_scripts: Vec<(String, String)> = ["FindObject.c", "GetXVal.c", "Explode.c"]
             .iter()
             .map(|name| {
-                let bytes = std::fs::read(planet.join(name)).expect("system script reads");
+                let bytes = std::fs::read(planet.join(name)).test_value();
                 // ISO-8859-1 comments -> chars (the group loader does the
                 // same byte-transparent conversion).
                 (
@@ -200,16 +191,11 @@
             .collect();
         engine.install_global_scripts(&system_scripts);
 
-        let flint_id = engine
-            .spawn_object(SpawnConfig::new("FLNX").with_position(Vector2::new(100, 100)))
-            .expect("flint spawns");
-        let bystander_id = engine
-            .spawn_object(SpawnConfig::new("BYST").with_position(Vector2::new(102, 100)))
-            .expect("bystander spawns");
-        let flint_idx = engine.find_object_index(flint_id).expect("flint exists");
+        let flint_id = engine.spawn_test_object(SpawnConfig::new("FLNX").with_position(Vector2::new(100, 100)));
+        let bystander_id = engine.spawn_test_object(SpawnConfig::new("BYST").with_position(Vector2::new(102, 100)));
+        let flint_idx = engine.test_object_index(flint_id);
         engine
-            .call_object_function(flint_idx, "Hit", Vec::new())
-            .expect("Hit runs without script errors");
+            .call_object_function(flint_idx, "Hit", Vec::new()).test_value();
         assert!(
             engine
                 .find_object_index(flint_id)
@@ -217,9 +203,7 @@
                 .unwrap_or(true),
             "the exploding object removed itself (Explode.c RemoveObject)"
         );
-        let bystander_idx = engine
-            .find_object_index(bystander_id)
-            .expect("bystander survives");
+        let bystander_idx = engine.test_object_index(bystander_id);
         assert_eq!(
             engine.objects[bystander_idx].state.damage, 18,
             "direct-hit rect victims take the blast level as Damage"
@@ -236,20 +220,18 @@
         // (C4Game.cpp:830-831, C4Effect.cpp:342-345), and the Timer's -1
         // return kills the effect with its Stop (C4Effect.cpp:350,
         // Explode.c:198 `return(-1)`).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
         let probe = dir.path().join("Defs.c4d/Probe.c4d");
-        std::fs::create_dir_all(&probe).expect("probe dir");
-        std::fs::write(
+        std::fs::create_dir_all(&probe).test_value();
+        write_test_file(
             probe.join("DefCore.txt"),
             "[DefCore]\nid=PROB\nName=Probe\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
-        )
-        .expect("probe defcore");
-        std::fs::write(
+        );
+        write_test_file(
             probe.join("Script.c"),
             "#strict\npublic func Shake() { return(ShakeViewPort(100, 0, 10, 20)); }\n",
-        )
-        .expect("probe script");
+        );
         write_test_definition_graphics(&probe);
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
@@ -258,7 +240,7 @@
         let system_scripts: Vec<(String, String)> = ["FindObject.c", "GetXVal.c", "Explode.c"]
             .iter()
             .map(|name| {
-                let bytes = std::fs::read(planet.join(name)).expect("system script reads");
+                let bytes = std::fs::read(planet.join(name)).test_value();
                 (
                     (*name).to_string(),
                     bytes.iter().map(|&b| b as char).collect::<String>(),
@@ -267,13 +249,10 @@
             .collect();
         engine.install_global_scripts(&system_scripts);
 
-        let probe_id = engine
-            .spawn_object(SpawnConfig::new("PROB").with_position(Vector2::new(100, 100)))
-            .expect("probe spawns");
-        let probe_idx = engine.find_object_index(probe_id).expect("probe exists");
+        let probe_id = engine.spawn_test_object(SpawnConfig::new("PROB").with_position(Vector2::new(100, 100)));
+        let probe_idx = engine.test_object_index(probe_id);
         engine
-            .call_object_function(probe_idx, "Shake", Vec::new())
-            .expect("Shake runs without script errors");
+            .call_object_function(probe_idx, "Shake", Vec::new()).test_value();
 
         // FxShakeEffectStart ran inside AddEffect; ShakeViewPort then
         // seeds EffectVar 0..2 with the level and offsets (Explode.c:
@@ -293,7 +272,7 @@
         // Execute does not unlink its current node until the next pass.
         let mut death_frame = None;
         for frame in 1..=40 {
-            engine.tick_without_snapshot().expect("tick runs");
+            engine.tick_without_snapshot().test_value();
             let active = engine
                 .global_effects()
                 .iter()
@@ -322,57 +301,50 @@
         // functions into GOOD's script as OVERRIDES (the original stays
         // reachable via inherited), and System.c4g scripts with #appendto
         // do the same (GoldRush's dialogue and AI scripts rely on both).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
             "#strict\n#appendto GOOD\n\
              public func Probe() { return inherited() * 10 + 4; }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "func Probe() { return 1; }\n",
-        )
-        .expect("write target script");
+        );
         let boost = dir.path().join("Defs.c4d/Boost.c4d");
-        std::fs::create_dir_all(&boost).expect("boost dir");
-        std::fs::write(
+        std::fs::create_dir_all(&boost).test_value();
+        write_test_file(
             boost.join("DefCore.txt"),
             "[DefCore]\nid=BOST\nName=Boost\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write boost defcore");
-        std::fs::write(
+        );
+        write_test_file(
             boost.join("Script.c"),
             "#strict\n#appendto GOOD\n\
              public func Probe() { return inherited() * 10 + 2; }\n\
              public func SetAI(szName, iInterval) { return 7; }\n",
-        )
-        .expect("write boost script");
+        );
         write_test_definition_graphics(&boost);
         let pack_system = dir.path().join("Defs.c4d/System.c4g");
-        std::fs::create_dir_all(&pack_system).expect("pack system dir");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_system).test_value();
+        write_test_file(
             pack_system.join("Append.c"),
             "#strict\n#appendto GOOD\n\
              public func Probe() { return inherited() * 10 + 3; }\n",
-        )
-        .expect("write pack system append");
+        );
         let system = scenario_dir.join("System.c4g");
-        std::fs::create_dir_all(&system).expect("system dir");
-        std::fs::write(
+        std::fs::create_dir_all(&system).test_value();
+        write_test_file(
             system.join("Append.c"),
             "#strict\n#appendto GOOD\n\
              static const SYSTEM_APPEND_VALUE = 3;\n\
              public func Probe() { return inherited() * 10 + 5; }\n\
              public func FromSystem() { return SYSTEM_APPEND_VALUE(); }\n",
-        )
-        .expect("write system append");
+        );
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
-        let id = engine
-            .spawn_object(SpawnConfig::new("GOOD"))
-            .expect("target spawns");
-        let index = engine.find_object_index(id).expect("object index");
+        let id = engine.spawn_test_object(SpawnConfig::new("GOOD"));
+        let index = engine.test_object_index(id);
         assert_eq!(
             engine
                 .call_object_function(index, "Probe", Vec::new())
@@ -411,7 +383,7 @@
         // pObj->SetAI(...) right after CreateObject). The copy-in/copy-out
         // model must give pending spawns a callable scope, and their
         // nested outcomes must fold onto the object once spawned.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -421,19 +393,17 @@
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal hit;\npublic func Mark() { hit = 7; return hit; }\n",
-        )
-        .expect("write target script");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("object created during Initialize");
+            .find(|object| object.definition_id == "GOOD").test_value();
         assert_eq!(
             object.local_vars.get("hit"),
             Some(&clonk_script::Value::Int(7)),
@@ -448,7 +418,7 @@
         // declares `static iDifficulty;` and the appended AI script (in a
         // definition host) reads it (Locals.c4d/AI.c4d SetAI ->
         // SetDifficultyPhysicals(iDifficulty)).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -460,20 +430,18 @@
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal seen;\n\
              public func Remember() { seen = shared; shared = shared + 1; return seen; }\n",
-        )
-        .expect("write target script");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("object created");
+            .find(|object| object.definition_id == "GOOD").test_value();
         assert_eq!(
             object.local_vars.get("seen"),
             Some(&clonk_script::Value::Int(4)),
@@ -498,7 +466,7 @@
         // plainly (GetFuncRecursive walks up to the engine,
         // C4Aul.cpp:285-291). Includes/appends never copy global funcs
         // (C4AulLink.cpp:127) — they are reachable through the engine.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -508,24 +476,21 @@
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal seen;\n\
              public func Remember() { seen = NightCheck(); return seen; }\n",
-        )
-        .expect("write target script");
+        );
         let time = dir.path().join("Defs.c4d/Time.c4d");
-        std::fs::create_dir_all(&time).expect("time dir");
-        std::fs::write(
+        std::fs::create_dir_all(&time).test_value();
+        write_test_file(
             time.join("DefCore.txt"),
             "[DefCore]\nid=TIME\nName=Time\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write time defcore");
-        std::fs::write(
+        );
+        write_test_file(
             time.join("Script.c"),
             "#strict\nglobal func NightCheck() { return 8; }\n",
-        )
-        .expect("write time script");
+        );
         write_test_definition_graphics(&time);
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
@@ -533,8 +498,7 @@
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("object created");
+            .find(|object| object.definition_id == "GOOD").test_value();
         assert_eq!(
             object.local_vars.get("seen"),
             Some(&clonk_script::Value::Int(8)),
@@ -551,7 +515,7 @@
         // FnLocalN returns a reference into the TARGET's named locals
         // (C4Script.cpp:4591-4605): the write lands on the fresh object
         // and the nested call right after it sees the new value.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -563,20 +527,18 @@
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal iWater;\nlocal seen;\n\
              public func Check() { seen = iWater; return seen; }\n",
-        )
-        .expect("write target script");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("object created");
+            .find(|object| object.definition_id == "GOOD").test_value();
         assert_eq!(
             object.local_vars.get("seen"),
             Some(&clonk_script::Value::Int(90)),
@@ -599,7 +561,7 @@
         // simply no filter (C4Value::getObj() yields nil), never an error.
         // GoldRush's cannon Initialize chain depends on this layout
         // (Cannon.c4d/Script.c:31 passes NoContainer() as 9th argument).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             Some(("BOXD", "// box\n")),
@@ -613,7 +575,7 @@
                  return 1;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\n\
              local iExcluded; local iNoContainer; local iAnyContainer;\n\
@@ -626,8 +588,7 @@
                  if (FindObject(GOOD, 0,0,0,0, 0, 0, 0, 7) == pOther) iIntTolerant = 1;\n\
                  if (FindObject(GOOD, -10,-10, 20,20) == pOther) iRelative = 1;\n\
              }\n",
-        )
-        .expect("write prober script");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
@@ -635,8 +596,7 @@
             .objects
             .iter()
             .filter(|object| object.definition_id == "GOOD")
-            .min_by_key(|object| object.id)
-            .expect("prober created");
+            .min_by_key(|object| object.id).test_value();
         let flag = |name: &str| prober.local_vars.get(name).cloned();
         assert_eq!(
             flag("iExcluded"),
@@ -679,7 +639,7 @@
         // PSF_InitializePlayer this way (C4Player.cpp:769-775) — GoldRush's
         // TeamAccount rule creates the per-player ACNT from it
         // (TeamAccount.c4d/Script.c InitializePlayer).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -689,13 +649,12 @@
              }\n",
         );
         let rule = dir.path().join("Defs.c4d/Rule.c4d");
-        std::fs::create_dir_all(&rule).expect("rule dir");
-        std::fs::write(
+        std::fs::create_dir_all(&rule).test_value();
+        write_test_file(
             rule.join("DefCore.txt"),
             "[DefCore]\nid=RULZ\nName=Rule\nCategory=524288\nCrewMember=0\n",
-        )
-        .expect("write rule defcore");
-        std::fs::write(
+        );
+        write_test_file(
             rule.join("Script.c"),
             "#strict\nlocal iJoined;\n\
              public func InitializePlayer(iPlr) {\n\
@@ -703,8 +662,7 @@
                  CreateObject(GOOD, 60, 60, iPlr);\n\
                  return 1;\n\
              }\n",
-        )
-        .expect("write rule script");
+        );
         write_test_definition_graphics(&rule);
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
@@ -713,8 +671,7 @@
         let rule_object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "RULZ")
-            .expect("rule object created");
+            .find(|object| object.definition_id == "RULZ").test_value();
         assert_eq!(
             rule_object.local_vars.get("iJoined"),
             Some(&clonk_script::Value::Int(1)),
@@ -740,7 +697,7 @@
         // both: FxAIBanditNoMoveStart does `this()->~ContextDefend()`,
         // equips via CreateContents, and writes the appended local
         // `iOwner=-2` (Goldrush.c4s/Locals.c4d/AI.c4d/Script.c:96-106).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -750,7 +707,7 @@
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal iSelf;\n\
              public func Boot() { AddEffect(\"Probe\", this(), 1, 0, this()); return 1; }\n\
@@ -761,16 +718,14 @@
                  if (this()) iSelf = 1;\n\
                  CreateContents(GOOD);\n\
              }\n",
-        )
-        .expect("write target script");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD" && object.container.is_none())
-            .expect("object created");
+            .find(|object| object.definition_id == "GOOD" && object.container.is_none()).test_value();
         assert_eq!(
             object.local_vars.get("iSelf"),
             Some(&clonk_script::Value::Int(1)),
@@ -792,21 +747,20 @@
     // intro movie Talker colors its text with it.
     #[test]
     fn get_plr_color_dw_returns_the_joined_players_color() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
             "global func Initialize(state, random) { return 0; }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal iColor;\n\
              public func Probe(iPlr) {\n\
                  iColor = GetPlrColorDw(iPlr);\n\
                  return(1);\n\
              }\n",
-        )
-        .expect("write probe script");
+        );
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         join_test_player(&mut engine);
@@ -814,14 +768,12 @@
         let object_id = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("crew object exists")
+            .find(|object| object.definition_id == "GOOD").test_value()
             .id;
-        let idx = engine.find_object_index(object_id).expect("object exists");
+        let idx = engine.test_object_index(object_id);
         engine
-            .call_object_function(idx, "Probe", vec![clonk_script::Value::Int(0)])
-            .expect("probe runs");
-        let idx = engine.find_object_index(object_id).expect("object exists");
+            .call_object_function(idx, "Probe", vec![clonk_script::Value::Int(0)]).test_value();
+        let idx = engine.test_object_index(object_id);
         assert_eq!(
             engine.objects[idx].state.local_vars.get("iColor"),
             Some(&clonk_script::Value::Int(0xff0000)),
@@ -841,7 +793,7 @@
         // CheckAmmo (Winchester:289-299) -> LoadRifle (Cowboy:499-504);
         // the rifle removes itself and leaves a WCHR crosshair. The
         // fixture distills those scripts with the content call forms.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -851,14 +803,13 @@
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/ActMap.txt"),
             "[Action]\nName=Walk\nProcedure=NONE\nDirections=2\nFlipDir=1\nLength=16\nDelay=15\nNextAction=Walk\n\n\
              [Action]\nName=AimRifle\nProcedure=NONE\nDirections=2\nFlipDir=1\nLength=10\nDelay=0\nNextAction=Hold\n\n\
              [Action]\nName=LoadRifle\nProcedure=NONE\nDirections=2\nFlipDir=1\nLength=10\nDelay=3\nEndCall=AimAgain\n",
-        )
-        .expect("write bandit actmap");
-        std::fs::write(
+        );
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             r#"#strict
 local iOwner;
@@ -1001,8 +952,7 @@ public func DoWatchRewrite() {
   return(Local(0,obj));
 }
 "#,
-        )
-        .expect("write bandit script");
+        );
         let defs_root = dir.path().join("Defs.c4d");
         for (id, defcore, script) in [
             (
@@ -1093,17 +1043,16 @@ public func ActualizePhase(pClonk)
             ),
         ] {
             let def_dir = defs_root.join(id);
-            std::fs::create_dir_all(&def_dir).expect("def dir");
-            std::fs::write(def_dir.join("DefCore.txt"), defcore).expect("defcore");
-            std::fs::write(def_dir.join("Script.c"), script).expect("script");
+            std::fs::create_dir_all(&def_dir).test_value();
+            write_test_file(def_dir.join("DefCore.txt"), defcore);
+            write_test_file(def_dir.join("Script.c"), script);
             write_test_definition_graphics(&def_dir);
         }
         // WCHR needs its Crosshair action for SetAction (content ActMap).
-        std::fs::write(
+        write_test_file(
             defs_root.join("Crosshair.c4d/ActMap.txt"),
             "[Action]\nName=Crosshair\nProcedure=ATTACH\nLength=1\nDelay=1\nNextAction=Crosshair\n",
-        )
-        .expect("crosshair actmap");
+        );
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         // The live game installs planet/System.c4g before the scenario;
@@ -1124,14 +1073,13 @@ public func ActualizePhase(pClonk)
         // the scenario-apply Boot (C4Effect::Execute iTime % iIntervall,
         // C4Effect.cpp:340-345).
         for _ in 0..31 {
-            engine.tick_without_snapshot().expect("tick");
+            engine.tick_without_snapshot().test_value();
         }
         let snapshot = engine.snapshot();
         let bandit = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("bandit exists");
+            .find(|object| object.definition_id == "GOOD").test_value();
         assert_eq!(
             bandit.action.name, "LoadRifle",
             "the first OrderDefend tick walks the whole load chain \
@@ -1179,9 +1127,9 @@ public func ActualizePhase(pClonk)
         // Sin(0,40)=0 — the f60 live wall's crosshairs at owner+0).
         let bandit_id = bandit.id;
         for _ in 0..200 {
-            engine.tick_without_snapshot().expect("tick");
+            engine.tick_without_snapshot().test_value();
         }
-        let bandit_idx = engine.find_object_index(bandit_id).expect("bandit exists");
+        let bandit_idx = engine.test_object_index(bandit_id);
         let rewrites = engine.objects[bandit_idx]
             .state
             .local_vars
@@ -1205,9 +1153,8 @@ public func ActualizePhase(pClonk)
         let cross_state = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "WCHR")
-            .expect("crosshair exists");
-        let vertex = cross_state.vertices.first().expect("crosshair vertex");
+            .find(|object| object.definition_id == "WCHR").test_value();
+        let vertex = cross_state.vertices.first().test_value();
         assert_eq!(
             vertex.x.abs(),
             40,
@@ -1216,10 +1163,9 @@ public func ActualizePhase(pClonk)
             (vertex.x, vertex.y)
         );
 
-        let bandit_idx = engine.find_object_index(bandit_id).expect("bandit exists");
+        let bandit_idx = engine.test_object_index(bandit_id);
         let angle = engine
-            .call_object_function(bandit_idx, "DoWatchRewrite", Vec::new())
-            .expect("watch rewrite runs");
+            .call_object_function(bandit_idx, "DoWatchRewrite", Vec::new()).test_value();
         assert_eq!(
             angle,
             clonk_script::Value::Int(84),
@@ -1230,9 +1176,8 @@ public func ActualizePhase(pClonk)
         let cross = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "WCHR")
-            .expect("crosshair exists");
-        let vertex = cross.vertices.first().expect("crosshair vertex");
+            .find(|object| object.definition_id == "WCHR").test_value();
+        let vertex = cross.vertices.first().test_value();
         assert_eq!(
             (vertex.x, vertex.y),
             (-40, 4),
@@ -1247,7 +1192,7 @@ public func ActualizePhase(pClonk)
         // ignores AB_CALLNS at execution and the paired AB_CALL resolves
         // Func on the arrow target (C4AulExec.cpp:1212-1267). GOOD's Tag
         // therefore overrides HLPR's parse-time function.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1257,23 +1202,20 @@ public func ActualizePhase(pClonk)
                  return 0;\n\
              }\n",
         );
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nlocal seen;\npublic func Tag() { seen = 1; return seen; }\n",
-        )
-        .expect("write target script");
+        );
         let helper = dir.path().join("Defs.c4d/Helper.c4d");
-        std::fs::create_dir_all(&helper).expect("helper dir");
-        std::fs::write(
+        std::fs::create_dir_all(&helper).test_value();
+        write_test_file(
             helper.join("DefCore.txt"),
             "[DefCore]\nid=HLPR\nName=Helper\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write helper defcore");
-        std::fs::write(
+        );
+        write_test_file(
             helper.join("Script.c"),
             "#strict\nlocal seen;\npublic func Tag() { seen = 5; return seen; }\n",
-        )
-        .expect("write helper script");
+        );
         write_test_definition_graphics(&helper);
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
@@ -1281,8 +1223,7 @@ public func ActualizePhase(pClonk)
         let object = snapshot
             .objects
             .iter()
-            .find(|object| object.definition_id == "GOOD")
-            .expect("object created");
+            .find(|object| object.definition_id == "GOOD").test_value();
         assert_eq!(
             object.local_vars.get("seen"),
             Some(&clonk_script::Value::Int(1)),
@@ -1299,7 +1240,7 @@ public func ActualizePhase(pClonk)
         // state-proplist convention stays a JSON-fixture convenience —
         // legacy content had been receiving shifted arguments
         // (GoldRush's GetCrew(iPlr, ...) got the state map as iPlr).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1334,8 +1275,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("join succeeds");
+            }).test_value();
         assert_eq!(
             engine
                 .script_globals
@@ -1374,8 +1314,7 @@ public func ActualizePhase(pClonk)
                     auto_context_menu: false,
                 },
                 crate::PlayerAtClient::new(7),
-            )
-            .expect("remote player joins");
+            ).test_value();
 
         assert_eq!(
             engine
@@ -1419,8 +1358,7 @@ public func ActualizePhase(pClonk)
                 },
                 crate::PlayerAtClient::new(3),
                 &info,
-            )
-            .expect("remote player joins");
+            ).test_value();
         let player = joined.number();
 
         assert!(
@@ -1440,13 +1378,11 @@ public func ActualizePhase(pClonk)
         assert!(engine.player(player).expect("player exists").surrendered());
         for _ in 0..59 {
             engine
-                .tick_player_systems()
-                .expect("surrender retirement advances");
+                .tick_player_systems().test_value();
         }
         assert!(engine.player(player).is_some());
         engine
-            .tick_player_systems()
-            .expect("sixtieth execute retires surrendered player");
+            .tick_player_systems().test_value();
         assert!(engine.player(player).is_none());
     }
 
@@ -1457,7 +1393,7 @@ public func ActualizePhase(pClonk)
         // PreInitializePlayer exactly once, and does not consume the
         // ScenarioInit RNG ledger, place ready crew, or call
         // InitializePlayer (C4Player.cpp:299-320, 344-349).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1487,8 +1423,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("team-choice join succeeds");
+            }).test_value();
 
         assert_eq!(number, 0);
         assert_eq!(
@@ -1519,7 +1454,7 @@ public func ActualizePhase(pClonk)
         // therefore registered in PS_TeamSelection before PreInitialize,
         // and ordinary C4Player::Init skips ScenarioInit
         // (C4Teams.h:186; C4Player.cpp:299-320, 344-349).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1527,7 +1462,7 @@ public func ActualizePhase(pClonk)
              global func Initialize() { init_count = 0; }\n\
              global func InitializePlayer() { init_count = init_count + 1; }\n",
         );
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Teams.txt"),
             "[Teams]\n\
              AllowHostilityChange=0\n\
@@ -1538,8 +1473,7 @@ public func ActualizePhase(pClonk)
              \t[Team]\n\
              \tid=2\n\
              \tName=Right\n",
-        )
-        .expect("write custom teams");
+        );
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let rng_before = engine.rng.clone();
 
@@ -1560,8 +1494,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("join registers");
+            }).test_value();
 
         assert_eq!(
             outcome,
@@ -1589,7 +1522,7 @@ public func ActualizePhase(pClonk)
         // must postpone ScenarioInit. GenerateDefaultTeams creates every
         // missing ID through the requested one (C4Player.cpp:299-320;
         // C4Teams.cpp:386-420).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1597,8 +1530,7 @@ public func ActualizePhase(pClonk)
              global func Initialize() { init_count = 0; }\n\
              global func InitializePlayer() { init_count = init_count + 1; }\n",
         );
-        std::fs::write(scenario_dir.join("Teams.txt"), "[Teams]\n")
-            .expect("write empty custom teams");
+        write_test_file(scenario_dir.join("Teams.txt"), "[Teams]\n");
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
 
         let outcome = engine
@@ -1618,8 +1550,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("assigned-team join succeeds");
+            }).test_value();
 
         assert!(matches!(outcome, crate::JoinPlayerOutcome::Initialized(_)));
         assert_eq!(
@@ -1647,7 +1578,7 @@ public func ActualizePhase(pClonk)
         // team and returns that generated team to C4Player::Init's postponed-
         // selection check without rewriting the player's assigned Team value
         // (C4Player.cpp:299-320; C4Teams.cpp:403-420).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1655,8 +1586,7 @@ public func ActualizePhase(pClonk)
              global func Initialize() { init_count = 0; }\n\
              global func InitializePlayer() { init_count = init_count + 1; }\n",
         );
-        std::fs::write(scenario_dir.join("Teams.txt"), "[Teams]\n")
-            .expect("write empty custom teams");
+        write_test_file(scenario_dir.join("Teams.txt"), "[Teams]\n");
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
 
         let outcome = engine
@@ -1676,8 +1606,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("new-team join succeeds");
+            }).test_value();
 
         assert!(matches!(outcome, crate::JoinPlayerOutcome::Initialized(_)));
         assert_eq!(
@@ -1706,7 +1635,7 @@ public func ActualizePhase(pClonk)
         // nothing and GetGenerateTeamByID returns null, so C4Player::Init
         // postpones ScenarioInit (C4Player.cpp:299-320;
         // C4Teams.cpp:386-420).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1714,8 +1643,7 @@ public func ActualizePhase(pClonk)
              global func Initialize() { init_count = 0; }\n\
              global func InitializePlayer() { init_count = init_count + 1; }\n",
         );
-        std::fs::write(scenario_dir.join("Teams.txt"), "[Teams]\n")
-            .expect("write empty custom teams");
+        write_test_file(scenario_dir.join("Teams.txt"), "[Teams]\n");
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         engine.set_initial_network_team_metadata(&InitialNetworkTeamMetadata {
             active: true,
@@ -1749,8 +1677,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("new-team join registers");
+            }).test_value();
 
         assert_eq!(
             outcome,
@@ -1774,7 +1701,7 @@ public func ActualizePhase(pClonk)
         // ScenarioAndTeamInit assigns the team and resumes ScenarioInit plus
         // FinalInit without repeating PreInitializePlayer
         // (C4Player.cpp:111-151, 1774-1780).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -1805,25 +1732,22 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("team-choice join succeeds");
+            }).test_value();
         let rng_before = engine.rng.clone();
         let object_count_before = engine.snapshot().objects.len();
 
         engine
-            .mark_team_selection_pending(number)
-            .expect("selection request is accepted");
+            .mark_team_selection_pending(number).test_value();
         assert_eq!(
             engine.player(number).map(crate::Player::status),
             Some(crate::PlayerStatus::TeamSelectionPending)
         );
         let joined = engine
             .initialize_scenario_player(number, 1)
-            .expect("selection control executes")
-            .expect("team is accepted");
+            .expect("selection control executes").test_value();
 
         assert_eq!(joined.number, number);
-        let player = engine.player(number).expect("player remains registered");
+        let player = engine.player(number).test_value();
         assert_eq!(player.status(), crate::PlayerStatus::Active);
         assert_eq!(player.team(), Some(1));
         assert_ne!(
@@ -1882,30 +1806,24 @@ public func ActualizePhase(pClonk)
         generated.set_team_colors(true);
         generated.set_auto_generate_teams(true);
         let number = generated
-            .join_player_for_team_selection(config.clone())
-            .expect("generated-team chooser registers");
+            .join_player_for_team_selection(config.clone()).test_value();
         generated
-            .mark_team_selection_pending(number)
-            .expect("generated-team choice is pending");
+            .mark_team_selection_pending(number).test_value();
 
         let mut reference = Engine::new();
         reference.set_teams(vec![first_team.clone(), second_team.clone()]);
         reference.set_team_colors(true);
         let reference_number = reference
-            .join_player_for_team_selection(config)
-            .expect("existing-team chooser registers");
+            .join_player_for_team_selection(config).test_value();
         reference
-            .mark_team_selection_pending(reference_number)
-            .expect("existing-team choice is pending");
+            .mark_team_selection_pending(reference_number).test_value();
 
         let joined = generated
             .initialize_scenario_player(number, -1)
-            .expect("TEAMID_New control executes")
-            .expect("generated team is accepted");
+            .expect("TEAMID_New control executes").test_value();
         let reference_joined = reference
             .initialize_scenario_player(reference_number, 2)
-            .expect("existing-team control executes")
-            .expect("existing team is accepted");
+            .expect("existing-team control executes").test_value();
 
         assert_eq!(generated.teams(), reference.teams());
         assert_eq!(
@@ -1917,7 +1835,7 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(joined, reference_joined);
         assert_eq!(generated.rng, reference.rng, "no lockstep RNG drift");
-        let player = generated.player(number).expect("chooser remains joined");
+        let player = generated.player(number).test_value();
         assert_eq!(
             player.status(),
             crate::PlayerStatus::Eliminated,
@@ -1952,11 +1870,9 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("team chooser registers");
+            }).test_value();
         engine
-            .mark_team_selection_pending(number)
-            .expect("new-team choice is pending");
+            .mark_team_selection_pending(number).test_value();
         let teams_before = engine.teams().to_vec();
         let rng_before = engine.rng.clone();
 
@@ -1970,7 +1886,7 @@ public func ActualizePhase(pClonk)
 
         assert_eq!(engine.teams(), teams_before);
         assert_eq!(engine.rng, rng_before, "ScenarioInit did not run");
-        let player = engine.player(number).expect("chooser remains registered");
+        let player = engine.player(number).test_value();
         assert_eq!(player.status(), crate::PlayerStatus::TeamSelection);
         assert_eq!(player.team(), None);
     }
@@ -2009,30 +1925,24 @@ public func ActualizePhase(pClonk)
         generated.set_team_colors(true);
         generated.set_auto_generate_teams(true);
         let number = generated
-            .join_player_for_team_selection(config.clone())
-            .expect("generated-team chooser registers");
+            .join_player_for_team_selection(config.clone()).test_value();
         generated
-            .mark_team_selection_pending(number)
-            .expect("generated-team choice is pending");
+            .mark_team_selection_pending(number).test_value();
 
         let mut reference = Engine::new();
         reference.set_teams(vec![existing.clone(), unresolved.clone()]);
         reference.set_team_colors(true);
         let reference_number = reference
-            .join_player_for_team_selection(config)
-            .expect("existing-team chooser registers");
+            .join_player_for_team_selection(config).test_value();
         reference
-            .mark_team_selection_pending(reference_number)
-            .expect("existing-team choice is pending");
+            .mark_team_selection_pending(reference_number).test_value();
 
         generated
             .initialize_scenario_player(number, -1)
-            .expect("TEAMID_New control executes")
-            .expect("generated team is accepted");
+            .expect("TEAMID_New control executes").test_value();
         reference
             .initialize_scenario_player(reference_number, 12)
-            .expect("existing-team control executes")
-            .expect("existing team is accepted");
+            .expect("existing-team control executes").test_value();
 
         assert_eq!(generated.teams(), reference.teams());
         assert_eq!(
@@ -2056,7 +1966,7 @@ public func ActualizePhase(pClonk)
         // C4Player::ColorDw before ScenarioAndTeamInit calls ScenarioInit;
         // ScenarioInit reloads ColorDw before InitializePlayer observes it
         // (C4Teams.cpp:53-81; C4Player.cpp:111-151, 670-693, 769-775).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -2064,7 +1974,7 @@ public func ActualizePhase(pClonk)
              global func Initialize() { initialized_name = \"\"; }\n\
              global func InitializePlayer(plr) { initialized_name = GetTaggedPlayerName(plr); }\n",
         );
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Teams.txt"),
             "[Teams]\n\
              TeamColors=1\n\
@@ -2076,8 +1986,7 @@ public func ActualizePhase(pClonk)
              \tid=2\n\
              \tName=Green\n\
              \tColor=4513160\n",
-        )
-        .expect("write custom teams");
+        );
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
 
         for (name, info_color, team, team_color, tagged_name) in [
@@ -2113,27 +2022,23 @@ public func ActualizePhase(pClonk)
                     startup_player_count: 2,
                     control_style: false,
                     auto_context_menu: false,
-                })
-                .expect("team-choice join registers");
+                }).test_value();
             let number = outcome.number();
             assert_eq!(
                 outcome,
                 crate::JoinPlayerOutcome::AwaitingTeamSelection { number }
             );
             engine
-                .mark_team_selection_pending(number)
-                .expect("selection request is accepted");
+                .mark_team_selection_pending(number).test_value();
             engine
                 .initialize_scenario_player(number, team)
-                .expect("selection control executes")
-                .expect("team is accepted");
+                .expect("selection control executes").test_value();
 
             let player = engine
                 .snapshot()
                 .players
                 .into_iter()
-                .find(|player| player.id == number)
-                .expect("selected player is in the runtime snapshot");
+                .find(|player| player.id == number).test_value();
             assert_eq!(player.color, Some(team_color));
             assert_eq!(
                 engine
@@ -2152,7 +2057,7 @@ public func ActualizePhase(pClonk)
         // C4Team::AddPlayer always assigns the team, but gates both player
         // info and runtime color changes on C4TeamList::IsTeamColors
         // (C4Teams.cpp:68-80).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -2160,7 +2065,7 @@ public func ActualizePhase(pClonk)
              global func Initialize() { initialized_name = \"\"; }\n\
              global func InitializePlayer(plr) { initialized_name = GetTaggedPlayerName(plr); }\n",
         );
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Teams.txt"),
             "[Teams]\n\
              TeamColors=0\n\
@@ -2172,8 +2077,7 @@ public func ActualizePhase(pClonk)
              \tid=2\n\
              \tName=Green\n\
              \tColor=4513160\n",
-        )
-        .expect("write custom teams");
+        );
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let outcome = engine
             .join_player(crate::JoinPlayerConfig {
@@ -2192,23 +2096,19 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("team-choice join registers");
+            }).test_value();
         let number = outcome.number();
         engine
-            .mark_team_selection_pending(number)
-            .expect("selection request is accepted");
+            .mark_team_selection_pending(number).test_value();
         engine
             .initialize_scenario_player(number, 2)
-            .expect("selection control executes")
-            .expect("team is accepted");
+            .expect("selection control executes").test_value();
 
         let player = engine
             .snapshot()
             .players
             .into_iter()
-            .find(|player| player.id == number)
-            .expect("selected player is in the runtime snapshot");
+            .find(|player| player.id == number).test_value();
         assert_eq!(player.team, Some(2));
         assert_eq!(player.color, Some(crate::RgbColor::new(0x55, 0xcc, 0x88)));
         assert_eq!(
@@ -2231,7 +2131,7 @@ public func ActualizePhase(pClonk)
         // OnTeamSelectionFailed changes only PS_TeamSelectionPending back
         // to PS_TeamSelection (C4Player.cpp:130-143, 2256-2261;
         // C4Teams.cpp:545-560).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -2244,9 +2144,7 @@ public func ActualizePhase(pClonk)
             crate::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
             crate::TeamInfo::new(2, "Open", 0x0000_c800),
         ]);
-        engine
-            .register_player(crate::PlayerConfig::new(99, "Occupant").with_team(Some(1)))
-            .expect("occupant registers");
+        engine.register_test_player(crate::PlayerConfig::new(99, "Occupant").with_team(Some(1)));
         let number = engine
             .join_player_for_team_selection(crate::JoinPlayerConfig {
                 name: "Chooser".to_string(),
@@ -2264,11 +2162,9 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("team-choice join succeeds");
+            }).test_value();
         engine
-            .mark_team_selection_pending(number)
-            .expect("selection request is accepted");
+            .mark_team_selection_pending(number).test_value();
         let rng_before = engine.rng.clone();
         let objects_before = engine.snapshot().objects;
         let init_count_before = engine
@@ -2284,7 +2180,7 @@ public func ActualizePhase(pClonk)
                 .is_none(),
             "full team rejects the join"
         );
-        let player = engine.player(number).expect("chooser remains registered");
+        let player = engine.player(number).test_value();
         assert_eq!(player.status(), crate::PlayerStatus::TeamSelection);
         assert_eq!(player.team(), None);
         assert_eq!(engine.rng, rng_before);
@@ -2309,12 +2205,8 @@ public func ActualizePhase(pClonk)
             crate::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
             crate::TeamInfo::new(2, "Open", 0x0000_c800),
         ]);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Chooser"))
-            .expect("chooser registers");
-        engine
-            .register_player(crate::PlayerConfig::new(1, "Occupant").with_team(Some(1)))
-            .expect("occupant registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Chooser"));
+        engine.register_test_player(crate::PlayerConfig::new(1, "Occupant").with_team(Some(1)));
 
         assert_eq!(engine.forced_team_selection(0), Some(2));
     }
@@ -2329,9 +2221,7 @@ public func ActualizePhase(pClonk)
             crate::TeamInfo::new(1, "Left", 0x00f4_0000),
             crate::TeamInfo::new(2, "Right", 0x0000_c800),
         ]);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Chooser"))
-            .expect("chooser registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Chooser"));
         assert_eq!(engine.forced_team_selection(0), None);
 
         engine.set_teams(vec![crate::TeamInfo::new(1, "Solo", 0x00f4_0000)]);
@@ -2345,7 +2235,7 @@ public func ActualizePhase(pClonk)
         // group and registers its scripts with Game.ScriptEngine
         // (C4Def.cpp:956-977) — Western.c4d/System.c4g carries Find_Clan
         // and friends. They must be callable like any global script.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -2353,18 +2243,16 @@ public func ActualizePhase(pClonk)
              global func Initialize() { probed = PackHelper() + PACK_ORDER; return 0; }\n",
         );
         let system = dir.path().join("Defs.c4d/System.c4g");
-        std::fs::create_dir_all(&system).expect("system dir");
-        std::fs::write(
+        std::fs::create_dir_all(&system).test_value();
+        write_test_file(
             system.join("Helpers.c"),
             "#strict\nstatic const PACK_ORDER = 20;\n\
              global func PackHelper() { return 6; }\n",
-        )
-        .expect("write pack script");
-        std::fs::write(
+        );
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "#strict\nstatic const PACK_ORDER = 10;\n",
-        )
-        .expect("write definition script");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert_eq!(
@@ -2383,7 +2271,7 @@ public func ActualizePhase(pClonk)
         // InitDefs disables System loading only for the scenario root call.
         // Recursive *.c4d loads use fLoadSysGroups=true again
         // (C4Def.cpp:903-907,939-968).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
@@ -2391,12 +2279,11 @@ public func ActualizePhase(pClonk)
              global func Initialize() { nested_result = NestedHelper(); }\n",
         );
         let nested_system = scenario_dir.join("Helpers.c4d/System.c4g");
-        std::fs::create_dir_all(&nested_system).expect("nested system dir");
-        std::fs::write(
+        std::fs::create_dir_all(&nested_system).test_value();
+        write_test_file(
             nested_system.join("Helpers.c"),
             "#strict\nglobal func NestedHelper() { return 73; }\n",
-        )
-        .expect("write nested helper");
+        );
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert_eq!(
@@ -2415,73 +2302,63 @@ public func ActualizePhase(pClonk)
         // existing ID. Destroying the old host unregisters its functions and
         // appends, but GlobalNamed/GlobalConsts are not rolled back
         // (C4Def.cpp:625-633,927-933,1059-1091; C4Aul.cpp:473-481).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let defs = dir.path().join("Defs.c4d");
         let old = defs.join("Old.c4d");
         let target = defs.join("Target.c4d");
-        std::fs::create_dir_all(&old).expect("old def dir");
-        std::fs::create_dir_all(&target).expect("target def dir");
-        std::fs::write(
+        std::fs::create_dir_all(&old).test_value();
+        std::fs::create_dir_all(&target).test_value();
+        write_test_file(
             old.join("DefCore.txt"),
             "[DefCore]\nid=DUPS\nName=Old\nCategory=0\n",
-        )
-        .expect("write old core");
-        std::fs::write(
+        );
+        write_test_file(
             old.join("Script.c"),
             "#strict\nstatic const SURVIVES_REPLACEMENT = 7;\n\
              global func Clash() { return 1; }\n\
              #appendto TARG\npublic func Hook() { return inherited() * 10 + 1; }\n",
-        )
-        .expect("write old script");
+        );
         write_test_definition_graphics(&old);
-        std::fs::write(
+        write_test_file(
             target.join("DefCore.txt"),
             "[DefCore]\nid=TARG\nName=Target\nCategory=0\n",
-        )
-        .expect("write target core");
-        std::fs::write(
+        );
+        write_test_file(
             target.join("Script.c"),
             "#strict\npublic func Hook() { return 0; }\n",
-        )
-        .expect("write target script");
+        );
         write_test_definition_graphics(&target);
         let pack_system = defs.join("System.c4g");
-        std::fs::create_dir_all(&pack_system).expect("pack system dir");
-        std::fs::write(
+        std::fs::create_dir_all(&pack_system).test_value();
+        write_test_file(
             pack_system.join("Globals.c"),
             "#strict\nglobal func Clash() { return 15; }\n\
              public func PackPrivate() { return 9; }\n",
-        )
-        .expect("write pack globals");
+        );
 
         let scenario_dir = dir.path().join("Replacement.c4s");
         let replacement = scenario_dir.join("Replacement.c4d");
-        std::fs::create_dir_all(&replacement).expect("replacement def dir");
-        std::fs::write(
+        std::fs::create_dir_all(&replacement).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Replacement\n\n[Definitions]\nDefinition1=Defs.c4d\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             replacement.join("DefCore.txt"),
             "[DefCore]\nid=DUPS\nName=New\nCategory=0\n",
-        )
-        .expect("write replacement core");
-        std::fs::write(
+        );
+        write_test_file(
             replacement.join("Script.c"),
             "#strict\nglobal func Clash() { return 2; }\n\
              #appendto TARG\npublic func Hook() { return inherited() * 10 + 2; }\n",
-        )
-        .expect("write replacement script");
+        );
         write_test_definition_graphics(&replacement);
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         assert_eq!(
             engine
@@ -2494,9 +2371,8 @@ public func ActualizePhase(pClonk)
         );
         let globals = engine
             .global_script_functions
-            .as_ref()
-            .expect("global table exists");
-        let clash = globals.get("Clash").expect("replacement Clash exists");
+            .as_ref().test_value();
+        let clash = globals.get("Clash").test_value();
         assert!(clash.overloaded.is_some(), "pack System is inherited");
         assert!(
             clash
@@ -2506,10 +2382,8 @@ public func ActualizePhase(pClonk)
             "the removed definition function is absent from the overload chain"
         );
         assert!(!globals.contains_key("PackPrivate"));
-        let id = engine
-            .spawn_object(SpawnConfig::new("TARG"))
-            .expect("target spawns");
-        let index = engine.find_object_index(id).expect("target index");
+        let id = engine.spawn_test_object(SpawnConfig::new("TARG"));
+        let index = engine.test_object_index(id);
         assert_eq!(
             engine
                 .call_object_function(index, "Hook", Vec::new())
@@ -2527,44 +2401,37 @@ public func ActualizePhase(pClonk)
         // (C4Game.cpp:3288-3289). A configured [PlayerN] Position
         // multiplies a MapZoom.Evaluate per coordinate
         // (C4Player.cpp:713-714) — one synced draw each.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
-        std::fs::write(
+        write_test_file(
             dir.path().join("Defs.c4d/Good.c4d/ClonkNames.txt"),
             "Jim\nBob\nJoe\n",
-        )
-        .expect("write clonk names");
-        std::fs::write(dir.path().join("Defs.c4d/Good.c4d/ClonkNamesUS.txt"), [])
-            .expect("write empty localized clonk names");
+        );
+        write_test_file(dir.path().join("Defs.c4d/Good.c4d/ClonkNamesUS.txt"), []);
         let plain = dir.path().join("Defs.c4d/Plain.c4d");
-        std::fs::create_dir_all(&plain).expect("plain def dir");
-        std::fs::write(
+        std::fs::create_dir_all(&plain).test_value();
+        write_test_file(
             plain.join("DefCore.txt"),
             "[DefCore]\nid=PLAI\nName=Plain\nCategory=0\nCrewMember=1\n",
-        )
-        .expect("write plain defcore");
-        std::fs::write(plain.join("Script.c"), "// plain\n").expect("write plain script");
+        );
+        write_test_file(plain.join("Script.c"), "// plain\n");
         write_test_definition_graphics(&plain);
-        std::fs::write(scenario_dir.join("Names.txt"), "Alpha\nBeta\n")
-            .expect("write scenario names");
-        std::fs::write(
+        write_test_file(scenario_dir.join("Names.txt"), "Alpha\nBeta\n");
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Names\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
              [Player1]\nCrew=GOOD=1;PLAI=1\nPosition=20,30\n",
-        )
-        .expect("write scenario core");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(99);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         let mut replay = engine.rng.clone();
-        let landscape = engine.landscape().expect("landscape set").clone();
+        let landscape = engine.landscape().test_value().clone();
 
         // Wealth (default C4SVal(0,0,0,250)) — one draw.
         LegacyC4SVal::new(0, 0, 0, 250).evaluate(&mut replay);
@@ -2610,8 +2477,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
                 control_style: false,
                 auto_context_menu: false,
-            })
-            .expect("join succeeds");
+            }).test_value();
         assert_eq!(engine.rng, replay, "draw ledger matches");
 
         let snapshot = engine.snapshot();
@@ -2623,8 +2489,7 @@ public func ActualizePhase(pClonk)
                 (
                     object.definition_id.clone(),
                     engine
-                        .crew_object_info(object.id)
-                        .expect("crew info recorded")
+                        .crew_object_info(object.id).test_value()
                         .name
                         .clone(),
                 )
@@ -2660,8 +2525,7 @@ public func ActualizePhase(pClonk)
                     "Magic".to_string(),
                     "PLAI;GOOD=-6;PLAI=9;GOOD=0".to_string(),
                 ),
-            ])
-            .expect("player fields compile");
+            ]).test_value();
 
         let start = PlayerStart::from_legacy(&player);
         assert_eq!(
@@ -2708,27 +2572,24 @@ public func ActualizePhase(pClonk)
         // C4Player::ScenarioInit at join time (C4Player.cpp:670-777):
         // after apply the engine must still know all four start slots —
         // wealth/crew/position/ready lists — for joining players.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Starts\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
              [Player1]\nWealth=50,10,0,250\nCrew=GOOD=2\nBuildings=GOOD=1\n\
              Vehicles=GOOD=1\nMaterial=GOOD=2\nKnowledge=GOOD=1\n\
              HomeBaseMaterial=GOOD=3\nHomeBaseProduction=GOOD=2\nMagic=GOOD=0\n\
              Position=120,160\nEnforcePosition=1\nStandardCrew=GOOD\nClonks=2,0,1,10\n",
-        )
-        .expect("write scenario core");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
-        let start = engine.player_start(0).expect("start slot 0 exists");
+        let start = engine.player_start(0).test_value();
         assert_eq!(start.wealth, LegacyC4SVal::new(50, 10, 0, 250));
         assert_eq!(start.crew_count, LegacyC4SVal::new(2, 0, 1, 10));
         assert_eq!(start.native_crew.as_deref(), Some("GOOD"));
@@ -2747,7 +2608,7 @@ public func ActualizePhase(pClonk)
         // Unconfigured slots carry the C4SPlrStart defaults
         // (C4Scenario.cpp:294-300 Default()): Wealth (0,0,0,250),
         // Clonks (1,0,1,10), Position (-1,-1).
-        let other = engine.player_start(3).expect("start slot 3 exists");
+        let other = engine.player_start(3).test_value();
         assert_eq!(other.wealth, LegacyC4SVal::new(0, 0, 0, 250));
         assert_eq!(other.crew_count, LegacyC4SVal::new(1, 0, 1, 10));
         assert_eq!(other.position, [-1, -1]);
@@ -2792,8 +2653,7 @@ public func ActualizePhase(pClonk)
                 startup_player_count: 1,
             })
             .expect("team player joins")
-            .initialized()
-            .expect("team player initializes");
+            .initialized().test_value();
 
         assert_eq!((joined.start_x, joined.start_y), (120, 130));
     }

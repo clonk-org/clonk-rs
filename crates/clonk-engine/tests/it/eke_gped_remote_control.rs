@@ -9,8 +9,8 @@ const SCENARIO: &str = "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/AirbikeFight.
 const APPEND: &str = "EkeGpedRemoteControl.c";
 
 fn join_pilot(engine: &mut Engine, auto_stop: bool) -> i32 {
-    engine
-        .join_player(JoinPlayerConfig {
+    crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Eke remote control".into(),
             player_info_id: 0,
             score: 0,
@@ -26,11 +26,10 @@ fn join_pilot(engine: &mut Engine, auto_stop: bool) -> i32 {
             control_style: auto_stop,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("the local virtual player joins")
-        .initialized()
-        .expect("AirbikeFight needs no runtime team selection")
-        .number
+        }))
+        .initialized(),
+    )
+    .number
 }
 
 fn local(engine: &Engine, object: ObjectId, name: &str) -> Value {
@@ -60,7 +59,7 @@ fn com_dir(engine: &Engine, object: ObjectId) -> CommandDirection {
 
 fn tick(engine: &mut Engine, frames: u32) {
     for _ in 0..frames {
-        engine.tick_without_snapshot().expect("the frame executes");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 }
 
@@ -82,32 +81,31 @@ struct RemoteControl {
 /// it on the bike.
 fn steering_by_remote_control(engine: &mut Engine, auto_stop: bool) -> RemoteControl {
     let owner = join_pilot(engine, auto_stop);
-    let sft = engine
-        .crew_cursor(owner)
-        .expect("AirbikeFight joins with a selected SFT");
+    let sft = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     assert_eq!(
         action_name(engine, sft),
         "AirbikeFly",
         "InitializeClonk seats the fresh SFT on its airbike"
     );
 
-    let airbike = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "AB5B" && object.owner == owner)
-        .map(|object| object.id)
-        .expect("InitializeClonk creates one airbike per player");
+    let airbike = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "AB5B" && object.owner == owner)
+            .map(|object| object.id),
+    );
 
     // "Land/exit the bike": Airbike::Entrance is the shipped dismount body
     // (Airbike.c4d/Script.c:452-461) that Airbike::ControlDown also runs once
     // the bike is grounded.
-    let airbike_index = engine
-        .find_object_index(airbike)
-        .expect("the airbike has an index");
-    engine
-        .call_object_function(airbike_index, "Entrance", Vec::new())
-        .expect("the shipped dismount runs");
+    let airbike_index = crate::support::TestValueExt::test_value(engine.find_object_index(airbike));
+    crate::support::TestValueExt::test_value(engine.call_object_function(
+        airbike_index,
+        "Entrance",
+        Vec::new(),
+    ));
     // SFT::CheckArmed renames Walk after the selected item, so the dismounted
     // SFT lands in JetpackWalk (SFT.c4d/Script.c:441-445).
     let dismounted = action_name(engine, sft);
@@ -116,33 +114,28 @@ fn steering_by_remote_control(engine: &mut Engine, auto_stop: bool) -> RemoteCon
         "the dismounted SFT walks again, not {dismounted}"
     );
 
-    let gped = engine
-        .object_snapshot(sft)
-        .expect("the SFT remains live")
-        .contents
-        .into_iter()
-        .find(|&object| {
-            engine
-                .object_snapshot(object)
-                .is_some_and(|snapshot| snapshot.definition_id == "GP5B")
-        })
-        .expect("InitializeClonk equips one GPED");
+    let gped = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.object_snapshot(sft))
+            .contents
+            .into_iter()
+            .find(|&object| {
+                engine
+                    .object_snapshot(object)
+                    .is_some_and(|snapshot| snapshot.definition_id == "GP5B")
+            }),
+    );
 
     // Select the GPED through the engine's own inventory shift: the SFT only
     // forwards controls to Contents() (SFT.c4d/Script.c:288-295).
     for _ in 0..8 {
-        if engine
-            .object_snapshot(sft)
-            .expect("the SFT remains live")
+        if crate::support::TestValueExt::test_value(engine.object_snapshot(sft))
             .contents
             .first()
             == Some(&gped)
         {
             break;
         }
-        engine
-            .player_in_com(owner, COM_WHEEL_DOWN, 0)
-            .expect("shifting the inventory succeeds");
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_WHEEL_DOWN, 0));
     }
     assert_eq!(
         engine
@@ -156,9 +149,7 @@ fn steering_by_remote_control(engine: &mut Engine, auto_stop: bool) -> RemoteCon
 
     // [Special2] rotates the GPED from Blaster to Control mode
     // (GPED.c4d/Script.c:129-150).
-    engine
-        .player_in_com(owner, COM_SPECIAL2, 0)
-        .expect("the mode switch reaches the GPED");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_SPECIAL2, 0));
     assert_eq!(
         local(engine, gped, "mode"),
         Value::String("Control".into()),
@@ -169,12 +160,12 @@ fn steering_by_remote_control(engine: &mut Engine, auto_stop: bool) -> RemoteCon
     // ControlDig, which picks the nearest matching airbike and hands the GPED
     // to Airbike::ControlRequest (GPED.c4d/Script.c:90-156,
     // Airbike.c4d/Script.c:180-199,477-489).
-    engine
-        .player_in_com(owner, COM_DIG | COM_DOUBLE, 0)
-        .expect("activating the GPED succeeds");
-    engine
-        .player_in_com(owner, COM_DIG + COM_RELEASE_OFFSET, 0)
-        .expect("releasing Dig succeeds");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG | COM_DOUBLE, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_DIG + COM_RELEASE_OFFSET,
+        0,
+    ));
     assert_eq!(
         local(engine, gped, "target"),
         Value::Object(airbike.as_u64()),
@@ -214,15 +205,11 @@ fn eke_gped_remote_control_steers_the_airbike_without_walking_its_pilot() {
     for auto_stop in [false, true] {
         let mut engine = prepared.instantiate();
         let remote = steering_by_remote_control(&mut engine, auto_stop);
-        let parked = engine
-            .object_snapshot(remote.sft)
-            .expect("the SFT remains live")
-            .position;
+        let parked =
+            crate::support::TestValueExt::test_value(engine.object_snapshot(remote.sft)).position;
 
         // [Left] steers the airbike.
-        engine
-            .player_in_com(remote.owner, COM_LEFT, 0)
-            .expect("the turn reaches the GPED");
+        crate::support::TestValueExt::test_value(engine.player_in_com(remote.owner, COM_LEFT, 0));
         assert_eq!(
             com_dir(&engine, remote.airbike),
             CommandDirection::Left,
@@ -248,12 +235,12 @@ fn eke_gped_remote_control_steers_the_airbike_without_walking_its_pilot() {
         // Steering the other way is the ordinary next input: release [Left],
         // press [Right]. C4Player::InCom flushes the stale
         // `COM_Left | COM_Single` first (oracle C4Player.cpp:1522-1531).
-        engine
-            .player_in_com(remote.owner, COM_LEFT + COM_RELEASE_OFFSET, 0)
-            .expect("releasing Left succeeds");
-        engine
-            .player_in_com(remote.owner, COM_RIGHT, 0)
-            .expect("the reverse turn reaches the GPED");
+        crate::support::TestValueExt::test_value(engine.player_in_com(
+            remote.owner,
+            COM_LEFT + COM_RELEASE_OFFSET,
+            0,
+        ));
+        crate::support::TestValueExt::test_value(engine.player_in_com(remote.owner, COM_RIGHT, 0));
         assert_eq!(
             com_dir(&engine, remote.airbike),
             CommandDirection::Right,
@@ -297,15 +284,13 @@ fn shipped_eke_content_walks_the_remote_control_pilot_only_under_jump_and_run() 
         let mut engine = prepared.instantiate_without_system_script(APPEND);
         let remote = steering_by_remote_control(&mut engine, auto_stop);
 
-        engine
-            .player_in_com(remote.owner, COM_LEFT, 0)
-            .expect("the turn reaches the GPED");
-        engine
-            .player_in_com(remote.owner, COM_LEFT + COM_RELEASE_OFFSET, 0)
-            .expect("releasing Left succeeds");
-        engine
-            .player_in_com(remote.owner, COM_RIGHT, 0)
-            .expect("the reverse turn reaches the GPED");
+        crate::support::TestValueExt::test_value(engine.player_in_com(remote.owner, COM_LEFT, 0));
+        crate::support::TestValueExt::test_value(engine.player_in_com(
+            remote.owner,
+            COM_LEFT + COM_RELEASE_OFFSET,
+            0,
+        ));
+        crate::support::TestValueExt::test_value(engine.player_in_com(remote.owner, COM_RIGHT, 0));
 
         assert_eq!(
             com_dir(&engine, remote.airbike),

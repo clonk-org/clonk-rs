@@ -6,7 +6,7 @@ fn engine_with_push_pull_plane(
     height: u32,
     bytes: Vec<u8>,
 ) -> (Engine, MaterialId) {
-    let library = clonk_resources::MaterialLibrary::parse(
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
         r#"
             [Material Water]
             Name=Water
@@ -18,12 +18,11 @@ fn engine_with_push_pull_plane(
             Name=Earth
             Density=100
             "#,
-    )
-    .expect("push-pull materials parse");
+    ));
     let materials = MaterialSet::from_resource_library(&library);
-    let water = materials.id_of("Water").expect("Water exists");
-    let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
-        .expect("push-pull landscape builds");
+    let water = crate::TestValueExt::test_value(materials.id_of("Water"));
+    let mut landscape =
+        crate::TestValueExt::test_value(Landscape::new(width, vec![height as i32; width as usize]));
     landscape.set_world_height(height as i32);
     landscape.set_pixel_grid(landscape::PixelGrid::new(
         width,

@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use clonk_engine::{
     Definition, EliminatePlayerControlData, Engine, LegacyCString, MessageBoardAnswerControlData,
     ObjectId, ObjectStatus, ObjectUpdate, PlayerAtClient, PlayerConfig, PlayerStatus, SpawnConfig,
@@ -99,45 +100,31 @@ global func InputCallback(string answer, int player)
 
 fn fixture() -> (Engine, ObjectId, ObjectId) {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("MBQP", "Message-board query probe", QUERY_PROBE_SCRIPT)
-        .expect("message-board query probe registers");
+    engine.register_test_script_definition("MBQP", "Message-board query probe", QUERY_PROBE_SCRIPT);
 
-    let mut crew_definition =
-        Definition::from_script("CLNK", "Message-board player crew", "#strict 2\n")
-            .expect("crew definition compiles");
+    let mut crew_definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "CLNK",
+        "Message-board player crew",
+        "#strict 2\n",
+    ));
     crew_definition.set_crew_member(true);
-    engine
-        .register_definition(crew_definition)
-        .expect("crew definition registers");
-    engine
-        .register_player(PlayerConfig::new(PLAYER, "Message-board player"))
-        .expect("message-board player registers");
+    engine.register_test_definition(crew_definition);
+    engine.register_test_player(PlayerConfig::new(PLAYER, "Message-board player"));
     engine.set_local_players([PLAYER]);
 
     // Keep the player active through frame 35, when C4Player::Execute opens
     // the first pending local query (src/C4Player.cpp:228-235,2202-2213).
-    let crew = engine
-        .spawn_object(
-            SpawnConfig::new("CLNK")
-                .with_owner(PLAYER)
-                .with_crew_member(true)
-                .with_alive(true),
-        )
-        .expect("player crew spawns");
-    engine
-        .select_crew(PLAYER, [crew])
-        .expect("player crew is selected");
-    engine
-        .set_crew_cursor(PLAYER, Some(crew))
-        .expect("player crew becomes cursor");
+    let crew = engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(PLAYER)
+            .with_crew_member(true)
+            .with_alive(true),
+    );
+    crate::support::TestValueExt::test_value(engine.select_crew(PLAYER, [crew]));
+    crate::support::TestValueExt::test_value(engine.set_crew_cursor(PLAYER, Some(crew)));
 
-    let target = engine
-        .spawn_object(SpawnConfig::new("MBQP"))
-        .expect("message-board target spawns");
-    let driver = engine
-        .spawn_object(SpawnConfig::new("MBQP"))
-        .expect("message-board answer driver spawns");
+    let target = engine.spawn_test_object(SpawnConfig::new("MBQP"));
+    let driver = engine.spawn_test_object(SpawnConfig::new("MBQP"));
     (engine, target, driver)
 }
 
@@ -170,7 +157,7 @@ fn open(
 }
 
 fn object_number(object: ObjectId) -> i32 {
-    i32::try_from(object.as_u64()).expect("fixture object number fits the signed control field")
+    crate::support::TestValueExt::test_value(i32::try_from(object.as_u64()))
 }
 
 #[test]
@@ -194,17 +181,12 @@ fn call_message_board_rejects_invalid_players_and_status_zero_objects() {
     // Keep the Status==0 object in the vector until the next tick, matching
     // the C++ AssignRemoval window in which FnCallMessageBoard can still be
     // handed the object pointer and must reject its cleared Status.
-    engine
-        .apply_object_update(
-            target,
-            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
-        )
-        .expect("target enters Status==0 before cleanup");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        target,
+        ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+    ));
     assert_eq!(
-        engine
-            .object_snapshot(target)
-            .expect("deleted target remains until cleanup")
-            .status,
+        engine.test_object_snapshot(target).status,
         ObjectStatus::Deleted
     );
     assert_eq!(
@@ -259,9 +241,7 @@ fn call_message_board_rejects_a_target_removed_earlier_in_the_same_script_call()
 #[test]
 fn test_message_board_reports_validity_availability_and_retained_query_state() {
     let (mut engine, target, _) = fixture();
-    engine
-        .player_mut(PLAYER)
-        .expect("message-board player remains")
+    crate::support::TestValueExt::test_value(engine.player_mut(PLAYER))
         .set_at_client(PlayerAtClient::new(7));
 
     assert_eq!(
@@ -291,9 +271,9 @@ fn test_message_board_reports_validity_availability_and_retained_query_state() {
             panic!("state query activation tick {frame} succeeds: {error}")
         });
     }
-    let control = engine
-        .prepare_message_board_answer_control(LegacyCString::default(), 7)
-        .expect("active input produces its synchronized answer");
+    let control = crate::support::TestValueExt::test_value(
+        engine.prepare_message_board_answer_control(LegacyCString::default(), 7),
+    );
     assert!(
         engine
             .player(PLAYER)
@@ -328,10 +308,7 @@ fn replacement_query_opens_once_and_abort_matches_active_and_pending_paths() {
         Value::Bool(true)
     );
 
-    let state = engine
-        .player(PLAYER)
-        .expect("message-board player remains")
-        .to_state();
+    let state = crate::support::TestValueExt::test_value(engine.player(PLAYER)).to_state();
     assert_eq!(state.message_board_queries.len(), 1);
     let query = &state.message_board_queries[0];
     assert_eq!(query.target, Some(target));
@@ -344,9 +321,7 @@ fn replacement_query_opens_once_and_abort_matches_active_and_pending_paths() {
             .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
     }
-    let active = engine
-        .active_message_board_input()
-        .expect("the local player's replacement query opens on Tick35");
+    let active = crate::support::TestValueExt::test_value(engine.active_message_board_input());
     assert_eq!(active.player, PLAYER);
     assert_eq!(active.target, Some(target));
     assert_eq!(active.prompt, "replacement prompt");
@@ -412,9 +387,7 @@ fn call_message_board_replacement_moves_target_to_list_tail() {
         Value::Bool(true)
     );
 
-    let queries = &engine
-        .player(PLAYER)
-        .expect("message-board player remains")
+    let queries = &crate::support::TestValueExt::test_value(engine.player(PLAYER))
         .to_state()
         .message_board_queries;
     assert_eq!(queries.len(), 2);
@@ -436,13 +409,9 @@ fn restored_query_denumerates_a_missing_callback_object() {
     let mut state = engine.capture_state();
     state.objects.retain(|object| object.snapshot.id != target);
 
-    engine
-        .restore_state(&state)
-        .expect("player state with a missing callback object restores");
-    let queries = engine
-        .player(PLAYER)
-        .expect("message-board player restores")
-        .message_board_queries();
+    crate::support::TestValueExt::test_value(engine.restore_state(&state));
+    let queries =
+        crate::support::TestValueExt::test_value(engine.player(PLAYER)).message_board_queries();
     assert_eq!(queries.len(), 1);
     assert_eq!(queries[0].target, None);
     assert_eq!(queries[0].prompt, "saved prompt");
@@ -493,15 +462,11 @@ fn local_script_player_does_not_open_a_message_board_query() {
         Value::Bool(true)
     );
     let mut state = engine.capture_state();
-    state
-        .players
-        .iter_mut()
-        .find(|player| player.id == PLAYER)
-        .expect("message-board player is saved")
-        .script_player = true;
-    engine
-        .restore_state(&state)
-        .expect("script-player state restores");
+    crate::support::TestValueExt::test_value(
+        state.players.iter_mut().find(|player| player.id == PLAYER),
+    )
+    .script_player = true;
+    crate::support::TestValueExt::test_value(engine.restore_state(&state));
 
     for frame in 1..=35 {
         engine
@@ -541,15 +506,11 @@ fn deleting_an_active_query_target_closes_the_input_and_unblocks_the_next_prompt
         Some(target)
     );
 
-    engine
-        .apply_object_update(
-            target,
-            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
-        )
-        .expect("active query target enters Status==0");
-    engine
-        .tick_without_snapshot()
-        .expect("ordinary destroyed-object cleanup succeeds");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        target,
+        ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+    ));
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(
         engine.active_message_board_input().is_none(),
         "C4MessageInput::ClearPointers closes the deleted target's type-in"
@@ -564,9 +525,7 @@ fn deleting_an_active_query_target_closes_the_input_and_unblocks_the_next_prompt
             .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("next query activation tick {frame} succeeds: {error}"));
     }
-    let active = engine
-        .active_message_board_input()
-        .expect("a later prompt is no longer blocked by the deleted target");
+    let active = crate::support::TestValueExt::test_value(engine.active_message_board_input());
     assert_eq!(active.target, Some(next_target));
     assert_eq!(active.prompt, "unblocked prompt");
 }
@@ -603,9 +562,7 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
         Value::Bool(true)
     );
 
-    let target_state = engine
-        .object_snapshot(target)
-        .expect("callback target remains active");
+    let target_state = engine.test_object_snapshot(target);
     assert_eq!(
         target_state.local_vars.get("callback_answer"),
         Some(&Value::String("typed answer".to_string().into()))
@@ -643,8 +600,7 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
     );
     assert_eq!(
         engine
-            .object_snapshot(target)
-            .expect("callback target remains active")
+            .test_object_snapshot(target)
             .local_vars
             .get("callback_count"),
         Some(&Value::Int(1)),
@@ -655,13 +611,11 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
 #[test]
 fn ownerless_answer_dispatches_game_script_and_no_answer_only_clears_query() {
     let (mut engine, _, driver) = fixture();
-    engine
-        .install_scenario_script_with_convention(
-            "Message-board global query",
-            GLOBAL_QUERY_SCRIPT,
-            true,
-        )
-        .expect("the global query scenario script installs");
+    crate::support::TestValueExt::test_value(engine.install_scenario_script_with_convention(
+        "Message-board global query",
+        GLOBAL_QUERY_SCRIPT,
+        true,
+    ));
     assert_eq!(
         engine.install_global_scripts(&[(
             "MessageBoardGlobal.c".into(),
@@ -738,12 +692,12 @@ fn ownerless_answer_dispatches_game_script_and_no_answer_only_clears_query() {
         "an explicit empty string still reaches Game.Script InputCallback"
     );
 
-    engine
-        .register_script_definition("MBQN", "Message-board no-callback probe", "#strict 2\n")
-        .expect("no-callback probe registers");
-    let no_callback_target = engine
-        .spawn_object(SpawnConfig::new("MBQN"))
-        .expect("no-callback probe spawns");
+    engine.register_test_script_definition(
+        "MBQN",
+        "Message-board no-callback probe",
+        "#strict 2\n",
+    );
+    let no_callback_target = engine.spawn_test_object(SpawnConfig::new("MBQN"));
     assert_eq!(
         call(
             &mut engine,
@@ -787,9 +741,7 @@ fn ownerless_answer_dispatches_game_script_and_no_answer_only_clears_query() {
 #[test]
 fn message_board_answer_control_requires_the_players_exact_client() {
     let (mut engine, target, _) = fixture();
-    engine
-        .player_mut(PLAYER)
-        .expect("message-board player remains")
+    crate::support::TestValueExt::test_value(engine.player_mut(PLAYER))
         .set_at_client(PlayerAtClient::new(7));
     assert_eq!(
         open(&mut engine, target, false, "authenticated answer", PLAYER),
@@ -798,7 +750,9 @@ fn message_board_answer_control_requires_the_players_exact_client() {
 
     let forged = MessageBoardAnswerControlData {
         object: object_number(target),
-        answer: LegacyCString::from_bytes(b"forged".to_vec()).expect("answer is NUL-free"),
+        answer: crate::support::TestValueExt::test_value(LegacyCString::from_bytes(
+            b"forged".to_vec(),
+        )),
         player: PLAYER,
         by_client: 8,
     };
@@ -816,8 +770,7 @@ fn message_board_answer_control_requires_the_players_exact_client() {
     );
     assert_ne!(
         engine
-            .object_snapshot(target)
-            .expect("callback target remains")
+            .test_object_snapshot(target)
             .local_vars
             .get("callback_count"),
         Some(&Value::Int(1)),
@@ -847,24 +800,20 @@ fn message_board_answer_control_requires_the_players_exact_client() {
 #[test]
 fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame() {
     let (mut engine, target, _) = fixture();
-    engine
-        .player_mut(PLAYER)
-        .expect("message-board player remains")
+    crate::support::TestValueExt::test_value(engine.player_mut(PLAYER))
         .set_at_client(PlayerAtClient::new(7));
     assert_eq!(
         open(&mut engine, target, false, "escaped answer", PLAYER),
         Value::Bool(true)
     );
-    engine
-        .tick_without_snapshot()
-        .expect("advance to a nonzero control frame");
-    let frame = i32::try_from(engine.frame()).expect("fixture frame fits i32");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    let frame = crate::support::TestValueExt::test_value(i32::try_from(engine.frame()));
 
     let gravity = engine.physics().gravity;
     let answer = b"say \" ); SetGravity(99); // \\ \x80".to_vec();
     let control = MessageBoardAnswerControlData {
         object: object_number(target),
-        answer: LegacyCString::from_bytes(answer).expect("answer is NUL-free"),
+        answer: crate::support::TestValueExt::test_value(LegacyCString::from_bytes(answer)),
         player: PLAYER,
         by_client: 7,
     };
@@ -877,9 +826,7 @@ fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame
         "the callback executes in the control frame without advancing simulation"
     );
 
-    let target_state = engine
-        .object_snapshot(target)
-        .expect("callback target remains");
+    let target_state = engine.test_object_snapshot(target);
     assert_eq!(
         target_state.local_vars.get("callback_answer"),
         Some(&Value::String(
@@ -914,9 +861,7 @@ fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame
 #[test]
 fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query() {
     let (mut engine, target, _) = fixture();
-    engine
-        .player_mut(PLAYER)
-        .expect("message-board player remains")
+    crate::support::TestValueExt::test_value(engine.player_mut(PLAYER))
         .set_at_client(PlayerAtClient::new(7));
     assert_eq!(
         open(&mut engine, target, false, "cancel this query", PLAYER),
@@ -929,9 +874,9 @@ fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query()
     }
     assert!(engine.active_message_board_input().is_some());
 
-    let control = engine
-        .prepare_message_board_answer_control(LegacyCString::default(), 7)
-        .expect("active input produces its synchronized answer");
+    let control = crate::support::TestValueExt::test_value(
+        engine.prepare_message_board_answer_control(LegacyCString::default(), 7),
+    );
     assert_eq!(control.object, object_number(target));
     assert_eq!(control.player, PLAYER);
     assert_eq!(control.by_client, 7);
@@ -939,16 +884,13 @@ fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query()
         engine.active_message_board_input().is_none(),
         "local submission closes the process-local type-in before execution"
     );
-    let pending = engine
-        .player(PLAYER)
-        .expect("message-board player remains")
-        .message_board_queries();
+    let pending =
+        crate::support::TestValueExt::test_value(engine.player(PLAYER)).message_board_queries();
     assert_eq!(pending.len(), 1);
     assert!(pending[0].answered, "submission marks the query answered");
     assert_ne!(
         engine
-            .object_snapshot(target)
-            .expect("callback target remains")
+            .test_object_snapshot(target)
             .local_vars
             .get("callback_count"),
         Some(&Value::Int(1)),
@@ -965,8 +907,7 @@ fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query()
         .is_empty());
     assert_ne!(
         engine
-            .object_snapshot(target)
-            .expect("callback target remains")
+            .test_object_snapshot(target)
             .local_vars
             .get("callback_count"),
         Some(&Value::Int(1)),
@@ -977,9 +918,7 @@ fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query()
 #[test]
 fn message_board_answer_submission_applies_cpp_uppercase_bytes_before_queueing() {
     let (mut engine, target, _) = fixture();
-    engine
-        .player_mut(PLAYER)
-        .expect("message-board player remains")
+    crate::support::TestValueExt::test_value(engine.player_mut(PLAYER))
         .set_at_client(PlayerAtClient::new(7));
     assert_eq!(
         open(&mut engine, target, true, "uppercase answer", PLAYER),
@@ -991,12 +930,13 @@ fn message_board_answer_submission_applies_cpp_uppercase_bytes_before_queueing()
             .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
     }
 
-    let control = engine
-        .prepare_message_board_answer_control(
-            LegacyCString::from_bytes(vec![b'a', 0xe4, 0xf6, 0xfc]).expect("answer is NUL-free"),
+    let control =
+        crate::support::TestValueExt::test_value(engine.prepare_message_board_answer_control(
+            crate::support::TestValueExt::test_value(LegacyCString::from_bytes(vec![
+                b'a', 0xe4, 0xf6, 0xfc,
+            ])),
             7,
-        )
-        .expect("uppercase input produces a control");
+        ));
     assert_eq!(control.answer.as_bytes(), &[b'A', 0xc4, 0xd6, 0xdc]);
 }
 
@@ -1008,9 +948,7 @@ fn message_board_answer_control_preserves_cpp_internal_script_parse_failures() {
         vec![b'x'; 1025],
     ] {
         let (mut engine, target, _) = fixture();
-        engine
-            .player_mut(PLAYER)
-            .expect("message-board player remains")
+        crate::support::TestValueExt::test_value(engine.player_mut(PLAYER))
             .set_at_client(PlayerAtClient::new(7));
         assert_eq!(
             open(
@@ -1025,7 +963,7 @@ fn message_board_answer_control_preserves_cpp_internal_script_parse_failures() {
 
         let control = MessageBoardAnswerControlData {
             object: object_number(target),
-            answer: LegacyCString::from_bytes(answer).expect("answer is NUL-free"),
+            answer: crate::support::TestValueExt::test_value(LegacyCString::from_bytes(answer)),
             player: PLAYER,
             by_client: 7,
         };
@@ -1043,8 +981,7 @@ fn message_board_answer_control_preserves_cpp_internal_script_parse_failures() {
         );
         assert_ne!(
             engine
-                .object_snapshot(target)
-                .expect("callback target remains")
+                .test_object_snapshot(target)
                 .local_vars
                 .get("callback_count"),
             Some(&Value::Int(1)),

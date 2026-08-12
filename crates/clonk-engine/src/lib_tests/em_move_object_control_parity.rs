@@ -1,7 +1,7 @@
 use super::*;
 
 fn number(id: ObjectId) -> i32 {
-    i32::try_from(id.as_u64()).expect("fixture object number fits i32")
+    crate::TestValueExt::test_value(i32::try_from(id.as_u64()))
 }
 
 fn control(action: u8, objects: Vec<i32>) -> EmMoveObjectControlData {
@@ -18,32 +18,30 @@ fn control(action: u8, objects: Vec<i32>) -> EmMoveObjectControlData {
 }
 
 fn register_definition(engine: &mut Engine, id: &str, script: &str) {
-    engine
-        .register_script_definition(id, id, script)
-        .expect("fixture definition registers");
+    crate::TestValueExt::test_value(engine.register_script_definition(id, id, script));
 }
 
 #[test]
 fn em_move_object_move_uses_live_array_order_and_league_gate() {
     let mut engine = Engine::new();
     register_definition(&mut engine, "MOVE", "");
-    let active = engine
-        .spawn_object(
+    let active = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("MOVE")
                 .with_position(Vector2::new(10, 20))
                 .with_velocity(Vector2::new(3, -4))
                 .with_mobile(true),
-        )
-        .expect("active object spawns");
-    let inactive = engine
-        .spawn_object(
+        ),
+    );
+    let inactive = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("MOVE")
                 .with_position(Vector2::new(1, 2))
                 .with_velocity(Vector2::new(-2, 5))
                 .with_mobile(true)
                 .with_status(ObjectStatus::Inactive),
-        )
-        .expect("inactive object spawns");
+        ),
+    );
     let mut packet = control(
         EMMO_MOVE,
         vec![
@@ -60,18 +58,20 @@ fn em_move_object_move_uses_live_array_order_and_league_gate() {
     assert!(engine
         .execute_em_move_object_control(&packet, ScriptControlPolicy::live(false))
         .expect("move packet executes"));
-    let active_state = &engine.objects[engine.find_object_index(active).unwrap()];
+    let active_state =
+        &engine.objects[crate::TestValueExt::test_value(engine.find_object_index(active))];
     assert_eq!(active_state.state.position, Vector2::new(14, 14));
     assert_eq!(active_state.fixed_position, FixedVec2::from_ints(14, 14));
     assert_eq!(active_state.state.velocity, Vector2::ZERO);
     assert_eq!(active_state.fixed_velocity, FixedVec2::ZERO);
     assert!(!active_state.state.mobile);
-    let inactive_state = &engine.objects[engine.find_object_index(inactive).unwrap()];
+    let inactive_state =
+        &engine.objects[crate::TestValueExt::test_value(engine.find_object_index(inactive))];
     assert_eq!(inactive_state.state.position, Vector2::new(3, -1));
     assert_eq!(inactive_state.fixed_velocity, FixedVec2::ZERO);
     assert!(!inactive_state.state.mobile);
 
-    let before = engine.objects[engine.find_object_index(active).unwrap()]
+    let before = engine.objects[crate::TestValueExt::test_value(engine.find_object_index(active))]
         .state
         .position;
     engine.set_league_game(true);
@@ -95,20 +95,18 @@ fn em_move_object_duplicate_uses_create_object_lifecycle_not_state_clone() {
             "DUPL",
             "#strict 3\nstatic Made;\nfunc Construction(creator) { if (Made == nil) Made = 0; Made = Made + 1; return true; }\nfunc ReadMade() { return Made; }",
     );
-    let layer = engine
-        .spawn_object(SpawnConfig::new("LAYR"))
-        .expect("layer object spawns");
-    let source = engine
-        .spawn_object(
+    let layer = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("LAYR")));
+    let source = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("DUPL")
                 .with_position(Vector2::new(23, 41))
                 .with_velocity(Vector2::new(7, -5))
                 .with_rotation(67)
                 .with_owner(4)
                 .with_layer(layer),
-        )
-        .expect("source object spawns");
-    let source_index = engine.find_object_index(source).unwrap();
+        ),
+    );
+    let source_index = crate::TestValueExt::test_value(engine.find_object_index(source));
     assert_eq!(
         engine
             .call_object_function(source_index, "ReadMade", Vec::new())
@@ -137,7 +135,7 @@ fn em_move_object_duplicate_uses_create_object_lifecycle_not_state_clone() {
         assert_eq!(duplicate.state.layer, Some(layer));
         assert_eq!(duplicate.state.construction, FULL_CON);
     }
-    let source_index = engine.find_object_index(source).unwrap();
+    let source_index = crate::TestValueExt::test_value(engine.find_object_index(source));
     assert_eq!(
         engine
             .call_object_function(source_index, "ReadMade", Vec::new())
@@ -151,27 +149,27 @@ fn em_move_object_enter_exit_and_remove_use_native_object_paths() {
     let mut engine = Engine::new();
     register_definition(&mut engine, "CONT", "");
     register_definition(&mut engine, "ITEM", "");
-    let container = engine
-        .spawn_object(
+    let container = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("CONT")
                 .with_position(Vector2::new(50, 60))
                 .with_velocity(Vector2::new(2, 3)),
-        )
-        .expect("container spawns");
-    let child = engine
-        .spawn_object(
+        ),
+    );
+    let child = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("ITEM")
                 .with_position(Vector2::new(4, 5))
                 .with_velocity(Vector2::new(8, -9))
                 .with_rotation(27),
-        )
-        .expect("child spawns");
+        ),
+    );
     let mut enter = control(EMMO_ENTER, vec![number(child)]);
     enter.target_object = number(container);
     assert!(engine
         .execute_em_move_object_control(&enter, ScriptControlPolicy::live(false))
         .expect("enter executes"));
-    let child_index = engine.find_object_index(child).unwrap();
+    let child_index = crate::TestValueExt::test_value(engine.find_object_index(child));
     assert_eq!(engine.objects[child_index].state.container, Some(container));
     assert_eq!(
         engine.objects[child_index].state.position,
@@ -184,16 +182,16 @@ fn em_move_object_enter_exit_and_remove_use_native_object_paths() {
             ScriptControlPolicy::live(false),
         )
         .expect("exit executes"));
-    let child_index = engine.find_object_index(child).unwrap();
+    let child_index = crate::TestValueExt::test_value(engine.find_object_index(child));
     assert_eq!(engine.objects[child_index].state.container, None);
     assert_eq!(engine.objects[child_index].state.rotation, 27);
     assert_eq!(engine.objects[child_index].fixed_velocity, FixedVec2::ZERO);
     assert_eq!(engine.objects[child_index].rotation_velocity, C4Fixed::ZERO);
     assert!(engine.objects[child_index].state.mobile);
 
-    let content = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(child))
-        .expect("nested content spawns");
+    let content = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("ITEM").with_container(child)),
+    );
     assert!(engine
         .execute_em_move_object_control(
             &control(EMMO_REMOVE, vec![number(child), number(child)]),
@@ -229,27 +227,21 @@ fn em_move_object_script_preserves_raw_targets_fallbacks_and_policy() {
             "SCRP",
             "#strict 3\nlocal Marks;\nfunc Mark() { if (Marks == nil) Marks = 0; Marks = Marks + 1; return true; }\nfunc ReadMarks() { return Marks; }",
     );
-    let object = engine
-        .spawn_object(SpawnConfig::new("SCRP"))
-        .expect("script object spawns");
+    let object = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("SCRP")));
     let mut packet = control(EMMO_SCRIPT, vec![number(object), 999_999, number(object)]);
-    packet.script = LegacyCString::from_bytes(b"Mark()".to_vec()).unwrap();
+    packet.script = crate::TestValueExt::test_value(LegacyCString::from_bytes(b"Mark()".to_vec()));
     assert!(engine
         .execute_em_move_object_control(&packet, ScriptControlPolicy::replay(false))
         .expect("host-authored replay script executes"));
-    let index = engine.find_object_index(object).unwrap();
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     assert_eq!(
         engine
             .call_object_function(index, "ReadMarks", Vec::new())
             .expect("object marks read"),
         Value::Int(2)
     );
-    let global = engine
-        .script_globals
-        .borrow()
-        .get("GlobalMarks")
-        .cloned()
-        .expect("global fallback marker exists");
+    let global =
+        crate::TestValueExt::test_value(engine.script_globals.borrow().get("GlobalMarks").cloned());
     assert_eq!(*global.borrow(), Value::Int(1));
 
     packet.by_client = 7;
@@ -257,7 +249,7 @@ fn em_move_object_script_preserves_raw_targets_fallbacks_and_policy() {
         .execute_em_move_object_control(&packet, ScriptControlPolicy::replay(false))
         .expect("outer packet remains accepted"));
     assert_eq!(*global.borrow(), Value::Int(1));
-    let index = engine.find_object_index(object).unwrap();
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     assert_eq!(
         engine
             .call_object_function(index, "ReadMarks", Vec::new())

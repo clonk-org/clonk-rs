@@ -32,45 +32,237 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
-fn tempdir() -> std::io::Result<tempfile::TempDir> {
-    tempfile::Builder::new().prefix("lc-test-").tempdir()
+#[track_caller]
+fn tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("lc-test-")
+        .tempdir()
+        .test_value()
+}
+
+#[track_caller]
+fn test_app_paths() -> AppPaths {
+    AppPaths::discover().test_value()
+}
+
+trait TestReference<T> {
+    fn test_ref(&self) -> &T;
+    fn test_mut(&mut self) -> &mut T;
+}
+
+impl<T> TestReference<T> for Option<T> {
+    #[track_caller]
+    fn test_ref(&self) -> &T {
+        Option::as_ref(self).test_value()
+    }
+
+    #[track_caller]
+    fn test_mut(&mut self) -> &mut T {
+        Option::as_mut(self).test_value()
+    }
+}
+
+impl<T, E: std::fmt::Debug> TestReference<T> for Result<T, E> {
+    #[track_caller]
+    fn test_ref(&self) -> &T {
+        Result::as_ref(self).test_value()
+    }
+
+    #[track_caller]
+    fn test_mut(&mut self) -> &mut T {
+        Result::as_mut(self).test_value()
+    }
+}
+
+trait TestOptionExt<T> {
+    fn test_value(self) -> T;
+}
+
+impl<T> TestOptionExt<T> for Option<T> {
+    #[track_caller]
+    fn test_value(self) -> T {
+        Option::expect(self, "test value exists")
+    }
+}
+
+impl<T, E: std::fmt::Debug> TestOptionExt<T> for Result<T, E> {
+    #[track_caller]
+    fn test_value(self) -> T {
+        Result::expect(self, "test operation succeeds")
+    }
+}
+
+trait TestJoinExt<T> {
+    fn test_join(self) -> T;
+}
+
+impl<T> TestJoinExt<T> for std::thread::JoinHandle<T> {
+    #[track_caller]
+    fn test_join(self) -> T {
+        std::thread::JoinHandle::join(self).test_value()
+    }
+}
+
+trait TestGameAppExt {
+    fn test_key(&mut self, key: VirtualKeyCode, state: ElementState);
+    fn test_render(&mut self, frame: &mut [u8]) -> bool;
+    fn test_left_button(&mut self, state: ElementState);
+    fn test_right_button(&mut self, state: ElementState);
+    fn test_cursor(&mut self, position: PhysicalPosition<f64>);
+    fn test_modifiers(&mut self, modifiers: ModifiersState);
+    fn test_update(&mut self);
+    fn test_network_events(&mut self);
+    fn test_text_input(&mut self, character: char);
+    fn test_gamepad_events(&mut self, events: impl IntoIterator<Item = GamepadEvent>);
+    fn test_mouse_wheel(&mut self, delta: MouseScrollDelta, output_scale: f32);
+    fn test_touch(&mut self, phase: TouchPhase, position: GuiPoint);
+}
+
+impl TestGameAppExt for GameApp {
+    #[track_caller]
+    fn test_key(&mut self, key: VirtualKeyCode, state: ElementState) {
+        self.handle_key(key, state).test_value();
+    }
+
+    #[track_caller]
+    fn test_render(&mut self, frame: &mut [u8]) -> bool {
+        self.render(frame).test_value()
+    }
+
+    #[track_caller]
+    fn test_left_button(&mut self, state: ElementState) {
+        self.handle_mouse_button(state).test_value();
+    }
+
+    #[track_caller]
+    fn test_right_button(&mut self, state: ElementState) {
+        self.handle_right_mouse_button(state).test_value();
+    }
+
+    #[track_caller]
+    fn test_cursor(&mut self, position: PhysicalPosition<f64>) {
+        self.handle_cursor_moved(position).test_value();
+    }
+
+    #[track_caller]
+    fn test_modifiers(&mut self, modifiers: ModifiersState) {
+        self.handle_modifiers_changed(modifiers).test_value();
+    }
+
+    #[track_caller]
+    fn test_update(&mut self) {
+        self.update().test_value();
+    }
+
+    #[track_caller]
+    fn test_network_events(&mut self) {
+        self.process_network_events().test_value();
+    }
+
+    #[track_caller]
+    fn test_text_input(&mut self, character: char) {
+        self.handle_text_input(character).test_value();
+    }
+
+    #[track_caller]
+    fn test_gamepad_events(&mut self, events: impl IntoIterator<Item = GamepadEvent>) {
+        self.process_gamepad_event_batch(events).test_value();
+    }
+
+    #[track_caller]
+    fn test_mouse_wheel(&mut self, delta: MouseScrollDelta, output_scale: f32) {
+        self.handle_mouse_wheel(delta, output_scale).test_value();
+    }
+
+    #[track_caller]
+    fn test_touch(&mut self, phase: TouchPhase, position: GuiPoint) {
+        self.handle_touch(phase, position).test_value();
+    }
+}
+
+fn test_definition(id: &str, name: &str, script: &str) -> Definition {
+    Definition::from_script(id, name, script).test_value()
+}
+
+trait TestEngineExt {
+    fn register_test_definition(&mut self, definition: Definition);
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
+    fn test_player(&self, id: i32) -> &clonk_engine::Player;
+    fn test_player_mut(&mut self, id: i32) -> &mut clonk_engine::Player;
+    fn test_object_snapshot(&self, id: ObjectId) -> ObjectSnapshot;
+    fn test_crew_cursor(&self, owner: i32) -> ObjectId;
+    fn test_tick(&mut self) -> SimulationSnapshot;
+}
+
+impl TestEngineExt for Engine {
+    #[track_caller]
+    fn register_test_definition(&mut self, definition: Definition) {
+        self.register_definition(definition).test_value();
+    }
+
+    #[track_caller]
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
+        self.spawn_object(config).test_value()
+    }
+
+    #[track_caller]
+    fn test_player(&self, id: i32) -> &clonk_engine::Player {
+        self.player(id).test_value()
+    }
+
+    #[track_caller]
+    fn test_player_mut(&mut self, id: i32) -> &mut clonk_engine::Player {
+        self.player_mut(id).test_value()
+    }
+
+    #[track_caller]
+    fn test_object_snapshot(&self, id: ObjectId) -> ObjectSnapshot {
+        self.object_snapshot(id).test_value()
+    }
+
+    #[track_caller]
+    fn test_crew_cursor(&self, owner: i32) -> ObjectId {
+        self.crew_cursor(owner).test_value()
+    }
+
+    #[track_caller]
+    fn test_tick(&mut self) -> SimulationSnapshot {
+        self.tick().test_value()
+    }
 }
 
 fn install_record_test_definitions(root: &Path) {
     let definition = root.join("Objects.c4d").join("Record.c4d");
-    fs::create_dir_all(&definition).expect("create record fixture definition");
+    fs::create_dir_all(&definition).test_value();
     fs::write(
         definition.join("DefCore.txt"),
         b"[DefCore]\nid=RECD\nName=Record fixture\nCategory=1\n",
     )
-    .expect("write record fixture definition core");
+    .test_value();
     write_test_definition_graphics(&definition);
 }
 
 fn write_test_definition_graphics(path: &Path) {
     image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
         .save(path.join("Graphics.png"))
-        .expect("write definition graphics");
+        .test_value();
 }
 
 fn render_mouse_test_app(app: &mut GameApp) {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("render mouse test fixture");
+    app.render(&mut frame).test_value();
 }
 
 fn mouse_test_object_point(app: &GameApp, owner: i32, object: ObjectId) -> GuiPoint {
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("mouse test has a local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
         .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(object))
-        .expect("mouse test object has a visible pick point")
+        .test_value()
 }
 
 fn mouse_test_drop_geometry_candidate(landscape: &Landscape, world: Vector2) -> bool {
@@ -125,10 +317,7 @@ fn mouse_test_empty_point(
     start: GuiPoint,
     carry_command: Option<CommandId>,
 ) -> (GuiPoint, Vector2) {
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("mouse test has a local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
 
     // Drop has an exact cheap geometry case: liquid, or air at most five
     // pixels above ground (C4MouseControl.cpp:833-846). Probe sparse columns
@@ -157,7 +346,7 @@ fn mouse_test_empty_point(
         .find_map(|point| {
             mouse_test_matching_empty_point(app, owner, start, point, carry_command, false)
         })
-        .expect("mouse test has a matching empty release point")
+        .test_value()
 }
 
 fn physical_left_click_with_modifiers(
@@ -168,19 +357,15 @@ fn physical_left_click_with_modifiers(
 ) {
     // Distinct waypoint clicks are not a platform LeftDouble gesture.
     app.ingame_last_left_down = None;
-    app.handle_modifiers_changed(press_modifiers)
-        .expect("install left-down modifiers");
+    app.handle_modifiers_changed(press_modifiers).test_value();
     app.handle_cursor_moved(PhysicalPosition::new(
         f64::from(point.x),
         f64::from(point.y),
     ))
-    .expect("move to click point");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("physical left-down");
-    app.handle_modifiers_changed(release_modifiers)
-        .expect("install left-up modifiers");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("physical left-up");
+    .test_value();
+    app.handle_mouse_button(ElementState::Pressed).test_value();
+    app.handle_modifiers_changed(release_modifiers).test_value();
+    app.handle_mouse_button(ElementState::Released).test_value();
 }
 
 fn install_mouse_network_capture(app: &mut GameApp) -> network::TestNetworkCommands {
@@ -197,7 +382,7 @@ fn install_mouse_help_target(
 ) -> (ObjectId, GuiPoint) {
     render_mouse_test_app(app);
     let owner = app.local_owner;
-    let viewport = app.graphics.viewport_rect(owner).expect("sandbox viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let inset_x = 24_i32.min(viewport.width as i32 / 4);
     let inset_y = 24_i32.min(viewport.height as i32 / 4);
     let position = (viewport.y + inset_y..viewport.y + viewport.height as i32 - inset_y)
@@ -216,15 +401,13 @@ fn install_mouse_help_target(
                     .is_none())
             .then_some(ingame_pointer_world_pixel(pointer))
         })
-        .expect("help target has an empty interior spawn point");
-    let mut definition = Definition::from_script(definition_id, "Definition name", "#strict\n")
-        .expect("help target compiles");
+        .test_value();
+    let mut definition =
+        Definition::from_script(definition_id, "Definition name", "#strict\n").test_value();
     definition.set_category(clonk_engine::CATEGORY_OBJECT);
     definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-4, -4, 8, 8)));
     definition.set_description(description.map(str::to_string));
-    app.engine
-        .register_definition(definition)
-        .expect("register help target");
+    app.engine.register_definition(definition).test_value();
     let mut spawn = SpawnConfig::new(definition_id)
         .with_position(position)
         .with_custom_name(custom_name);
@@ -236,7 +419,7 @@ fn install_mouse_help_target(
     {
         spawn = spawn.with_layer(layer);
     }
-    let target = app.engine.spawn_object(spawn).expect("spawn help target");
+    let target = app.engine.spawn_object(spawn).test_value();
     render_mouse_test_app(app);
     let point = mouse_test_object_point(app, owner, target);
     assert_eq!(
@@ -255,34 +438,27 @@ fn install_mouse_help_target(
 fn inventory_region_fixture() -> (GameApp, i32, ObjectId, ObjectId, ObjectId, GuiPoint) {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
+    let crew = app.engine.crew_cursor(owner).test_value();
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(200);
     app.engine.set_landscape(landscape);
-    let mut item =
-        Definition::from_script("MITM", "Mouse item", "#strict\n").expect("item compiles");
+    let mut item = Definition::from_script("MITM", "Mouse item", "#strict\n").test_value();
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
-    app.engine.register_definition(item).expect("register item");
+    app.engine.register_definition(item).test_value();
     let first = app
         .engine
         .spawn_object(SpawnConfig::new("MITM").with_container(crew))
-        .expect("spawn first item");
+        .test_value();
     let second = app
         .engine
         .spawn_object(SpawnConfig::new("MITM").with_container(crew))
-        .expect("spawn second item");
+        .test_value();
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("render inventory region");
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("local sandbox viewport");
+    app.render(&mut frame).test_value();
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let region_point = GuiPoint::new(
         (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + clonk_frontend::hud::SYMBOL_SIZE / 2)
             as f32,
@@ -292,7 +468,7 @@ fn inventory_region_fixture() -> (GameApp, i32, ObjectId, ObjectId, ObjectId, Gu
     );
     let region_target = app
         .ingame_inventory_region_target(owner, region_point)
-        .expect("first inventory cell has a copied target");
+        .test_value();
     assert_eq!(
         region_target, second,
         "runtime same-ID cluster is newest-first"
@@ -308,8 +484,8 @@ fn command_region_point(app: &GameApp, command: u8) -> GuiPoint {
         .iter()
         .find(|player| player.id == owner)
         .and_then(|player| player.cursor)
-        .expect("local cursor");
-    let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+        .test_value();
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let context = AppCommandContext {
         engine: &app.engine,
         bindings: &app.bindings,
@@ -337,10 +513,7 @@ fn viewport_button_point(
     owner: i32,
     button: clonk_frontend::hud::ViewportButton,
 ) -> GuiPoint {
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("viewport button owner has a viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let rect = clonk_frontend::hud::viewport_button_rect(viewport, button);
     GuiPoint::new(
         rect.x as f32 + rect.width as f32 / 2.0,
@@ -353,38 +526,34 @@ fn command_bar_fixture(control_style: bool) -> (GameApp, i32, [(u8, GuiPoint); 4
     let owner = app.local_owner;
     app.engine
         .player_mut(owner)
-        .expect("local player")
+        .test_value()
         .control
         .control_style = control_style;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    let container = Definition::from_script("MBAS", "Mouse base", "#strict\n")
-        .expect("base definition compiles");
-    app.engine
-        .register_definition(container)
-        .expect("register base");
+    let cursor = app.engine.crew_cursor(owner).test_value();
+    let container = Definition::from_script("MBAS", "Mouse base", "#strict\n").test_value();
+    app.engine.register_definition(container).test_value();
     let container = app
         .engine
         .spawn_object(SpawnConfig::new("MBAS"))
-        .expect("spawn base");
+        .test_value();
     app.engine
         .apply_object_update(container, ObjectUpdate::new().with_base(owner))
-        .expect("mark player base");
+        .test_value();
     app.engine
         .apply_object_update(cursor, ObjectUpdate::new().with_container(container))
-        .expect("contain cursor");
-    let mut item = Definition::from_script("MCBI", "Command item", "#strict\n")
-        .expect("item definition compiles");
+        .test_value();
+    let mut item = Definition::from_script("MCBI", "Command item", "#strict\n").test_value();
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
-    app.engine.register_definition(item).expect("register item");
+    app.engine.register_definition(item).test_value();
     app.engine
         .spawn_object(SpawnConfig::new("MCBI").with_container(cursor))
-        .expect("give cursor an item");
+        .test_value();
     app.engine.set_base_buy_enabled(true);
     app.engine.set_base_sell_enabled(true);
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("render command regions");
+    app.render(&mut frame).test_value();
 
     let points = [5_u8, 4, 3, 6].map(|command| {
         let point = command_region_point(&app, command);
@@ -410,17 +579,20 @@ impl<'app> AppVirtualKeyboard<'app> {
         Self { app }
     }
 
-    fn press(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
-        self.app.handle_key(key, ElementState::Pressed)
+    #[track_caller]
+    fn press(&mut self, key: VirtualKeyCode) {
+        self.app.test_key(key, ElementState::Pressed);
     }
 
-    fn release(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
-        self.app.handle_key(key, ElementState::Released)
+    #[track_caller]
+    fn release(&mut self, key: VirtualKeyCode) {
+        self.app.test_key(key, ElementState::Released);
     }
 
-    fn tap(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
-        self.press(key)?;
-        self.release(key)
+    #[track_caller]
+    fn tap(&mut self, key: VirtualKeyCode) {
+        self.press(key);
+        self.release(key);
     }
 
     fn engine(&self) -> &Engine {
@@ -434,7 +606,7 @@ impl<'app> AppVirtualKeyboard<'app> {
             .players
             .into_iter()
             .find(|player| player.id == self.app.local_owner)
-            .expect("virtual keyboard has a local player")
+            .test_value()
             .control
     }
 }
@@ -535,14 +707,14 @@ impl PreparedRealInstalledScenario {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
-            .expect("repository root");
-        let user_data = tempdir().expect("isolated prepared-scenario user data");
+            .test_value();
+        let user_data = tempdir();
         let _env_guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(repository)),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
             ("LC_LANGUAGE", Some(Path::new("US"))),
         ]);
-        let paths = AppPaths::discover().expect("discover repository install");
+        let paths = test_app_paths();
         let (scenario, scenarios) = load_frontend_scenarios_for_test(&paths, scenario_key);
         let scenario_path = scenario
             .path
@@ -568,8 +740,8 @@ impl PreparedRealInstalledScenario {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
-            .expect("repository root");
-        let user_data = tempdir().expect("isolated user data");
+            .test_value();
+        let user_data = tempdir();
         let env_guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(repository)),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
@@ -578,14 +750,14 @@ impl PreparedRealInstalledScenario {
             // locale just like the user-data/config roots.
             ("LC_LANGUAGE", Some(Path::new("US"))),
         ]);
-        let paths = AppPaths::discover().expect("discover repository install");
-        paths.ensure_user_dirs().expect("prepared user dirs");
+        let paths = test_app_paths();
+        paths.ensure_user_dirs().test_value();
         // The production launcher adapts an empty config before clonk-app.
         fs::write(
             paths.config_file(),
             b"[General]\nVersion=362\n[Graphics]\nShader=true\nDisableGamma=false\n",
         )
-        .expect("materialize post-migration renderer config");
+        .test_value();
         let audio_options = AudioOptions {
             sound_enabled: false,
             music_enabled: false,
@@ -606,7 +778,7 @@ impl PreparedRealInstalledScenario {
             },
             Some(self.scenarios.clone()),
         )
-        .expect("initialise app");
+        .test_value();
         if preexisting_clonk {
             // These long physical-route fixtures exercise the ordinary C++
             // persistent-player path: GetIdle recruits the existing CLNK and
@@ -707,7 +879,7 @@ fn wait_for_menu_impl(app: &mut GameApp, dismiss_first_player_dialog: bool) {
             app.startup_dialog_fade = None;
             return;
         }
-        app.update().expect("tick while waiting for boot to finish");
+        app.update().test_value();
         thread::sleep(Duration::from_millis(2));
     }
     panic!("app did not reach menu mode in time");
@@ -718,8 +890,7 @@ fn wait_for_running_with_attempts(app: &mut GameApp, attempts: usize) {
         if matches!(app.mode, AppMode::Running) {
             return;
         }
-        app.update()
-            .expect("tick while waiting for scenario to start");
+        app.update().test_value();
         thread::sleep(Duration::from_millis(2));
     }
     panic!(
@@ -741,12 +912,15 @@ fn network_catch_up_fixture(
     let start_tick = 41_u32;
     app.network = Some(manager);
     app.network_control_clock = Some(NetworkControlClock::new(
-        i32::try_from(start_tick).unwrap(),
+        i32::try_from(start_tick).test_value(),
         control_rate,
     ));
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(i32::try_from(start_tick).unwrap(), control_rate)
-            .expect("valid catch-up control timing"),
+        clonk_engine::NetworkControlTiming::new(
+            i32::try_from(start_tick).test_value(),
+            control_rate,
+        )
+        .test_value(),
     );
     for offset in 0..ready_count {
         events
@@ -754,7 +928,7 @@ fn network_catch_up_fixture(
                 tick: start_tick + offset,
                 controls: Vec::new(),
             })
-            .expect("queue ready control tick");
+            .test_value();
     }
     let schedule = frame_schedule_for_mode(
         app.mode,
@@ -770,36 +944,30 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
     // C4Game takes Config.General.Participants as PlayerFilenames
     // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
     // file's AutoStopControl preference (C4Player.cpp:2371-2380).
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     install_global_gui_test_root(install.path(), None);
     let player_dir = install.path().join("build/Tyler.c4p");
-    fs::create_dir_all(&player_dir).expect("create player file group");
-    fs::write(
-                player_dir.join("Player.txt"),
-                format!(
-                    "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nControl=0\nAutoStopControl={}\n",
-                    i32::from(auto_stop)
-                ),
-            )
-            .expect("write player core");
+    fs::create_dir_all(&player_dir).test_value();
+    fs::write(player_dir.join("Player.txt"), format!(
+        "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nControl=0\nAutoStopControl={}\n",
+        i32::from(auto_stop)
+    )).test_value();
     let user_dir = install.path().join("user-data");
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    fs::create_dir_all(paths.config_dir()).expect("create config directory");
+    let paths = test_app_paths();
+    fs::create_dir_all(paths.config_dir()).test_value();
     fs::write(
         paths.config_file(),
         "[General]\nParticipants=Tyler.c4p\nPlayerPath=\n",
     )
-    .expect("write config");
-    let mut app =
-        test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("initialise app");
+    .test_value();
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     install_classic_test_assets(&mut app);
 
-    let mut definition =
-        Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
+    let mut definition = Definition::from_script("WLKR", "Walker", walker_script()).test_value();
     definition.configure_actions(
         Some("Walk".to_string()),
         HashMap::from([(
@@ -809,16 +977,14 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
     );
     definition.set_movement_profile(MovementProfile::default());
     definition.set_crew_member(true);
-    app.engine
-        .register_definition(definition)
-        .expect("register crew definition");
+    app.engine.register_definition(definition).test_value();
     app.engine
         .set_player_starts(vec![clonk_engine::scenario::PlayerStart {
             ready_crew: vec![("WLKR".to_string(), 1)],
             ..Default::default()
         }]);
 
-    app.join_local_player().expect("join selected player");
+    app.join_local_player().test_value();
 
     let player = app
         .engine
@@ -826,7 +992,7 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
         .players
         .into_iter()
         .find(|player| player.id == app.local_owner)
-        .expect("joined player");
+        .test_value();
     assert_eq!(
         player.control.control_style, auto_stop,
         "the selected player's AutoStopControl preference must reach C4Player"
@@ -836,17 +1002,14 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
     assert_eq!(player.score, 250);
     assert_eq!(player.total_playing_time, 1_234);
 
-    let cursor = app
-        .engine
-        .crew_cursor(app.local_owner)
-        .expect("crew cursor");
+    let cursor = app.engine.crew_cursor(app.local_owner).test_value();
     app.mode = AppMode::Running;
     let mut keyboard = AppVirtualKeyboard::new(&mut app);
     for (key, held_direction) in [
         (VirtualKeyCode::KeyC, CommandDirection::Right),
         (VirtualKeyCode::KeyZ, CommandDirection::Left),
     ] {
-        keyboard.press(key).expect("press movement key");
+        keyboard.press(key);
         assert_eq!(
             keyboard
                 .engine()
@@ -857,7 +1020,7 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
             "pressed horizontal key must steer"
         );
 
-        keyboard.release(key).expect("release movement key");
+        keyboard.release(key);
         assert_eq!(
             keyboard
                 .engine()
@@ -883,36 +1046,34 @@ fn assert_selected_player_horizontal_release(auto_stop: bool) {
 }
 
 fn write_preview_png(path: &Path, pixel: [u8; 4]) {
-    let file = File::create(path).expect("create preview image");
+    let file = File::create(path).test_value();
     let writer = BufWriter::new(file);
     let mut encoder = Encoder::new(writer, 1, 1);
     encoder.set_color(ColorType::Rgba);
     encoder.set_depth(BitDepth::Eight);
-    let mut writer = encoder.write_header().expect("write PNG header");
-    writer
-        .write_image_data(&pixel)
-        .expect("write PNG pixel data");
+    let mut writer = encoder.write_header().test_value();
+    writer.write_image_data(&pixel).test_value();
 }
 
 fn write_preview_image(path: &Path, pixel: [u8; 4], format: image::ImageFormat) {
     image::save_buffer_with_format(path, &pixel, 1, 1, image::ColorType::Rgba8, format)
-        .expect("write preview image");
+        .test_value();
 }
 
 fn install_global_gui_test_root(root: &Path, missing_sheet: Option<&str>) {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let system = root.join("planet/System.c4g");
     let graphics = root.join("planet/Graphics.c4g");
-    fs::create_dir_all(&system).expect("fixture System.c4g");
-    fs::create_dir_all(&graphics).expect("fixture Graphics.c4g");
+    fs::create_dir_all(&system).test_value();
+    fs::create_dir_all(&graphics).test_value();
     fs::copy(
         repository.join("planet/System.c4g/Endeavour.ttf"),
         system.join("Endeavour.ttf"),
     )
-    .expect("copy fixture Endeavour font");
+    .test_value();
     for (_, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
         if missing_sheet == Some(canonical_name) {
             continue;
@@ -946,12 +1107,12 @@ fn install_global_gui_and_loader_test_root(root: &Path) {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     fs::copy(
         repository.join("planet/Graphics.c4g/LoaderGoldmine1.png"),
         root.join("planet/Graphics.c4g/LoaderGoldmine1.png"),
     )
-    .expect("copy fixture startup loader");
+    .test_value();
 }
 
 fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
@@ -967,11 +1128,7 @@ fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
     header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
     put_i32(&mut header, 28, 1);
     put_i32(&mut header, 32, 2);
-    put_i32(
-        &mut header,
-        36,
-        i32::try_from(entries.len()).expect("packed entry count fits"),
-    );
+    put_i32(&mut header, 36, i32::try_from(entries.len()).test_value());
     for byte in &mut header {
         *byte ^= 237;
     }
@@ -985,16 +1142,8 @@ fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
         let mut entry = [0_u8; ENTRY_SIZE];
         entry[..name.len()].copy_from_slice(name.as_bytes());
         put_i32(&mut entry, 264, i32::from(*child));
-        put_i32(
-            &mut entry,
-            268,
-            i32::try_from(data.len()).expect("packed entry size fits"),
-        );
-        put_i32(
-            &mut entry,
-            276,
-            i32::try_from(data_offset).expect("packed offset fits"),
-        );
+        put_i32(&mut entry, 268, i32::try_from(data.len()).test_value());
+        put_i32(&mut entry, 276, i32::try_from(data_offset).test_value());
         image.extend_from_slice(&entry);
         data_offset += data.len();
     }
@@ -1010,14 +1159,12 @@ fn packed_test_file_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
         if *child {
             group
                 .add_packed_child_with_metadata(*name, data.to_vec(), 0, 0, false)
-                .expect("add packed child fixture");
+                .test_value();
         } else {
-            group
-                .add_file(*name, data.to_vec())
-                .expect("add packed file fixture");
+            group.add_file(*name, data.to_vec()).test_value();
         }
     }
-    group.pack().expect("compress packed fixture")
+    group.pack().test_value()
 }
 
 fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
@@ -1149,8 +1296,7 @@ fn silent_pcm_wav(duration_ms: u32) -> Vec<u8> {
     const CHANNELS: u16 = 1;
     const BITS_PER_SAMPLE: u16 = 16;
     let sample_count = u64::from(duration_ms) * u64::from(SAMPLE_RATE) / 1_000;
-    let data_len =
-        u32::try_from(sample_count * u64::from(BITS_PER_SAMPLE / 8)).expect("test WAV fits u32");
+    let data_len = u32::try_from(sample_count * u64::from(BITS_PER_SAMPLE / 8)).test_value();
     let mut bytes = Vec::with_capacity(44 + data_len as usize);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
@@ -1173,16 +1319,16 @@ fn silent_pcm_wav(duration_ms: u32) -> Vec<u8> {
 fn test_audio_context_with_sound(
     duration_ms: u32,
 ) -> (tempfile::TempDir, AudioContext, SimulationSnapshot) {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let scenario = dir.path().join("Audio.c4s");
-    fs::create_dir_all(&scenario).expect("create scenario group");
-    fs::write(scenario.join("Loop.wav"), silent_pcm_wav(duration_ms)).expect("write test sound");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Loop.wav"), silent_pcm_wav(duration_ms)).test_value();
 
     let mut audio = AudioContext::try_new(AudioOptions {
         max_channels: 1,
         ..AudioOptions::default()
     })
-    .expect("audio context");
+    .test_value();
     audio.configure_scenario(Some(&scenario));
     (dir, audio, make_snapshot(Vec::new(), Vec::new()))
 }
@@ -1245,7 +1391,7 @@ fn empty_test_audio_context() -> AudioContext {
         menu_sound_enabled: false,
         ..AudioOptions::default()
     })
-    .expect("deferred test audio context")
+    .test_value()
 }
 
 fn audio_viewport(index: usize, owner: i32, center: Vector2) -> ActiveViewportProjection {
@@ -1324,17 +1470,13 @@ fn sample_scenarios() -> Vec<FrontendScenario> {
 
 fn install_native_test_fonts(app: &mut GameApp, scale: f32) {
     app.graphics.set_runtime_sprite_filtering(scale, false);
-    app.loader_render_config = Some(
-        LoaderRenderConfig::new(scale, false)
-            .expect("install scale-native test render configuration"),
-    );
+    app.loader_render_config = Some(LoaderRenderConfig::new(scale, false).test_value());
     app.loader_render_error = None;
     let font_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../planet/System.c4g/Endeavour.ttf");
-    let bytes = fs::read(font_path).expect("read Endeavour.ttf");
+    let bytes = fs::read(font_path).test_value();
     app.native_startup_fonts = Some(Arc::new(
-        clonk_frontend::clonk_fonts::build_native_font_set(&bytes, scale)
-            .expect("build scale-native test fonts"),
+        clonk_frontend::clonk_fonts::build_native_font_set(&bytes, scale).test_value(),
     ));
 }
 
@@ -1352,11 +1494,7 @@ fn render_ordered_test_frame(
             .render_ordered_native_base(logical))
         .expect("render ordered logical base"));
     let base = output.clone();
-    let plan = app
-        .pending_native_presentation
-        .as_ref()
-        .expect("ordered renderer prepared a presentation plan")
-        .clone();
+    let plan = app.pending_native_presentation.test_ref().clone();
 
     let mut chrome_only = base.clone();
     {
@@ -1375,7 +1513,7 @@ fn render_ordered_test_frame(
     {
         let mut composer = presenter.ordered_composer(&mut output);
         app.replay_pending_native_presentation(&mut composer)
-            .expect("replay ordered native text");
+            .test_value();
     }
     (chrome_only, output, plan)
 }
@@ -1416,27 +1554,22 @@ fn prepare_tutorial_host_lobby(app: &GameApp, repository: &Path) -> StagedNetwor
             definition_root: None,
         },
     )
-    .expect("pre-bind exact host scenario")
+    .test_value()
 }
 
 fn install_minimal_prepared_host_fixture(content: &Path) -> FrontendScenario {
     let scenario_path = content.join("Fixture.c4s");
     let definition_path = content.join("Defs.c4d/Good.c4d");
-    fs::create_dir_all(&scenario_path).expect("minimal prepared-host scenario group");
-    fs::create_dir_all(&definition_path).expect("minimal prepared-host definition");
-    fs::create_dir_all(content.join("Material.c4g")).expect("minimal prepared-host material group");
-    fs::write(
-                scenario_path.join("Scenario.txt"),
-                "[Head]\nTitle=Fixture\nIcon=2\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\n",
-            )
-            .expect("minimal prepared-host scenario core");
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::create_dir_all(&definition_path).test_value();
+    fs::create_dir_all(content.join("Material.c4g")).test_value();
+    fs::write(scenario_path.join("Scenario.txt"), "[Head]\nTitle=Fixture\nIcon=2\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\n").test_value();
     fs::write(
         definition_path.join("DefCore.txt"),
         "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
     )
-    .expect("minimal prepared-host definition core");
-    fs::write(definition_path.join("Script.c"), "// fixture\n")
-        .expect("minimal prepared-host definition script");
+    .test_value();
+    fs::write(definition_path.join("Script.c"), "// fixture\n").test_value();
     write_test_definition_graphics(&definition_path);
 
     let mut frontend = FrontendScenario::fallback();
@@ -1458,19 +1591,18 @@ fn prepare_minimal_host_lobby(
     frontend: FrontendScenario,
 ) -> StagedNetworkHostScenario {
     app.prepare_network_host_scenario(frontend, minimal_prepared_host_definition_load())
-        .expect("pre-bind minimal host scenario")
+        .test_value()
 }
 
 fn install_network_definition_pack(root: &Path, module: &str, id: &str) -> PathBuf {
     let path = root.join(module);
-    fs::create_dir_all(&path).expect("create network definition pack");
+    fs::create_dir_all(&path).test_value();
     fs::write(
         path.join("DefCore.txt"),
         format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n"),
     )
-    .expect("write network definition core");
-    fs::write(path.join("Script.c"), "// network definition fixture\n")
-        .expect("write network definition script");
+    .test_value();
+    fs::write(path.join("Script.c"), "// network definition fixture\n").test_value();
     write_test_definition_graphics(&path);
     path
 }
@@ -1482,19 +1614,19 @@ fn packed_network_definition(module: &str, id: &str) -> clonk_resources::Mutable
             "DefCore.txt",
             format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n").into_bytes(),
         )
-        .expect("add packed network definition core");
+        .test_value();
     definition
         .add_file(
             "Script.c",
             b"// packed network definition fixture\n".to_vec(),
         )
-        .expect("add packed network definition script");
+        .test_value();
     definition
         .add_file(
             "Graphics.png",
             include_bytes!("../../../content/Material.c4g/Snow.png").to_vec(),
         )
-        .expect("add packed network definition graphics");
+        .test_value();
     definition
 }
 
@@ -1513,7 +1645,7 @@ fn prepare_staged_network_host(
     )
     .expect("build staged network host preparation")
     .prepare()
-    .expect("prepare staged network host")
+    .test_value()
 }
 
 fn prepare_harpoonrace_host_with_seed(
@@ -1522,7 +1654,7 @@ fn prepare_harpoonrace_host_with_seed(
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let content = repository.join("content");
     let planet = repository.join("planet");
     let scenario_path = content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
@@ -1537,12 +1669,12 @@ fn prepare_harpoonrace_host_with_seed(
         &content,
         "",
     )
-    .expect("freeze HarpoonRace definitions");
+    .test_value();
     let definition_executable_path = format!("{}{}", content.display(), std::path::MAIN_SEPARATOR);
     let install_roots = vec![repository.to_path_buf(), content, planet];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = clonk_resources::LanguagePacks::default();
-    let network = tempdir().expect("isolated HarpoonRace host resources");
+    let network = tempdir();
     let league = prepared_host_bootstrap::PreparedLeagueHostConfig {
         endpoint: "https://league.invalid/".to_owned(),
         transport: clonk_network::LeagueHttpTransportConfig::default(),
@@ -1589,7 +1721,7 @@ fn prepare_harpoonrace_host_with_seed(
             league: Some(&league),
         },
     )
-    .expect("prepare HarpoonRace live-signup host");
+    .test_value();
     (prepared, network)
 }
 
@@ -1597,8 +1729,7 @@ fn published_definition_wire_names(prepared: &PreparedHostBootstrap) -> Vec<Vec<
     prepared
         .host_config()
         .initial_join_snapshot
-        .as_ref()
-        .expect("prepared JoinData")
+        .test_ref()
         .parameters
         .game_resources
         .iter()
@@ -1652,13 +1783,7 @@ fn install_test_classic_host_team_lobby(
     clonk_engine::ControlPlayerInfoEntry,
 ) {
     install_test_classic_host_lobby(app);
-    let client = app
-        .classic_host_lobby
-        .as_ref()
-        .expect("test lobby")
-        .controller
-        .rows()[0]
-        .clone();
+    let client = app.classic_host_lobby.test_ref().controller.rows()[0].clone();
     let player = LobbyRosterRow::Player(clonk_frontend::game_lobby::LobbyPlayerRow {
         id: 7,
         client_id: 0,
@@ -1686,10 +1811,7 @@ fn install_test_classic_host_team_lobby(
         5,
         vec![client, player],
     );
-    app.classic_host_lobby
-        .as_mut()
-        .expect("test lobby")
-        .controller = controller;
+    app.classic_host_lobby.test_mut().controller = controller;
     let teams = [
         clonk_engine::TeamInfo::new(1, "Full current", 0x00f4_0000)
             .with_player_ids(vec![7])
@@ -1722,7 +1844,7 @@ fn install_test_classic_host_team_lobby(
         "the host lobby must use its retained pregame C4TeamList"
     );
     let chooser = clonk_engine::ControlPlayerInfoEntry {
-        name: LegacyCString::from_bytes(b"Chooser".to_vec()).expect("valid name"),
+        name: LegacyCString::from_bytes(b"Chooser".to_vec()).test_value(),
         id: 7,
         team: 1,
         color: 0x0012_3456,
@@ -1730,7 +1852,7 @@ fn install_test_classic_host_team_lobby(
         ..clonk_engine::ControlPlayerInfoEntry::default()
     };
     let companion = clonk_engine::ControlPlayerInfoEntry {
-        name: LegacyCString::from_bytes(b"Companion".to_vec()).expect("valid name"),
+        name: LegacyCString::from_bytes(b"Companion".to_vec()).test_value(),
         id: 8,
         team: 3,
         color: 0x0065_4321,
@@ -1765,37 +1887,27 @@ fn install_classic_host_network_stub(
 
 fn install_test_free_savegame_player_row(app: &mut GameApp, player_id: i32) {
     install_test_classic_host_lobby(app);
-    let client = app
-        .classic_host_lobby
-        .as_ref()
-        .expect("test lobby")
-        .controller
-        .rows()[0]
-        .clone();
-    app.classic_host_lobby
-        .as_mut()
-        .expect("test lobby")
-        .controller
-        .set_rows(vec![
-            LobbyRosterRow::Header(LobbyHeaderRow {
-                kind: LobbyRosterHeader::UnassignedSavegamePlayers,
-                label: "Player assignment".to_string(),
-                icon: LobbyRosterIcon::Standard(12),
-                can_add_player: false,
-            }),
-            LobbyRosterRow::Player(LobbyPlayerRow {
-                id: player_id,
-                client_id: -1,
-                name: "Free restore".to_string(),
-                color: [0xff; 4],
-                icon: LobbyRosterIcon::Standard(7),
-                joined_player_overlay: None,
-                team: None,
-                league_score: None,
-                league_rank: None,
-            }),
-            client,
-        ]);
+    let client = app.classic_host_lobby.test_ref().controller.rows()[0].clone();
+    app.classic_host_lobby.test_mut().controller.set_rows(vec![
+        LobbyRosterRow::Header(LobbyHeaderRow {
+            kind: LobbyRosterHeader::UnassignedSavegamePlayers,
+            label: "Player assignment".to_string(),
+            icon: LobbyRosterIcon::Standard(12),
+            can_add_player: false,
+        }),
+        LobbyRosterRow::Player(LobbyPlayerRow {
+            id: player_id,
+            client_id: -1,
+            name: "Free restore".to_string(),
+            color: [0xff; 4],
+            icon: LobbyRosterIcon::Standard(7),
+            joined_player_overlay: None,
+            team: None,
+            league_score: None,
+            league_rank: None,
+        }),
+        client,
+    ]);
 }
 
 fn script_player_add_fixture(
@@ -1813,8 +1925,8 @@ fn script_player_add_fixture(
                 .enumerate()
                 .map(
                     |(index, (name, script_player))| clonk_engine::ControlPlayerInfoEntry {
-                        id: i32::try_from(index + 1).unwrap(),
-                        name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+                        id: i32::try_from(index + 1).test_value(),
+                        name: LegacyCString::from_bytes(name.to_vec()).test_value(),
                         player_type: if *script_player {
                             clonk_engine::PLAYER_INFO_TYPE_SCRIPT
                         } else {
@@ -1838,7 +1950,7 @@ fn script_player_add_fixture(
             team_distribution: clonk_engine::InitialNetworkTeamDistribution::Free,
             team_colors: false,
             max_script_players,
-            script_player_names: LegacyCString::from_bytes(configured_names.to_vec()).unwrap(),
+            script_player_names: LegacyCString::from_bytes(configured_names.to_vec()).test_value(),
             random_team_count: 0,
             teams: Vec::new(),
         },
@@ -1901,7 +2013,7 @@ fn new_menu_app_with_frontend_scenarios(
         },
         frontend_scenarios,
     )
-    .expect("initialise app");
+    .test_value();
     wait_for_menu(&mut app);
     app
 }
@@ -1911,9 +2023,7 @@ fn default_exact_host_reference() -> (
     clonk_network::HostGameReference,
 ) {
     let host_config = clonk_network::HostConfig::default();
-    let snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host JoinData");
+    let snapshot = host_config.initial_join_snapshot.test_value();
     let parameters = snapshot.parameters.clone();
     let reference = clonk_network::HostGameReference::new(
         clonk_network::NetworkGameReference {
@@ -1929,13 +2039,12 @@ fn default_exact_host_reference() -> (
         clonk_network::HostGameReferenceMetadata::default(),
         parameters,
     )
-    .expect("valid exact host reference");
+    .test_value();
     (snapshot, reference)
 }
 
 fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp {
-    let mut app = test_game_app(width, height, AudioOptions::default(), Some(paths))
-        .expect("initialise app with paths");
+    let mut app = test_game_app(width, height, AudioOptions::default(), Some(paths)).test_value();
     wait_for_menu(&mut app);
     app
 }
@@ -1943,8 +2052,7 @@ fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp
 fn wait_for_scenario_selector_discovery(app: &mut GameApp) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while app.scenario_selector_discovery.is_some() {
-        app.poll_scenario_selector_discovery()
-            .expect("poll scenario selector discovery");
+        app.poll_scenario_selector_discovery().test_value();
         assert!(
             Instant::now() < deadline,
             "scenario selector discovery did not finish"
@@ -1957,18 +2065,16 @@ fn exact_loader_test_paths(user_data: &Path, content_dir: Option<&Path>) -> (Env
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_CONTENT_DIR", content_dir),
         ("LC_USER_DATA_DIR", Some(user_data)),
     ]);
-    let paths = AppPaths::discover().expect("discover exact loader test paths");
-    paths.ensure_user_dirs().expect("loader test user dirs");
-    persist_config_value(&paths, "General", "LanguageEx", "US")
-        .expect("configure exact loader test language");
-    persist_config_value(&paths, "Network", "LocalName", "Exact Host")
-        .expect("configure exact loader test local name");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    persist_config_value(&paths, "General", "LanguageEx", "US").test_value();
+    persist_config_value(&paths, "Network", "LocalName", "Exact Host").test_value();
     (guard, paths)
 }
 
@@ -1982,8 +2088,7 @@ fn configure_test_startup_participant(paths: &AppPaths, root: &Path) {
                         .to_vec(),
                     1,
                     false,
-                )
-                .expect("add exact test player core");
+                ).test_value();
     group
         .add_file_with_metadata(
             "BigIcon.png",
@@ -1991,27 +2096,25 @@ fn configure_test_startup_participant(paths: &AppPaths, root: &Path) {
             1,
             false,
         )
-        .expect("add exact test player icon");
-    fs::write(&player, group.pack().expect("pack exact test player"))
-        .expect("write exact test player");
-    let packed = Group::open(&player).expect("reopen exact test player group");
-    PlayerFile::load(&packed).expect("parse exact test player core");
+        .test_value();
+    fs::write(&player, group.pack().test_value()).test_value();
+    let packed = Group::open(&player).test_value();
+    PlayerFile::load(&packed).test_value();
     persist_config_value(
         paths,
         "General",
         "PlayerPath",
         root.to_string_lossy().into_owned(),
     )
-    .expect("configure exact test player path");
+    .test_value();
     persist_config_value(
         paths,
         "General",
         "Participants",
         player.to_string_lossy().into_owned(),
     )
-    .expect("configure exact test participant");
-    let configured = clonk_app_netplay::load_configured_client_players(paths)
-        .expect("reload configured test participant");
+    .test_value();
+    let configured = clonk_app_netplay::load_configured_client_players(paths).test_value();
     assert_eq!(
         configured.players().len(),
         1,
@@ -2117,7 +2220,7 @@ fn install_synthetic_classic_test_assets(app: &mut GameApp) {
     );
     assets
         .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-        .expect("synthetic process-global GUI fixture is complete");
+        .test_value();
     apply_test_frontend_assets(app, assets);
 }
 
@@ -2129,25 +2232,21 @@ fn install_classic_test_assets(app: &mut GameApp) {
                 let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
                     .parent()
                     .and_then(Path::parent)
-                    .expect("repository root");
+                    .test_value();
                 let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository))]);
-                let paths = AppPaths::discover().expect("discover repository assets");
+                let paths = test_app_paths();
                 FrontendAssets::load(Some(&paths))
             })
             .clone(),
     );
     assets
         .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-        .expect("repository ships the complete process-global GUI bootstrap");
+        .test_value();
     assets
         .require_classic_startup_bootstrap_resources()
-        .expect("repository ships the complete classic startup bootstrap");
-    assets
-        .require_classic_startup_main_resources()
-        .expect("repository ships exact startup-main resources");
-    assets
-        .require_classic_ingame_menu_resources()
-        .expect("repository ships exact in-game menu resources");
+        .test_value();
+    assets.require_classic_startup_main_resources().test_value();
+    assets.require_classic_ingame_menu_resources().test_value();
 
     apply_test_frontend_assets(app, assets);
 }
@@ -2185,15 +2284,12 @@ fn install_l018_cursor_atlas(app: &mut GameApp) {
         app.active_game_graphics.is_none(),
         "focused cursor fixtures use the process atlas"
     );
-    Arc::get_mut(&mut app.assets)
-        .expect("focused fixture uniquely owns frontend assets")
-        .cursor_atlas = drag_cursor_atlas();
+    Arc::get_mut(&mut app.assets).test_value().cursor_atlas = drag_cursor_atlas();
     let (width, height) = {
         let surface = app.graphics.surface();
         (surface.width(), surface.height())
     };
-    app.resize(width, height)
-        .expect("rebuild graphics with focused cursor atlas");
+    app.resize(width, height).test_value();
 }
 
 fn new_classic_menu_app(width: u32, height: u32) -> GameApp {
@@ -2253,10 +2349,10 @@ fn assert_global_gui_boundary(
 
 fn remove_global_gui_sheet(app: &mut GameApp, canonical_name: &str) -> ImageData {
     Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .remove(canonical_name)
-        .expect("global GUI fixture sheet")
+        .test_value()
 }
 
 fn activate_startup_network_chat(app: &mut GameApp) {
@@ -2272,21 +2368,16 @@ fn activate_startup_network_chat(app: &mut GameApp) {
         f64::from(button.x + button.w / 2),
         f64::from(button.y + button.h / 2),
     );
-    app.handle_cursor_moved(point).expect("hover Chat");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Chat");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("open the retained Chat page");
+    app.handle_cursor_moved(point).test_value();
+    app.handle_mouse_button(ElementState::Pressed).test_value();
+    app.handle_mouse_button(ElementState::Released).test_value();
 }
 
 fn spawn_loopback_irc_server() -> (String, thread::JoinHandle<()>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback IRC listener");
-    let address = listener
-        .local_addr()
-        .expect("read loopback IRC listener address")
-        .to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let address = listener.local_addr().test_value().to_string();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept loopback IRC client");
+        let (mut stream, _) = listener.accept().test_value();
         let mut buffer = [0_u8; 512];
         while stream.read(&mut buffer).is_ok_and(|read| read != 0) {}
     });
@@ -2308,7 +2399,7 @@ fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartup
                 app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
                     .unwrap_or_else(|error| panic!("open Options {sheet:?}: {error}"));
                 app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-                    .expect("release options sheet key");
+                    .test_value();
                 if sheet == target {
                     break;
                 }
@@ -2329,11 +2420,9 @@ fn enter_about_licenses(app: &mut GameApp) {
         f64::from(button.x + button.w / 2),
         f64::from(button.y + button.h / 2),
     );
-    app.handle_cursor_moved(point).expect("hover Licenses");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Licenses");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("open the classic Licenses page");
+    app.handle_cursor_moved(point).test_value();
+    app.handle_mouse_button(ElementState::Pressed).test_value();
+    app.handle_mouse_button(ElementState::Released).test_value();
     assert_eq!(
         app.startup_about_dialog.as_ref().unwrap().current_page(),
         clonk_frontend::startup_about_dlg::AboutPage::Licenses
@@ -2367,14 +2456,14 @@ fn startup_player_properties_validation_app(
 ) -> (EnvGuard, AppPaths, PathBuf, GameApp) {
     let (guard, paths) = exact_loader_test_paths(user_data, None);
     let player_root = user_data.join("Players");
-    fs::create_dir_all(&player_root).expect("create validation player root");
+    fs::create_dir_all(&player_root).test_value();
     persist_config_value(
         &paths,
         "General",
         "PlayerPath",
         player_root.to_string_lossy(),
     )
-    .expect("configure validation player path");
+    .test_value();
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
     app.open_player_selection_dialog();
@@ -2385,7 +2474,7 @@ fn startup_player_properties_validation_app(
 fn write_map_png(path: &Path, width: u32, height: u32, pixel: [u8; 4]) {
     image::RgbaImage::from_pixel(width, height, image::Rgba(pixel))
         .save(path)
-        .expect("write FolderMap image");
+        .test_value();
 }
 
 fn retained_test_presentation(app: &GameApp) -> GpuPresentation {
@@ -2408,24 +2497,24 @@ fn assert_retained_frame_has_commands(label: &str, frame: &RetainedGpuFrame) {
 
 fn loader_origin_fixture_paths(root: &Path) -> (EnvGuard, AppPaths, PathBuf) {
     let planet = root.join("planet");
-    fs::create_dir_all(&planet).expect("fixture planet directory");
-    fs::write(planet.join("System.c4g"), b"stub").expect("fixture System group");
+    fs::create_dir_all(&planet).test_value();
+    fs::write(planet.join("System.c4g"), b"stub").test_value();
     let content = root.join("content");
-    fs::create_dir_all(&content).expect("fixture content directory");
+    fs::create_dir_all(&content).test_value();
     let user_data = root.join("user-data");
     let guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(root)),
         ("LC_CONTENT_DIR", Some(content.as_path())),
         ("LC_USER_DATA_DIR", Some(user_data.as_path())),
     ]);
-    let paths = AppPaths::discover().expect("fixture app paths");
+    let paths = test_app_paths();
     (guard, paths, content)
 }
 
 fn running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
     let scenarios = sample_scenarios();
-    let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-        .expect("build scenario menu");
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
     let mut app = new_real_menu_app(640, 480);
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scenario_catalog = build_scenario_catalog(&scenarios);
@@ -2442,13 +2531,13 @@ fn running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
                 },
             )]
         })
-        .expect("start round through the scenario browser");
+        .test_value();
     } else {
         // A pathless fixture cannot enter the real prepared-host pipeline;
         // this branch isolates the startup-dialog memory across the
         // otherwise transient lobby view.
         app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start hosted state probe");
+            .test_value();
     }
     wait_for_running(&mut app);
     app
@@ -2473,10 +2562,7 @@ fn assert_l038_browser_return(app: &GameApp, selector_mode: ScenarioSelectorMode
 
 fn attach_l040_network_dialog(app: &mut GameApp) {
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
-        app.assets
-            .clonk_fonts
-            .as_deref()
-            .expect("classic startup fonts"),
+        app.assets.clonk_fonts.as_deref().test_value(),
     );
     let mut dialog = clonk_frontend::startup_netdlg::NetDlgController::new(
         clonk_frontend::startup_netdlg::NetDlgConfig {
@@ -2485,13 +2571,7 @@ fn attach_l040_network_dialog(app: &mut GameApp) {
         },
         metrics,
     );
-    dialog.set_text_font(
-        &app.assets
-            .clonk_fonts
-            .as_deref()
-            .expect("classic startup fonts")
-            .text,
-    );
+    dialog.set_text_font(&app.assets.clonk_fonts.as_deref().test_value().text);
     dialog.resize(800, 600);
     app.startup_view = StartupView::NetworkGame;
     app.startup_network_dialog = Some(dialog);
@@ -2502,7 +2582,7 @@ fn new_running_sandbox_app() -> GameApp {
     // Most state/input tests need the shipped CLNK definition but not the
     // much heavier shipped frontend bundle. Pixel/resource contracts use
     // the explicit classic constructor below.
-    let paths = cached_app_paths().expect("discover sandbox crew definition");
+    let paths = cached_app_paths().test_value();
     new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::InstallCrew(paths.as_ref()))
 }
 
@@ -2514,8 +2594,7 @@ fn finish_abort_dialog(
         dialog.continuation,
         MessageDialogContinuation::AbortGame { .. }
     )));
-    app.finish_message_dialog(result)
-        .expect("finish C4AbortGameDialog");
+    app.finish_message_dialog(result).test_value();
 }
 
 fn confirm_abort_dialog(app: &mut GameApp) {
@@ -2527,7 +2606,7 @@ fn confirm_abort_dialog(app: &mut GameApp) {
 }
 
 fn new_classic_running_sandbox_app() -> GameApp {
-    let paths = cached_app_paths().expect("discover sandbox crew definition");
+    let paths = cached_app_paths().test_value();
     let mut app = new_running_sandbox_app_with_definitions_and_assets(
         SandboxDefinitionLoad::InstallCrew(paths.as_ref()),
         SandboxFixtureAssets::Classic,
@@ -2537,7 +2616,7 @@ fn new_classic_running_sandbox_app() -> GameApp {
 }
 
 fn new_state_only_running_sandbox_app() -> GameApp {
-    let paths = cached_app_paths().expect("discover sandbox crew definition");
+    let paths = cached_app_paths().test_value();
     new_running_sandbox_app_with_definitions_and_assets(
         SandboxDefinitionLoad::InstallCrew(paths.as_ref()),
         SandboxFixtureAssets::StateOnly,
@@ -2555,8 +2634,7 @@ fn install_synthetic_sandbox_crew_definition(app: &mut GameApp) {
     // Default PlayerStart uses one native CLNK. Tests which exercise a
     // later player activation therefore need that exact definition ID,
     // but not the shipped definition's scripts, graphics, or actions.
-    let mut crew = Definition::from_script("CLNK", "Synthetic Clonk", "#strict\n")
-        .expect("synthetic sandbox crew compiles");
+    let mut crew = Definition::from_script("CLNK", "Synthetic Clonk", "#strict\n").test_value();
     crew.set_crew_member(true);
     crew.set_category(clonk_engine::CATEGORY_OBJECT | clonk_engine::CATEGORY_LIVING);
     crew.set_physical(clonk_engine::PhysicalInfo {
@@ -2564,9 +2642,7 @@ fn install_synthetic_sandbox_crew_definition(app: &mut GameApp) {
         breath: 50_000,
         ..clonk_engine::PhysicalInfo::default()
     });
-    app.engine
-        .register_definition(crew)
-        .expect("synthetic sandbox crew registers");
+    app.engine.register_definition(crew).test_value();
 }
 
 fn new_state_only_synthetic_crew_running_sandbox_app() -> GameApp {
@@ -2647,7 +2723,7 @@ fn new_running_sandbox_app_with_definitions_and_assets(
         },
         Some(Vec::new()),
     )
-    .expect("initialise app");
+    .test_value();
     match fixture_assets {
         SandboxFixtureAssets::StateOnly => {}
         SandboxFixtureAssets::Synthetic => install_synthetic_classic_test_assets(&mut app),
@@ -2658,7 +2734,7 @@ fn new_running_sandbox_app_with_definitions_and_assets(
     // CLNK for native shape/action/portrait coverage; the explicit
     // lightweight variant is reserved for definition-independent tests.
     app.start_sandbox_scenario_with_definitions(FrontendScenario::fallback(), definition_load)
-        .expect("start sandbox scenario");
+        .test_value();
     wait_for_running(&mut app);
     // Most running-input tests begin after native's one-time centered
     // C4MouseControl move. Tests for that initialization explicitly clear
@@ -2670,9 +2746,7 @@ fn new_running_sandbox_app_with_definitions_and_assets(
     if let Some(cursor) = app.engine.crew_cursor(app.local_owner) {
         let mut update = ObjectUpdate::new();
         update.plr_view_range = Some(500);
-        app.engine
-            .apply_object_update(cursor, update)
-            .expect("install sandbox cursor view range");
+        app.engine.apply_object_update(cursor, update).test_value();
         app.snapshot = app.engine.snapshot();
     }
     hold_message_board_for_frame_comparison(&mut app);
@@ -2681,11 +2755,8 @@ fn new_running_sandbox_app_with_definitions_and_assets(
 
 fn set_test_scenario_head_flags(app: &mut GameApp, replay: i32, film: i32) {
     let mut state = app.engine.capture_state();
-    let values = state
-        .scenario_values
-        .as_mut()
-        .expect("captured state retains Game.C4S values");
-    let mut encoded = serde_json::to_value(&*values).expect("serialize Game.C4S values");
+    let values = state.scenario_values.test_mut();
+    let mut encoded = serde_json::to_value(&*values).test_value();
     let head = encoded
         .get_mut("sections")
         .and_then(serde_json::Value::as_array_mut)
@@ -2694,11 +2765,11 @@ fn set_test_scenario_head_flags(app: &mut GameApp, replay: i32, film: i32) {
                 section.get("name").and_then(serde_json::Value::as_str) == Some("Head")
             })
         })
-        .expect("Game.C4S contains Head");
+        .test_value();
     let entries = head
         .get_mut("entries")
         .and_then(serde_json::Value::as_array_mut)
-        .expect("Head contains compiler entries");
+        .test_value();
     for (name, value) in [("Replay", replay), ("Film", film)] {
         let entry = entries
             .iter_mut()
@@ -2706,10 +2777,8 @@ fn set_test_scenario_head_flags(app: &mut GameApp, replay: i32, film: i32) {
             .unwrap_or_else(|| panic!("Head contains {name}"));
         entry["values"] = serde_json::json!([{ "Int": value }]);
     }
-    *values = serde_json::from_value(encoded).expect("deserialize adjusted Game.C4S values");
-    app.engine
-        .restore_state(&state)
-        .expect("restore adjusted Game.C4S values");
+    *values = serde_json::from_value(encoded).test_value();
+    app.engine.restore_state(&state).test_value();
     app.engine.set_film_viewport_available(true);
     app.snapshot = app.engine.snapshot();
     assert_eq!(app.engine.replay(), replay != 0);
@@ -2723,10 +2792,10 @@ fn install_test_recording_template(app: &mut GameApp, output_path: PathBuf) {
             "Scenario.txt",
             b"[Head]\nTitle=Recorded\nReplay=1\nIcon=29\n".to_vec(),
         )
-        .expect("add replay scenario core");
+        .test_value();
     group
         .add_file("Sentinel.txt", b"preserved".to_vec())
-        .expect("add copied scenario component");
+        .test_value();
     app.recording_template = Some(RecordingTemplate {
         group,
         output_path,
@@ -2769,8 +2838,7 @@ fn install_running_network_stub(
     app.network = Some(manager);
     app.network_control_clock = Some(NetworkControlClock::new(start_tick, control_rate));
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(start_tick, control_rate)
-            .expect("valid runtime network timing"),
+        clonk_engine::NetworkControlTiming::new(start_tick, control_rate).test_value(),
     );
     app.network_control_running = true;
     app.runtime_network_status_barrier = None;
@@ -2783,7 +2851,7 @@ fn queue_empty_ready_tick(app: &GameApp, events: &network::NetworkEventSender) {
             tick: app.expected_network_control_tick(),
             controls: Vec::new(),
         })
-        .expect("queue complete empty control tick");
+        .test_value();
 }
 
 fn message_control(
@@ -2797,8 +2865,7 @@ fn message_control(
         message_type,
         player,
         to_player,
-        message: clonk_engine::LegacyCString::from_bytes(message.to_vec())
-            .expect("message fixture is NUL-free"),
+        message: clonk_engine::LegacyCString::from_bytes(message.to_vec()).test_value(),
         by_client,
     }
 }
@@ -2808,10 +2875,8 @@ fn message_client(client_id: i32, nick: &[u8]) -> clonk_engine::ClientCoreContro
         client_id,
         activated: true,
         observer: false,
-        name: clonk_engine::LegacyCString::from_bytes(nick.to_vec())
-            .expect("client name fixture is NUL-free"),
-        nick: clonk_engine::LegacyCString::from_bytes(nick.to_vec())
-            .expect("client nick fixture is NUL-free"),
+        name: clonk_engine::LegacyCString::from_bytes(nick.to_vec()).test_value(),
+        nick: clonk_engine::LegacyCString::from_bytes(nick.to_vec()).test_value(),
         lobby_ready: false,
     }
 }
@@ -2847,10 +2912,10 @@ fn install_message_fixture(app: &mut GameApp) {
         .register_player(
             PlayerConfig::new(7, "Sender").with_color(Some(RgbColor::new(0x12, 0x34, 0x56))),
         )
-        .expect("message sender registers");
+        .test_value();
     app.engine
         .player_mut(7)
-        .expect("message sender exists")
+        .test_value()
         .set_at_client(clonk_engine::PlayerAtClient::new(7));
     app.engine.set_local_players([app.local_owner]);
     let line_height = app.graphics.message_board_line_height();
@@ -2863,7 +2928,7 @@ fn add_secondary_local_player_for_mouse_option_test(app: &mut GameApp) -> i32 {
     let secondary = app.engine.next_player_number();
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
-        .expect("register secondary local player");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
     let assignment = app.local_controls.initialize(LocalControlInit {
         owner: secondary,
@@ -2875,7 +2940,7 @@ fn add_secondary_local_player_for_mouse_option_test(app: &mut GameApp) -> i32 {
     });
     app.engine
         .set_player_runtime_control(secondary, assignment.runtime_control())
-        .expect("project secondary local controls into the runtime player");
+        .test_value();
     secondary
 }
 
@@ -2903,7 +2968,7 @@ fn test_game_app(
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
 #[test]
 fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
-    let directory = tempdir().expect("client preload resource directory");
+    let directory = tempdir();
     let scenario_path = directory.path().join("Scenario.c4s");
     let dynamic_path = directory.path().join("Dynamic.c4s");
     let definitions_path = directory.path().join("Objects.c4d");
@@ -2912,35 +2977,26 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
                 .add_file(
                     "Scenario.txt",
                     b"[Head]\nTitle=Preloaded client\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n\n[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\nMapPlayerExtend=1\nMaterial=Earth\n".to_vec(),
-                )
-                .expect("add client scenario core");
+                ).test_value();
     let mut materials = clonk_resources::MutableGroup::new("Material.c4g");
     materials
         .add_file("TexMap.txt", b"1=Earth-Smooth\n".to_vec())
-        .expect("add client texture map");
+        .test_value();
     materials
         .add_file(
             "Earth.c4m",
             b"[Material]\nName=Earth\nDensity=100\n".to_vec(),
         )
-        .expect("add client material");
+        .test_value();
     scenario_group
         .add_child("Material.c4g", materials)
-        .expect("add client material group");
-    fs::write(
-        &scenario_path,
-        scenario_group.pack().expect("pack client scenario"),
-    )
-    .expect("write client scenario");
+        .test_value();
+    fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
     let mut dynamic_group = clonk_resources::MutableGroup::new("Dynamic.c4s");
     dynamic_group
         .add_file("Dynamic.txt", b"preloaded".to_vec())
-        .expect("add dynamic marker");
-    fs::write(
-        &dynamic_path,
-        dynamic_group.pack().expect("pack client dynamic data"),
-    )
-    .expect("write client dynamic data");
+        .test_value();
+    fs::write(&dynamic_path, dynamic_group.pack().test_value()).test_value();
     let mut definitions = clonk_resources::MutableGroup::new("Objects.c4d");
     let mut definition = clonk_resources::MutableGroup::new("Host.c4d");
     definition
@@ -2948,21 +3004,15 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
             "DefCore.txt",
             b"[DefCore]\nid=HOST\nName=Host\nCategory=1\n".to_vec(),
         )
-        .expect("add synchronized definition core");
+        .test_value();
     definition
         .add_file(
             "Graphics.png",
             include_bytes!("../../../content/Material.c4g/Snow.png").to_vec(),
         )
-        .expect("add synchronized definition graphics");
-    definitions
-        .add_child("Host.c4d", definition)
-        .expect("add synchronized definition");
-    fs::write(
-        &definitions_path,
-        definitions.pack().expect("pack synchronized definitions"),
-    )
-    .expect("write synchronized definitions");
+        .test_value();
+    definitions.add_child("Host.c4d", definition).test_value();
+    fs::write(&definitions_path, definitions.pack().test_value()).test_value();
 
     let mut app = new_menu_app(320, 200);
     let (manager, event_tx, mut commands) =
@@ -2981,15 +3031,12 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
             resource_type: resource_type as u8,
             id,
             loadable: true,
-            filename: clonk_engine::LegacyCString::from_bytes(name.to_vec())
-                .expect("fixture filename is NUL-free"),
+            filename: clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value(),
             ..Default::default()
         }
     };
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     snapshot.parameters.random_seed = 41;
     snapshot.parameters.startup_player_count = 1;
     snapshot.parameters.scenario = resource(
@@ -3009,7 +3056,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         .clients
         .push(clonk_engine::ClientCoreControlData {
             client_id: 7,
-            name: clonk_engine::LegacyCString::from_bytes(b"Observer".to_vec()).unwrap(),
+            name: clonk_engine::LegacyCString::from_bytes(b"Observer".to_vec()).test_value(),
             ..Default::default()
         });
     snapshot.parameters.player_infos.last_player_id = 3;
@@ -3036,8 +3083,8 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     };
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
-        .expect("queue preload JoinData");
-    app.process_network_events().expect("enter client lobby");
+        .test_value();
+    app.process_network_events().test_value();
     commands.take_framed_status_acknowledgements();
 
     for (resource_id, core, path) in [
@@ -3056,10 +3103,9 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
                 path,
                 local: false,
             })
-            .expect("complete preload resource");
+            .test_value();
     }
-    app.process_network_events()
-        .expect("make client preload eligible");
+    app.process_network_events().test_value();
     assert!(app
         .network_lobby
         .as_ref()
@@ -3073,20 +3119,17 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     };
     event_tx
         .send(NetworkEvent::StatusRequested(go))
-        .expect("queue GO during preload");
-    app.process_network_events()
-        .expect("defer GO behind preload");
+        .test_value();
+    app.process_network_events().test_value();
     assert_eq!(app.pending_client_start_status, Some(go));
     assert!(app.loading_state.is_none());
     let (removed_tx, removed_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let removal_observer = thread::spawn(move || {
         let (resource_id, completion) = commands.receive_resource_removal();
-        removed_tx
-            .send(resource_id)
-            .expect("report preload removal");
+        removed_tx.send(resource_id).test_value();
         let _ = release_rx.recv_timeout(Duration::from_secs(10));
-        completion.send(Ok(())).expect("complete preload removal");
+        completion.send(Ok(())).test_value();
         commands
     });
 
@@ -3095,8 +3138,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         app.lobby_preload_task.as_ref().map(|task| &task.state),
         Some(LobbyPreloadTaskState::RemovingClientResource { .. })
     ) {
-        app.poll_lobby_preload()
-            .expect("poll client preload worker");
+        app.poll_lobby_preload().test_value();
         assert!(
             app.lobby_preload_task.is_some(),
             "client preload ended before asynchronous removal"
@@ -3115,7 +3157,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     assert!(app.client_combined_preload_file.is_owned());
     assert!(app.lobby_preload_artifact.is_none());
     let (expected_hud, expected_textures, expected_render_info) = {
-        let task = app.lobby_preload_task.as_ref().unwrap();
+        let task = app.lobby_preload_task.as_ref().test_value();
         let LobbyPreloadTaskState::RemovingClientResource { artifact, .. } = &task.state else {
             unreachable!("client removal is pending")
         };
@@ -3131,16 +3173,14 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
             .expect("preload removal command"),
         71
     );
-    app.poll_lobby_preload()
-        .expect("resource removal remains asynchronous");
+    app.poll_lobby_preload().test_value();
     assert!(app.lobby_preload_task.is_some());
     assert!(app.loading_state.is_none());
 
-    release_tx.send(()).expect("release dynamic removal");
-    let mut commands = removal_observer.join().expect("removal observer exits");
+    release_tx.send(()).test_value();
+    let mut commands = removal_observer.test_join();
     while app.lobby_preload_task.is_some() {
-        app.poll_lobby_preload()
-            .expect("install completed client preload");
+        app.poll_lobby_preload().test_value();
         assert!(Instant::now() < deadline, "client preload did not install");
         thread::yield_now();
     }
@@ -3163,8 +3203,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         .is_some_and(|client| client.scenario.is_none()));
 
     while app.engine.landscape().is_none() {
-        app.poll_loading()
-            .expect("activate the preloaded client scenario");
+        app.poll_loading().test_value();
         assert!(
             Instant::now() < deadline,
             "post-lobby MapPlayerExtend load did not finish"
@@ -3208,38 +3247,32 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     // It does not acknowledge GO until InitGame reaches FinalInit
     // (pristine 9ffa0a5d src/C4Network2.cpp:619-671;
     // src/C4Game.cpp:2526-2556,455-482).
-    let directory = tempdir().expect("network resource directory");
+    let directory = tempdir();
     let scenario_path = directory.path().join("Scenario.c4s");
     let dynamic_path = directory.path().join("Dynamic.c4s");
     let game_resource_path = directory.path().join("Objects.c4d");
     let system_resource_path = directory.path().join("System.c4g");
     let material_resource_path = directory.path().join("HostMaterials.c4g");
     let local_material_fallback_path = directory.path().join("Material.c4g");
-    fs::create_dir(&system_resource_path).expect("create trusted local System");
+    fs::create_dir(&system_resource_path).test_value();
     fs::write(
         system_resource_path.join("Local.c"),
         b"// Rust client System",
     )
-    .expect("write trusted local System");
+    .test_value();
     let mut scenario_group = clonk_resources::MutableGroup::new("Scenario.c4s");
     scenario_group
                 .add_file(
                     "Scenario.txt",
                     b"[Head]\nTitle=Client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n"
                         .to_vec(),
-                )
-                .expect("add scenario core");
-    fs::write(
-        &scenario_path,
-        scenario_group.pack().expect("pack scenario"),
-    )
-    .expect("write scenario resource");
+                ).test_value();
+    fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
     let mut dynamic_group = clonk_resources::MutableGroup::new("Dynamic.c4s");
     dynamic_group
         .add_file("Dynamic.txt", b"merged".to_vec())
-        .expect("add dynamic marker");
-    fs::write(&dynamic_path, dynamic_group.pack().expect("pack dynamic"))
-        .expect("write dynamic resource");
+        .test_value();
+    fs::write(&dynamic_path, dynamic_group.pack().test_value()).test_value();
     let mut game_resource = clonk_resources::MutableGroup::new("Objects.c4d");
     let mut host_definition = clonk_resources::MutableGroup::new("Host.c4d");
     host_definition
@@ -3247,76 +3280,64 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             "DefCore.txt",
             b"[DefCore]\nid=HOST\nName=Host\nCategory=1\n".to_vec(),
         )
-        .expect("add host definition core");
+        .test_value();
     host_definition
         .add_file(
             "Graphics.png",
             include_bytes!("../../../content/Material.c4g/Snow.png").to_vec(),
         )
-        .expect("add host definition graphics");
+        .test_value();
     game_resource
         .add_child("Host.c4d", host_definition)
-        .expect("add host definition");
-    fs::write(
-        &game_resource_path,
-        game_resource.pack().expect("pack game resource"),
-    )
-    .expect("write game resource");
+        .test_value();
+    fs::write(&game_resource_path, game_resource.pack().test_value()).test_value();
     let mut host_materials = clonk_resources::MutableGroup::new("HostMaterials.c4g");
     host_materials
         .add_file(
             "TexMap.txt",
             b"OverloadMaterials\nOverloadTextures\n1=NetworkOnly-HostTexture\n".to_vec(),
         )
-        .expect("add host texture map");
+        .test_value();
     host_materials
                 .add_file(
                     "NetworkOnly.c4m",
                     b"[Material]\nName=NetworkOnly\nColorX=11,12,13,14,15,16,17,18,19\nDensity=50\nTextureOverlay=HostTexture\n"
                         .to_vec(),
-                )
-                .expect("add host material");
+                ).test_value();
     host_materials
         .add_file(
             "HostTexture.png",
             include_bytes!("../../../content/Material.c4g/Snow.png").to_vec(),
         )
-        .expect("add host texture");
-    fs::write(
-        &material_resource_path,
-        host_materials.pack().expect("pack host materials"),
-    )
-    .expect("write host material resource");
+        .test_value();
+    fs::write(&material_resource_path, host_materials.pack().test_value()).test_value();
     let mut local_material_fallback = clonk_resources::MutableGroup::new("Material.c4g");
     local_material_fallback
         .add_file("TexMap.txt", b"1=NetworkOnly-FallbackTexture\n".to_vec())
-        .expect("add fallback texture map");
+        .test_value();
     local_material_fallback
                 .add_file(
                     "NetworkOnly.c4m",
                     b"[Material]\nName=NetworkOnly\nColorX=201,202,203\nDensity=100\nTextureOverlay=FallbackTexture\n"
                         .to_vec(),
-                )
-                .expect("add conflicting fallback material");
+                ).test_value();
     local_material_fallback
         .add_file(
             "FallbackOnly.c4m",
             b"[Material]\nName=FallbackOnly\nDensity=100\n".to_vec(),
         )
-        .expect("add fallback-only material");
+        .test_value();
     local_material_fallback
         .add_file(
             "FallbackTexture.png",
             include_bytes!("../../../content/Material.c4g/Snow.png").to_vec(),
         )
-        .expect("add fallback texture");
+        .test_value();
     fs::write(
         &local_material_fallback_path,
-        local_material_fallback
-            .pack()
-            .expect("pack fallback materials"),
+        local_material_fallback.pack().test_value(),
     )
-    .expect("write local material fallback");
+    .test_value();
 
     let mut app = new_menu_app(320, 200);
     app.loader_screen = Some(
@@ -3328,7 +3349,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
                 .expect("synthetic loader resources"),
             LoaderState::initial("Client start"),
         )
-        .expect("synthetic client loader"),
+        .test_value(),
     );
     let (manager, event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -3339,14 +3360,11 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     let resource = |id, name: &[u8]| clonk_engine::NetworkResourceCore {
         id,
         loadable: true,
-        filename: clonk_engine::LegacyCString::from_bytes(name.to_vec())
-            .expect("fixture filename is NUL-free"),
+        filename: clonk_engine::LegacyCString::from_bytes(name.to_vec()).test_value(),
         ..Default::default()
     };
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     let network_random_seed = 7_i32;
     snapshot.parameters.random_seed = network_random_seed;
     snapshot.parameters.control_rate = 2;
@@ -3376,7 +3394,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     };
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
-        .expect("queue JoinData");
+        .test_value();
     event_tx
         .send(NetworkEvent::ResourceComplete {
             resource_id: 74,
@@ -3384,11 +3402,11 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             path: system_resource_path,
             local: true,
         })
-        .expect("complete trusted local System");
+        .test_value();
     event_tx
         .send(NetworkEvent::StatusRequested(go))
-        .expect("queue GO request");
-    app.process_network_events().expect("apply start request");
+        .test_value();
+    app.process_network_events().test_value();
     // A client publishes 6 before RetrieveScenario blocks; the modal
     // transfer percentage below remains a separate progress domain
     // (src/C4Game.cpp:2558-2568).
@@ -3426,8 +3444,8 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             path: scenario_path,
             local: false,
         })
-        .expect("complete scenario");
-    app.process_network_events().expect("wait for dynamic");
+        .test_value();
+    app.process_network_events().test_value();
     assert!(!combined_path.exists());
     assert_eq!(
         app.blocking_resource_wait
@@ -3439,10 +3457,8 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     let (removed_tx, removed_rx) = mpsc::channel();
     let removal_observer = thread::spawn(move || {
         let (resource_id, completion) = commands.receive_resource_removal();
-        completion.send(Ok(())).expect("complete dynamic removal");
-        removed_tx
-            .send(resource_id)
-            .expect("report removed dynamic");
+        completion.send(Ok(())).test_value();
+        removed_tx.send(resource_id).test_value();
         commands
     });
     event_tx
@@ -3452,15 +3468,15 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             path: dynamic_path.clone(),
             local: false,
         })
-        .expect("complete dynamic");
-    app.process_network_events().expect("compose resources");
+        .test_value();
+    app.process_network_events().test_value();
     assert_eq!(
         removed_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("client did not retire its merged dynamic resource"),
         71
     );
-    let mut commands = removal_observer.join().expect("removal observer exits");
+    let mut commands = removal_observer.test_join();
     assert_eq!(
         app.blocking_resource_wait
             .as_ref()
@@ -3468,7 +3484,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
         Some(72)
     );
 
-    let combined = Group::open(&combined_path).expect("open combined scenario");
+    let combined = Group::open(&combined_path).test_value();
     assert_eq!(combined.read_file("Dynamic.txt").unwrap(), b"merged");
     assert!(commands.take_status_acknowledgements().is_empty());
 
@@ -3479,13 +3495,13 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             path: dynamic_path,
             local: false,
         })
-        .expect("repeat dynamic completion");
+        .test_value();
     event_tx
         .send(NetworkEvent::StatusRequested(go))
-        .expect("repeat GO request");
-    app.process_network_events().expect("ignore duplicate work");
+        .test_value();
+    app.process_network_events().test_value();
     let combined_files = fs::read_dir(directory.path())
-        .expect("read resource directory")
+        .test_value()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("Combined7"))
         .count();
@@ -3498,7 +3514,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             path: game_resource_path,
             local: false,
         })
-        .expect("complete ordinary game resource");
+        .test_value();
     event_tx
         .send(NetworkEvent::ResourceComplete {
             resource_id: 73,
@@ -3506,9 +3522,8 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             path: material_resource_path,
             local: false,
         })
-        .expect("complete authoritative material resource");
-    app.process_network_events()
-        .expect("begin client InitGame after all resources complete");
+        .test_value();
+    app.process_network_events().test_value();
     assert!(app.blocking_resource_wait.is_none());
     assert!(!app.message_dialogs.iter().any(|dialog| matches!(
         dialog.continuation,
@@ -3535,7 +3550,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     );
     let loading_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        app.poll_loading().expect("poll client InitGame phase");
+        app.poll_loading().test_value();
         if app.message_dialogs.iter().any(|dialog| {
             matches!(
                 dialog.continuation,
@@ -3576,7 +3591,7 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
                 MessageDialogContinuation::NetworkClientStartWait
             )
         })
-        .expect("FinalInit presents the client start-wait message");
+        .test_value();
     assert_eq!(client_wait.state.message(), "Waiting for start...");
     assert_eq!(client_wait.state.caption(), "Network");
     assert_eq!(
@@ -3650,9 +3665,8 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
     };
     event_tx
         .send(NetworkEvent::StatusCommitted(host_commit))
-        .expect("commit matching state and target");
-    app.process_network_events()
-        .expect("complete client Network.FinalInit");
+        .test_value();
+    app.process_network_events().test_value();
     assert!(matches!(app.mode, AppMode::Running));
     assert_eq!(
         app.loader_screen
@@ -3674,8 +3688,8 @@ fn client_go_combines_scenario_once_and_defers_100_until_final_init() {
             tick: 23,
             controls: Vec::new(),
         })
-        .expect("queue first playable network tick");
-    app.update().expect("play first network frame");
+        .test_value();
+    app.update().test_value();
     assert_eq!(app.engine.frame(), initial_frame + 1);
 }
 
@@ -3686,7 +3700,8 @@ fn set_control_test_team(
 ) -> clonk_engine::InitialNetworkTeam {
     clonk_engine::InitialNetworkTeam {
         id,
-        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes())
+            .test_value(),
         player_start_index: 0,
         player_ids,
         color: if id == 1 { 0x00f4_0000 } else { 0x0000_00f4 },
@@ -3720,7 +3735,8 @@ fn set_control_test_player(id: i32, team: i32, flags: u16) -> clonk_engine::Cont
         id,
         team,
         flags,
-        name: clonk_engine::LegacyCString::from_bytes(format!("Player {id}").into_bytes()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(format!("Player {id}").into_bytes())
+            .test_value(),
         ..Default::default()
     }
 }
@@ -3735,11 +3751,10 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
     let (manager, event_tx) = NetworkManager::test_stub();
     app.network = Some(manager);
     app.engine.set_network_game(true);
-    let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+    let tick = u32::try_from(app.engine.frame()).test_value();
     let initial_frame = app.engine.frame();
     let info = clonk_engine::ControlPlayerInfoEntry {
-        name: clonk_engine::LegacyCString::from_bytes(b"Network Tyler".to_vec())
-            .expect("valid legacy name"),
+        name: clonk_engine::LegacyCString::from_bytes(b"Network Tyler".to_vec()).test_value(),
         id: 7,
         color: 0x0011_2233,
         ..Default::default()
@@ -3748,7 +3763,7 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
         filename: clonk_engine::LegacyCString::from_bytes(
             b"/definitely/missing/RemotePlayer.c4p".to_vec(),
         )
-        .expect("valid legacy filename"),
+        .test_value(),
         at_client: 0,
         info_id: 7,
         source: clonk_engine::JoinPlayerSource::Embedded(
@@ -3757,7 +3772,7 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
         by_client: 1,
     };
     app.set_runtime_flash_message("Join clears me", RuntimeHelpCharset::Windows1252)
-        .expect("install pre-viewport flash");
+        .test_value();
     assert!(app.runtime_flash_message.is_some());
     app.ui_sound_log.clear();
     event_tx
@@ -3773,9 +3788,9 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
                 NetworkControl::JoinPlayer(join),
             ],
         })
-        .expect("queue admission controls");
+        .test_value();
 
-    app.update().expect("execute admission tick");
+    app.update().test_value();
 
     assert_eq!(app.engine.frame(), initial_frame + 1);
     let joined = app
@@ -3783,7 +3798,7 @@ fn ready_tick_local_join_opens_one_viewport_with_feedback() {
         .players
         .iter()
         .find(|player| player.player_info_id == 7)
-        .expect("embedded player joined before the simulation tick");
+        .test_value();
     assert_eq!(joined.name, "Network Tyler");
     assert_eq!((joined.score, joined.total_playing_time), (42, 99));
     // AtClient, independently of the remote ByClient source selection,
@@ -3818,21 +3833,19 @@ fn synchronized_remote_join_has_no_local_viewport_feedback() {
     let (manager, event_tx) = NetworkManager::test_stub();
     app.network = Some(manager);
     app.engine.set_network_game(true);
-    let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+    let tick = u32::try_from(app.engine.frame()).test_value();
     let info_id = 73;
     let at_client = 3;
     app.ui_sound_log.clear();
     app.control_clients.replace_snapshot([
         clonk_engine::ClientCoreControlData {
             client_id: 0,
-            name: clonk_engine::LegacyCString::from_bytes(b"Host Client".to_vec())
-                .expect("valid host client name"),
+            name: clonk_engine::LegacyCString::from_bytes(b"Host Client".to_vec()).test_value(),
             ..Default::default()
         },
         clonk_engine::ClientCoreControlData {
             client_id: at_client,
-            name: clonk_engine::LegacyCString::from_bytes(b"Remote Andr\xe9".to_vec())
-                .expect("valid remote client name"),
+            name: clonk_engine::LegacyCString::from_bytes(b"Remote Andr\xe9".to_vec()).test_value(),
             ..Default::default()
         },
     ]);
@@ -3864,16 +3877,16 @@ fn synchronized_remote_join_has_no_local_viewport_feedback() {
                 }),
             ],
         })
-        .expect("queue remote admission controls");
+        .test_value();
 
-    app.update().expect("execute remote admission tick");
+    app.update().test_value();
 
     let joined = app
         .snapshot
         .players
         .iter()
         .find(|player| player.player_info_id == info_id)
-        .expect("remote player joined");
+        .test_value();
     assert_eq!(
         app.engine
             .player(joined.id)
@@ -3881,7 +3894,7 @@ fn synchronized_remote_join_has_no_local_viewport_feedback() {
             .at_client(),
         clonk_engine::PlayerAtClient::new(at_client)
     );
-    let player = app.engine.player(joined.id).expect("runtime remote player");
+    let player = app.engine.player(joined.id).test_value();
     assert_eq!(
         clonk_script::c4_string_bytes(player.at_client_name()),
         b"Remote Andr\xe9"
@@ -3932,7 +3945,7 @@ fn synchronized_join_for_a_missing_client_is_ignored() {
         ),
         by_client: 1,
     })
-    .expect("missing-client join is ignored");
+    .test_value();
 
     assert!(app
         .engine
@@ -3945,8 +3958,7 @@ fn two_item_script_menu(cursor: ObjectId) -> clonk_engine::ObjectMenuState {
         caption: "Choose".to_string(),
         symbol_id: "MENU".to_string(),
         title_symbol: clonk_engine::ObjectMenuSymbol::default(),
-        identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
-            .expect("menu identification deserializes"),
+        identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" })).test_value(),
         style: 0,
         equal_item_height: false,
         permanent: false,
@@ -4031,39 +4043,35 @@ fn install_test_cursor_menu(
                 ..ObjectUpdate::default()
             },
         )
-        .expect("install cursor object menu");
+        .test_value();
 }
 
 fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, Vector2, i32) {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let cursor = app.engine.crew_cursor(owner).test_value();
     // Disabling never owes the repeller rebuild.
     let _ = app
         .engine
         .player_mut(owner)
-        .expect("sandbox player")
+        .test_value()
         .set_fog_of_war(false);
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(220);
     app.engine.set_landscape(landscape);
 
-    let mut site = Definition::from_script("BLD1", "Build site", "#strict\n")
-        .expect("constructable definition compiles");
+    let mut site = Definition::from_script("BLD1", "Build site", "#strict\n").test_value();
     site.set_category(clonk_engine::CATEGORY_STRUCTURE);
     site.set_constructable(true);
     site.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-4, -8, 8, 8)));
-    app.engine
-        .register_definition(site)
-        .expect("register constructable definition");
+    app.engine.register_definition(site).test_value();
 
     let mut menu = two_item_script_menu(cursor);
     menu.items[0].item_id = "BLD1".to_owned();
     install_test_cursor_menu(&mut app, cursor, menu);
     app.snapshot = app.engine.snapshot();
     let render_snapshot = app.snapshot.clone();
-    let viewports = collect_viewport_inputs(&render_snapshot)
-        .expect("construction fixture has a local viewport");
+    let viewports = collect_viewport_inputs(&render_snapshot).test_value();
     app.graphics.render_frame(&render_snapshot, &viewports);
 
     let (width, height) = {
@@ -4078,11 +4086,11 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
                 Ok(Some(EngineScriptMenuPointerTarget::Item(0)))
             )
         })
-        .expect("construction menu first item has a pointer point");
+        .test_value();
 
     let mut valid = None;
     let mut invalid = None;
-    let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     'points: for y in viewport.y..viewport.y + viewport.height as i32 {
         for x in viewport.x..viewport.x + viewport.width as i32 {
             let point = GuiPoint::new(x as f32, y as f32);
@@ -4090,10 +4098,7 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
                 .abs()
                 .max((point.y - menu_point.y).abs())
                 < MENU_DRAG_THRESHOLD
-                || app
-                    .script_menu_pointer_target(point)
-                    .expect("hit-test candidate site")
-                    .is_some()
+                || app.script_menu_pointer_target(point).test_value().is_some()
             {
                 continue;
             }
@@ -4116,12 +4121,12 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
             }
         }
     }
-    let (valid_point, valid_world) = valid.expect("flat landscape has a valid build site");
-    let invalid_point = invalid.expect("viewport also has an unsupported build site");
+    let (valid_point, valid_world) = valid.test_value();
+    let invalid_point = invalid.test_value();
     let raw_c4id = app
         .engine
         .object_menu_construction_drag(owner, 0)
-        .expect("first row is a construction drag")
+        .test_value()
         .definition_c4id;
     (
         app,
@@ -4139,9 +4144,8 @@ fn begin_construction_drag(app: &mut GameApp, menu_point: GuiPoint, drop_point: 
         f64::from(menu_point.x),
         f64::from(menu_point.y),
     ))
-    .expect("move over constructable menu row");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press constructable menu row");
+    .test_value();
+    app.handle_mouse_button(ElementState::Pressed).test_value();
     assert!(matches!(
         app.construction_menu_drag.as_ref(),
         Some(ConstructionMenuDrag::Candidate { .. })
@@ -4150,13 +4154,13 @@ fn begin_construction_drag(app: &mut GameApp, menu_point: GuiPoint, drop_point: 
         f64::from(drop_point.x),
         f64::from(drop_point.y),
     ))
-    .expect("cross construction-menu drag sensitivity");
+    .test_value();
     assert!(app.ingame_construction_drag_active());
 }
 
 fn new_game_over_keyboard_app() -> GameApp {
     let mut app = new_classic_running_sandbox_app();
-    app.handle_game_over().expect("show game-over dialog");
+    app.handle_game_over().test_value();
     assert!(app.game_over_dialog.is_some());
     if let Some(audio) = app.audio.as_mut() {
         // Isolate game-over input from InitGameFinal's intentional
@@ -4281,7 +4285,7 @@ fn configure_scoreboard_test_app(mut app: GameApp, script: &str) -> GameApp {
     if !script.is_empty() {
         app.engine
             .install_scenario_script_with_convention("ScoreboardBoundary", script, true)
-            .expect("install scoreboard fixture script");
+            .test_value();
         app.snapshot = app.engine.snapshot();
         app.snapshot.hud.messages.clear();
     }
@@ -4289,12 +4293,11 @@ fn configure_scoreboard_test_app(mut app: GameApp, script: &str) -> GameApp {
 }
 
 fn toggle_scoreboard(app: &mut GameApp, modifiers: ModifiersState) {
-    app.handle_modifiers_changed(modifiers)
-        .expect("set keyboard modifiers");
+    app.handle_modifiers_changed(modifiers).test_value();
     app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("toggle the classic scoreboard");
+        .test_value();
     app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release the scoreboard key");
+        .test_value();
 }
 
 fn route_primary_gamepad_to_local_owner(app: &mut GameApp) {
@@ -4303,7 +4306,7 @@ fn route_primary_gamepad_to_local_owner(app: &mut GameApp) {
         Some("Gamepad0"),
         "Button9",
         input::legacy_gamepad_axis_key(0, 0, true)
-            .expect("primary right-axis key")
+            .test_value()
             .to_string(),
     );
     app.gamepad_bindings = GamepadBindings::from_config(&config);
@@ -4373,8 +4376,8 @@ fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
         )),
         "LanguageUS.txt",
     )
-    .expect("parse shipped language table");
-    let columns = build_runtime_help_columns(&table).expect("build shipped help columns");
+    .test_value();
+    let columns = build_runtime_help_columns(&table).test_value();
     let speed_up = if cfg!(target_os = "windows") {
         "Shift+Add"
     } else if cfg!(target_os = "linux") {
@@ -4402,7 +4405,7 @@ fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
         b"IDS_CON_HELP=First\nIDS_CON_HELP=Second\n",
         "duplicate fixture",
     )
-    .expect("parse duplicate fixture");
+    .test_value();
     assert_eq!(
         duplicate.get("IDS_CON_HELP").map(String::as_str),
         Some("First")
@@ -4419,7 +4422,7 @@ fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
         )),
         "LanguageUS.txt",
     )
-    .expect("parse shipped US language table");
+    .test_value();
     let de = parse_runtime_language_table(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -4427,7 +4430,7 @@ fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
         )),
         "LanguageDE.txt",
     )
-    .expect("parse shipped German language table");
+    .test_value();
     assert_eq!(default_rank_resource_names(&us)[1], "Ensign");
     assert_eq!(default_rank_resource_names(&de)[1], "Fähnrich");
 
@@ -4453,43 +4456,43 @@ fn presentation_material_and_texture_overload_chains_stop_independently() {
     // material but deliberately stops before Parent.png.
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
-    let root = tempdir().expect("temp material chain");
+    let root = tempdir();
     let family = root.path().join("Hazard.c4f");
     let scenario = family.join("Tutorial.c4s");
     let local = scenario.join("Material.c4g");
     let parent = family.join("Material.c4g");
-    fs::create_dir_all(&local).expect("local material group");
-    fs::create_dir_all(&parent).expect("parent material group");
+    fs::create_dir_all(&local).test_value();
+    fs::create_dir_all(&parent).test_value();
     fs::write(
         local.join("TexMap.txt"),
         "OverloadMaterials\n1=Local-Local\n",
     )
-    .expect("local texmap");
-    fs::write(local.join("Local.c4m"), "[Material]\nName=Local\n").expect("local material");
+    .test_value();
+    fs::write(local.join("Local.c4m"), "[Material]\nName=Local\n").test_value();
     fs::write(
         local.join("Local.png"),
         include_bytes!("../../../content/Material.c4g/Snow.png"),
     )
-    .expect("local texture");
-    fs::write(parent.join("TexMap.txt"), "1=Parent-Parent\n").expect("parent texmap");
-    fs::write(parent.join("Parent.c4m"), "[Material]\nName=Parent\n").expect("parent material");
+    .test_value();
+    fs::write(parent.join("TexMap.txt"), "1=Parent-Parent\n").test_value();
+    fs::write(parent.join("Parent.c4m"), "[Material]\nName=Parent\n").test_value();
     fs::write(
         parent.join("Parent.png"),
         include_bytes!("../../../content/Material.c4g/Snow.png"),
     )
-    .expect("parent texture");
+    .test_value();
 
     let plain_ancestor_materials = root.path().join("Material.c4g");
-    fs::create_dir_all(&plain_ancestor_materials).expect("plain ancestor material group");
+    fs::create_dir_all(&plain_ancestor_materials).test_value();
     fs::write(
         plain_ancestor_materials.join("Wrong.c4m"),
         "[Material]\nName=Wrong\n",
     )
-    .expect("plain ancestor material");
-    let scenario_group = Group::open(&scenario).expect("scenario group");
+    .test_value();
+    let scenario_group = Group::open(&scenario).test_value();
     let external = InstallDefinitionResolver::new(None)
         .resolve_material_groups(&scenario_group)
-        .expect("material parents resolve");
+        .test_value();
     assert_eq!(external.len(), 1);
     assert_eq!(external[0].root(), parent.as_path());
 

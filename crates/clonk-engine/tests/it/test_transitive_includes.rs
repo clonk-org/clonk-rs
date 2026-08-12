@@ -8,47 +8,44 @@ fn check_functions_after_resolve() {
     // This test directly checks if functions are present after resolve_includes
     let mut engine = Engine::new();
 
-    let tree = Definition::from_script(
+    let tree = crate::support::TestValueExt::test_value(Definition::from_script(
         "TREE",
         "Tree",
         r#"
         #strict
         private func Breeze() { return 1; }
         "#,
-    )
-    .expect("tree compiles");
+    ));
 
-    let tre1 = Definition::from_script(
+    let tre1 = crate::support::TestValueExt::test_value(Definition::from_script(
         "TRE1",
         "Tree1",
         r#"
         #strict
         #include TREE
         "#,
-    )
-    .expect("tre1 compiles");
+    ));
 
-    let plm1 = Definition::from_script(
+    let plm1 = crate::support::TestValueExt::test_value(Definition::from_script(
         "PLM1",
         "Palm1",
         r#"
         #strict
         #include TRE1
         "#,
-    )
-    .expect("plm1 compiles");
+    ));
 
     // Register all definitions
-    engine.register_definition(tree).unwrap();
-    engine.register_definition(tre1).unwrap();
-    engine.register_definition(plm1).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(tree));
+    crate::support::TestValueExt::test_value(engine.register_definition(tre1));
+    crate::support::TestValueExt::test_value(engine.register_definition(plm1));
 
     // Resolve includes
-    engine.resolve_includes().expect("includes resolve");
+    crate::support::TestValueExt::test_value(engine.resolve_includes());
 
     // Now spawn a PLM1 object and verify Breeze is available
     // by calling it in Initialize
-    let test_def = Definition::from_script(
+    let test_def = crate::support::TestValueExt::test_value(Definition::from_script(
         "TESTPLM",
         "TestPalm",
         r#"
@@ -61,16 +58,15 @@ fn check_functions_after_resolve() {
             return 0;
         }
         "#,
-    )
-    .expect("test definition compiles");
+    ));
 
-    engine.register_definition(test_def).unwrap();
-    engine.resolve_includes().expect("test includes resolve");
+    crate::support::TestValueExt::test_value(engine.register_definition(test_def));
+    crate::support::TestValueExt::test_value(engine.resolve_includes());
 
     use clonk_engine::SpawnConfig;
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TESTPLM".to_string()))
-        .expect("spawn should succeed - Breeze should be found via PLM1's transitive includes");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TESTPLM".to_string())),
+    );
 }
 
 #[test]
@@ -78,7 +74,7 @@ fn transitive_includes_resolve_correctly() {
     let mut engine = Engine::new();
 
     // Grandparent: defines the function
-    let grandparent = Definition::from_script(
+    let grandparent = crate::support::TestValueExt::test_value(Definition::from_script(
         "TREE",
         "Tree",
         r#"
@@ -95,42 +91,39 @@ fn transitive_includes_resolve_correctly() {
             return 42;
         }
         "#,
-    )
-    .expect("grandparent compiles");
+    ));
 
     // Parent: includes grandparent
-    let parent = Definition::from_script(
+    let parent = crate::support::TestValueExt::test_value(Definition::from_script(
         "TRE1",
         "Tree1",
         r#"
         #strict
         #include TREE
         "#,
-    )
-    .expect("parent compiles");
+    ));
 
     // Child: includes parent (transitive to grandparent)
-    let child = Definition::from_script(
+    let child = crate::support::TestValueExt::test_value(Definition::from_script(
         "TRE2",
         "Tree2",
         r#"
         #strict
         #include TRE1
         "#,
-    )
-    .expect("child compiles");
+    ));
 
     // Register in order that might cause issues if not handled correctly
-    engine.register_definition(grandparent).unwrap();
-    engine.register_definition(child).unwrap(); // Register child before parent
-    engine.register_definition(parent).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(grandparent));
+    crate::support::TestValueExt::test_value(engine.register_definition(child)); // Register child before parent
+    crate::support::TestValueExt::test_value(engine.register_definition(parent));
 
     // Resolve includes - this should handle transitive includes correctly
-    engine.resolve_includes().expect("includes resolve");
+    crate::support::TestValueExt::test_value(engine.resolve_includes());
 
     // Now test that TRE2 can call Breeze (inherited transitively)
     // We'll spawn a TRE2 and call a function that uses Breeze
-    let test_def = Definition::from_script(
+    let test_def = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -146,17 +139,16 @@ fn transitive_includes_resolve_correctly() {
             return 1;  // Failure
         }
         "#,
-    )
-    .expect("test definition compiles");
+    ));
 
-    engine.register_definition(test_def).unwrap();
-    engine.resolve_includes().expect("test includes resolve");
+    crate::support::TestValueExt::test_value(engine.register_definition(test_def));
+    crate::support::TestValueExt::test_value(engine.resolve_includes());
 
     // Spawn TEST object - Initialize should succeed without "unknown function 'Breeze'" error
     use clonk_engine::SpawnConfig;
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()))
-        .expect("spawn should succeed - Breeze should be found via transitive includes");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string())),
+    );
 }
 
 #[test]
@@ -164,7 +156,7 @@ fn action_callback_with_transitive_include() {
     // This more closely reproduces the actual TRE2/Breeze issue with action StartCall
     let mut engine = Engine::new();
 
-    let grandparent = Definition::from_script(
+    let grandparent = crate::support::TestValueExt::test_value(Definition::from_script(
         "BASE",
         "Base",
         r#"
@@ -178,28 +170,25 @@ fn action_callback_with_transitive_include() {
             return 123;
         }
         "#,
-    )
-    .expect("grandparent compiles");
+    ));
 
-    let parent = Definition::from_script(
+    let parent = crate::support::TestValueExt::test_value(Definition::from_script(
         "PARENT",
         "Parent",
         r#"
         #strict
         #include BASE
         "#,
-    )
-    .expect("parent compiles");
+    ));
 
-    let mut child = Definition::from_script(
+    let mut child = crate::support::TestValueExt::test_value(Definition::from_script(
         "CHILD",
         "Child",
         r#"
         #strict
         #include PARENT
         "#,
-    )
-    .expect("child compiles");
+    ));
 
     // Configure action with StartCall that uses the inherited function
     use clonk_engine::{ActionSpec, ActionState};
@@ -217,16 +206,16 @@ fn action_callback_with_transitive_include() {
     );
     child.configure_actions(Some("Idle".to_string()), actions);
 
-    engine.register_definition(grandparent).unwrap();
-    engine.register_definition(child).unwrap();
-    engine.register_definition(parent).unwrap();
-    engine.resolve_includes().expect("includes resolve");
+    crate::support::TestValueExt::test_value(engine.register_definition(grandparent));
+    crate::support::TestValueExt::test_value(engine.register_definition(child));
+    crate::support::TestValueExt::test_value(engine.register_definition(parent));
+    crate::support::TestValueExt::test_value(engine.resolve_includes());
 
     // Spawn with action that triggers StartCall
     let action_state = ActionState::new("Test");
-    let _obj = engine
-        .spawn_object(clonk_engine::SpawnConfig::new("CHILD".to_string()).with_action(action_state))
-        .expect("spawn should work - ActionCallback should be found via transitive includes");
+    let _obj = crate::support::TestValueExt::test_value(engine.spawn_object(
+        clonk_engine::SpawnConfig::new("CHILD".to_string()).with_action(action_state),
+    ));
 
-    engine.tick_without_snapshot().expect("tick should succeed");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 }

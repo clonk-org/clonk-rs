@@ -5,13 +5,14 @@ use clonk_script::Value;
 fn call_probe_result(script: &str, landscape: Landscape) -> Result<Value, EngineError> {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(landscape);
-    engine
-        .register_script_definition("PF2T", "PathFree2 probe", script)
-        .expect("probe definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("PF2T"))
-        .expect("probe object spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "PF2T",
+        "PathFree2 probe",
+        script,
+    ));
+    let object =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("PF2T")));
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
     engine.call_object_function(index, "Probe", Vec::new())
 }
 
@@ -132,7 +133,7 @@ fn path_free2_native_integer_slots_apply_legacy_falsy_conversion() {
         let mut engine = clonk_script::Engine::new();
         clonk_engine::compat::register_host_functions(&mut engine);
         engine.register_host_function("ZeroId", |_| Ok(Value::C4Id("NONE".into())));
-        engine.load_script(source).expect("probe script loads");
+        crate::support::TestValueExt::test_value(engine.load_script(source));
         engine
     }
 

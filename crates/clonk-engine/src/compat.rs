@@ -179,6 +179,74 @@ mod tests {
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
+    #[track_caller]
+    fn test_definition(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        source: &str,
+    ) -> crate::Definition {
+        crate::Definition::from_script(id, name, source).expect("test definition compiles")
+    }
+
+    trait TestValueExt<T> {
+        fn test_value(self) -> T;
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            self.expect("compat-test value exists")
+        }
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            self.expect("compat-test operation succeeds")
+        }
+    }
+
+    trait TestEngineExt {
+        fn register_test_definition(&mut self, definition: crate::Definition);
+        fn register_test_player(&mut self, config: crate::PlayerConfig);
+        fn register_test_script_definition(
+            &mut self,
+            id: impl Into<String>,
+            name: impl Into<String>,
+            source: &str,
+        );
+        fn spawn_test_object(&mut self, config: crate::SpawnConfig) -> crate::ObjectId;
+    }
+
+    impl TestEngineExt for crate::Engine {
+        #[track_caller]
+        fn register_test_definition(&mut self, definition: crate::Definition) {
+            self.register_definition(definition)
+                .expect("test definition registers");
+        }
+
+        #[track_caller]
+        fn register_test_player(&mut self, config: crate::PlayerConfig) {
+            self.register_player(config).expect("test player registers");
+        }
+
+        #[track_caller]
+        fn register_test_script_definition(
+            &mut self,
+            id: impl Into<String>,
+            name: impl Into<String>,
+            source: &str,
+        ) {
+            self.register_script_definition(id, name, source)
+                .expect("test script definition registers");
+        }
+
+        #[track_caller]
+        fn spawn_test_object(&mut self, config: crate::SpawnConfig) -> crate::ObjectId {
+            self.spawn_object(config).expect("test object spawns")
+        }
+    }
+
     // The C++ host-compat battery stays one module so its ids remain
     // `compat::tests::*`; the bodies live in byte-verbatim contiguous parts.
     include!("compat/tests/part_01.rs");

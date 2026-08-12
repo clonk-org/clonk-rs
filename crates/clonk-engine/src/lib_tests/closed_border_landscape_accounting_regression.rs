@@ -2,19 +2,18 @@ use super::*;
 use crate::landscape::PixelGrid;
 
 fn border_engine(bottom_open: bool) -> (Engine, MaterialId) {
-    let library = clonk_resources::MaterialLibrary::parse(
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
         r#"
             [Material Vehicle]
             Name=Vehicle
             Density=100
             Friction=100
             "#,
-    )
-    .expect("material fixture parses");
+    ));
     let materials = MaterialSet::from_resource_library(&library);
-    let vehicle = materials.id_of("Vehicle").expect("Vehicle exists");
+    let vehicle = crate::TestValueExt::test_value(materials.id_of("Vehicle"));
     let grid = PixelGrid::new(7, 3, vec![0; 21], vec![0], vec![None], vec![None]);
-    let mut landscape = Landscape::new(7, vec![3; 7]).expect("landscape builds");
+    let mut landscape = crate::TestValueExt::test_value(Landscape::new(7, vec![3; 7]));
     landscape.set_world_height(3);
     landscape.set_pixel_grid(grid);
     landscape.set_border_open(0, 0, true, bottom_open);
@@ -26,16 +25,16 @@ fn border_engine(bottom_open: bool) -> (Engine, MaterialId) {
 }
 
 fn spawn_digger(engine: &mut Engine) -> ObjectId {
-    engine
-        .register_script_definition("DGRR", "Digger", "#strict\n")
-        .expect("digger registers");
-    engine
-        .spawn_object(SpawnConfig::new("DGRR"))
-        .expect("digger spawns")
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "DGRR",
+        "Digger",
+        "#strict\n",
+    ));
+    crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("DGRR")))
 }
 
 fn shifting_border_engine() -> (Engine, MaterialId) {
-    let library = clonk_resources::MaterialLibrary::parse(
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
         r#"
             [Material Vehicle]
             Name=Vehicle
@@ -47,10 +46,9 @@ fn shifting_border_engine() -> (Engine, MaterialId) {
             Name=Earth
             Density=80
             "#,
-    )
-    .expect("material fixture parses");
+    ));
     let materials = MaterialSet::from_resource_library(&library);
-    let vehicle = materials.id_of("Vehicle").expect("Vehicle exists");
+    let vehicle = crate::TestValueExt::test_value(materials.id_of("Vehicle"));
     let grid = PixelGrid::new(
         7,
         3,
@@ -59,7 +57,7 @@ fn shifting_border_engine() -> (Engine, MaterialId) {
         vec![None, Some("Earth".to_string())],
         vec![None; 2],
     );
-    let mut landscape = Landscape::new(7, vec![3; 7]).expect("landscape builds");
+    let mut landscape = crate::TestValueExt::test_value(Landscape::new(7, vec![3; 7]));
     landscape.set_world_height(3);
     landscape.set_pixel_grid(grid);
 
@@ -70,7 +68,7 @@ fn shifting_border_engine() -> (Engine, MaterialId) {
 }
 
 fn shake_border_engine() -> (Engine, MaterialId) {
-    let library = clonk_resources::MaterialLibrary::parse(
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
         r#"
             [Material Vehicle]
             Name=Vehicle
@@ -81,10 +79,9 @@ fn shake_border_engine() -> (Engine, MaterialId) {
             Density=80
             DigFree=1
             "#,
-    )
-    .expect("material fixture parses");
+    ));
     let materials = MaterialSet::from_resource_library(&library);
-    let earth = materials.id_of("Earth").expect("Earth exists");
+    let earth = crate::TestValueExt::test_value(materials.id_of("Earth"));
     let grid = PixelGrid::new(
         7,
         3,
@@ -93,7 +90,7 @@ fn shake_border_engine() -> (Engine, MaterialId) {
         vec![None, Some("Earth".to_string())],
         vec![None; 2],
     );
-    let mut landscape = Landscape::new(7, vec![0; 7]).expect("landscape builds");
+    let mut landscape = crate::TestValueExt::test_value(Landscape::new(7, vec![0; 7]));
     landscape.set_world_height(3);
     landscape.set_pixel_grid(grid);
 
@@ -108,9 +105,7 @@ fn blast_circle_counts_closed_bottom_vehicle_without_rng_draws() {
     let (mut engine, vehicle) = border_engine(false);
     let before_rng = engine.rng.count;
 
-    let result = engine
-        .blast_circle(Vector2::new(3, 2), 2, None)
-        .expect("nonnegative blast runs");
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(3, 2), 2, None));
 
     // C4Landscape::BlastFree includes ycnt=radius. At y=3 the circle
     // probes two closed-bottom pixels; at y=4 it probes one more.
@@ -123,9 +118,7 @@ fn blast_circle_counts_closed_bottom_vehicle_without_rng_draws() {
 fn blast_circle_open_bottom_counts_sky_instead_of_vehicle() {
     let (mut engine, vehicle) = border_engine(true);
 
-    let result = engine
-        .blast_circle(Vector2::new(3, 2), 2, None)
-        .expect("nonnegative blast runs");
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(3, 2), 2, None));
 
     assert_eq!(result.pixel_count_by_material.get(&vehicle), None);
 }
@@ -143,7 +136,7 @@ fn dig_circle_open_bottom_credits_no_vehicle() {
         by_object: Some(digger),
     }]);
 
-    let digger_index = engine.find_object_index(digger).expect("digger survives");
+    let digger_index = crate::TestValueExt::test_value(engine.find_object_index(digger));
     assert_eq!(engine.objects[digger_index].material_content(vehicle), 0);
 }
 
@@ -162,7 +155,7 @@ fn dig_rect_credits_vehicle_only_at_closed_bottom() {
             by_object: Some(digger),
         }]);
 
-        let digger_index = engine.find_object_index(digger).expect("digger survives");
+        let digger_index = crate::TestValueExt::test_value(engine.find_object_index(digger));
         assert_eq!(
             engine.objects[digger_index].material_content(vehicle),
             expected_vehicle,
@@ -179,9 +172,7 @@ fn closed_bottom_vehicle_runs_shift_rng_but_records_no_oob_removal() {
         let _ = expected_rng.random(3);
     }
 
-    let result = engine
-        .blast_circle(Vector2::new(3, 2), 2, None)
-        .expect("nonnegative blast runs");
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(3, 2), 2, None));
 
     assert_eq!(result.pixel_count_by_material.get(&vehicle), Some(&3));
     assert_eq!(result.removed_by_material.get(&vehicle), None);

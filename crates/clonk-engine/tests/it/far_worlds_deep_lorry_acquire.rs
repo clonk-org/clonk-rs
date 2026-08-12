@@ -33,23 +33,21 @@ pub(super) fn deep_hydroclonk_finds_coral_inside_a_submerged_lorry(
     engine.set_landscape(water);
 
     let position = Vector2::new(100, 60);
-    let hydroclonk = engine
-        .spawn_object(SpawnConfig::new("HCLK").with_position(position))
-        .expect("the shipped Hydroclonk spawns");
-    let lorry = engine
-        .spawn_object(SpawnConfig::new("LORY").with_position(position))
-        .expect("the shipped lorry spawns");
-    let coral = engine
-        .spawn_object(
+    let hydroclonk = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("HCLK").with_position(position)),
+    );
+    let lorry = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("LORY").with_position(position)),
+    );
+    let coral = crate::support::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("GCOR")
                 .with_position(position)
                 .with_container(lorry),
-        )
-        .expect("the shipped green coral spawns inside LORY");
+        ),
+    );
 
-    let coral_index = engine
-        .find_object_index(coral)
-        .expect("the contained coral remains live");
+    let coral_index = crate::support::TestValueExt::test_value(engine.find_object_index(coral));
     let coral_ocf = engine.object_ocf_at_index(coral_index);
     assert_ne!(coral_ocf & ocf::FULL_CON, 0);
     assert_eq!(
@@ -58,16 +56,13 @@ pub(super) fn deep_hydroclonk_finds_coral_inside_a_submerged_lorry(
         "deeply submerged contained coral must reach HCLK's container fallback"
     );
 
-    let hydroclonk_index = engine
-        .find_object_index(hydroclonk)
-        .expect("the Hydroclonk remains live");
-    let found = engine
-        .call_object_function(
-            hydroclonk_index,
-            "GetAvailableObject",
-            vec![Value::C4Id("GCOR".into()), Value::Int(0)],
-        )
-        .expect("the shipped HCLK acquisition search completes");
+    let hydroclonk_index =
+        crate::support::TestValueExt::test_value(engine.find_object_index(hydroclonk));
+    let found = crate::support::TestValueExt::test_value(engine.call_object_function(
+        hydroclonk_index,
+        "GetAvailableObject",
+        vec![Value::C4Id("GCOR".into()), Value::Int(0)],
+    ));
 
     assert_eq!(
         found,

@@ -9,84 +9,71 @@
         // scenario material group before the installed group; the first
         // definition of a duplicate material name wins (C4Game.cpp:901-977,
         // C4Material.cpp:263-299).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
 
         let definition = dir.path().join("Defs.c4d/Good.c4d");
-        std::fs::create_dir_all(&definition).expect("definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&definition).test_value();
+        write_test_file(
             definition.join("DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write definition");
+        );
         write_test_definition_graphics(&definition);
 
         let scenario_dir = dir.path().join("Tutorial10.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Tutorial10 material override\n\n\
              [Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapZoom=10\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[&[24, 59], &[24, 59]]),
-        )
-        .expect("write landscape");
+        );
 
         let local_materials = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&local_materials).expect("local materials");
-        std::fs::write(
+        std::fs::create_dir_all(&local_materials).test_value();
+        write_test_file(
             local_materials.join("TexMap.txt"),
             "OverloadMaterials\nOverloadTextures\n24=DuroLava-Liquid\n59=FlyAshes-Smooth\n",
-        )
-        .expect("write local texmap");
-        std::fs::write(
+        );
+        write_test_file(
             local_materials.join("FlyAshes.c4m"),
             "[Material]\nName=FlyAshes\nDensity=50\n\n\
              [Reaction]\nType=Convert\nTargetSpec=SemiSolid\nExecMask=-1\nConvertMat=Sky\n",
-        )
-        .expect("write local FlyAshes override");
+        );
 
         let installed_materials = dir.path().join("Material.c4g");
-        std::fs::create_dir_all(&installed_materials).expect("installed materials");
-        std::fs::write(
+        std::fs::create_dir_all(&installed_materials).test_value();
+        write_test_file(
             installed_materials.join("TexMap.txt"),
             "# installed table\n",
-        )
-        .expect("write installed texmap");
-        std::fs::write(
+        );
+        write_test_file(
             installed_materials.join("FlyAshes.c4m"),
             "[Material]\nName=FlyAshes\nDensity=50\n",
-        )
-        .expect("write installed FlyAshes");
-        std::fs::write(
+        );
+        write_test_file(
             installed_materials.join("DuroLava.c4m"),
             "[Material]\nName=DuroLava\nDensity=25\n",
-        )
-        .expect("write installed DuroLava");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
-        let installed_group = Group::open(&installed_materials).expect("installed group opens");
-        let installed_library = clonk_resources::MaterialLibrary::from_group(&installed_group)
-            .expect("installed materials load");
+            load_test_scenario(&scenario_dir, &resolver);
+        let installed_group = Group::open(&installed_materials).test_value();
+        let installed_library = clonk_resources::MaterialLibrary::from_group(&installed_group).test_value();
         let mut engine = Engine::with_seed(0);
         engine.configure_materials_from_library(&installed_library);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         let fly_ashes = engine
             .materials()
-            .id_of("FlyAshes")
-            .expect("FlyAshes is loaded");
+            .id_of("FlyAshes").test_value();
         let duro_lava = engine
             .materials()
-            .id_of("DuroLava")
-            .expect("DuroLava is loaded from the admitted installed group");
+            .id_of("DuroLava").test_value();
         let reaction = engine
             .materials()
             .reaction(Some(fly_ashes), Some(duro_lava));
@@ -109,27 +96,25 @@
         // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73) copies the
         // Scenario.txt LeftOpen/RightOpen/TopOpen/BottomOpen keys onto the
         // landscape; AutoScanSideOpen=0 keeps the explicit side values.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let defs_root = dir.path().join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
-        std::fs::create_dir_all(&good).expect("definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&good).test_value();
+        write_test_file(
             good.join("DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write defcore");
-        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        );
+        write_test_file(good.join("Script.c"), "// fine\n");
         write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Borders.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Borders\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapZoom=10\nTopOpen=0\nBottomOpen=1\nLeftOpen=7\nRightOpen=9\nAutoScanSideOpen=0\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[
                 &[0, 0, 0, 0],
@@ -137,26 +122,21 @@
                 &[30, 30, 30, 0],
                 &[30, 30, 30, 30],
             ]),
-        )
-        .expect("write map");
+        );
         let materials = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "# table\n30=Earth-Smooth\n")
-            .expect("write texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "# table\n30=Earth-Smooth\n");
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
-        )
-        .expect("write earth");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
-        let landscape = engine.landscape().expect("landscape loaded");
+        apply_test_scenario(&scenario, &mut engine);
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.left_open(), 7);
         assert_eq!(landscape.right_open(), 9);
         assert!(!landscape.top_open());
@@ -165,44 +145,38 @@
 
     #[test]
     fn cpp_runtime_landscape_preseeds_map_and_savegame_fields_override_scenario_init() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Runtime Landscape\nSaveGame=1\n\n\
              [Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapZoom=5\nGravity=120\nTopOpen=1\nBottomOpen=0\nLeftOpen=7\nRightOpen=9\nAutoScanSideOpen=0\n",
-        )
-        .expect("write save core");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Game.txt"),
             "[Landscape]\r\nMapSeed=-7\r\nLeftOpen=-1\r\nRightOpen=42\r\nBottomOpen=true\r\nMatModulation=4278255360\r\n",
-        )
-        .expect("write C++ runtime block");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Map.bmp"),
             encode_indexed_bmp(&[&[0, 0, 0], &[30, 30, 30]]),
-        )
-        .expect("write static map");
+        );
         let materials = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n").expect("write texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "30=Earth-Smooth\n");
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nColor=1,2,3,4,5,6,7,8,9\nDensity=100\nShape=2\n",
-        )
-        .expect("write earth");
+        );
         write_test_texture(&materials, "Smooth");
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("savegame loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("savegame applies");
+        apply_test_scenario(&scenario, &mut engine);
 
-        let landscape = engine.landscape().expect("landscape restored");
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.map_seed(), -7);
         assert_eq!(landscape.left_open(), -1);
         assert_eq!(landscape.right_open(), 42);
@@ -226,7 +200,7 @@
         let wrong = crate::chunky::synthesize_landscape(&indices, 3, 2, 5, generated_seed, &shapes)
             .into_bytes();
         assert_ne!(expected, wrong, "fixture must distinguish the runtime seed");
-        let grid = landscape.pixel_grid().expect("static Surface8 restored");
+        let grid = landscape.pixel_grid().test_value();
         for row in 0..10 {
             assert_eq!(
                 &grid.bytes()[row * 100..row * 100 + 15],
@@ -266,19 +240,16 @@
         // Initial network dynamics carry exact Game.txt data without turning
         // Scenario.txt into a savegame. MapSeed/Mode/Modulation are compiled
         // before Init, while ScenarioInit still owns gravity and borders.
-        let core = std::fs::read_to_string(scenario_dir.join("Scenario.txt")).unwrap();
-        std::fs::write(
+        let core = std::fs::read_to_string(scenario_dir.join("Scenario.txt")).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             core.replace("SaveGame=1\n", "SaveGame=0\n"),
-        )
-        .unwrap();
+        );
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("initial dynamic loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut initial = Engine::with_seed(0);
-        scenario
-            .apply(&mut initial)
-            .expect("initial dynamic applies");
-        let landscape = initial.landscape().unwrap();
+        apply_test_scenario(&scenario, &mut initial);
+        let landscape = initial.landscape().test_value();
         assert_eq!(landscape.map_seed(), -7);
         assert_eq!(landscape.mode(), LANDSCAPE_MODE_STATIC);
         assert_eq!(landscape.modulation(), 4_278_255_360);
@@ -293,28 +264,26 @@
         // AutoScanSideOpen defaults to true (C4Scenario.cpp:297):
         // ScanSideOpen (C4Landscape.cpp:231-238) replaces LeftOpen /
         // RightOpen with the first non-sky pixel of the border columns.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let defs_root = dir.path().join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
-        std::fs::create_dir_all(&good).expect("definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&good).test_value();
+        write_test_file(
             good.join("DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write defcore");
-        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        );
+        write_test_file(good.join("Script.c"), "// fine\n");
         write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Scan.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Scan\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n",
-        )
-        .expect("write scenario core");
+        );
         // Column 0 turns solid at map row 2 (world y 20); column 3 is all
         // sky (right side fully open through the 100px minimum height).
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[
                 &[0, 30, 30, 0],
@@ -322,27 +291,22 @@
                 &[30, 30, 30, 0],
                 &[30, 30, 30, 0],
             ]),
-        )
-        .expect("write map");
+        );
         let materials = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "# table\n30=Earth-Smooth\n")
-            .expect("write texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "# table\n30=Earth-Smooth\n");
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
-        )
-        .expect("write earth");
+        );
         write_test_texture(&materials, "Smooth");
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
-        let landscape = engine.landscape().expect("landscape loaded");
+        apply_test_scenario(&scenario, &mut engine);
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.left_open(), 20, "first non-sky pixel in column 0");
         assert_eq!(
             landscape.right_open(),
@@ -383,44 +347,38 @@
         // it does not skip TextureMap.Init or CrossMapMaterials. Because this
         // group loads both materials and textures, the two independent
         // zero-count fallbacks stay closed and the installed group is ignored.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("NoTexMap.c4s");
         let local = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&local).expect("local materials dir");
+        std::fs::create_dir_all(&local).test_value();
         for (file, name, density, overlay) in [
             ("A-Wet.c4m", "Wet", 25, "Liquid"),
             ("B-Rock.c4m", "Rock", 70, "Smooth"),
         ] {
-            std::fs::write(
+            write_test_file(
                 local.join(file),
                 format!("[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"),
-            )
-            .expect("write local material");
+            );
         }
         write_test_texture(&local, "Liquid");
         write_test_texture(&local, "Smooth");
 
         let installed_root = dir.path().join("Installed");
         let installed = installed_root.join("Material.c4g");
-        std::fs::create_dir_all(&installed).expect("installed materials dir");
-        std::fs::write(installed.join("TexMap.txt"), "1=Global-Rough\n")
-            .expect("write installed texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&installed).test_value();
+        write_test_file(installed.join("TexMap.txt"), "1=Global-Rough\n");
+        write_test_file(
             installed.join("Global.c4m"),
             "[Material]\nName=Global\nDensity=100\nTextureOverlay=Rough\n",
-        )
-        .expect("write installed material");
+        );
         write_test_texture(&installed, "Rough");
 
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let resolver = FileSystemResolver {
-            roots: vec![installed_root],
-        };
+        let group = Group::open(&scenario_dir).test_value();
+        let resolver = test_resolver(vec![installed_root]);
         let classifier = build_map_pixel_classifier(&group, &resolver)
-            .expect("classifier load succeeds")
-            .expect("a missing first TexMap still builds a classifier");
+            .expect("classifier load succeeds").test_value();
 
-        let library = classifier.material_library().expect("local materials load");
+        let library = classifier.material_library().test_value();
         let material_order = library
             .iter()
             .map(|material| (material.name(), material.int("Density").unwrap_or(0)))
@@ -459,8 +417,7 @@
             height: 1,
             indices: vec![1, 2, 0],
         };
-        let landscape = exact_classified_landscape(&bitmap, &classifier, 0, 2, None)
-            .expect("indexed map classifies");
+        let landscape = exact_classified_landscape(&bitmap, &classifier, 0, 2, None).test_value();
         assert_eq!(
             (0..3)
                 .map(|x| landscape.grid_byte_at(x, 0))
@@ -481,14 +438,13 @@
     fn build_packed_material_enumeration_classifier(
         mat_map: Option<&[u8]>,
     ) -> Result<MapPixelClassifier, ScenarioError> {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         // C4MaterialMap::Load enumerates the physical C4Group entry cores
         // (src/C4Material.cpp:242-276). A packed fixture therefore pins the
         // intended A, B, C order independently of host directory enumeration.
         let mut materials = clonk_resources::MutableGroup::new("Material.c4g");
         materials
-            .add_file("TexMap.txt", b"# dynamic slots only\n".to_vec())
-            .expect("add texmap");
+            .add_file("TexMap.txt", b"# dynamic slots only\n".to_vec()).test_value();
         for (name, density) in [("A", 60), ("B", 70), ("C", 80)] {
             materials
                 .add_file(
@@ -497,23 +453,20 @@
                         "[Material]\nName={name}\nDensity={density}\nTextureOverlay=Smooth\n"
                     )
                     .into_bytes(),
-                )
-                .expect("add material");
+                ).test_value();
         }
         materials
-            .add_file("Smooth.bmp", encode_indexed_bmp(&[&[0u8]]))
-            .expect("add texture");
-        std::fs::write(
+            .add_file("Smooth.bmp", encode_indexed_bmp(&[&[0u8]])).test_value();
+        write_test_file(
             dir.path().join("Material.c4g"),
-            materials.pack().expect("pack materials"),
-        )
-        .expect("write materials");
+            materials.pack().test_value(),
+        );
         if let Some(mat_map) = mat_map {
-            std::fs::write(dir.path().join("MatMap.txt"), mat_map).expect("write MatMap");
+            write_test_file(dir.path().join("MatMap.txt"), mat_map);
         }
 
-        let group = Group::open(dir.path()).expect("scenario group opens");
-        let resolver = FileSystemResolver { roots: Vec::new() };
+        let group = Group::open(dir.path()).test_value();
+        let resolver = test_resolver(Vec::new());
         build_map_pixel_classifier(&group, &resolver)?.ok_or_else(|| {
             ScenarioError::InvalidLandscape("material classifier was not built".to_string())
         })
@@ -526,9 +479,8 @@
         // it. The same order must drive both MaterialIds and dynamic texmap
         // allocation (before CrossMapMaterials).
         let classifier =
-            build_packed_material_enumeration_classifier(Some(b"ignored [Enumeration]\r\nC\r\n"))
-                .expect("enumerated classifier builds");
-        let library = classifier.material_library().expect("materials loaded");
+            build_packed_material_enumeration_classifier(Some(b"ignored [Enumeration]\r\nC\r\n")).test_value();
+        let library = classifier.material_library().test_value();
         assert_eq!(
             library
                 .iter()
@@ -563,14 +515,13 @@
 
     #[test]
     fn material_enumeration_name_fails_even_without_material_or_texmap_groups() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(
+        let dir = test_tempdir();
+        write_test_file(
             dir.path().join("MatMap.txt"),
             b"[Enumeration]\r\nMissing\r\n",
-        )
-        .expect("write MatMap");
-        let group = Group::open(dir.path()).expect("scenario group opens");
-        let resolver = FileSystemResolver { roots: Vec::new() };
+        );
+        let group = Group::open(dir.path()).test_value();
+        let resolver = test_resolver(Vec::new());
         let error = match build_map_pixel_classifier(&group, &resolver) {
             Ok(_) => panic!("Num=0 cannot satisfy a listed material"),
             Err(error) => error,
@@ -585,8 +536,7 @@
 
     #[test]
     fn missing_material_enumeration_keeps_fresh_scenario_load_order() {
-        let classifier = build_packed_material_enumeration_classifier(None)
-            .expect("fresh classifier builds");
+        let classifier = build_packed_material_enumeration_classifier(None).test_value();
         assert_eq!(
             classifier
                 .material_library()
@@ -603,32 +553,29 @@
         // CrossMapMaterials stores numeric slots in each C4Material. A later
         // SetTextureIndex can create duplicate names, so save/restore must
         // retain the originally resolved number rather than look it up again.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let materials = dir.path().join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(
             materials.join("TexMap.txt"),
             "4=Earth-Ridge\n30=Earth-Smooth\n",
-        )
-        .expect("write texmap");
-        std::fs::write(
+        );
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\nTextureOverlay=Smooth\nBlastShiftTo=Earth\n",
-        )
-        .expect("write material");
+        );
         write_test_texture(&materials, "Ridge");
         write_test_texture(&materials, "Smooth");
 
-        let group = Group::open(dir.path()).expect("scenario group opens");
-        let resolver = FileSystemResolver { roots: Vec::new() };
+        let group = Group::open(dir.path()).test_value();
+        let resolver = test_resolver(Vec::new());
         let classifier = build_map_pixel_classifier(&group, &resolver)
-            .expect("classifier builds")
-            .expect("local texmap exists");
+            .expect("classifier builds").test_value();
         assert_eq!(classifier.state.default_material_entry("Earth"), Some(30));
         assert_eq!(classifier.state.material_crossmap_entries, vec![30]);
 
-        let encoded = serde_json::to_string(&classifier.state).expect("texmap serializes");
-        let restored: RuntimeTexMapState = serde_json::from_str(&encoded).expect("texmap restores");
+        let encoded = serde_json::to_string(&classifier.state).test_value();
+        let restored: RuntimeTexMapState = serde_json::from_str(&encoded).test_value();
         assert_eq!(restored, classifier.state);
     }
 
@@ -639,36 +586,31 @@
         // CrossMapMaterials. Once
         // slots 1..29 are occupied, GetIndex must therefore be able to reuse
         // the cleared slot 30 (C4Texture.cpp:68-104,229-244,319-345).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let materials = dir.path().join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(
             materials.join("TexMap.txt"),
             "1=Earth-NoSuchTex\n30=Earth-NoSuchTex\n31= Earth-Rough\n",
-        )
-        .expect("write texmap");
-        std::fs::write(
+        );
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=50\n",
-        )
-        .expect("write earth");
-        std::fs::write(
+        );
+        write_test_file(
             materials.join("X.c4m"),
             "[Material]\nName=X\nDensity=75\nShape=2\nTextureOverlay=Rough\n",
-        )
-        .expect("write allocation material");
-        std::fs::write(
+        );
+        write_test_file(
             materials.join("Y.c4m"),
             "[Material]\nName=Y\nDensity=80\nShape=3\n",
-        )
-        .expect("write fresh-pair material");
+        );
         write_test_texture(&materials, "Rough");
 
-        let group = Group::open(dir.path()).expect("scenario group opens");
-        let resolver = FileSystemResolver { roots: Vec::new() };
+        let group = Group::open(dir.path()).test_value();
+        let resolver = test_resolver(Vec::new());
         let mut classifier = build_map_pixel_classifier(&group, &resolver)
-            .expect("classifier builds")
-            .expect("local texmap exists");
+            .expect("classifier builds").test_value();
 
         for slot in [30usize, 31] {
             assert_eq!(classifier.state.densities[slot], 0);
@@ -702,22 +644,20 @@
         // Smooth being loaded cannot save the static slot when Liquid is not.
         // The separately tracked dynamic-add substitution gap may create a
         // Water-Smooth pair elsewhere; this assertion pins the parsed slot.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let materials = dir.path().join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "25=Water-Smooth\n").expect("write texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "25=Water-Smooth\n");
+        write_test_file(
             materials.join("Water.c4m"),
             "[Material]\nName=Water\nDensity=25\n",
-        )
-        .expect("write water");
+        );
         write_test_texture(&materials, "Smooth");
 
-        let group = Group::open(dir.path()).expect("scenario group opens");
-        let resolver = FileSystemResolver { roots: Vec::new() };
+        let group = Group::open(dir.path()).test_value();
+        let resolver = test_resolver(Vec::new());
         let classifier = build_map_pixel_classifier(&group, &resolver)
-            .expect("classifier builds")
-            .expect("local texmap exists");
+            .expect("classifier builds").test_value();
 
         assert_eq!(classifier.state.densities[25], 0);
         assert!(classifier.state.material_names[25].is_none());
@@ -732,32 +672,28 @@
         // A valid liquid Smooth entry retains Smooth for pair matching while
         // selecting Liquid for rendering. Ordinary valid entries remain
         // byte-for-byte classified at their original slot.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let materials = dir.path().join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(
             materials.join("TexMap.txt"),
             "25=Water-Smooth\n30=Earth-Rough\n",
-        )
-        .expect("write texmap");
-        std::fs::write(
+        );
+        write_test_file(
             materials.join("Water.c4m"),
             "[Material]\nName=Water\nDensity=25\n",
-        )
-        .expect("write water");
-        std::fs::write(
+        );
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
-        )
-        .expect("write earth");
+        );
         write_test_texture(&materials, "Liquid");
         write_test_texture(&materials, "Rough");
 
-        let group = Group::open(dir.path()).expect("scenario group opens");
-        let resolver = FileSystemResolver { roots: Vec::new() };
+        let group = Group::open(dir.path()).test_value();
+        let resolver = test_resolver(Vec::new());
         let classifier = build_map_pixel_classifier(&group, &resolver)
-            .expect("classifier builds")
-            .expect("local texmap exists");
+            .expect("classifier builds").test_value();
 
         assert_eq!(classifier.state.densities[25], 25);
         assert_eq!(
@@ -792,8 +728,7 @@
         }
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nShape=2\n",
-        )
-        .expect("material parses");
+        ).test_value();
         let mut classifier = MapPixelClassifier::from_slots_with_library(
             [0; 128],
             names,
@@ -813,54 +748,47 @@
         // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine
         // 9ffa0a5d src/C4Game.cpp:2394-2431;
         // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let definition = dir.path().join("Defs.c4d/Good.c4d");
-        std::fs::create_dir_all(&definition).expect("definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&definition).test_value();
+        write_test_file(
             definition.join("DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write defcore");
+        );
         write_test_definition_graphics(&definition);
 
         let scenario_dir = dir.path().join("Extend.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Extend\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
              MapPlayerExtend=1\nMaterial=Earth\n",
-        )
-        .expect("write scenario core");
+        );
         let materials = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n").expect("write texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "30=Earth-Smooth\n");
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
-        )
-        .expect("write earth");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
+        let group = Group::open(&scenario_dir).test_value();
         let one = Scenario::load_from_group_with_languages_and_seed_and_startup_player_count(
             &group,
             &resolver,
             &["US"],
             0,
             1,
-        )
-        .expect("one-player scenario loads through group API");
+        ).test_value();
         let three = Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
             &scenario_dir,
             &resolver,
             &["US"],
             0,
             3,
-        )
-        .expect("three-player scenario loads through path API");
+        ).test_value();
 
         assert_eq!(
             (
@@ -884,59 +812,50 @@
         // overlays that section's C4S and initializes its landscape with the
         // frozen StartupPlayerCount (src/C4Game.cpp:2642-2649,4084-4223;
         // src/C4Landscape.cpp:531-543; src/C4MapCreatorS2.cpp:633-644).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let definition = dir.path().join("Defs.c4d/Good.c4d");
-        std::fs::create_dir_all(&definition).expect("definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&definition).test_value();
+        write_test_file(
             definition.join("DefCore.txt"),
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
-        )
-        .expect("write defcore");
+        );
         write_test_definition_graphics(&definition);
 
         let scenario_dir = dir.path().join("Sections.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Section extend\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
              [Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
              MapPlayerExtend=0\nMaterial=Earth\n",
-        )
-        .expect("write main core");
+        );
         let section_dir = scenario_dir.join("SectArena.c4g");
-        std::fs::create_dir_all(&section_dir).expect("section dir");
-        std::fs::write(
+        std::fs::create_dir_all(&section_dir).test_value();
+        write_test_file(
             section_dir.join("Scenario.txt"),
             "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
              MapPlayerExtend=1\nMaterial=Earth\n",
-        )
-        .expect("write section core");
-        std::fs::write(
+        );
+        write_test_file(
             section_dir.join("Landscape.txt"),
             "map Arena { seed=1; mat=Earth; tex=Smooth; sub=0; };",
-        )
-        .expect("write section landscape");
+        );
         let materials = scenario_dir.join("Material.c4g");
-        std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
-            .expect("write texmap");
-        std::fs::write(
+        std::fs::create_dir_all(&materials).test_value();
+        write_test_file(materials.join("TexMap.txt"), "30=Earth-Smooth\n");
+        write_test_file(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
-        )
-        .expect("write earth");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
         let scenario = Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
             &scenario_dir,
             &resolver,
             &["US"],
             0,
             1,
-        )
-        .expect("scenario loads");
+        ).test_value();
         assert!(
             scenario.uses_map_player_extend(),
             "a child section must invalidate a count-one lobby preload"
@@ -948,19 +867,14 @@
                 &["US"],
                 0,
                 3,
-            )
-            .expect("three-player scenario loads");
+            ).test_value();
         let mut one_player_engine = Engine::with_seed(0);
-        scenario
-            .apply(&mut one_player_engine)
-            .expect("one-player scenario applies");
+        apply_test_scenario(&scenario, &mut one_player_engine);
         assert!(one_player_engine
             .load_scenario_section("Arena", 0, Vec::new())
             .expect("one-player section activates"));
         let mut three_player_engine = Engine::with_seed(0);
-        three_player
-            .apply(&mut three_player_engine)
-            .expect("three-player scenario applies");
+        apply_test_scenario(&three_player, &mut three_player_engine);
         assert!(three_player_engine
             .load_scenario_section("Arena", 0, Vec::new())
             .expect("three-player section activates"));
@@ -988,12 +902,11 @@
         // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
         // The fixed MapZoom has Rnd=0 and therefore keeps its configured
         // value even though Evaluate still consumes Random(1).
-        let dir = tempdir().expect("tempdir");
-        let group = Group::open(dir.path()).expect("scenario group opens");
+        let dir = test_tempdir();
+        let group = Group::open(dir.path()).test_value();
         let manifest = parse_legacy_scenario_text(
             "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\nMapPlayerExtend=1\n",
-        )
-        .expect("scenario core parses");
+        ).test_value();
         let mut classifier = MapPixelClassifier::from_slots(
             [0; 128],
             vec![None; 128],
@@ -1003,8 +916,7 @@
 
         let landscape =
             load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 3)
-                .expect("landscape loads")
-                .expect("landscape exists");
+                .expect("landscape loads").test_value();
 
         assert_eq!(landscape.width(), 20 * 3 * 5);
         assert_eq!(
@@ -1018,12 +930,11 @@
 
     #[test]
     fn dynamic_landscape_without_materials_still_clamps_to_cpp_minimum() {
-        let dir = tempdir().expect("tempdir");
-        let group = Group::open(dir.path()).expect("scenario group opens");
+        let dir = test_tempdir();
+        let group = Group::open(dir.path()).test_value();
         let manifest = parse_legacy_scenario_text(
             "[Landscape]\nMapWidth=8,0,1,8\nMapHeight=5,0,1,5\nMapZoom=5\n",
-        )
-        .expect("scenario core parses");
+        ).test_value();
 
         let mut callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut creator = None;
@@ -1039,8 +950,7 @@
             &mut callbacks,
             &mut creator,
         )
-        .expect("fallback landscape loads")
-        .expect("fallback landscape exists");
+        .expect("fallback landscape loads").test_value();
 
         assert_eq!(
             (landscape.width(), landscape.estimated_height()),
@@ -1053,12 +963,11 @@
         // FixRandom(7) makes an early MapZoom Evaluate produce 9. C++ first
         // builds this basic map, then draw #530 is Random(5)=0, so
         // 10 + 0 - 2 yields zoom 8 (C4Landscape.cpp:578-635).
-        let dir = tempdir().expect("tempdir");
-        let group = Group::open(dir.path()).expect("scenario group opens");
+        let dir = test_tempdir();
+        let group = Group::open(dir.path()).test_value();
         let manifest = parse_legacy_scenario_text(
             "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=10,2,5,15\n",
-        )
-        .expect("scenario core parses");
+        ).test_value();
         let mut early_rng = legacy_map_creation_rng(7);
         assert_eq!(
             legacy_map_zoom(manifest.sections.get("landscape"), &mut early_rng),
@@ -1074,8 +983,7 @@
 
         let landscape =
             load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 7, 1)
-                .expect("landscape loads")
-                .expect("landscape exists");
+                .expect("landscape loads").test_value();
         assert_eq!(
             landscape
                 .raster_state()
@@ -1086,8 +994,7 @@
         assert_eq!(landscape.width(), 160);
 
         let fallback = load_legacy_landscape_body_for_test(&group, &manifest, None, 7, 1)
-            .expect("fallback landscape loads")
-            .expect("fallback landscape exists");
+            .expect("fallback landscape loads").test_value();
         assert_eq!(
             fallback.width(),
             160,
@@ -1097,19 +1004,17 @@
 
     #[test]
     fn keep_map_creator_persists_the_evaluated_tree_with_raster_state() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("KeepCreator.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("landscape.txt"),
             "overlay Named { seed = 7; }; map Test { seed = 11; };",
-        )
-        .expect("write lowercase landscape.txt");
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        );
+        let group = Group::open(&scenario_dir).test_value();
         let manifest = parse_legacy_scenario_text(
             "[Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=5\nKeepMapCreator=1\n",
-        )
-        .expect("scenario core parses");
+        ).test_value();
         let mut classifier = MapPixelClassifier::from_slots(
             [0; 128],
             vec![None; 128],
@@ -1119,17 +1024,16 @@
 
         let landscape =
             load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 1)
-                .expect("landscape loads")
-                .expect("landscape exists");
-        let raster = landscape.raster_state().expect("raster state retained");
+                .expect("landscape loads").test_value();
+        let raster = landscape.raster_state().test_value();
         assert_eq!(raster.map_zoom(), 5);
         assert!(
             raster.map_creator().is_some(),
             "KeepMapCreator retains tree"
         );
 
-        let encoded = serde_json::to_string(&landscape).expect("landscape serializes");
-        let restored: Landscape = serde_json::from_str(&encoded).expect("landscape restores");
+        let encoded = serde_json::to_string(&landscape).test_value();
+        let restored: Landscape = serde_json::from_str(&encoded).test_value();
         assert_eq!(restored, landscape, "creator and texmap survive saves");
     }
 
@@ -1145,8 +1049,8 @@
             "content/Worlds.c4f/FoggyCliffs.c4s",
             "content/Fantasy.c4f/Crystalvalley.c4s",
         ] {
-            let group = Group::open(repository.join(relative)).expect("shipped scenario group");
-            let mut manifest = parse_legacy_scenario_manifest(&group).expect("scenario core");
+            let group = Group::open(repository.join(relative)).test_value();
+            let mut manifest = parse_legacy_scenario_manifest(&group).test_value();
             // Creator retention is only a diagnostic here: the basic-map
             // fallback cannot populate this state. Keep the render small
             // while exercising the shipped S2 source and loader gate.
@@ -1162,8 +1066,7 @@
 
             let landscape =
                 load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 1)
-                    .expect("shipped landscape loads")
-                    .expect("shipped landscape exists");
+                    .expect("shipped landscape loads").test_value();
             assert!(
                 landscape
                     .raster_state()
@@ -1209,11 +1112,10 @@
         let classifier = MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
         let landscape =
-            classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
+            classified_landscape(&bitmap, &classifier, 10, 0).test_value();
 
         let grid = landscape
-            .pixel_grid()
-            .expect("classified maps build Surface8");
+            .pixel_grid().test_value();
         assert_eq!(
             grid.byte_at(15, 15),
             Some(20),
@@ -1257,10 +1159,9 @@
         let classifier = MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
         let landscape =
-            classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
+            classified_landscape(&bitmap, &classifier, 10, 0).test_value();
         let grid = landscape
-            .pixel_grid()
-            .expect("classified maps build Surface8");
+            .pixel_grid().test_value();
         assert_eq!(
             (landscape.width(), landscape.estimated_height()),
             (100, 100)
@@ -1310,10 +1211,9 @@
             .into_bytes();
 
         let landscape =
-            classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
+            classified_landscape(&bitmap, &classifier, 10, 0).test_value();
         let grid = landscape
-            .pixel_grid()
-            .expect("classified maps build Surface8");
+            .pixel_grid().test_value();
         assert_eq!((grid.width(), grid.height()), (110, 100));
         assert_eq!(
             grid.bytes(),
@@ -1347,7 +1247,7 @@
         shapes[30] = Some(crate::chunky::ChunkShape::Smooth);
         let classifier = MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
-        let landscape = classified_landscape(&bitmap, &classifier, 4, 0).expect("landscape builds");
+        let landscape = classified_landscape(&bitmap, &classifier, 4, 0).test_value();
 
         assert!(landscape.is_solid_at(6, 3), "chunk bulges above its block");
         assert!(!landscape.is_solid_at(4, 3), "bulge is jitter-shaped");
@@ -1365,30 +1265,27 @@
         // directly as Surface8 (C4Landscape.cpp:1520-1533). Exact landscapes
         // neither apply MapZoom nor pass through ChunkOZoom: Flat pixels must
         // not bleed into their right/bottom neighbors, and IFT stays bit 0x80.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("Exact.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nMapZoom=7\n",
-        )
-        .expect("write scenario core");
+        );
         let expected = vec![
             0, 0, 0, 0, //
             0, 5, 0, 0, // isolated Flat pixel: no inclusive-edge bleed
             0, 0x85, 0, 0, // the same texmap slot with IFT set
         ];
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("lAnDsCaPe.BmP"),
             encode_indexed_bmp(&[&[0, 0, 0, 0], &[0, 5, 0, 0], &[0, 0x85, 0, 0]]),
-        )
-        .expect("write mixed-case exact landscape");
+        );
 
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let group = Group::open(&scenario_dir).test_value();
         let manifest = parse_legacy_scenario_text(
             "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nMapZoom=7\n",
-        )
-        .expect("scenario core parses");
+        ).test_value();
         let mut densities = [0i32; 128];
         densities[5] = 100;
         let mut names = vec![None; 128];
@@ -1400,11 +1297,9 @@
 
         let landscape =
             load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 1)
-                .expect("exact landscape loads")
-                .expect("exact landscape exists");
+                .expect("exact landscape loads").test_value();
         let grid = landscape
-            .pixel_grid()
-            .expect("exact indexed landscape keeps Surface8");
+            .pixel_grid().test_value();
         assert_eq!(landscape.mode(), LANDSCAPE_MODE_EXACT);
         assert_eq!(
             landscape.raster_state().unwrap().map_zoom(),
@@ -1461,8 +1356,7 @@
 
             let mut encoded = Vec::new();
             image::codecs::png::PngEncoder::new(&mut encoded)
-                .write_image(rgba, width, height, ColorType::Rgba8.into())
-                .expect("encode Landscape.png");
+                .write_image(rgba, width, height, ColorType::Rgba8.into()).test_value();
             encoded
         }
 
@@ -1475,25 +1369,22 @@
             classifier: &mut MapPixelClassifier,
         ) -> Result<Landscape, ScenarioError> {
             let scenario_dir = root.join(format!("{name}.c4s"));
-            std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+            std::fs::create_dir_all(&scenario_dir).test_value();
             let source = format!("[Landscape]\nExactLandscape=1\nNewStyleLandscape={format}\n");
-            std::fs::write(scenario_dir.join("Scenario.txt"), &source)
-                .expect("write scenario core");
-            std::fs::write(scenario_dir.join("Landscape.bmp"), encode_indexed_bmp(rows))
-                .expect("write Landscape.bmp");
+            write_test_file(scenario_dir.join("Scenario.txt"), &source);
+            write_test_file(scenario_dir.join("Landscape.bmp"), encode_indexed_bmp(rows));
             if let Some(png) = png {
-                std::fs::write(scenario_dir.join("lAnDsCaPe.PnG"), png)
-                    .expect("write Landscape.png");
+                write_test_file(scenario_dir.join("lAnDsCaPe.PnG"), png);
             }
-            let group = Group::open(&scenario_dir).expect("scenario group opens");
-            let manifest = parse_legacy_scenario_text(&source).expect("scenario core parses");
+            let group = Group::open(&scenario_dir).test_value();
+            let manifest = parse_legacy_scenario_text(&source).test_value();
             load_legacy_landscape_body_for_test(&group, &manifest, Some(classifier), 0, 1)?
                 .ok_or_else(|| {
                     ScenarioError::InvalidLandscape("exact landscape was not created".to_string())
                 })
         }
 
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
 
         // Format 0: three colors per material and the old 0x40 IFT range
         // become each material's current DefaultMatTex plus current 0x80 IFT.
@@ -1507,8 +1398,7 @@
             &[&[128, 131, 134, 137, 192, 195, 198, 201]],
             None,
             &mut format0_classifier,
-        )
-        .expect("format-0 landscape converts");
+        ).test_value();
         assert_eq!(
             format0.pixel_grid().unwrap().bytes(),
             &[30, 31, 7, 10, 158, 159, 135, 138]
@@ -1527,8 +1417,7 @@
             &[&[0, 1, 2, 3, 4, 5, 6, 7, 129, 134]],
             Some(&format1_png),
             &mut format1_classifier,
-        )
-        .expect("format-1 landscape converts with PNG present");
+        ).test_value();
         assert_eq!(
             format1.pixel_grid().unwrap().bytes(),
             &[0, 30, 31, 7, 7, 7, 10, 0, 158, 138]
@@ -1553,8 +1442,7 @@
             &[&[30, 31, 7]],
             Some(&png),
             &mut png_classifier,
-        )
-        .expect("current-format PNG landscape loads");
+        ).test_value();
         assert_eq!(png_landscape.pixel_grid().unwrap().bytes(), &[30, 31, 7]);
         assert_eq!(
             (0..3)
@@ -1573,8 +1461,7 @@
             &[&[30]],
             Some(b"not a PNG"),
             &mut malformed_png_classifier,
-        )
-        .expect("malformed PNG is nonfatal");
+        ).test_value();
         assert_eq!(malformed_png.pixel_grid().unwrap().bytes(), &[30]);
         assert_eq!(malformed_png.surface32_pixel_at(0, 0), None);
 
@@ -1604,33 +1491,29 @@
 
     #[test]
     fn legacy_landscape_diff_is_applied_after_initial_snapshot() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("Diff.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
-        )
-        .expect("write scenario core");
-        std::fs::write(
+        );
+        write_test_file(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[&[1, 2, 3], &[4, 5, 6]]),
-        )
-        .expect("write base landscape");
+        );
         let expected_diff = vec![
             0xff, 7, 0xff, // preserve, change, preserve
             0, 0xff, 8, // zero is a change, preserve, change
         ];
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("dIfFlAnDsCaPe.BmP"),
             encode_indexed_bmp(&[&[0xff, 7, 0xff], &[0, 0xff, 8]]),
-        )
-        .expect("write mixed-case diff landscape");
+        );
 
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let group = Group::open(&scenario_dir).test_value();
         let manifest =
-            parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n")
-                .expect("scenario core parses");
+            parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n").test_value();
         let mut densities = [0i32; 128];
         let mut names = vec![None; 128];
         let mut shapes = vec![None; 128];
@@ -1656,8 +1539,7 @@
             &mut callbacks,
             &mut creator,
         )
-        .expect("legacy landscape loads")
-        .expect("legacy landscape exists");
+        .expect("legacy landscape loads").test_value();
 
         assert_eq!(
             landscape.pixel_grid().expect("loaded Surface8").bytes(),
@@ -1666,8 +1548,7 @@
         );
         let saved = landscape
             .save_diff(false)
-            .expect("masked diff rebuilds")
-            .expect("loaded changes emit a diff");
+            .expect("masked diff rebuilds").test_value();
         assert_eq!(
             saved.indices, expected_diff,
             "SaveInitial ran before ApplyDiff, preserving the original comparison plane"
@@ -1676,17 +1557,16 @@
 
     #[test]
     fn legacy_landscape_shade_materials_reaches_runtime_landscape() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("Shade.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[&[1]]),
-        )
-        .expect("write exact landscape");
+        );
         let source = "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nShadeMaterials=0\n";
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let manifest = parse_legacy_scenario_text(source).expect("scenario core parses");
+        let group = Group::open(&scenario_dir).test_value();
+        let manifest = parse_legacy_scenario_text(source).test_value();
         let mut densities = [0i32; 128];
         densities[1] = 100;
         let mut names = vec![None; 128];
@@ -1710,16 +1590,14 @@
             &mut callbacks,
             &mut creator,
         )
-        .expect("legacy landscape loads")
-        .expect("legacy landscape exists");
+        .expect("legacy landscape loads").test_value();
 
         assert!(
             !landscape.shade_materials(),
             "the parsed scenario flag rides the runtime landscape snapshot"
         );
         let restored: Landscape =
-            serde_json::from_str(&serde_json::to_string(&landscape).expect("landscape serializes"))
-                .expect("landscape restores");
+            serde_json::from_str(&serde_json::to_string(&landscape).expect("landscape serializes")).test_value();
         assert!(!restored.shade_materials());
     }
 
@@ -1727,18 +1605,16 @@
     fn exact_landscape_requires_landscape_bmp_instead_of_map_fallback() {
         // C4Landscape::Load accesses C4CFN_Landscape directly and fails when
         // it is absent; the static-only Map.bmp fallback is not consulted.
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = dir.path().join("Exact.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Map.bmp"),
             encode_indexed_bmp(&[&[0, 0], &[5, 5]]),
-        )
-        .expect("write static map only");
-        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        );
+        let group = Group::open(&scenario_dir).test_value();
         let manifest =
-            parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n")
-                .expect("scenario core parses");
+            parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n").test_value();
 
         let error = load_legacy_landscape_body_for_test(&group, &manifest, None, 0, 1)
             .expect_err("exact load must require Landscape.bmp");
@@ -1763,13 +1639,12 @@
         // returning NO landscape here left GBackSolid answering "never
         // solid" and hung content like the grass placement loop
         // (Knights.c4f/Dunkelfels.c4s + Grass.c4d Initialize).
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        std::fs::write(
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Exact\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=4,2\n\n[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
-        )
-        .expect("write scenario core");
+        );
         let mut bitmap = RgbaImage::from_pixel(8, 6, Rgba([0, 0, 255, 255]));
         for y in 2..6 {
             for x in 0..8 {
@@ -1781,13 +1656,12 @@
         {
             let mut encoder = BmpEncoder::new(&mut encoded);
             encoder
-                .encode(&raw, 8, 6, ColorType::Rgba8.into())
-                .expect("encode landscape bmp");
+                .encode(&raw, 8, 6, ColorType::Rgba8.into()).test_value();
         }
-        std::fs::write(scenario_dir.join("Landscape.bmp"), encoded).expect("write landscape");
+        write_test_file(scenario_dir.join("Landscape.bmp"), encoded);
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
-        let landscape = engine.landscape().expect("exact landscape loads");
+        let landscape = engine.landscape().test_value();
         assert_eq!(landscape.width(), 8, "pixel scale: no MapZoom applied");
         assert_eq!(
             landscape.surface(),
@@ -1798,26 +1672,24 @@
 
     #[test]
     fn legacy_map_bmp_creates_landscape_height_profile() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
 
         let defs_root = dir.path().join("Defs.c4d");
         let crew_core = defs_root.join("Crew.c4d");
-        std::fs::create_dir_all(&crew_core).expect("crew definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&crew_core).test_value();
+        write_test_file(
             crew_core.join("DefCore.txt"),
             "[DefCore]\nid=CLNK\nName=Clonk\nCategory=0\nCrewMember=1\n",
-        )
-        .expect("write crew defcore");
-        std::fs::write(crew_core.join("Script.c"), "// crew script\n").expect("crew script");
+        );
+        write_test_file(crew_core.join("Script.c"), "// crew script\n");
         write_test_definition_graphics(&crew_core);
 
         let scenario_dir = dir.path().join("LegacyLandscape.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Legacy Landscape\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=CLNK=1\nPosition=40,60\n\n[Landscape]\nMapWidth=4\nMapHeight=4\nMapZoom=2\n",
-        )
-        .expect("write scenario core");
+        );
 
         let mut map = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 255, 255]));
         for y in 1..4 {
@@ -1830,21 +1702,18 @@
         {
             let mut encoder = BmpEncoder::new(&mut encoded);
             encoder
-                .encode(&raw, 4, 4, ColorType::Rgba8.into())
-                .expect("encode map bmp");
+                .encode(&raw, 4, 4, ColorType::Rgba8.into()).test_value();
         }
-        std::fs::write(scenario_dir.join("mAp.BmP"), encoded).expect("write mixed-case map");
+        write_test_file(scenario_dir.join("mAp.BmP"), encoded);
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
-        let landscape = engine.landscape().expect("landscape present");
+        let landscape = engine.landscape().test_value();
         // MapZoom=2 clamps to the C4SVal Min of 5 (C4Scenario.cpp:307,353):
         // the rendered map is 20x20 with ground starting at y=5, while
         // C4Landscape::Init pads both axes to 100. The column-only fallback
@@ -1859,22 +1728,21 @@
 
     #[test]
     fn legacy_scenario_populates_physics_and_environment() {
-        let dir = tempdir().expect("tempdir");
+        let dir = test_tempdir();
 
         let defs_root = dir.path().join("Defs.c4d");
         let crew_core = defs_root.join("Crew.c4d");
-        std::fs::create_dir_all(&crew_core).expect("crew definition dir");
-        std::fs::write(
+        std::fs::create_dir_all(&crew_core).test_value();
+        write_test_file(
             crew_core.join("DefCore.txt"),
             "[DefCore]\nid=CLNK\nName=Clonk\nCategory=0\nCrewMember=1\n",
-        )
-        .expect("write crew defcore");
-        std::fs::write(crew_core.join("Script.c"), "// crew script\n").expect("crew script");
+        );
+        write_test_file(crew_core.join("Script.c"), "// crew script\n");
         write_test_definition_graphics(&crew_core);
 
         let scenario_dir = dir.path().join("LegacyEnvironment.c4s");
-        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-        std::fs::write(
+        std::fs::create_dir_all(&scenario_dir).test_value();
+        write_test_file(
             scenario_dir.join("Scenario.txt"),
             r#"
             [Head]
@@ -1904,23 +1772,20 @@
             Volcano=15
             Earthquake=5
             "#,
-        )
-        .expect("write scenario core");
+        );
 
-        let resolver = FileSystemResolver {
-            roots: vec![dir.path().to_path_buf()],
-        };
+        let resolver = test_resolver(vec![dir.path().to_path_buf()]);
 
         let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+            load_test_scenario(&scenario_dir, &resolver);
 
-        let physics = scenario.physics().expect("physics present");
+        let physics = scenario.physics().test_value();
         assert_eq!(
             physics.gravity, 120,
             "expected gravity parsed from Scenario.txt"
         );
 
-        let environment = scenario.environment().expect("environment present");
+        let environment = scenario.environment().test_value();
         assert_eq!(environment.wind, 10, "expected wind base from Scenario.txt");
         assert_eq!(
             environment.wind_variation, 5,
@@ -1963,7 +1828,7 @@
         );
 
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("scenario applies");
+        apply_test_scenario(&scenario, &mut engine);
 
         let configured_physics = engine.physics();
         assert_eq!(

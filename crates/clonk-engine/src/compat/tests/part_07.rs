@@ -9,7 +9,7 @@
             get_wind(&[])
         });
 
-        let value = result.expect("SetWind/GetWind succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(100));
         assert_eq!(delta.wind, Some(100));
     }
@@ -21,7 +21,7 @@
             get_temperature(&[])
         });
 
-        let value = result.expect("SetTemperature/GetTemperature succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(-30));
         assert_eq!(delta.temperature, Some(-30));
     }
@@ -33,7 +33,7 @@
             get_climate(&[])
         });
 
-        let value = result.expect("SetClimate/GetClimate succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(-50));
         assert_eq!(delta.climate, Some(-50));
     }
@@ -48,7 +48,7 @@
             get_season(&[])
         });
 
-        let value = result.expect("SetSeason/GetSeason succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(100));
         assert_eq!(delta.season, Some(100));
     }
@@ -87,12 +87,11 @@
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
         script
-            .load_script("#strict 2\nfunc Probe() { return [AsyncRandom(10), AsyncRandom(0)]; }")
-            .expect("AsyncRandom probe compiles");
+            .load_script("#strict 2\nfunc Probe() { return [AsyncRandom(10), AsyncRandom(0)]; }").test_value();
 
         let initial_rng = LcgRng::new(41);
         let guard = enter_random_context(initial_rng.clone());
-        let result = script.call("Probe", &[]).expect("AsyncRandom succeeds");
+        let result = script.call("Probe", &[]).test_value();
         let final_rng = guard.finish();
 
         let Value::Array(values) = result else {
@@ -152,13 +151,13 @@
         // through the unsigned modulo (usual arithmetic conversions), so
         // the hold DOES advance.
         let guard = enter_random_context(LcgRng::new(0));
-        let zero = random(&[Value::Int(0)]).expect("zero range succeeds");
+        let zero = random(&[Value::Int(0)]).test_value();
         assert_eq!(zero, Value::Int(0));
-        let nil = random(&[Value::Nil]).expect("nil converts to 0");
+        let nil = random(&[Value::Nil]).test_value();
         assert_eq!(nil, Value::Int(0));
-        let missing = random(&[]).expect("missing argument converts to 0");
+        let missing = random(&[]).test_value();
         assert_eq!(missing, Value::Int(0));
-        let negative = random(&[Value::Int(-3)]).expect("negative range succeeds");
+        let negative = random(&[Value::Int(-3)]).test_value();
         let rng = guard.finish();
         // Three zero-ish draws (count++ only) plus one negative draw that
         // advances the hold like C++'s unsigned modulo.
@@ -264,7 +263,7 @@
             ])
         });
 
-        let value = result.expect("AddEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
         assert_eq!(outcome.object.len(), 1);
         match &outcome.object[0] {
@@ -319,7 +318,7 @@
         let state = empty_state();
         let (result, _) =
             with_object_host_context(|| remove_effect(&[Value::Nil, state.clone(), Value::Int(0)]));
-        let value = result.expect("RemoveEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -331,7 +330,7 @@
             remove_effect(&[Value::String("Glow".into()), state.clone()])
         });
 
-        let value = result.expect("calls succeed");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.object.len(), 2);
         assert!(matches!(outcome.object[0], EffectCommand::Add { .. }));
@@ -357,7 +356,7 @@
             ])
         });
 
-        let value = result.expect("calls succeed");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.object.len(), 2);
         assert!(matches!(outcome.object[0], EffectCommand::Add { .. }));
@@ -399,38 +398,37 @@
         script
             .load_script(
                 r#"#strict 2
-func Probe(state) {
-  var unset;
-  var renamed = ChangeEffect("Int*", this(), 0, "IntFadeOut", 10);
-  var preserved = ChangeEffect("Keep", this(), 0, "KeepOut", -1);
-  var empty_rejected = ChangeEffect("KeepOut", this(), 0, "", 1);
-  var nil_rejected = ChangeEffect("KeepOut", this(), 0, unset, 1);
-  var missing_rejected = ChangeEffect("Missing", this(), 0, "StillMissing", 1);
-  var by_number = ChangeEffect(unset, this(), 12, "ByNumber", -7);
-  var omitted_timer = ChangeEffect("Omitted", this(), 0, "Reset");
-  var clamped = ChangeEffect(unset, this(), 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
-  return [
-    renamed,
-    GetEffect("IntFadeOut", this(), 0, 3),
-    GetEffect("IntFadeOut", this(), 0, 6),
-    preserved,
-    empty_rejected,
-    nil_rejected,
-    missing_rejected,
-    by_number,
-    GetEffect(unset, this(), 12, 1),
-    GetEffect(unset, this(), 12, 3),
-    GetEffect(unset, this(), 12, 6),
-    omitted_timer,
-    GetEffect(unset, this(), 13, 3),
-    GetEffect(unset, this(), 13, 6),
-    clamped,
-    GetEffect(unset, this(), 14, 1)
-  ];
-}
-"#,
-            )
-            .expect("ChangeEffect probe compiles");
+        func Probe(state) {
+          var unset;
+          var renamed = ChangeEffect("Int*", this(), 0, "IntFadeOut", 10);
+          var preserved = ChangeEffect("Keep", this(), 0, "KeepOut", -1);
+          var empty_rejected = ChangeEffect("KeepOut", this(), 0, "", 1);
+          var nil_rejected = ChangeEffect("KeepOut", this(), 0, unset, 1);
+          var missing_rejected = ChangeEffect("Missing", this(), 0, "StillMissing", 1);
+          var by_number = ChangeEffect(unset, this(), 12, "ByNumber", -7);
+          var omitted_timer = ChangeEffect("Omitted", this(), 0, "Reset");
+          var clamped = ChangeEffect(unset, this(), 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
+          return [
+            renamed,
+            GetEffect("IntFadeOut", this(), 0, 3),
+            GetEffect("IntFadeOut", this(), 0, 6),
+            preserved,
+            empty_rejected,
+            nil_rejected,
+            missing_rejected,
+            by_number,
+            GetEffect(unset, this(), 12, 1),
+            GetEffect(unset, this(), 12, 3),
+            GetEffect(unset, this(), 12, 6),
+            omitted_timer,
+            GetEffect(unset, this(), 13, 3),
+            GetEffect(unset, this(), 13, 6),
+            clamped,
+            GetEffect(unset, this(), 14, 1)
+          ];
+        }
+        "#,
+            ).test_value();
 
         let state = empty_state();
         let (result, outcome) = with_effect_context(
@@ -507,7 +505,7 @@ func Probe(state) {
             || set_action(&[Value::String("Walk".into())]),
         );
 
-        let value = result.expect("SetAction returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
 
@@ -523,10 +521,10 @@ func Probe(state) {
             || set_action(&[Value::String("Idle".into())]),
         );
 
-        let value = result.expect("SetAction returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("pending update exists");
-        let action = update.action.expect("action update recorded");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.name.as_deref(), Some("Idle"));
         assert!(!action.force);
     }
@@ -600,8 +598,8 @@ func Probe(state) {
                 Value::Int(255),
             ])
         );
-        let update = outcome.object_update.expect("object update recorded");
-        let action = update.action.expect("action update present");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.data, Some(255));
     }
 
@@ -698,8 +696,7 @@ func Probe(state) {
     fn set_action_data_foreign_bridge_clamps_material_and_preserves_sentinel() {
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material Sky]\nName=Sky\n\n[Material Earth]\nName=Earth\n",
-        )
-        .expect("material library parses");
+        ).test_value();
         let materials = Rc::new(MaterialSet::from_resource_library(&library));
         let material_count = materials.len() as i32;
 
@@ -776,8 +773,7 @@ func Probe(state) {
         register_host_functions(&mut script);
         let materials = clonk_resources::MaterialLibrary::parse(
             "[Material Sky]\nName=Sky\n\n[Material Earth]\nName=Earth\n",
-        )
-        .expect("material library parses");
+        ).test_value();
         let world = HostWorldContext::from_objects(vec![target])
             .with_definition_metadata(Rc::new(HashMap::from([(
                 DefinitionId::from("CLNK"),
@@ -826,15 +822,13 @@ func Probe(state) {
         let target = outcome
             .other_objects
             .iter()
-            .find(|outcome| outcome.object_id == clonk)
-            .expect("foreign CLNK outcome recorded");
+            .find(|outcome| outcome.object_id == clonk).test_value();
         let action = target
             .update
             .as_ref()
             .expect("foreign update recorded")
             .action
-            .as_ref()
-            .expect("action update present");
+            .as_ref().test_value();
         assert_eq!(action.name.as_deref(), Some("Bridge"));
         assert_eq!(
             action.data,
@@ -860,7 +854,7 @@ func Probe(state) {
             || set_action_data(&[Value::Int(31 << 8)]),
         );
 
-        let value = result.expect("SetActionData returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -869,8 +863,7 @@ func Probe(state) {
     fn set_action_data_and_bridge_data_use_cpp_status_truthiness() {
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material Sky]\nName=Sky\n\n[Material Earth]\nName=Earth\n",
-        )
-        .expect("material library parses");
+        ).test_value();
         let materials = Rc::new(MaterialSet::from_resource_library(&library));
 
         for (status, expected, expected_update) in [
@@ -909,7 +902,7 @@ func Probe(state) {
     #[test]
     fn get_action_data_returns_zero_by_default() {
         let (result, outcome) = with_object_host_context(|| get_action_data(&[]));
-        let value = result.expect("GetActionData succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(0));
         assert!(outcome.object_update.is_none());
     }
@@ -927,10 +920,10 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("GetActionData succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(42));
-        let update = outcome.object_update.expect("action update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.data, Some(42));
     }
 
@@ -946,7 +939,7 @@ func Probe(state) {
             get_action_data(&[Value::Proplist(target.into_iter().collect())])
         });
 
-        let value = result.expect("GetActionData succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(77));
     }
 
@@ -958,20 +951,20 @@ func Probe(state) {
             get_action_data(&[Value::Proplist(target.into_iter().collect())])
         });
 
-        let value = result.expect("GetActionData succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
     #[test]
     fn get_action_data_returns_nil_without_context() {
-        let value = get_action_data(&[]).expect("GetActionData succeeds without context");
+        let value = get_action_data(&[]).test_value();
         assert_eq!(value, Value::Nil);
     }
 
     #[test]
     fn get_action_returns_idle_by_default() {
         let (result, outcome) = with_object_host_context(|| get_action(&[]));
-        let value = result.expect("GetAction succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::String("Idle".into()));
         assert!(outcome.object_update.is_none());
     }
@@ -997,10 +990,10 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("SetAction/GetAction succeed");
+        let value = result.test_value();
         assert_eq!(value, Value::String("Walk".into()));
-        let update = outcome.object_update.expect("action update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.name.as_deref(), Some("Walk"));
     }
 
@@ -1021,7 +1014,7 @@ func Probe(state) {
             || get_procedure(&[]),
         );
 
-        let value = result.expect("GetProcedure succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1042,7 +1035,7 @@ func Probe(state) {
             || get_procedure(&[]),
         );
 
-        let value = result.expect("GetProcedure succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::String("walk".into()));
     }
 
@@ -1067,7 +1060,7 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("SetAction/GetProcedure succeed");
+        let value = result.test_value();
         assert_eq!(value, Value::String("float".into()));
     }
 
@@ -1085,7 +1078,7 @@ func Probe(state) {
             get_procedure(&[Value::Proplist(target.into_iter().collect())])
         });
 
-        let value = result.expect("GetProcedure succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::String("swim".into()));
     }
 
@@ -1098,7 +1091,7 @@ func Probe(state) {
             get_action(&[target])
         });
 
-        let value = result.expect("GetAction succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1113,7 +1106,7 @@ func Probe(state) {
             get_action(&[Value::Proplist(target.into_iter().collect())])
         });
 
-        let value = result.expect("GetAction succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::String("Walk".into()));
     }
 
@@ -1130,20 +1123,20 @@ func Probe(state) {
             get_action(&[Value::Proplist(target.into_iter().collect())])
         });
 
-        let value = result.expect("GetAction resolves world lookup");
+        let value = result.test_value();
         assert_eq!(value, Value::String("Dig".into()));
     }
 
     #[test]
     fn get_action_returns_nil_without_context() {
-        let value = get_action(&[]).expect("GetAction succeeds without context");
+        let value = get_action(&[]).test_value();
         assert_eq!(value, Value::Nil);
     }
 
     #[test]
     fn get_act_time_returns_zero_by_default() {
         let (result, outcome) = with_object_host_context(|| get_act_time(&[]));
-        let value = result.expect("GetActTime succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(0));
         assert!(outcome.object_update.is_none());
     }
@@ -1166,10 +1159,10 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("GetActTime succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(7));
-        let update = outcome.object_update.expect("action update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.ticks, Some(0), "PhaseDelay resets independently");
     }
 
@@ -1195,10 +1188,10 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("GetActTime succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(0));
-        let update = outcome.object_update.expect("action update recorded");
-        let action = update.action.expect("action update exists");
+        let update = outcome.object_update.test_value();
+        let action = update.action.test_value();
         assert_eq!(action.ticks, Some(0));
     }
 
@@ -1214,13 +1207,13 @@ func Probe(state) {
             get_act_time(&[Value::Proplist(target.into_iter().collect())])
         });
 
-        let value = result.expect("GetActTime succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(12));
     }
 
     #[test]
     fn get_act_time_returns_nil_without_context() {
-        let value = get_act_time(&[]).expect("GetActTime succeeds without context");
+        let value = get_act_time(&[]).test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1242,7 +1235,7 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("GetVertexNum succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(2));
     }
 
@@ -1321,8 +1314,7 @@ func Probe(state) {
                     return [before_wdt, before_hgt, GetObjWidth(), GetObjHeight()];
                 }
                 "#,
-            )
-            .expect("dimension probe compiles");
+            ).test_value();
         let definitions = Rc::new(HashMap::from([(
             DefinitionId::from("SELF"),
             DefinitionMetadata {
@@ -1374,8 +1366,7 @@ func Probe(state) {
                     return [GetObjWidth(), GetObjHeight()];
                 }
                 "#,
-            )
-            .expect("shape ordering probe compiles");
+            ).test_value();
         let definitions = Rc::new(HashMap::from([(
             DefinitionId::from("SELF"),
             DefinitionMetadata {
@@ -1420,7 +1411,7 @@ func Probe(state) {
     fn loaded_string_table_identity_survives_get_object_val_reflection() {
         let strings = clonk_script::new_string_registrations();
         clonk_script::register_loaded_c4_string(&strings, 3, "loaded");
-        let loaded = clonk_script::resolve_c4_string(&strings, 3).expect("loaded S3 resolves");
+        let loaded = clonk_script::resolve_c4_string(&strings, 3).test_value();
         let runtime = clonk_script::C4StringValue::from("runtime");
 
         let mut reflection = ObjectValueReflection::default();
@@ -1604,7 +1595,7 @@ func Probe(state) {
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("serialized cache reflection probes succeed");
+        result.test_value();
     }
 
     #[test]
@@ -1849,7 +1840,7 @@ func Probe(state) {
             with_object_host_context(|| add_vertex(&[Value::Int(17), Value::Int(-9)]));
 
         assert_eq!(result.expect("AddVertex succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("live shape update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(
             update
                 .shape_vertices
@@ -1906,8 +1897,7 @@ func Probe(state) {
         let update = outcome.other_objects[0]
             .update
             .as_ref()
-            .and_then(|update| update.shape_vertices.as_ref())
-            .expect("foreign fixed-slot shape update recorded")
+            .and_then(|update| update.shape_vertices.as_ref()).test_value()
             .active();
         assert_eq!(update.len(), 30);
         assert_eq!(update[29], ObjectVertex::new(29, -29));
@@ -1962,8 +1952,7 @@ func Probe(state) {
         let middle = middle_outcome
             .object_update
             .as_ref()
-            .and_then(|update| update.shape_vertices.as_ref())
-            .expect("middle removal records fixed shape slots")
+            .and_then(|update| update.shape_vertices.as_ref()).test_value()
             .active();
         assert_eq!(
             middle,
@@ -1984,8 +1973,7 @@ func Probe(state) {
         let zero = zero_outcome
             .object_update
             .as_ref()
-            .and_then(|update| update.shape_vertices.as_ref())
-            .expect("zero removal records fixed shape slots")
+            .and_then(|update| update.shape_vertices.as_ref()).test_value()
             .active();
         assert_eq!(
             zero,
@@ -2061,8 +2049,7 @@ func Probe(state) {
             ])
         );
         let update = outcome
-            .object_update
-            .expect("round trip records shape update");
+            .object_update.test_value();
         assert_eq!(
             update
                 .shape_vertices
@@ -2107,8 +2094,7 @@ func Probe(state) {
             .iter()
             .find(|object| object.object_id == target_id)
             .and_then(|object| object.update.as_ref())
-            .and_then(|update| update.shape_vertices.as_ref())
-            .expect("foreign target receives its fixed-slot update")
+            .and_then(|update| update.shape_vertices.as_ref()).test_value()
             .active();
         assert_eq!(
             foreign,
@@ -2200,7 +2186,7 @@ func Probe(state) {
             || get_vertex_contact(&[Value::Int(0)]),
         );
 
-        let value = result.expect("GetVertexContact succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32));
     }
 
@@ -2233,7 +2219,7 @@ func Probe(state) {
             },
         );
 
-        let value = result.expect("GetContact succeeds");
+        let value = result.test_value();
         assert_eq!(
             value,
             Value::Array(vec![

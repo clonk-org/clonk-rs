@@ -16,7 +16,7 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
         .players
         .iter_mut()
         .find(|player| player.id == owner)
-        .expect("sandbox player projection")
+        .test_value()
         .status = PlayerStatus::Eliminated;
     let before_players = app.engine.snapshot().players;
 
@@ -27,9 +27,9 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
             kind: CommandKind::Press,
         },
     )
-    .expect("eliminated player's local PlayerMenu opens its main page");
+    .test_value();
 
-    let menu = app.ingame_menu.get(owner).expect("player menu is active");
+    let menu = app.ingame_menu.get(owner).test_value();
     assert!(menu
         .items()
         .iter()
@@ -49,8 +49,7 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
 fn help_suppresses_open_ingame_menu_and_right_up_exits() {
     let mut app = new_classic_running_sandbox_app();
     let owner = app.local_owner;
-    app.activate_ingame_main_menu_for_player(owner)
-        .expect("open player menu for Help interception");
+    app.activate_ingame_main_menu_for_player(owner).test_value();
     render_mouse_test_app(&mut app);
     let (width, height) = {
         let surface = app.graphics.surface();
@@ -63,7 +62,7 @@ fn help_suppresses_open_ingame_menu_and_right_up_exits() {
             (app.ingame_menu_pointer_target(point) == Some((owner, IngameMenuPointerTarget::Close)))
                 .then_some(point)
         })
-        .expect("player menu exposes its close button");
+        .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_mouse_help = true;
@@ -83,11 +82,9 @@ fn help_suppresses_open_ingame_menu_and_right_up_exits() {
         (Vec::new(), Vec::new(), Vec::new())
     );
 
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("Help right-down over player menu");
+    app.test_right_button(ElementState::Pressed);
     assert!(app.ingame_mouse_help);
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("Help right-up over player menu");
+    app.test_right_button(ElementState::Released);
     assert!(!app.ingame_mouse_help);
     assert!(app.ingame_menu_belongs_to(owner));
     assert_eq!(
@@ -115,16 +112,13 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
             ModifiersState::empty(),
         );
         assert!(app.ingame_mouse_help_caption.is_some());
-        app.handle_cursor_moved(PhysicalPosition::new(
+        app.test_cursor(PhysicalPosition::new(
             f64::from(release.x),
             f64::from(release.y),
-        ))
-        .expect("move Help right-click");
-        app.handle_right_mouse_button(ElementState::Pressed)
-            .expect("Help right-down");
+        ));
+        app.test_right_button(ElementState::Pressed);
         assert!(app.ingame_mouse_help, "right-down retains Help");
-        app.handle_right_mouse_button(ElementState::Released)
-            .expect("Help right-up");
+        app.test_right_button(ElementState::Released);
         assert!(!app.ingame_mouse_help, "right-up exits Help");
         assert_eq!(app.engine.crew_cursor(owner), cursor);
         assert_eq!(
@@ -140,8 +134,7 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
             }),
             "right-up clears KeepCaption without erasing the caption immediately"
         );
-        app.update_ingame_pointer(release)
-            .expect("the next Move clears the zero-lifetime caption");
+        app.update_ingame_pointer(release).test_value();
         assert!(app.ingame_mouse_help_caption.is_none());
     }
 }
@@ -203,10 +196,7 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
         "mouse COM_PlayerMenu is consumed by the local menu"
     );
 
-    app.ingame_menu
-        .get_mut(owner)
-        .expect("mouse menu is open")
-        .set_selection(2);
+    app.ingame_menu.get_mut(owner).test_value().set_selection(2);
     physical_left_click_with_modifiers(
         &mut app,
         menu,
@@ -236,17 +226,13 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
 fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     let mut app = new_classic_running_sandbox_app();
     let removed_owner = app.local_owner;
-    app.engine
-        .remove_player(removed_owner)
-        .expect("remove local player for passive observer");
+    app.engine.remove_player(removed_owner).test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
     app.mouse_control = false;
     render_mouse_test_app(&mut app);
 
-    let viewport = app
-        .active_ingame_mouse_viewport()
-        .expect("ownerless observer viewport");
+    let viewport = app.active_ingame_mouse_viewport().test_value();
     assert_eq!(viewport.owner, OWNER_NONE);
     let help_rect = clonk_frontend::hud::viewport_button_rect(
         viewport.rect,
@@ -268,30 +254,24 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
         viewport.rect.y as f32 + viewport.rect.height as f32 / 2.0,
     );
     assert_eq!(app.ingame_viewport_region(OWNER_NONE, world), None);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(world.x),
         f64::from(world.y),
-    ))
-    .expect("move passive observer over world");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("passive world left-down remains inert");
+    ));
+    app.test_left_button(ElementState::Pressed);
     assert!(
         app.mouse_state.is_none(),
         "passive observers never enter native DragNone world state"
     );
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release inert passive world click");
+    app.test_left_button(ElementState::Released);
 
     let mut network_commands = install_mouse_network_capture(&mut app);
     app.ingame_last_left_down = None;
     let help = center(help_rect);
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(help.x), f64::from(help.y)))
-        .expect("move passive observer over Help");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press passive observer Help");
+    app.test_cursor(PhysicalPosition::new(f64::from(help.x), f64::from(help.y)));
+    app.test_left_button(ElementState::Pressed);
     assert!(!app.ingame_mouse_help, "passive buttons wait for LeftUp");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release passive observer Help");
+    app.test_left_button(ElementState::Released);
     assert!(app.ingame_mouse_help);
     assert!(
         app.ingame_help_cursor_active(),
@@ -299,22 +279,17 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     );
     assert!(app.ingame_menu.is_none());
 
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("press passive observer right button in Help");
+    app.test_right_button(ElementState::Pressed);
     assert!(app.ingame_mouse_help, "right-down retains passive Help");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("release passive observer right button in Help");
+    app.test_right_button(ElementState::Released);
     assert!(!app.ingame_mouse_help, "right-up exits passive Help");
 
     app.ingame_last_left_down = None;
     let menu = center(menu_rect);
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(menu.x), f64::from(menu.y)))
-        .expect("move passive observer over PlayerMenu");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press passive observer PlayerMenu");
+    app.test_cursor(PhysicalPosition::new(f64::from(menu.x), f64::from(menu.y)));
+    app.test_left_button(ElementState::Pressed);
     assert!(app.ingame_menu.is_none(), "passive buttons wait for LeftUp");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release passive observer PlayerMenu");
+    app.test_left_button(ElementState::Released);
     assert!(app.ingame_menu_belongs_to(OWNER_NONE));
     assert_eq!(
         app.ingame_menu
@@ -335,12 +310,11 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
                 _ => None,
             }
         })
-        .expect("fullscreen observer menu exposes pointer-owned items");
-    app.handle_cursor_moved(PhysicalPosition::new(
+        .test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(menu_target.0.x),
         f64::from(menu_target.0.y),
-    ))
-    .expect("move over observer fullscreen menu");
+    ));
     assert_eq!(
         app.ingame_menu
             .get(OWNER_NONE)
@@ -349,8 +323,7 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
         menu_target.1
     );
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Escape closes observer fullscreen menu locally");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.ingame_menu.is_none());
     assert_eq!(
         network_commands.take_submitted_player_inputs(),
@@ -366,18 +339,17 @@ fn hud_command_autostop_release_survives_menu_opened_by_press() {
     let point = points
         .iter()
         .find_map(|(command, point)| (*command == 3).then_some(*point))
-        .expect("Buy COM_Up region");
+        .test_value();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
         f64::from(point.y),
-    ))
-    .expect("move onto Buy region");
+    ));
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("AutoStop Buy left-down");
+        .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     assert!(commands.is_empty());
     assert!(selections.is_empty());
@@ -399,7 +371,7 @@ fn hud_command_autostop_release_survives_menu_opened_by_press() {
             event: *event,
         }],
     )
-    .expect("execute queued Buy press");
+    .test_value();
     assert!(
         app.engine.cursor_object_menu(owner).is_some(),
         "COM_Up must open the contained base Buy menu before button-up"
@@ -412,7 +384,7 @@ fn hud_command_autostop_release_survives_menu_opened_by_press() {
     );
 
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("captured AutoStop Buy left-up");
+        .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     assert_eq!(
         controls,
@@ -456,21 +428,19 @@ fn script_menu_owns_threshold_crossing_inventory_drag_move() {
             ) && ((point.x - inventory_point.x).abs() > 5.0
                 || (point.y - inventory_point.y).abs() > 5.0)
         })
-        .expect("open script menu has an item beyond the drag threshold");
+        .test_value();
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(inventory_point.x),
         f64::from(inventory_point.y),
-    ))
-    .expect("move onto inventory region");
+    ));
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("inventory left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
+        .test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(menu_point.x),
         f64::from(menu_point.y),
-    ))
-    .expect("move into GUI menu");
+    ));
     assert!(app.mouse_state.is_some_and(|state| {
         !state.motion.moved
             && !state.motion.region_drag_started
@@ -478,7 +448,7 @@ fn script_menu_owns_threshold_crossing_inventory_drag_move() {
     }));
     assert!(app.ingame_dragged_objects.is_empty());
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("GUI-owned menu release");
+        .test_value();
     assert!(app.mouse_state.is_none());
 }
 
@@ -486,10 +456,8 @@ fn script_menu_owns_threshold_crossing_inventory_drag_move() {
 fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
     let mut app = real_installed_scenario_app("Western.c4f/Goldrush.c4s", "Goldrush dialog parity");
     let mut baseline = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut baseline).expect("baseline renders");
-    app.engine
-        .tick()
-        .expect("settle native ATTACH containment callbacks");
+    app.test_render(&mut baseline);
+    app.engine.test_tick();
 
     let owner = app.local_owner;
     let snapshot = app.engine.snapshot();
@@ -500,7 +468,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
             object.definition_id == "CVRM" && object.custom_name.as_deref() == Some("Captain")
         })
         .map(|object| object.id)
-        .expect("placed Goldrush captain");
+        .test_value();
     let talker = snapshot
         .objects
         .iter()
@@ -508,7 +476,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
             object.definition_id == "_TLK" && object.custom_name.as_deref() == Some("Captain")
         })
         .map(|object| object.id)
-        .expect("captain's attached Talker");
+        .test_value();
     assert_eq!(
         app.engine
             .object_snapshot(talker)
@@ -517,14 +485,8 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
             .target,
         Some(captain)
     );
-    let cursor = app
-        .engine
-        .crew_cursor(owner)
-        .expect("local Goldrush cursor");
-    let talker_index = app
-        .engine
-        .find_object_index(talker)
-        .expect("Talker vector index");
+    let cursor = app.engine.test_crew_cursor(owner);
+    let talker_index = app.engine.find_object_index(talker).test_value();
     let result = app
         .engine
         .call_object_function(
@@ -532,26 +494,20 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
             "ActivateEntrance",
             vec![Value::Object(cursor.as_u64())],
         )
-        .expect("shipped Talker entrance activation runs");
+        .test_value();
     assert!(result.as_bool());
 
-    let (_, first_menu) = app
-        .engine
-        .cursor_object_menu(owner)
-        .expect("DlgCaptainStart opens the player's first line");
+    let (_, first_menu) = app.engine.cursor_object_menu(owner).test_value();
     assert_eq!(first_menu.style, 3);
     app.engine
         .player_in_com(owner, clonk_engine::COM_MENU_SHOW_TEXT, 0)
-        .expect("reveal the first line");
+        .test_value();
     app.engine
         .player_in_com(owner, clonk_engine::COM_MENU_CLOSE, 0)
-        .expect("close the first line");
-    app.engine.tick().expect("advance to DlgCaptain1");
+        .test_value();
+    app.engine.test_tick();
 
-    let (_, menu) = app
-        .engine
-        .cursor_object_menu(owner)
-        .expect("DlgCaptain1 installs the captain's cursor dialog");
+    let (_, menu) = app.engine.cursor_object_menu(owner).test_value();
     assert_eq!(menu.style, 3);
     assert_eq!(menu.extra, clonk_engine::ObjectMenuExtra::None);
     assert_eq!(menu.items.len(), 2);
@@ -561,7 +517,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
         clonk_engine::ObjectMenuImage::TextSpec { spec, .. }
             if spec.ends_with("::Captain1")
     ));
-    let decoration = menu.decoration.as_ref().expect("Western MD69 decoration");
+    let decoration = menu.decoration.test_ref();
     assert_eq!(decoration.source_definition, "MD69");
     assert_eq!(decoration.background_color, 0x803f3f00);
     assert_eq!(
@@ -584,7 +540,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
         decoration.left.as_ref(),
     ]
     .map(|facet| {
-        let facet = facet.expect("all Western MD69 facets exist");
+        let facet = facet.test_value();
         (
             facet.x,
             facet.y,
@@ -623,8 +579,7 @@ fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
     app.snapshot = app.engine.snapshot();
     app.snapshot.hud.messages.clear();
     let mut rendered = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut rendered)
-        .expect("shipped decorated Dialog renders without fallback");
+    app.test_render(&mut rendered);
     assert_ne!(rendered, baseline);
 }
 
@@ -634,7 +589,7 @@ fn audio_context_selects_configured_linear_resampling() {
         prefer_linear_resampling: true,
         ..AudioOptions::default()
     })
-    .expect("audio context");
+    .test_value();
 
     assert_eq!(audio.system.resampling_mode(), ResamplingMode::Linear);
 }
@@ -651,14 +606,12 @@ fn info_menu_preflight_rejects_unresolved_text_images() {
     let mut engine = Engine::new();
     engine
         .register_script_definition("MENU", "Menu", script)
-        .expect("menu registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("MENU"))
-        .expect("menu object spawns");
+        .test_value();
+    let object = engine.spawn_test_object(SpawnConfig::new("MENU"));
     let menu = engine
         .debug_object_menu(object.as_u64())
         .expect("menu object exists")
-        .expect("Info menu exists");
+        .test_value();
 
     let error = resolve_script_menu_font_images(&engine, &menu, ScriptTextSpecResources::default())
         .expect_err("missing text image must fail before rendering");
@@ -750,7 +703,7 @@ fn tutorial_portrait_geometry_matches_every_shipped_position_family() {
 
 #[test]
 fn inventory_and_menu_color_modulation_alpha_fades_without_filling_background() {
-    let mut definition = Definition::from_script("FADE", "Fade", "").expect("definition compiles");
+    let mut definition = test_definition("FADE", "Fade", "");
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -767,17 +720,15 @@ fn inventory_and_menu_color_modulation_alpha_fades_without_filling_background() 
         color_mask: None,
     }));
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("definition registers");
+    engine.register_test_definition(definition);
 
     let mut object = make_object(1, "FADE", Vector2::ZERO);
     object.color_modulation = 0x00ff_ffff;
-    let unchanged = inventory_object_picture(&engine, &object).expect("unfaded picture");
+    let unchanged = inventory_object_picture(&engine, &object).test_value();
     assert_eq!(unchanged.pixels(), &[0, 0, 0, 0xff, 0, 0, 0, 0]);
 
     object.color_modulation = 0x80ff_ffff;
-    let inventory = inventory_object_picture(&engine, &object).expect("inventory picture");
+    let inventory = inventory_object_picture(&engine, &object).test_value();
     assert_eq!(
         inventory.pixels(),
         &[0, 0, 0, 0x7f, 0, 0, 0, 0],
@@ -819,7 +770,7 @@ fn inventory_and_menu_color_modulation_alpha_fades_without_filling_background() 
         &HudGraphics::default(),
         0,
     )
-    .expect("cached menu picture");
+    .test_value();
     assert_eq!((menu.width(), menu.height()), (2, 2));
     assert_eq!(
         menu.pixels(),
@@ -851,8 +802,7 @@ fn picture_overlay_transform_keeps_shear_and_projective_row_at_center() {
 
 #[test]
 fn script_menu_images_use_resolved_definition_phase_and_color() {
-    let mut definition =
-        Definition::from_script("PHAS", "Phases", "").expect("phase definition compiles");
+    let mut definition = test_definition("PHAS", "Phases", "");
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -866,9 +816,7 @@ fn script_menu_images_use_resolved_definition_phase_and_color() {
         color_mask: Some(Arc::from([0_u8, 0xff])),
     }));
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("phase definition registers");
+    engine.register_test_definition(definition);
     let snapshot = make_snapshot(Vec::new(), Vec::new());
     let item = clonk_engine::ObjectMenuItem {
         caption: "Indexed color".to_string(),
@@ -893,7 +841,7 @@ fn script_menu_images_use_resolved_definition_phase_and_color() {
 
     let picture =
         object_menu_item_picture(&engine, &snapshot, &item, 0, &HudGraphics::default(), 0)
-            .expect("resolved indexed picture");
+            .test_value();
     assert_eq!(picture.pixels(), &[0x44, 0x55, 0x66, 0xff]);
 
     let text_spec = resolve_script_font_image(
@@ -902,14 +850,13 @@ fn script_menu_images_use_resolved_definition_phase_and_color() {
         0x112233,
         ScriptTextSpecResources::default(),
     )
-    .expect("scanf-style TextSpec phase resolves");
+    .test_value();
     assert_eq!(text_spec.pixels(), &[0x11, 0x22, 0x33, 0xff]);
 }
 
 #[test]
 fn script_object_menu_image_survives_source_object_deletion() {
-    let mut definition =
-        Definition::from_script("OBJC", "Object", "").expect("definition compiles");
+    let mut definition = test_definition("OBJC", "Object", "");
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -923,9 +870,7 @@ fn script_object_menu_image_survives_source_object_deletion() {
         color_mask: Some(Arc::from([0xff_u8])),
     }));
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("object definition registers");
+    engine.register_test_definition(definition);
     let item = clonk_engine::ObjectMenuItem {
         caption: "Object".to_string(),
         info_caption: String::new(),
@@ -965,14 +910,14 @@ fn script_object_menu_image_survives_source_object_deletion() {
         &HudGraphics::default(),
         0,
     )
-    .expect("cached picture remains after source deletion");
+    .test_value();
     assert_eq!(picture.pixels(), &[0x12, 0x34, 0x56, 0xff]);
 }
 
 #[test]
 fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
     let mut engine = Engine::new();
-    let mut base = Definition::from_script("BASE", "Base", "").expect("base compiles");
+    let mut base = test_definition("BASE", "Base", "");
     base.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -985,8 +930,8 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
         pixels: Arc::from([0xff, 0, 0, 0xff, 0xff, 0, 0, 0xff]),
         color_mask: None,
     }));
-    engine.register_definition(base).expect("base registers");
-    let mut overlay = Definition::from_script("OVRL", "Overlay", "").expect("overlay compiles");
+    engine.register_test_definition(base);
+    let mut overlay = test_definition("OVRL", "Overlay", "");
     overlay.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -999,9 +944,7 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
         pixels: Arc::from([0, 0, 0xff, 0xff]),
         color_mask: None,
     }));
-    engine
-        .register_definition(overlay)
-        .expect("overlay registers");
+    engine.register_test_definition(overlay);
     let item = clonk_engine::ObjectMenuItem {
         caption: "Composite".to_string(),
         info_caption: String::new(),
@@ -1043,7 +986,7 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
         &HudGraphics::default(),
         0,
     )
-    .expect("owned picture composite");
+    .test_value();
     assert_eq!((picture.width(), picture.height()), (4, 4));
     for (index, pixel) in picture.pixels().chunks_exact(4).enumerate() {
         let row = index / 4;
@@ -1059,12 +1002,7 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
     ranked.image = clonk_engine::ObjectMenuImage::ObjectRank {
         object: ObjectId::new(9),
     };
-    ranked
-        .picture_snapshot
-        .as_mut()
-        .expect("picture snapshot")
-        .graphics_overlays
-        .clear();
+    ranked.picture_snapshot.test_mut().graphics_overlays.clear();
     let ranked_picture = object_menu_item_picture(
         &engine,
         &make_snapshot(Vec::new(), Vec::new()),
@@ -1073,7 +1011,7 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
         &HudGraphics::default(),
         0,
     )
-    .expect("ObjectRank picture");
+    .test_value();
     assert_eq!((ranked_picture.width(), ranked_picture.height()), (4, 4));
     assert_eq!(&ranked_picture.pixels()[0..4], &[0, 0, 0, 0]);
     assert_eq!(&ranked_picture.pixels()[4 * 4..4 * 5], &[0xff, 0, 0, 0xff]);
@@ -1085,7 +1023,7 @@ fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
 /// `GetSymbolSize()` (C4Script.cpp:1717-1728; C4Menu.cpp:650-652).
 #[test]
 fn context_object_rank_snapshot_uses_runtime_item_height() {
-    let mut definition = Definition::from_script("OBJC", "Object", "").expect("definition compiles");
+    let mut definition = test_definition("OBJC", "Object", "");
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -1099,9 +1037,7 @@ fn context_object_rank_snapshot_uses_runtime_item_height() {
         color_mask: None,
     }));
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("definition registers");
+    engine.register_test_definition(definition);
 
     let item = clonk_engine::ObjectMenuItem {
         caption: String::new(),
@@ -1146,7 +1082,7 @@ fn context_object_rank_snapshot_uses_runtime_item_height() {
             15,
             context_item_height,
         )
-        .expect("ObjectRank picture");
+        .test_value();
         (picture.width(), picture.height())
     };
 
@@ -1201,8 +1137,7 @@ fn script_rank_menu_image_composes_extended_captain_symbol() {
         text_display_progress: -1,
     };
 
-    let picture = object_menu_item_picture(&engine, &snapshot, &item, 0, &hud, 1)
-        .expect("extended rank picture");
+    let picture = object_menu_item_picture(&engine, &snapshot, &item, 0, &hud, 1).test_value();
     assert_eq!((picture.width(), picture.height()), (3, 3));
     assert_eq!(
         &picture.pixels()[0..4],
@@ -1220,7 +1155,7 @@ fn script_rank_menu_image_composes_extended_captain_symbol() {
 fn menu_state_navigates_folders() {
     let scenarios = sample_scenarios();
     let entries = build_menu_entries(&scenarios, false);
-    let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+    let menu = StartupMenu::new(entries, test_font(), None).test_value();
     let mut state = MenuState::new(menu, scenarios);
 
     assert_eq!(state.current_entries().len(), 1);
@@ -1284,21 +1219,20 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("isolated game-option config");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     if let Some(parent) = paths.config_file().parent() {
-        fs::create_dir_all(parent).expect("create native config directory");
+        fs::create_dir_all(parent).test_value();
     }
-    fs::write(paths.config_file(), b"[General]\r\nFairCrew=true\r\n")
-        .expect("seed non-native fair-crew spelling");
+    fs::write(paths.config_file(), b"[General]\r\nFairCrew=true\r\n").test_value();
     assert!(!load_fair_crew_flag(Some(&paths)));
     assert!(!load_scenario_game_option_values(Some(&paths)).fair_crew);
-    fs::remove_file(paths.config_file()).expect("remove non-native fair-crew config");
+    fs::remove_file(paths.config_file()).test_value();
 
     for (section, key, value) in [
         ("General", "DefCrewStrength", "777"),
@@ -1308,7 +1242,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
         ("Network", "Comment", "old comment"),
         ("Network", "LastPassword", "old password"),
     ] {
-        persist_config_value(&paths, section, key, value).expect("seed game option");
+        persist_config_value(&paths, section, key, value).test_value();
     }
     persist_native_config_values(
         &paths,
@@ -1318,7 +1252,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
             clonk_app_netplay::NativeConfigValue::RawAscii("true"),
         )],
     )
-    .expect("seed C++ NoCrew Boolean");
+    .test_value();
     assert!(
         load_fair_crew_flag(Some(&paths)),
         "the scen-sel flag reads C4ConfigGeneral's native NoCrew key"
@@ -1333,12 +1267,12 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     assert_eq!(values.last_password, "old password");
 
     let scenario_path = user_data.path().join("Forced.c4s");
-    fs::create_dir_all(&scenario_path).expect("forced scenario group");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Forced\nForcedNoCrew=2\n",
     )
-    .expect("forced scenario core");
+    .test_value();
     let mut forced = FrontendScenario::fallback();
     forced.path = Some(scenario_path);
     assert_eq!(
@@ -1349,7 +1283,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     controller.set_selector_fair_crew_constraint(FairCrewConstraint::ForceNormal);
     let fair = controller
         .view(clonk_frontend::game_option_buttons::GameOptionButton::FairCrew)
-        .expect("fair-crew button");
+        .test_value();
     assert!(!fair.enabled);
     assert_eq!(
         fair.icon,
@@ -1374,14 +1308,10 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
             record_enabled: false,
         },
     )
-    .expect("game-option app");
+    .test_value();
     wait_for_menu(&mut app);
     app.open_scenario_browser();
-    let fonts = app
-        .assets
-        .clonk_fonts
-        .as_deref()
-        .expect("classic GUI fonts");
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
     let bounds = startup_scensel_game_option_bounds(800, 600, fonts);
     let option_layout = clonk_frontend::game_option_buttons::game_option_buttons_layout(
         bounds,
@@ -1398,8 +1328,8 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     );
 
     app.process_game_option_actions(vec![GameOptionAction::FairCrewPreferenceChanged(false)])
-        .expect("persist disabled native fair-crew preference");
-    let native_config = fs::read(paths.config_file()).expect("read disabled native preference");
+        .test_value();
+    let native_config = fs::read(paths.config_file()).test_value();
     assert!(native_config
         .split(|byte| matches!(*byte, b'\r' | b'\n'))
         .any(|line| line == b"NoCrew=false"));
@@ -1418,8 +1348,8 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
         GameOptionAction::LeagueSignupChanged(false),
         GameOptionAction::CommentChanged("new comment".to_string()),
     ])
-    .expect("persist selector options");
-    let config = Config::load(paths.config_file()).expect("reload persisted options");
+    .test_value();
+    let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("false"));
     assert_eq!(config.get_in(Some("General"), "FairCrew"), None);
     assert_eq!(config.get_in(Some("General"), "Record"), Some("1"));
@@ -1441,11 +1371,11 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     );
 
     app.process_game_option_actions(vec![GameOptionAction::FairCrewPreferenceChanged(true)])
-        .expect("persist native fair-crew preference");
-    let config = Config::load(paths.config_file()).expect("reload native fair-crew key");
+        .test_value();
+    let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("true"));
     assert_eq!(config.get_in(Some("General"), "FairCrew"), None);
-    let native_config = fs::read(paths.config_file()).expect("read enabled native preference");
+    let native_config = fs::read(paths.config_file()).test_value();
     assert!(native_config
         .split(|byte| matches!(*byte, b'\r' | b'\n'))
         .any(|line| line == b"NoCrew=true"));
@@ -1458,12 +1388,8 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     app.scenario_game_options =
         GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
     let actions = app.scenario_game_options.handle_hotkey('P');
-    app.finish_game_option_input(actions)
-        .expect("open classic password input");
-    let dialog = app
-        .game_option_input_dialog
-        .as_ref()
-        .expect("password InputDialog");
+    app.finish_game_option_input(actions).test_value();
+    let dialog = app.game_option_input_dialog.test_ref();
     assert_eq!(
         dialog.purpose,
         PendingInputDialogPurpose::GameOption(GameOptionInputKind::Password)
@@ -1473,7 +1399,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "new password".to_string(),
     )])
-    .expect("accept classic password input");
+    .test_value();
     assert_eq!(app.scenario_game_options.values().password, "new password");
     assert_eq!(
         Config::load(paths.config_file())
@@ -1490,13 +1416,13 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("isolated input-dialog config");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let mut app = GameApp::new(
         800,
         600,
@@ -1509,7 +1435,7 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
             record_enabled: false,
         },
     )
-    .expect("input-dialog app");
+    .test_value();
     wait_for_menu(&mut app);
     app.open_scenario_browser();
     app.menu_state.set_search_text("underlying search");
@@ -1520,86 +1446,69 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
         GameOptionValues::default(),
     );
     let actions = app.scenario_game_options.handle_hotkey('P');
-    app.finish_game_option_input(actions)
-        .expect("open password modal");
+    app.finish_game_option_input(actions).test_value();
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
-        .expect("hold combined mnemonic modifiers");
-    app.handle_key(VirtualKeyCode::KeyO, ElementState::Pressed)
-        .expect("combined modifiers do not activate the exact Alt mnemonic");
-    app.handle_key(VirtualKeyCode::KeyO, ElementState::Released)
-        .expect("release combined mnemonic probe");
+    app.test_modifiers(ModifiersState::CONTROL | ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::KeyO, ElementState::Released);
     assert!(app.game_option_input_dialog.is_some());
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift over regular input dialog");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("modified Escape does not cancel the regular dialog");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release modified Escape probe");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     assert!(app.game_option_input_dialog.is_some());
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release modal modifiers");
+    app.test_modifiers(ModifiersState::empty());
 
     for key in [
         VirtualKeyCode::ArrowUp,
         VirtualKeyCode::ArrowDown,
         VirtualKeyCode::ArrowLeft,
     ] {
-        app.handle_key(key, ElementState::Pressed)
-            .expect("modal key down");
-        app.handle_key(key, ElementState::Released)
-            .expect("modal key up");
+        app.test_key(key, ElementState::Pressed);
+        app.test_key(key, ElementState::Released);
     }
     assert_eq!(app.menu_state.menu.selected_index(), selected);
     assert_eq!(app.menu_state.stack.len(), stack_len);
     assert_eq!(app.menu_state.search_text(), "underlying search");
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("open modal edit context");
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     assert!(app.context_menu.is_some());
     assert!(
         GameApp::startup_base_context_menu(app.context_menu.as_ref(), true,).is_none(),
         "modal owns the one context-menu render pass"
     );
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
-        .expect("consume Apps release inside modal");
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     app.close_context_menu_silently();
 
-    let layout = app.game_option_input_layout().expect("modal layout");
+    let layout = app.game_option_input_layout().test_value();
     let edit_point = PhysicalPosition::new(
         f64::from(layout.edit.x + layout.edit.w / 2),
         f64::from(layout.edit.y + layout.edit.h / 2),
     );
-    app.handle_cursor_moved(edit_point)
-        .expect("point into modal edit");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("hold modal left button");
+    app.test_cursor(edit_point);
+    app.test_left_button(ElementState::Pressed);
     assert_eq!(
         app.game_option_input_pointer_capture,
         Some(ContextMenuPointerButton::Left)
     );
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
-        .expect("close modal while left is held");
+        .test_value();
     assert!(app.game_option_input_dialog.is_none());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("consume modal-owned left release");
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.game_option_input_pointer_capture, None);
     assert_eq!(app.menu_state.menu.selected_index(), selected);
 
     let actions = app.scenario_game_options.handle_hotkey('P');
-    app.finish_game_option_input(actions)
-        .expect("reopen password modal");
-    app.handle_cursor_moved(edit_point)
-        .expect("point into reopened modal");
+    app.finish_game_option_input(actions).test_value();
+    app.test_cursor(edit_point);
     app.handle_other_mouse_button(ElementState::Pressed)
-        .expect("modal middle down");
+        .test_value();
     assert_eq!(
         app.game_option_input_pointer_capture,
         Some(ContextMenuPointerButton::Other)
     );
     app.handle_other_mouse_button(ElementState::Released)
-        .expect("modal middle up");
+        .test_value();
     assert_eq!(app.game_option_input_pointer_capture, None);
     reset_cached_app_paths();
 }
@@ -1610,42 +1519,37 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("isolated resize config");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.open_scenario_browser();
     app.scenario_game_options.set_focused_button(Some(
         clonk_frontend::game_option_buttons::GameOptionButton::Record,
     ));
     app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("hold Record keyboard activation");
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     assert!(!app.game_option_consumed_keys.is_empty());
     let record = app
         .scenario_game_options
         .layout()
         .rect(clonk_frontend::game_option_buttons::GameOptionButton::Record)
-        .expect("Record bounds");
-    app.handle_cursor_moved(PhysicalPosition::new(
+        .test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(record.x + record.w / 2),
         f64::from(record.y + record.h / 2),
-    ))
-    .expect("point at held Record");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("hold Record pointer activation");
+    ));
+    app.test_left_button(ElementState::Pressed);
     assert!(app.game_option_pointer_capture);
-    app.resize(1024, 768).expect("resize held option strip");
+    app.resize(1024, 768).test_value();
     assert!(app.game_option_consumed_keys.is_empty());
     assert!(!app.game_option_pointer_capture);
-    app.handle_key(VirtualKeyCode::Space, ElementState::Released)
-        .expect("release cancelled Record keyboard activation");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release cancelled Record pointer activation");
+    app.test_key(VirtualKeyCode::Space, ElementState::Released);
+    app.test_left_button(ElementState::Released);
     assert!(!app.scenario_game_options.values().record);
 
     app.scenario_game_options = GameOptionButtons::new(
@@ -1654,40 +1558,32 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     );
     app.sync_scenario_game_option_bounds();
     let actions = app.scenario_game_options.handle_hotkey('P');
-    app.finish_game_option_input(actions)
-        .expect("open resize password modal");
-    let input_layout = app.game_option_input_layout().expect("input layout");
+    app.finish_game_option_input(actions).test_value();
+    let input_layout = app.game_option_input_layout().test_value();
     let edit_point = PhysicalPosition::new(
         f64::from(input_layout.edit.x + input_layout.edit.w / 2),
         f64::from(input_layout.edit.y + input_layout.edit.h / 2),
     );
-    app.handle_cursor_moved(edit_point)
-        .expect("point into password edit");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("start password edit drag");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("focus password OK button");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release password focus traversal");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("hold password OK button");
+    app.test_cursor(edit_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert_eq!(
         app.game_option_input_pointer_capture,
         Some(ContextMenuPointerButton::Left)
     );
     assert!(!app.game_option_input_consumed_keys.is_empty());
     assert!(app.game_option_input_pointer_position.is_some());
-    app.resize(1280, 720).expect("resize open password modal");
+    app.resize(1280, 720).test_value();
     assert!(app.game_option_input_dialog.is_some());
     assert_eq!(app.game_option_input_pointer_capture, None);
     assert!(app.game_option_input_consumed_keys.is_empty());
     assert!(app.game_option_input_pointer_position.is_none());
     assert!(app.game_option_input_last_click.is_none());
     assert!(!app.game_option_pointer_capture);
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("release cancelled modal OK button");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release cancelled modal drag");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
+    app.test_left_button(ElementState::Released);
     assert!(app.game_option_input_dialog.is_some());
     reset_cached_app_paths();
 }
@@ -1705,33 +1601,33 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
 
     let eligible_league = clonk_engine::ControlPlayerInfoEntry {
         id: 11,
-        name: LegacyCString::from_bytes(b"Raw A".to_vec()).unwrap(),
-        forced_name: LegacyCString::from_bytes(b"Forced A".to_vec()).unwrap(),
-        league_account: LegacyCString::from_bytes(b"League A".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Raw A".to_vec()).test_value(),
+        forced_name: LegacyCString::from_bytes(b"Forced A".to_vec()).test_value(),
+        league_account: LegacyCString::from_bytes(b"League A".to_vec()).test_value(),
         ..Default::default()
     };
     let join_issued = clonk_engine::ControlPlayerInfoEntry {
         id: 12,
-        name: LegacyCString::from_bytes(b"Issued".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Issued".to_vec()).test_value(),
         flags: clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED,
         ..Default::default()
     };
     let joined_and_removed = clonk_engine::ControlPlayerInfoEntry {
         id: 13,
-        name: LegacyCString::from_bytes(b"Joined".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Joined".to_vec()).test_value(),
         flags: clonk_engine::PLAYER_INFO_FLAG_JOINED | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
         ..Default::default()
     };
     let associated = clonk_engine::ControlPlayerInfoEntry {
         id: 14,
-        name: LegacyCString::from_bytes(b"Associated".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Associated".to_vec()).test_value(),
         savegame_player: 90,
         ..Default::default()
     };
     let eligible_forced = clonk_engine::ControlPlayerInfoEntry {
         id: 15,
-        name: LegacyCString::from_bytes(b"Raw B".to_vec()).unwrap(),
-        forced_name: LegacyCString::from_bytes(b"Forced B".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Raw B".to_vec()).test_value(),
+        forced_name: LegacyCString::from_bytes(b"Forced B".to_vec()).test_value(),
         ..Default::default()
     };
     app.control_player_infos.replace_snapshot(
@@ -1803,18 +1699,18 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
         row: LobbyRosterId::Player(50),
         position: GuiPoint::new(200.0, 150.0),
     }])
-    .expect("free savegame player context opens");
-    let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
+    .test_value();
+    let root = app.context_menu.as_ref().test_value().layout().panels[0].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
-        .expect("open takeover submenu");
-    let layout = app.context_menu.as_ref().unwrap().layout();
+        .test_value();
+    let layout = app.context_menu.as_ref().test_value().layout();
     assert_eq!(layout.panels.len(), 2);
     assert_eq!(layout.panels[1].rows.len(), 2);
 
     let mut rows = app
         .classic_host_lobby
         .as_ref()
-        .unwrap()
+        .test_value()
         .controller
         .rows()
         .to_vec();
@@ -1824,7 +1720,7 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
     header.kind = LobbyRosterHeader::ReplayPlayers;
     app.classic_host_lobby
         .as_mut()
-        .unwrap()
+        .test_value()
         .controller
         .set_rows(rows);
     app.close_stale_classic_lobby_team_combo();
@@ -1955,7 +1851,7 @@ fn ingame_menu_uses_active_language_resources_for_all_pages() {
         },
         &labels,
     )
-    .expect("populated main menu");
+    .test_value();
     assert_eq!(main.caption(), "[Spielermenü]");
     assert_eq!(
         captions(&main),
@@ -1995,7 +1891,7 @@ fn ingame_menu_uses_active_language_resources_for_all_pages() {
         },
         &labels,
     )
-    .expect("observer main menu");
+    .test_value();
     assert_eq!(observer.caption(), "[Zuschauermenü]");
     assert_eq!(
         captions(&observer),
@@ -2162,12 +2058,12 @@ fn takeover_submenu_fills_live_at_open() {
 
     let first = clonk_engine::ControlPlayerInfoEntry {
         id: 11,
-        name: LegacyCString::from_bytes(b"First".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"First".to_vec()).test_value(),
         ..Default::default()
     };
     let second = clonk_engine::ControlPlayerInfoEntry {
         id: 12,
-        name: LegacyCString::from_bytes(b"Second".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Second".to_vec()).test_value(),
         ..Default::default()
     };
     let packet_flags = clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
@@ -2185,7 +2081,7 @@ fn takeover_submenu_fills_live_at_open() {
         row: LobbyRosterId::Player(50),
         position: GuiPoint::new(200.0, 150.0),
     }])
-    .expect("free savegame player context opens");
+    .test_value();
     assert_eq!(
         app.context_menu.as_ref().unwrap().layout().panels.len(),
         1,
@@ -2199,10 +2095,10 @@ fn takeover_submenu_fills_live_at_open() {
     app.control_player_infos
         .replace_snapshot(100, [local_packet(vec![first.clone(), second.clone()])]);
 
-    let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
+    let root = app.context_menu.as_ref().test_value().layout().panels[0].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
-        .expect("open takeover submenu");
-    let layout = app.context_menu.as_ref().unwrap().layout();
+        .test_value();
+    let layout = app.context_menu.as_ref().test_value().layout();
     assert_eq!(layout.panels.len(), 2);
     assert_eq!(
         layout.panels[1].rows.len(),
@@ -2213,15 +2109,15 @@ fn takeover_submenu_fills_live_at_open() {
     // Closing the child and re-selecting the parent re-runs the fill
     // callback, so a candidate that issued its join meanwhile drops out.
     app.handle_context_menu_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
-        .expect("close the takeover child panel");
+        .test_value();
     assert_eq!(app.context_menu.as_ref().unwrap().layout().panels.len(), 1);
     let mut issued_first = first.clone();
     issued_first.flags |= clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED;
     app.control_player_infos
         .replace_snapshot(101, [local_packet(vec![issued_first, second.clone()])]);
     app.handle_context_menu_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
-        .expect("reopen the takeover child panel");
-    let layout = app.context_menu.as_ref().unwrap().layout();
+        .test_value();
+    let layout = app.context_menu.as_ref().test_value().layout();
     assert_eq!(layout.panels.len(), 2);
     assert_eq!(
         layout.panels[1].rows.len(),
@@ -2231,9 +2127,9 @@ fn takeover_submenu_fills_live_at_open() {
 
     // The surviving child is the live-eligible player and activates the
     // exact live association.
-    let child = app.context_menu.as_ref().unwrap().layout().panels[1].rows[0].rect;
+    let child = app.context_menu.as_ref().test_value().layout().panels[1].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((child.x + 1) as f32, (child.y + 1) as f32))
-        .expect("select live takeover child");
+        .test_value();
     assert!(app
         .handle_context_menu_pointer_button(ElementState::Pressed, ContextMenuPointerButton::Left,)
         .expect("activate live takeover child"));
@@ -2268,14 +2164,14 @@ fn player_context_root_matches_cpp_entry_gates() {
     };
     let replay_player = clonk_engine::ControlPlayerInfoEntry {
         id: 51,
-        name: LegacyCString::from_bytes(b"Replay".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Replay".to_vec()).test_value(),
         color: 0x0012_3456,
         original_color: 0x0065_4321,
         ..Default::default()
     };
     let free_script = clonk_engine::ControlPlayerInfoEntry {
         id: 52,
-        name: LegacyCString::from_bytes(b"Free script".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Free script".to_vec()).test_value(),
         player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
         ..Default::default()
     };
@@ -2304,7 +2200,7 @@ fn player_context_root_matches_cpp_entry_gates() {
     );
     let mut host_snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     host_snapshot.parameters.restore_player_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 52,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -2331,10 +2227,16 @@ fn player_context_root_matches_cpp_entry_gates() {
             league_rank: None,
         })
     };
-    let client_row = app.classic_host_lobby.as_ref().unwrap().controller.rows()[0].clone();
+    let client_row = app
+        .classic_host_lobby
+        .as_ref()
+        .test_value()
+        .controller
+        .rows()[0]
+        .clone();
     app.classic_host_lobby
         .as_mut()
-        .unwrap()
+        .test_value()
         .controller
         .set_rows(vec![
             LobbyRosterRow::Header(LobbyHeaderRow {
@@ -2362,9 +2264,7 @@ fn player_context_root_matches_cpp_entry_gates() {
         prepared: None,
     }));
 
-    let (_, free) = app
-        .classic_lobby_player_context_entries(50)
-        .expect("visible free restore row");
+    let (_, free) = app.classic_lobby_player_context_entries(50).test_value();
     assert_eq!(free.len(), 1);
     assert_eq!(free[0].text, "<c ffffff7f>T</c>ake over");
     assert_eq!(
@@ -2382,9 +2282,7 @@ fn player_context_root_matches_cpp_entry_gates() {
             .is_empty(),
         "native free script rows omit Take Over"
     );
-    let (_, replay) = app
-        .classic_lobby_player_context_entries(51)
-        .expect("visible replay row");
+    let (_, replay) = app.classic_lobby_player_context_entries(51).test_value();
     assert_eq!(
         replay
             .iter()
@@ -2406,7 +2304,7 @@ fn player_context_root_matches_cpp_entry_gates() {
         row: LobbyRosterId::Player(51),
         position: GuiPoint::new(200.0, 150.0),
     }])
-    .expect("replay context opens");
+    .test_value();
     app.close_stale_classic_lobby_team_combo();
     assert!(
         app.context_menu.is_some(),
@@ -2418,7 +2316,7 @@ fn player_context_root_matches_cpp_entry_gates() {
         row: LobbyRosterId::Player(50),
         position: GuiPoint::new(200.0, 150.0),
     }])
-    .expect("free restore context opens");
+    .test_value();
     assert_eq!(
         app.context_menu.as_ref().unwrap().layout().panels[0]
             .rows
@@ -2427,9 +2325,7 @@ fn player_context_root_matches_cpp_entry_gates() {
     );
     app.close_context_menu_silently();
 
-    let (_, ordinary) = app
-        .classic_lobby_player_context_entries(7)
-        .expect("visible ordinary row");
+    let (_, ordinary) = app.classic_lobby_player_context_entries(7).test_value();
     assert_eq!(ordinary.len(), 2);
     assert_eq!(ordinary[0].text, "<c ffffff7f>R</c>emove");
     assert_eq!(
@@ -2462,12 +2358,12 @@ fn player_context_root_matches_cpp_entry_gates() {
 
     app.network_team_assignment
         .as_mut()
-        .unwrap()
+        .test_value()
         .teams_mut()
         .team_colors = true;
-    let (_, ordinary) = app.classic_lobby_player_context_entries(7).unwrap();
+    let (_, ordinary) = app.classic_lobby_player_context_entries(7).test_value();
     assert_eq!(ordinary.len(), 1, "a nonzero team color suppresses reroll");
-    let (_, script) = app.classic_lobby_player_context_entries(9).unwrap();
+    let (_, script) = app.classic_lobby_player_context_entries(9).test_value();
     assert_eq!(script.len(), 1, "association suppresses only Remove");
     assert_eq!(
         script[0].action,
@@ -2481,13 +2377,13 @@ fn player_context_root_matches_cpp_entry_gates() {
     app.network_mode = None;
     app.control_clients
         .replace_snapshot([message_client(0, b"Remote owner")]);
-    let (_, foreign) = app.classic_lobby_player_context_entries(7).unwrap();
+    let (_, foreign) = app.classic_lobby_player_context_entries(7).test_value();
     assert!(foreign.is_empty());
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
         row: LobbyRosterId::Player(7),
         position: GuiPoint::new(200.0, 150.0),
     }])
-    .expect("C++ opens an empty root for an unowned player");
+    .test_value();
     assert!(app.context_menu.is_some());
     assert_eq!(app.context_menu_lobby_player, Some((0, 7, false)));
 }
@@ -2555,8 +2451,7 @@ fn classic_context_menu_dispatches_to_the_live_edit() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     app.classic_host_lobby
-        .as_mut()
-        .expect("classic lobby")
+        .test_mut()
         .controller
         .set_chat_edit_view(LobbyChatEditView {
             text: "select me".into(),
@@ -2567,7 +2462,7 @@ fn classic_context_menu_dispatches_to_the_live_edit() {
     app.process_classic_lobby_chat_request(LobbyChatRequest::OpenContextMenu {
         anchor: GuiPoint::new(20.0, 20.0),
     })
-    .expect("open chat context menu");
+    .test_value();
     assert!(app.context_menu.is_some());
     app.process_context_menu_outcome(ContextMenuOutcome {
         captured: true,
@@ -2580,11 +2475,10 @@ fn classic_context_menu_dispatches_to_the_live_edit() {
             )),
         ],
     })
-    .expect("dispatch chat context command");
+    .test_value();
     let view = app
         .classic_host_lobby
-        .as_ref()
-        .expect("classic lobby remains")
+        .test_ref()
         .controller
         .chat_edit_view();
     assert_eq!(view.selection, Some((0, view.text.len())));
@@ -2598,33 +2492,25 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
     // Music discovery reads process env; hold the env lock so the
     // EnvGuard-based tests cannot redirect paths mid-load.
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths))
-        .expect("initialise app with audio");
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
 
     let fixture = app
         .audio
-        .as_ref()
-        .expect("test audio")
+        .test_ref()
         .system
         .load_music(&silent_pcm_wav(20))
-        .expect("predecode controlled music fixture");
-    app.audio
-        .as_mut()
-        .expect("test audio")
-        .control_music_loads_with(fixture);
+        .test_value();
+    app.audio.test_mut().control_music_loads_with(fixture);
 
     // Menu music is started by `ensure_menu_music()` when asynchronous boot
     // loading completes and the menu is shown; pump boot to that point first.
     wait_for_menu(&mut app);
-    let audio = app.audio.as_ref().expect("test audio");
-    let controlled = audio
-        .controlled_music_loads
-        .as_ref()
-        .expect("controlled music loading");
+    let audio = app.audio.test_ref();
+    let controlled = audio.controlled_music_loads.test_ref();
     assert_eq!(controlled.requests.len(), 1);
-    let frontend = controlled.requests.front().expect("frontend music request");
+    let frontend = controlled.requests.front().test_value();
     assert!(!frontend.looped, "frontend music is non-looping");
     assert!(
         frontend.identity.is_some(),
@@ -2646,14 +2532,11 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
         .music_is_playing());
 
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start sandbox scenario");
-    let audio = app.audio.as_ref().expect("test audio");
-    let controlled = audio
-        .controlled_music_loads
-        .as_ref()
-        .expect("controlled music loading");
+        .test_value();
+    let audio = app.audio.test_ref();
+    let controlled = audio.controlled_music_loads.test_ref();
     assert_eq!(controlled.requests.len(), 1);
-    let sandbox = controlled.requests.front().expect("sandbox music request");
+    let sandbox = controlled.requests.front().test_value();
     assert!(sandbox.looped, "sandbox music is looping");
     assert!(
         sandbox.identity.is_none(),
@@ -2668,7 +2551,7 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
         .complete_next_controlled_music_load()
         .expect("complete sandbox music load"));
     app.return_to_menu();
-    let audio = app.audio.as_ref().expect("test audio");
+    let audio = app.audio.test_ref();
     assert!(
         !audio.system.music_is_playing(),
         "PreInit reconstruction hard-stops the fading game song"
@@ -2679,15 +2562,9 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
         [GAME_MUSIC_FADE_OUT_MS],
         "Game.Clear still requests its 2s fade before PreInit cancels it"
     );
-    let controlled = audio
-        .controlled_music_loads
-        .as_ref()
-        .expect("controlled music loading");
+    let controlled = audio.controlled_music_loads.test_ref();
     assert_eq!(controlled.requests.len(), 1);
-    let frontend = controlled
-        .requests
-        .front()
-        .expect("PreInit frontend music request");
+    let frontend = controlled.requests.front().test_value();
     assert!(!frontend.looped, "returned frontend music is non-looping");
     assert!(
         frontend.identity.is_some(),
@@ -2700,7 +2577,7 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
         .expect("test audio")
         .complete_next_controlled_music_load()
         .expect("complete returned frontend music load"));
-    let audio = app.audio.as_ref().expect("test audio");
+    let audio = app.audio.test_ref();
     assert!(audio.system.music_is_playing());
     assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire), 0);
     assert!(audio
@@ -2713,19 +2590,16 @@ fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
     // Restart/Next Mission also reconstructs at PreInit, but skips
     // C4Startup::DoStartup and therefore must not enqueue Frontend.*.
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start relaunch source scenario");
+        .test_value();
     assert!(app
         .audio
         .as_mut()
         .expect("test audio")
         .complete_next_controlled_music_load()
         .expect("complete relaunch source music"));
-    app.audio
-        .as_mut()
-        .expect("test audio")
-        .set_scenario_music_level(Some(25));
+    app.audio.test_mut().set_scenario_music_level(Some(25));
     app.return_to_menu_for_relaunch();
-    let audio = app.audio.as_ref().expect("test audio");
+    let audio = app.audio.test_ref();
     assert!(!audio.system.music_is_playing());
     assert!(!app.resume_frontend_music_after_fade);
     assert_eq!(
@@ -2758,8 +2632,7 @@ fn menu_cursor_moves_and_clears_on_leave() {
     install_l018_cursor_atlas(&mut app);
     let background = Color::opaque(9, 10, 11);
 
-    app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
-        .expect("first startup cursor move");
+    app.test_cursor(PhysicalPosition::new(20.0, 18.0));
     app.graphics.surface_mut().fill(background);
     assert!(app.draw_classic_gui_cursor(None));
     assert_eq!(
@@ -2767,8 +2640,7 @@ fn menu_cursor_moves_and_clears_on_leave() {
         Some(Color::opaque(0, 40, 200))
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(40.0, 30.0))
-        .expect("same-control startup cursor move");
+    app.test_cursor(PhysicalPosition::new(40.0, 30.0));
     app.graphics.surface_mut().fill(background);
     assert!(app.draw_classic_gui_cursor(None));
     assert_eq!(app.graphics.surface().get_pixel(18, 16), Some(background));
@@ -2777,7 +2649,7 @@ fn menu_cursor_moves_and_clears_on_leave() {
         Some(Color::opaque(0, 40, 200))
     );
 
-    app.pointer_left().expect("leave startup window");
+    app.pointer_left().test_value();
     assert!(!app.draw_classic_gui_cursor(None));
 }
 
@@ -2785,11 +2657,7 @@ fn menu_cursor_moves_and_clears_on_leave() {
 fn loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
     let mut app = new_menu_app(320, 200);
     install_l018_cursor_atlas(&mut app);
-    let fonts = app
-        .assets
-        .clonk_fonts
-        .clone()
-        .expect("synthetic classic loader fonts");
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     app.loader_screen = Some(
         LoaderScreen::new(
             LoaderSelection::startup("LoaderSynthetic.png")
@@ -2799,7 +2667,7 @@ fn loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
                 .expect("valid synthetic loader resources"),
             LoaderState::initial("Loading"),
         )
-        .expect("valid synthetic loader screen"),
+        .test_value(),
     );
     app.loader_error = None;
     app.loader_render_error = None;
@@ -2812,13 +2680,11 @@ fn loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("install loading message dialog");
-    app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
-        .expect("route loading GUI pointer");
+    .test_value();
+    app.test_cursor(PhysicalPosition::new(20.0, 18.0));
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("render loader, dialog, GUI cursor, and tooltip passes");
+    app.test_render(&mut frame);
     let cursor_pixel = ((16 * 320 + 18) * 4) as usize;
     assert_eq!(
         &frame[cursor_pixel..cursor_pixel + 4],
@@ -2836,17 +2702,16 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         (surface.width(), surface.height())
     };
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
-    app.render(&mut frame).expect("establish running viewport");
-    app.open_ingame_menu().expect("show external C4Menu");
+    app.test_render(&mut frame);
+    app.open_ingame_menu().test_value();
     let menu_point = (0..height)
         .flat_map(|y| (0..width).map(move |x| GuiPoint::new(x as f32, y as f32)))
         .find(|point| app.ingame_menu_pointer_target(*point).is_some())
-        .expect("visible menu owns at least one output point");
-    app.handle_cursor_moved(PhysicalPosition::new(
+        .test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(menu_point.x),
         f64::from(menu_point.y),
-    ))
-    .expect("route pointer into external C4Menu");
+    ));
     assert!(app.running_gui_mouse_owned);
     assert!(!app.running_world_mouse_owned);
     assert!(app.ingame_pointer.is_none());
@@ -2860,11 +2725,8 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         app.running_world_mouse_owned,
         "C4MouseControl::Default independently restores fMouseOwned"
     );
-    app.initialize_ingame_mouse_center()
-        .expect("execute reset C4MouseControl while menu remains shown");
-    let reset_world_pointer = app
-        .ingame_pointer
-        .expect("reset world mouse remains independently drawable");
+    app.initialize_ingame_mouse_center().test_value();
+    let reset_world_pointer = app.ingame_pointer.test_value();
     assert!(
         app.classic_gui_cursor_request().is_some(),
         "GUI cursor remains independently drawable after the reset"
@@ -2876,7 +2738,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         "Dialog::Close leaves ownership for C4GraphicsSystem::Execute"
     );
     app.reconcile_running_mouse_after_last_gui_close(false)
-        .expect("execute last-dialog stationary handoff with F1 help shown");
+        .test_value();
     assert!(!app.running_gui_mouse_owned);
     assert!(app.running_world_mouse_owned);
     assert!(
@@ -2886,16 +2748,14 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     assert_eq!(app.ingame_pointer, Some(reset_world_pointer));
 
     app.runtime_help_visible = false;
-    app.open_ingame_menu().expect("show external C4Menu again");
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.open_ingame_menu().test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(menu_point.x),
         f64::from(menu_point.y),
-    ))
-    .expect("route pointer into second menu");
+    ));
     assert!(!app.running_world_mouse_owned);
     set_test_scenario_head_flags(&mut app, 1, 1);
-    app.render(&mut frame)
-        .expect("render film/replay with the shown menu pixels suppressed");
+    app.test_render(&mut frame);
     assert!(
         app.running_gui_mouse_owned,
         "a shown C4Menu remains a C4GUI owner when viewport pixels are suppressed"
@@ -2904,8 +2764,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
 
     let non_cursor_menu_object = app
         .engine
-        .spawn_object(SpawnConfig::new("CLNK").with_position(Vector2::new(40, 30)))
-        .expect("spawn arbitrary non-cursor menu object");
+        .spawn_test_object(SpawnConfig::new("CLNK").with_position(Vector2::new(40, 30)));
     install_test_cursor_menu(
         &mut app,
         non_cursor_menu_object,
@@ -2916,8 +2775,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         Some(non_cursor_menu_object)
     );
     app.close_ingame_menu_for_player(app.local_owner);
-    app.render(&mut frame)
-        .expect("retain GUI ownership for a shown non-cursor object menu");
+    app.test_render(&mut frame);
     assert!(app.running_gui_mouse_owned);
     assert!(!app.running_world_mouse_owned);
 
@@ -2929,9 +2787,8 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
                 ..ObjectUpdate::default()
             },
         )
-        .expect("close arbitrary non-cursor object menu");
-    app.render(&mut frame)
-        .expect("handoff after the final suppressed object menu closes");
+        .test_value();
+    app.test_render(&mut frame);
     assert!(!app.running_gui_mouse_owned);
     assert!(app.running_world_mouse_owned);
     assert!(app.ingame_pointer.is_some());
@@ -2965,13 +2822,10 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
         .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
             LobbyChatRequest::OpenExternalDialog,
         )])
-        .expect("the lobby IRC button opens the standalone dialog");
+        .test_value();
     assert!(lobby_app.classic_host_lobby.is_some());
     assert!(lobby_app.external_irc_dialog_visible);
-    let dialog = lobby_app
-        .external_irc_dialog
-        .as_ref()
-        .expect("the standalone network/chat controller exists");
+    let dialog = lobby_app.external_irc_dialog.test_ref();
     assert_eq!(
         dialog.mode(),
         clonk_frontend::startup_netdlg::NetDlgMode::Chat
@@ -2985,7 +2839,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
         .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
             LobbyChatRequest::OpenExternalDialog,
         )])
-        .expect("a repeated lobby request raises the same dialog");
+        .test_value();
     assert!(lobby_app.external_irc_dialog_visible);
     assert_eq!(
         lobby_app
@@ -3007,39 +2861,28 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
         runtime_app
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::KeyC);
-        runtime_app
-            .handle_modifiers_changed(modifiers)
-            .expect("set the exact legacy IRC chord");
+        runtime_app.test_modifiers(modifiers);
         runtime_app.menu_title_drag = Some(MenuTitleDrag::Ingame {
             player: runtime_app.local_owner,
             start_pointer: GuiPoint::new(20.0, 20.0),
             start_location: (40, 50),
         });
-        runtime_app
-            .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-            .expect("runtime Alt+C opens the standalone IRC dialog");
+        runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
         assert!(runtime_app.external_irc_dialog_visible);
         assert!(
             runtime_app.menu_title_drag.is_none(),
             "activating C4ChatDlg releases an obscured menu-title drag"
         );
-        runtime_app
-            .handle_cursor_moved(PhysicalPosition::new(300.0, 200.0))
-            .expect("standalone dialog owns motion after activation");
-        runtime_app
-            .handle_mouse_button(ElementState::Released)
-            .expect("standalone dialog owns the pending pointer release");
+        runtime_app.test_cursor(PhysicalPosition::new(300.0, 200.0));
+        runtime_app.test_left_button(ElementState::Released);
         assert!(runtime_app.external_irc_dialog_visible);
 
         runtime_app
             .engine
-            .player_mut(runtime_app.local_owner)
-            .expect("local sandbox player")
+            .test_player_mut(runtime_app.local_owner)
             .control
             .pressed_coms = 1 << clonk_engine::COM_LEFT;
-        runtime_app
-            .handle_key(VirtualKeyCode::KeyC, ElementState::Released)
-            .expect("runtime IRC chord release must be consumed");
+        runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
         assert_ne!(
             runtime_app
                 .engine
@@ -3051,9 +2894,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             0,
             "runtime IRC release must not leak to modifier-blind player control"
         );
-        runtime_app
-            .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-            .expect("a second runtime Alt+C closes only the IRC UI");
+        runtime_app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
         assert!(!runtime_app.external_irc_dialog_visible);
     }
 
@@ -3067,9 +2908,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
         ModifiersState::ALT | ModifiersState::SHIFT,
         ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
-        ignored_runtime
-            .handle_modifiers_changed(modifiers)
-            .expect("set non-IRC modifiers");
+        ignored_runtime.test_modifiers(modifiers);
         assert!(!ignored_runtime
             .handle_runtime_irc_toggle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
             .expect("non-IRC chord is unhandled"));
@@ -3109,17 +2948,11 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     let mut app = new_real_classic_menu_app(640, 480);
     app.open_network_game_dialog();
     assert_eq!(app.startup_view, StartupView::NetworkGame);
-    let signup = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .masterserver_signup();
+    let signup = app.startup_network_dialog.test_ref().masterserver_signup();
 
     // Alt+I toggles Internet; Alt+Shift+R toggles Record.
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::KeyI, ElementState::Pressed)
-        .expect("dispatch the Internet mnemonic");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::KeyI, ElementState::Pressed);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3127,10 +2960,8 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
             .masterserver_signup(),
         !signup
     );
-    app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
-        .expect("hold Alt+Shift");
-    app.handle_key(VirtualKeyCode::KeyI, ElementState::Pressed)
-        .expect("the shifted Alt form dispatches the same mnemonic");
+    app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::KeyI, ElementState::Pressed);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3141,22 +2972,17 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
 
     // Alt+C reaches the Chat tab; there Refresh and Join are not drawn, so
     // their mnemonics are inert while New game still activates.
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-        .expect("dispatch the Chat mnemonic");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     assert!(app
         .startup_network_dialog
         .as_ref()
         .expect("network dialog")
         .is_chat_mode());
-    app.handle_key(VirtualKeyCode::KeyD, ElementState::Pressed)
-        .expect("a hidden Reload button does not activate");
-    app.handle_key(VirtualKeyCode::KeyJ, ElementState::Pressed)
-        .expect("a hidden Join button does not activate");
+    app.test_key(VirtualKeyCode::KeyD, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::KeyJ, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
-    app.handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("dispatch the Games mnemonic");
+    app.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert!(!app
         .startup_network_dialog
         .as_ref()
@@ -3164,10 +2990,8 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
         .is_chat_mode());
 
     // A covering modal owns the keyboard, so the dialog beneath is inert.
-    app.handle_game_over()
-        .expect("forge a covering evaluation dialog");
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("the exclusive owner swallows the mnemonic");
+    app.handle_game_over().test_value();
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
 }
 
@@ -3175,67 +2999,51 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
 fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     let mut app = new_real_classic_menu_app(640, 480);
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
-        .expect("hold unsupported Ctrl+Alt mask");
+    app.test_modifiers(ModifiersState::CONTROL | ModifiersState::ALT);
     for key in [
         VirtualKeyCode::ArrowDown,
         VirtualKeyCode::Enter,
         VirtualKeyCode::Space,
         VirtualKeyCode::Escape,
     ] {
-        app.handle_key(key, ElementState::Pressed)
-            .expect("Ctrl+Alt GUI key down is inert");
-        app.handle_key(key, ElementState::Released)
-            .expect("Ctrl+Alt GUI key up is inert");
+        app.test_key(key, ElementState::Pressed);
+        app.test_key(key, ElementState::Released);
     }
-    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
-        .expect("Ctrl+Alt does not dispatch a mnemonic");
+    app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(!app.exit_requested);
 
-    app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
-        .expect("hold Alt+Shift");
-    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
-        .expect("dispatch shifted About mnemonic");
+    app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::About);
     assert!(app.ui_sound_log.is_empty());
     app.show_main_menu();
 
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
+    app.test_modifiers(ModifiersState::ALT);
     for key in [
         VirtualKeyCode::ArrowDown,
         VirtualKeyCode::Enter,
         VirtualKeyCode::Escape,
     ] {
-        app.handle_key(key, ElementState::Pressed)
-            .expect("unmatched Alt GUI key down is inert");
-        app.handle_key(key, ElementState::Released)
-            .expect("unmatched Alt GUI key up is inert");
+        app.test_key(key, ElementState::Pressed);
+        app.test_key(key, ElementState::Released);
     }
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(!app.exit_requested);
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Alt");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("arm retained Start focus");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("activate retained Start focus");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert!(app.ui_sound_log.iter().any(|sound| sound == "Click"));
     app.ui_sound_log.clear();
     app.show_main_menu();
 
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("focus Network");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-        .expect("release focus key");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
     app.ui_sound_log.clear();
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("SDL Space mnemonic dispatches Start");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert!(
         !app.ui_sound_log.iter().any(|sound| sound == "Click"),
@@ -3246,8 +3054,7 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.show_main_menu();
     app.open_about_dialog();
     app.ui_sound_log.clear();
-    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
-        .expect("SDL Left mnemonic opens Licenses");
+    app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
     assert_eq!(
         app.startup_about_dialog
             .as_ref()
@@ -3256,19 +3063,16 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
         clonk_frontend::startup_about_dlg::AboutPage::Licenses
     );
     assert!(app.ui_sound_log.is_empty());
-    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
-        .expect("SDL Up mnemonic requests updates");
+    app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.message_dialogs[0].state.caption(), "Check for Updates");
     assert!(app.ui_sound_log.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("abort the update check");
+        .test_value();
 
     app.show_main_menu();
-    app.handle_game_over()
-        .expect("forge stale menu evaluation state");
-    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
-        .expect("exclusive game-over owner swallows unmatched startup mnemonics");
+    app.handle_game_over().test_value();
+    app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
     assert!(app.game_over_dialog.is_some());
     assert_eq!(app.startup_view, StartupView::MainMenu);
 }
@@ -3302,7 +3106,7 @@ fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
         last_click: None,
         ignore_pointer_up: false,
     });
-    app.handle_text_input('T').expect("type into inline rename");
+    app.test_text_input('T');
     assert_eq!(
         app.startup_player_dialog
             .as_ref()
@@ -3329,11 +3133,9 @@ fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("open modal dialog");
-    app.handle_text_input('T')
-        .expect("text is swallowed by modal");
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("Apps is swallowed by modal");
+    .test_value();
+    app.test_text_input('T');
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     assert_eq!(
         app.startup_player_dialog
             .as_ref()
@@ -3346,24 +3148,24 @@ fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
 
 #[test]
 fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
-    let directory = tempdir().expect("crew rename fixture root");
+    let directory = tempdir();
     let player_path = directory.path().join("Ada.c4p");
-    fs::create_dir(&player_path).expect("create player group");
+    fs::create_dir(&player_path).test_value();
     fs::write(
         player_path.join("Player.txt"),
         "[Player]\nName=Ada\n\n[Preferences]\nColorDw=255\n",
     )
-    .expect("write player core");
+    .test_value();
     for (file_name, name) in [("Alpha.c4i", "Alpha"), ("Taken.c4i", "Taken")] {
         let crew = player_path.join(file_name);
-        fs::create_dir(&crew).expect("create crew child");
+        fs::create_dir(&crew).test_value();
         fs::write(
             crew.join("ObjectInfo.txt"),
             format!("[ObjectInfo]\nid=CLNK\nName={name}\nParticipation=1\n"),
         )
-        .expect("write crew core");
+        .test_value();
     }
-    let player_file = PlayerFile::load_from_path(&player_path).expect("load player fixture");
+    let player_file = PlayerFile::load_from_path(&player_path).test_value();
     let player_model = clonk_frontend::startup_plrsel::PlrSelPlayer {
         name: "Ada".to_string(),
         activated: false,
@@ -3389,31 +3191,27 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
     ])
-    .expect("enter crew mode");
+    .test_value();
 
     let alpha_index = app
         .startup_crew_models
         .iter()
         .position(|crew| crew.name == "Alpha")
-        .expect("Alpha row");
+        .test_value();
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_selected_index(Some(alpha_index));
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("start inline crew rename");
-    let rename = app.startup_crew_rename.as_ref().expect("inline rename");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
+    let rename = app.startup_crew_rename.test_ref();
     assert!(!rename.edit.label_visible());
     assert!(rename.edit.is_focused());
     assert_eq!(rename.edit.selected_text(), Some("Alpha"));
     assert!(app.startup_crew_rename_rect().is_some());
     assert!(app.game_option_input_dialog.is_none());
     for character in "Draft".chars() {
-        app.handle_text_input(character)
-            .expect("type draft before restarting rename");
+        app.test_text_input(character);
     }
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("F2 restarts the active rename");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     assert_eq!(
         app.startup_crew_rename
             .as_ref()
@@ -3423,7 +3221,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         Some("Alpha")
     );
 
-    let edit_rect = app.startup_crew_rename_rect().expect("rename bounds");
+    let edit_rect = app.startup_crew_rename_rect().test_value();
     let edit_point = GuiPoint::new(
         (edit_rect.x + edit_rect.w / 2) as f32,
         (edit_rect.y + edit_rect.h / 2) as f32,
@@ -3436,12 +3234,8 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         .edit
         .selection_range()
         .is_none());
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("restart after middle click");
-    app.startup_crew_rename
-        .as_mut()
-        .expect("rename before double click")
-        .last_click = Some(Instant::now());
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
+    app.startup_crew_rename.test_mut().last_click = Some(Instant::now());
     assert!(app.handle_startup_crew_rename_pointer_down(edit_point));
     assert!(!app
         .startup_crew_rename
@@ -3450,11 +3244,9 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         .edit
         .is_dragging());
     assert!(app.handle_startup_crew_rename_pointer_up(edit_point));
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("restart after double click");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_pointer_position(Some(edit_point));
     let expected_edit_entries = app.startup_crew_rename_context_entries(false);
     assert!(expected_edit_entries.iter().any(|entry| {
@@ -3463,8 +3255,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
                 clonk_frontend::startup_netdlg::NetDlgEditContextCommand::Cut,
             ))
     }));
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("open inline edit context");
+    app.test_right_button(ElementState::Pressed);
     assert!(app.startup_crew_rename.is_some());
     assert!(matches!(
         app.context_menu
@@ -3478,19 +3269,11 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     ));
     app.close_context_menu_silently();
 
-    let layout = app
-        .startup_player_dialog
-        .as_ref()
-        .expect("player dialog")
-        .layout();
+    let layout = app.startup_player_dialog.test_ref().layout();
     let same_row_point = GuiPoint::new(
         (layout.list_viewport.x + layout.item_height / 2) as f32,
         (layout.list_viewport.y + layout.item_pitch * alpha_index as i32
-            - app
-                .startup_player_dialog
-                .as_ref()
-                .expect("player dialog")
-                .list_scroll_offset()
+            - app.startup_player_dialog.test_ref().list_scroll_offset()
             + layout.item_height / 2) as f32,
     );
     let inert_row_point = GuiPoint::new(
@@ -3498,21 +3281,16 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         same_row_point.y,
     );
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_pointer_position(Some(inert_row_point));
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press current row outside the edit");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release current row outside the edit");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(app.startup_crew_rename.is_some());
 
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_pointer_position(Some(same_row_point));
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("open current crew row context");
+    app.test_right_button(ElementState::Pressed);
     assert!(app.startup_crew_rename.is_some());
     assert_eq!(
         app.context_menu
@@ -3527,51 +3305,38 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     app.close_context_menu_silently();
 
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_pointer_position(Some(same_row_point));
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press crew participation checkbox");
+    app.test_left_button(ElementState::Pressed);
     assert!(app.startup_crew_rename.is_some());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("toggle crew participation checkbox");
+    app.test_left_button(ElementState::Released);
     assert!(app.startup_crew_rename.is_none());
     assert!(player_path.join("Alpha.c4i").exists());
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("restart after checkbox abort");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("abort inline crew rename");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.startup_crew_rename.is_none());
     assert!(player_path.join("Alpha.c4i").exists());
 
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("restart rename before row switch");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     for character in "Discarded".chars() {
-        app.handle_text_input(character)
-            .expect("type name that must be discarded");
+        app.test_text_input(character);
     }
     let taken_index = app
         .startup_crew_models
         .iter()
         .position(|crew| crew.name == "Taken")
-        .expect("Taken row");
+        .test_value();
     let other_row_point = GuiPoint::new(
         (layout.list_viewport.x + layout.item_height / 2) as f32,
         (layout.list_viewport.y + layout.item_pitch * taken_index as i32
-            - app
-                .startup_player_dialog
-                .as_ref()
-                .expect("player dialog")
-                .list_scroll_offset()
+            - app.startup_player_dialog.test_ref().list_scroll_offset()
             + layout.item_height / 2) as f32,
     );
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_pointer_position(Some(other_row_point));
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("switch row through crew context");
+    app.test_right_button(ElementState::Pressed);
     assert!(app.startup_crew_rename.is_none());
     assert!(player_path.join("Alpha.c4i").exists());
     assert!(!player_path.join("Discarded.c4i").exists());
@@ -3585,38 +3350,30 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     assert!(app.context_menu.is_some());
     app.close_context_menu_silently();
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_selected_index(Some(alpha_index));
 
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("restart inline crew rename");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     for character in "Taken".chars() {
-        app.handle_text_input(character)
-            .expect("type colliding name");
+        app.test_text_input(character);
     }
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("submit colliding name");
-    let rename = app
-        .startup_crew_rename
-        .as_ref()
-        .expect("invalid rename stays active");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    let rename = app.startup_crew_rename.test_ref();
     assert!(rename.edit.is_focused());
     assert_eq!(rename.edit.selected_text(), Some("Taken"));
-    let collision = app.message_dialogs.last().expect("collision dialog");
+    let collision = app.message_dialogs.last().test_value();
     assert_eq!(collision.state.caption(), "Rename failure.");
     assert_eq!(
         collision.state.message(),
         "A Clonk with the file name \"Taken.c4i\" exists already."
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss collision dialog");
+        .test_value();
 
     for character in "Renamed".chars() {
-        app.handle_text_input(character).expect("type unique name");
+        app.test_text_input(character);
     }
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("commit inline crew rename");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(app.startup_crew_rename.is_none());
     assert!(!player_path.join("Alpha.c4i").exists());
     assert!(player_path.join("Renamed.c4i").exists());
@@ -3632,21 +3389,17 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         .startup_crew_models
         .iter()
         .position(|crew| crew.name == "Renamed")
-        .expect("renamed row");
+        .test_value();
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_selected_index(Some(renamed_index));
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("start focus-loss rename");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     let focus_loss_name = "Blurred crew name exceeds thirty";
     let focus_loss_file = crew_file_name_for_title(focus_loss_name);
     for character in focus_loss_name.chars() {
-        app.handle_text_input(character)
-            .expect("type focus-loss name");
+        app.test_text_input(character);
     }
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("commit rename on focus loss");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert!(app.startup_crew_rename.is_none());
     assert!(!player_path.join("Renamed.c4i").exists());
     assert!(player_path.join(&focus_loss_file).exists());
@@ -3662,27 +3415,24 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         .startup_crew_models
         .iter()
         .position(|crew| crew.name == focus_loss_name)
-        .expect("full untruncated focus-loss renamed row");
+        .test_value();
     assert!(
         fs::read_to_string(player_path.join(&focus_loss_file).join("ObjectInfo.txt"))
             .expect("read truncated persisted crew core")
             .contains("Name=Blurred crew name exceeds thir")
     );
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_selected_index(Some(focus_loss_index));
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("start partial-persistence rename");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     for character in "Partial".chars() {
-        app.handle_text_input(character)
-            .expect("type partially persisted name");
+        app.test_text_input(character);
     }
     fs::rename(
         player_path.join(&focus_loss_file),
         player_path.join("Partial.c4i"),
     )
-    .expect("simulate the accepted filename change before RewriteCore fails");
+    .test_value();
     app.accept_startup_crew_rename_after_rewrite_failure(
         focus_loss_index,
         &player_path,
@@ -3690,13 +3440,13 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         "Partial.c4i",
         "Partial",
     )
-    .expect("accept the partially persisted rename");
+    .test_value();
     assert!(app.startup_crew_rename.is_none());
     let partial_index = app
         .startup_crew_files
         .iter()
         .position(|entry| entry.file_name == "Partial.c4i")
-        .expect("partially persisted crew row");
+        .test_value();
     assert_eq!(app.startup_crew_models[partial_index].name, "Partial");
     assert_eq!(
         app.startup_crew_files[partial_index].file_name,
@@ -3711,20 +3461,19 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
             .expect("read stale core after simulated rewrite failure")
             .contains("Name=Blurred crew name exceeds thir")
     );
-    let rewrite_failure = app.message_dialogs.last().expect("rewrite failure dialog");
+    let rewrite_failure = app.message_dialogs.last().test_value();
     assert_eq!(rewrite_failure.state.caption(), "");
     assert_eq!(
         rewrite_failure.state.message(),
         "File modification failure."
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss rewrite failure dialog");
+        .test_value();
 
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("start rename before leaving player selection");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     assert!(app.startup_crew_rename.is_some());
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
-        .expect("leave player selection while rename is active");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(app.startup_crew_rename.is_none());
 }
@@ -3756,7 +3505,7 @@ fn player_properties_context_closes_and_opens_the_editor() {
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
     app.startup_player_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .set_pointer_position(Some(GuiPoint::new(
             (layout.list_client.x + layout.item_height * 2) as f32,
             (layout.list_client.y + layout.item_height / 2) as f32,
@@ -3780,7 +3529,7 @@ fn player_properties_context_closes_and_opens_the_editor() {
             )),
         ],
     })
-    .expect("Properties callback opens the editor");
+    .test_value();
     assert!(app.context_menu.is_none());
     assert!(matches!(
         app.startup_player_properties_dialog
@@ -3860,13 +3609,13 @@ fn active_scenario_gui_overrides_reach_dialogs_and_script_menus() {
         .assets
         .startup_dialog_images
         .get("GUICaption.png")
-        .expect("startup caption sheet")
+        .test_value()
         .clone();
     let pristine_scroll = app
         .assets
         .startup_dialog_images
         .get("GUIScroll.png")
-        .expect("startup scroll sheet")
+        .test_value()
         .clone();
     let overrides = vec![
         gui_sheet_override(
@@ -3894,15 +3643,10 @@ fn active_scenario_gui_overrides_reach_dialogs_and_script_menus() {
     // every reusable running dialog and the script-menu graphics.
     app.assets
         .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-        .expect("applied overrides keep the global GUI bundle valid");
-    let message = app
-        .assets
-        .message_dialog_resources()
-        .expect("message dialog resources resolve from the rebound sheets");
+        .test_value();
+    let message = app.assets.message_dialog_resources().test_value();
     assert_eq!(message.progress.pixels()[..4], [0x77, 0x88, 0x99, 0xff]);
-    app.assets
-        .input_dialog_resources()
-        .expect("input dialog resources resolve from the rebound sheets");
+    app.assets.input_dialog_resources().test_value();
     assert_eq!(
         app.assets
             .startup_dialog_images
@@ -3912,10 +3656,7 @@ fn active_scenario_gui_overrides_reach_dialogs_and_script_menus() {
         [0x11, 0x22, 0x33, 0xff],
         "the caption consumed by every dialog skin must be the override"
     );
-    let info = app
-        .assets
-        .static_info_dialog_resources()
-        .expect("info dialog resources resolve from the rebound sheets");
+    let info = app.assets.static_info_dialog_resources().test_value();
     assert_eq!(info.scroll.pixels()[..4], [0x44, 0x55, 0x66, 0xff]);
     assert_eq!(
         app.ensure_ingame_menu_gfx()
@@ -3965,7 +3706,7 @@ fn active_gui_sheet_overrides_rebind_only_when_the_winning_source_changes() {
         .assets
         .startup_dialog_images
         .get("GUIButtonHighlight.png")
-        .expect("startup highlight sheet")
+        .test_value()
         .clone();
 
     let first = vec![gui_sheet_override(
@@ -3979,7 +3720,7 @@ fn active_gui_sheet_overrides_rebind_only_when_the_winning_source_changes() {
         .assets
         .startup_dialog_images
         .get("GUIButtonHighlight.png")
-        .expect("applied highlight sheet")
+        .test_value()
         .pixels()
         .as_ptr();
     assert_eq!(applied_ptr, first[0].image.pixels().as_ptr());
@@ -4062,25 +3803,25 @@ fn active_gui_sheet_overrides_rebind_only_when_the_winning_source_changes() {
 #[test]
 fn real_mars_full_size_highlight_reaches_host_gui_resources() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated Mars GUI user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(320, 200, &paths);
     let scenario =
         resolve_next_mission_scenario(&app.scenario_catalog, "ClonkMars.c4f/01_Fossae.c4s")
-            .expect("Mars Fossae is present in the real scenario catalog");
+            .test_value();
     let setup = build_scenario_loader(
         &scenario,
         &app.scenario_seed_definition_load(),
         &paths,
         app.assets.as_ref(),
     )
-    .expect("resolve the real Mars scenario loader and GUI refresh");
+    .test_value();
     let highlight = setup
         .refreshed_gui_sheet_overrides
         .iter()
         .find(|sheet| sheet.stem == "GUIButtonHighlight")
         .cloned()
-        .expect("Mars parent Graphics.c4g wins GUIButtonHighlight");
+        .test_value();
 
     // C4GUI::Resource::Load keeps the winning C4FCT_Full dimensions and
     // C4Facet::DrawX stretches that complete source for every consumer
@@ -4103,28 +3844,14 @@ fn real_mars_full_size_highlight_reaches_host_gui_resources() {
             .map(|image| (image.width(), image.height())),
         Some((30, 30))
     );
-    app.assets
-        .network_start_wait_resources()
-        .expect("host start-wait accepts the full Mars facet");
-    app.assets
-        .game_lobby_resources()
-        .expect("host lobby accepts the full Mars facet");
-    app.assets
-        .game_option_resources()
-        .expect("game options accept the full Mars facet");
-    app.assets
-        .input_dialog_resources()
-        .expect("input dialogs accept the full Mars facet");
-    let scensel = app
-        .assets
-        .scensel_assets()
-        .expect("scenario selector assets remain complete");
-    let button_down = app
-        .assets
-        .dialog_image("GUIButtonDown.png")
-        .expect("active down-button plank");
+    app.assets.network_start_wait_resources().test_value();
+    app.assets.game_lobby_resources().test_value();
+    app.assets.game_option_resources().test_value();
+    app.assets.input_dialog_resources().test_value();
+    let scensel = app.assets.scensel_assets().test_value();
+    let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
     clonk_frontend::startup_scensel::validate_scensel_button_assets(&scensel, &button_down)
-        .expect("scenario buttons accept the full Mars facet");
+        .test_value();
 }
 
 #[test]
@@ -4137,25 +3864,20 @@ fn real_mars_upper_board_keeps_the_product_logo() {
     // stale copy of the base-game logo: unlike Hazard's own total-conversion
     // branding, it only restates the product name, which this port rebranded.
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated Mars logo user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let app = new_menu_app_with_paths(320, 200, &paths);
     let scenario =
         resolve_next_mission_scenario(&app.scenario_catalog, "ClonkMars.c4f/01_Fossae.c4s")
-            .expect("Mars Fossae is present in the real scenario catalog");
-    let product = app
-        .assets
-        .hud_graphics()
-        .logo
-        .clone()
-        .expect("planet/Graphics.c4g supplies the product logo");
+            .test_value();
+    let product = app.assets.hud_graphics().logo.clone().test_value();
     let mars = app
         .loaded_game_graphics_resources(&scenario, None)
         .expect("resolve the real Mars game graphics")
         .hud_graphics
         .logo
         .clone()
-        .expect("Mars upper-board logo");
+        .test_value();
 
     assert_eq!(
         (mars.width(), mars.height()),
@@ -4310,10 +4032,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
 
     for style in 0..=3 {
         let mut app = new_running_sandbox_app();
-        let cursor = app
-            .engine
-            .crew_cursor(app.local_owner)
-            .expect("sandbox cursor");
+        let cursor = app.engine.test_crew_cursor(app.local_owner);
         let mut menu = two_item_script_menu(cursor);
         menu.style = style;
         app.engine
@@ -4324,7 +4043,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
                     ..ObjectUpdate::default()
                 },
             )
-            .expect("install engine script menu");
+            .test_value();
         check(app, &format!("engine script menu style {style}"));
     }
 }
@@ -4390,15 +4109,15 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
 fn ingame_menu_abort_routes_to_the_same_confirmation() {
     let mut app = new_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start explicit test sandbox");
+        .test_value();
     let mut menu =
         IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default())
-            .expect("main menu");
+            .test_value();
     let abort = menu
         .items()
         .iter()
         .position(|item| item.action == MenuAction::Abort)
-        .expect("abort item");
+        .test_value();
     menu.set_selection(abort);
     app.ingame_menu.replace(app.local_owner, Some(menu));
     app.status_text.clear();
@@ -4408,7 +4127,7 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
         ControlCommand::MenuEnter,
         CommandKind::Press,
     )
-    .expect("production Abort opens the confirmation");
+    .test_value();
     assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::AbortGame { .. }
@@ -4425,13 +4144,13 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
 fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() {
     let mut app = new_state_only_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start explicit test sandbox");
+        .test_value();
     let crew_id = app
         .snapshot
         .objects
         .iter()
         .find(|object| object.crew_member)
-        .expect("sandbox crew")
+        .test_value()
         .id;
 
     for (kind, label) in [
@@ -4460,8 +4179,7 @@ fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() 
         owner: app.local_owner,
         kind: MenuRequestKind::Construction,
     }];
-    app.handle_menu_requests()
-        .expect("stale engine-owned construction request is ignored");
+    app.handle_menu_requests().test_value();
     assert!(app.object_menu.is_none());
 }
 
@@ -4469,7 +4187,7 @@ fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() 
 fn rust_only_running_function_keys_fail_without_opening_panes() {
     let mut app = new_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start explicit test sandbox");
+        .test_value();
     for (key, label) in [
         (VirtualKeyCode::F5, "F5"),
         (VirtualKeyCode::F6, "F6"),
@@ -4485,11 +4203,9 @@ fn rust_only_running_function_keys_fail_without_opening_panes() {
 
 #[test]
 fn screenshot_path_reuses_the_first_numbered_gap() {
-    let directory = tempdir().expect("screenshot directory");
-    fs::write(directory.path().join("Screenshot001.png"), b"one")
-        .expect("occupy first screenshot path");
-    fs::write(directory.path().join("Screenshot003.png"), b"three")
-        .expect("occupy third screenshot path");
+    let directory = tempdir();
+    fs::write(directory.path().join("Screenshot001.png"), b"one").test_value();
+    fs::write(directory.path().join("Screenshot003.png"), b"three").test_value();
 
     assert_eq!(
         next_screenshot_path(directory.path()),
@@ -4505,17 +4221,15 @@ fn options_dialog_loads_log_timestamps_from_general_config() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    persist_config_value(&paths, "General", "ShowLogTimestamps", "1")
-        .expect("seed timestamp config");
-    let mut app =
-        test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).expect("initialise app");
+    let paths = test_app_paths();
+    persist_config_value(&paths, "General", "ShowLogTimestamps", "1").test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
     wait_for_menu(&mut app);
 
     app.open_options_menu();
@@ -4537,13 +4251,10 @@ fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
     app.open_options_menu();
 
     let mut program_frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut program_frame)
-        .expect("Program remains available without audio");
+    app.test_render(&mut program_frame);
 
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("Graphics remains available without audio");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-        .expect("release Graphics navigation");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
 
     let sound_error = app
         .handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
@@ -4585,13 +4296,13 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     configure_test_startup_participant(&paths, user_data.path());
     let mut app = GameApp::new(
         1280,
@@ -4611,7 +4322,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     wait_for_menu(&mut app);
     app.startup_player_files.clear();
     app.startup_player_models.clear();
@@ -4622,22 +4333,15 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
             f64::from(button.x + button.w / 2),
             f64::from(button.y + button.h / 2),
         );
-        app.handle_cursor_moved(point)
-            .expect("move over main button");
-        app.handle_mouse_button(ElementState::Pressed)
-            .expect("press main button");
-        app.handle_mouse_button(ElementState::Released)
-            .expect("release main button");
+        app.test_cursor(point);
+        app.test_left_button(ElementState::Pressed);
+        app.test_left_button(ElementState::Released);
     };
     let settle_startup_fade = |app: &mut GameApp| {
         assert!(app.startup_dialog_fade_active());
-        app.startup_dialog_fade
-            .as_mut()
-            .expect("active startup dialog fade")
-            .step = STARTUP_DIALOG_FADE_STEPS - 1;
+        app.startup_dialog_fade.test_mut().step = STARTUP_DIALOG_FADE_STEPS - 1;
         let mut frame = vec![0_u8; 1280 * 720 * 4];
-        app.render(&mut frame)
-            .expect("complete startup dialog transition");
+        app.test_render(&mut frame);
         assert!(!app.startup_dialog_fade_active());
     };
 
@@ -4661,12 +4365,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         f64::from(network_back.x + network_back.w / 2),
         f64::from(network_back.y + network_back.h / 2),
     );
-    app.handle_cursor_moved(network_point)
-        .expect("move over network Back");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press network Back");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release network Back");
+    app.test_cursor(network_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
@@ -4698,16 +4399,11 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         f64::from(player_layout.list_client.x + player_layout.item_height + 4),
         f64::from(player_layout.list_client.y + player_layout.item_height / 2),
     );
-    app.handle_cursor_moved(player_row)
-        .expect("move over player row");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press player row");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release first player-row click");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press player row again");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("double-click opens Properties");
+    app.test_cursor(player_row);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(matches!(
         app.startup_player_properties_dialog
             .as_ref()
@@ -4715,31 +4411,24 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         Some(clonk_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
     ));
     assert!(app.status_text.is_empty());
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("cancel player Properties");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release cancel");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     let player_back = player_layout.buttons[0];
     let player_point = PhysicalPosition::new(
         f64::from(player_back.x + player_back.w / 2),
         f64::from(player_back.y + player_back.h / 2),
     );
-    app.handle_cursor_moved(player_point)
-        .expect("move over player Back");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press player Back");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release player Back");
+    app.test_cursor(player_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
     click_main_button(&mut app, 3);
     assert_eq!(app.startup_view, StartupView::Options);
     settle_startup_fade(&mut app);
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("select Graphics sheet");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-        .expect("release Graphics navigation");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
     assert_eq!(
         app.startup_options_dialog
             .as_ref()
@@ -4747,10 +4436,8 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
             .active_sheet(),
         clonk_frontend::startup_options_dlg::OptionsSheet::Graphics
     );
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("advance to the implemented Sound sheet");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-        .expect("release Sound navigation");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
     assert_eq!(
         app.startup_options_dialog
             .as_ref()
@@ -4759,10 +4446,8 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         clonk_frontend::startup_options_dlg::OptionsSheet::Sound
     );
 
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("advance to the Keyboard sheet");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
-        .expect("release Keyboard navigation");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
     assert_eq!(
         app.startup_options_dialog
             .as_ref()
@@ -4770,11 +4455,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
             .active_sheet(),
         clonk_frontend::startup_options_dlg::OptionsSheet::Keyboard
     );
-    app.handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
-        .expect("generic keyboard control pane is disconnected");
+    app.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
     assert!(app.status_text.is_empty());
-    app.handle_key(VirtualKeyCode::Backspace, ElementState::Pressed)
-        .expect("Back leaves options");
+    app.test_key(VirtualKeyCode::Backspace, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
@@ -4787,12 +4470,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         f64::from(licenses.x + licenses.w / 2),
         f64::from(licenses.y + licenses.h / 2),
     );
-    app.handle_cursor_moved(licenses_point)
-        .expect("move over Licenses");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Licenses");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("open Licenses");
+    app.test_cursor(licenses_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.startup_about_dialog
             .as_ref()
@@ -4801,8 +4481,7 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         clonk_frontend::startup_about_dlg::AboutPage::Licenses
     );
     let mut licenses_frame = vec![0_u8; 1280 * 720 * 4];
-    app.render(&mut licenses_frame)
-        .expect("render the classic Licenses page");
+    app.test_render(&mut licenses_frame);
     assert!(licenses_frame.iter().any(|byte| *byte != 0));
 
     let about_back = about_layout.buttons[0];
@@ -4810,46 +4489,35 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
         f64::from(about_back.x + about_back.w / 2),
         f64::from(about_back.y + about_back.h / 2),
     );
-    app.handle_cursor_moved(about_back_point)
-        .expect("move over About Back");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press About Back");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("return from licenses");
+    app.test_cursor(about_back_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::About);
 
     let mut credits = vec![0_u8; 1280 * 720 * 4];
-    app.render(&mut credits).expect("render credits");
+    app.test_render(&mut credits);
     let update = about_layout.buttons[1];
     let update_point = PhysicalPosition::new(
         f64::from(update.x + update.w / 2),
         f64::from(update.y + update.h / 2),
     );
-    app.handle_cursor_moved(update_point)
-        .expect("move over Update");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Update");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("start the manual update check");
+    app.test_cursor(update_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::About);
-    let wait = app.message_dialogs.last().expect("visible update wait");
+    let wait = app.message_dialogs.last().test_value();
     assert_eq!(wait.state.caption(), "Check for Updates");
     assert_eq!(wait.state.message(), "Checking for updates...");
     assert!(app.update_check.is_some());
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("press Escape on the update wait");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("abort the update check");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     assert!(app.message_dialogs.is_empty());
     assert!(app.update_check.is_none());
     assert_eq!(app.startup_view, StartupView::About);
 
-    app.handle_cursor_moved(about_back_point)
-        .expect("move over About Back");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press About Back");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("leave About");
+    app.test_cursor(about_back_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
@@ -4861,36 +4529,35 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
 #[test]
 fn participant_context_helpers_preserve_raw_indices_and_lazy_scan_rules() {
     let _lock = env_lock().lock();
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     let install_root = install.path();
-    fs::create_dir_all(install_root.join("planet")).expect("create planet directory");
-    fs::write(install_root.join("planet/System.c4g"), b"").expect("create system group marker");
-    let user_data = tempdir().expect("user data");
+    fs::create_dir_all(install_root.join("planet")).test_value();
+    fs::write(install_root.join("planet/System.c4g"), b"").test_value();
+    let user_data = tempdir();
     let player_root = user_data.path().join("Players");
     let ada = player_root.join("Ada.c4p");
     let bob = player_root.join("Bob.c4p");
     let broken = player_root.join("Broken.c4p");
-    fs::create_dir_all(&ada).expect("create Ada group");
-    fs::create_dir_all(&bob).expect("create Bob group");
-    fs::write(&broken, b"not a group").expect("create invalid C4P file");
-    fs::write(player_root.join(".Hidden.c4p"), b"hidden").expect("create hidden C4P");
-    fs::write(player_root.join("Notes.txt"), b"text").expect("create non-player file");
+    fs::create_dir_all(&ada).test_value();
+    fs::create_dir_all(&bob).test_value();
+    fs::write(&broken, b"not a group").test_value();
+    fs::write(player_root.join(".Hidden.c4p"), b"hidden").test_value();
+    fs::write(player_root.join("Notes.txt"), b"text").test_value();
     let nested = player_root.join("Nested");
-    fs::create_dir_all(&nested).expect("create nested directory");
-    fs::write(nested.join("Deep.c4p"), b"nested").expect("create nested C4P");
+    fs::create_dir_all(&nested).test_value();
+    fs::write(nested.join("Deep.c4p"), b"nested").test_value();
 
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let save_participants = |participants: String| {
         let mut config = Config::new();
         config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
         config.set_in(Some("General"), "Participants", participants);
-        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
-            .expect("create config directory");
-        config.save(paths.config_file()).expect("save config");
+        fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+        config.save(paths.config_file()).test_value();
     };
 
     save_participants(format!(
@@ -4901,7 +4568,7 @@ fn participant_context_helpers_preserve_raw_indices_and_lazy_scan_rules() {
         player_root.join("Missing.c4p").display(),
         player_root.join("Notes.txt").display(),
     ));
-    update_startup_participant_config(&paths, |_| {}).expect("validate participants");
+    update_startup_participant_config(&paths, |_| {}).test_value();
     assert_eq!(
         startup_participant_references(&paths).expect("read validated participants"),
         vec![
@@ -4933,7 +4600,7 @@ fn participant_context_helpers_preserve_raw_indices_and_lazy_scan_rules() {
     save_participants(format!("{};;{}", bob.display(), ada.display()));
     let removed = remove_startup_participant_config(&paths, 2)
         .expect("remove using fresh raw index")
-        .expect("raw index still resolves");
+        .test_value();
     assert_eq!(removed, ada.to_string_lossy());
     assert_eq!(
         startup_participant_references(&paths).expect("read after removal"),
@@ -4967,14 +4634,12 @@ fn participant_context_helpers_preserve_raw_indices_and_lazy_scan_rules() {
     assert!(!add.iter().any(|entry| entry.text == "Deep"));
 
     let developer_players = install_root.join("build/DevPlayers");
-    fs::create_dir_all(&developer_players).expect("create developer PlayerPath");
-    fs::write(developer_players.join("Late.C4P"), b"not parsed").expect("create developer C4P");
+    fs::create_dir_all(&developer_players).test_value();
+    fs::write(developer_players.join("Late.C4P"), b"not parsed").test_value();
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", "DevPlayers");
     config.set_in(Some("General"), "Participants", "");
-    config
-        .save(paths.config_file())
-        .expect("save relative config");
+    config.save(paths.config_file()).test_value();
     let developer_add = startup_participant_add_entries(&paths);
     assert_eq!(developer_add.len(), 1);
     assert_eq!(developer_add[0].text, "Late");
@@ -4997,22 +4662,22 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let player_root = user_data.path().join("Players");
     let ada = player_root.join("Ada.c4p");
     let bob = player_root.join("Bob.c4p");
-    fs::create_dir_all(&ada).expect("create Ada group");
+    fs::create_dir_all(&ada).test_value();
     fs::write(
         ada.join("Player.txt"),
         "[Player]\nName=Ada\n\n[Preferences]\nColorDw=255\n",
     )
-    .expect("write Ada core");
+    .test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
     config.set_in(
@@ -5026,9 +4691,8 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
             ada.display(),
         ),
     );
-    fs::create_dir_all(paths.config_file().parent().expect("config parent"))
-        .expect("create config directory");
-    config.save(paths.config_file()).expect("save config");
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    config.save(paths.config_file()).test_value();
 
     let mut app = GameApp::new(
         1280,
@@ -5048,7 +4712,7 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     assert_eq!(
         startup_participant_references(&paths).expect("constructor validation"),
         vec![ada.to_string_lossy().into_owned()]
@@ -5063,52 +4727,37 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
         f64::from(participant_rect.x + participant_rect.w / 2),
         f64::from(participant_rect.y + participant_rect.h / 2),
     );
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(participant_rect.x - 1),
         f64::from(participant_rect.y),
-    ))
-    .expect("move outside participant label");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("ignore context outside participant label");
+    ));
+    app.test_right_button(ElementState::Pressed);
     assert!(app.context_menu.is_none());
 
     let open = |app: &mut GameApp| {
-        app.handle_cursor_moved(label_point)
-            .expect("move over participant label");
-        app.handle_right_mouse_button(ElementState::Pressed)
-            .expect("open participant context menu");
-        let layout = app.context_menu.as_ref().expect("root menu").layout();
+        app.test_cursor(label_point);
+        app.test_right_button(ElementState::Pressed);
+        let layout = app.context_menu.test_ref().layout();
         assert_eq!(layout.panels.len(), 1);
         assert_eq!(layout.panels[0].rows.len(), 2);
         assert_eq!(layout.panels[0].selected, None);
     };
     let hover_root = |app: &mut GameApp, index: usize| {
-        let row = app
-            .context_menu
-            .as_ref()
-            .expect("root menu")
-            .layout()
-            .panels[0]
-            .rows[index]
-            .rect;
-        app.handle_cursor_moved(PhysicalPosition::new(
+        let row = app.context_menu.test_ref().layout().panels[0].rows[index].rect;
+        app.test_cursor(PhysicalPosition::new(
             f64::from(row.x + 1),
             f64::from(row.y + 1),
-        ))
-        .expect("hover root row");
+        ));
     };
     let activate_child = |app: &mut GameApp, index: usize| {
-        let layout = app.context_menu.as_ref().expect("submenu").layout();
+        let layout = app.context_menu.test_ref().layout();
         let row = layout.panels[1].rows[index].rect;
-        app.handle_cursor_moved(PhysicalPosition::new(
+        app.test_cursor(PhysicalPosition::new(
             f64::from(row.x + 1),
             f64::from(row.y + 1),
-        ))
-        .expect("hover child row");
-        app.handle_mouse_button(ElementState::Pressed)
-            .expect("activate child row on left-down");
-        app.handle_mouse_button(ElementState::Released)
-            .expect("release activation button");
+        ));
+        app.test_left_button(ElementState::Pressed);
+        app.test_left_button(ElementState::Released);
     };
 
     open(&mut app);
@@ -5121,14 +4770,14 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
     assert!(!app.startup_element_tooltip_pending());
 
     open(&mut app);
-    fs::create_dir_all(&bob).expect("create Bob after root popup opens");
+    fs::create_dir_all(&bob).test_value();
     fs::write(
         bob.join("Player.txt"),
         "[Player]\nName=Bob\n\n[Preferences]\nColorDw=255\n",
     )
-    .expect("write Bob core");
+    .test_value();
     hover_root(&mut app, 0);
-    let add_layout = app.context_menu.as_ref().expect("Add submenu").layout();
+    let add_layout = app.context_menu.test_ref().layout();
     assert_eq!(add_layout.panels.len(), 2);
     assert_eq!(add_layout.panels[1].rows.len(), 1);
     activate_child(&mut app, 0);
@@ -5144,11 +4793,7 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
 
     open(&mut app);
     hover_root(&mut app, 0);
-    let empty = app
-        .context_menu
-        .as_ref()
-        .expect("empty Add submenu")
-        .layout();
+    let empty = app.context_menu.test_ref().layout();
     assert_eq!(empty.panels.len(), 2);
     assert!(empty.panels[1].rows.is_empty());
     assert_eq!(
@@ -5159,7 +4804,7 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
 
     open(&mut app);
     hover_root(&mut app, 1);
-    let remove_layout = app.context_menu.as_ref().expect("Remove submenu").layout();
+    let remove_layout = app.context_menu.test_ref().layout();
     assert_eq!(remove_layout.panels.len(), 2);
     assert_eq!(remove_layout.panels[1].rows.len(), 2);
     activate_child(&mut app, 1);
@@ -5177,23 +4822,23 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let player_root = user_data.path().join("Players");
     for name in ["Ada", "Bob"] {
         let group = player_root.join(format!("{name}.c4p"));
-        fs::create_dir_all(&group).expect("create player group");
+        fs::create_dir_all(&group).test_value();
         fs::write(
             group.join("Player.txt"),
             format!("[Player]\nName={name}\n\n[Preferences]\nColorDw=255\n"),
         )
-        .expect("write player core");
+        .test_value();
     }
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
     config.set_in(
@@ -5201,11 +4846,8 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         "Participants",
         player_root.join("Ada.c4p").to_string_lossy(),
     );
-    fs::create_dir_all(paths.config_file().parent().expect("config parent"))
-        .expect("create config directory");
-    config
-        .save(paths.config_file())
-        .expect("save player config");
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    config.save(paths.config_file()).test_value();
 
     let mut app = GameApp::new(
         1280,
@@ -5225,7 +4867,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     wait_for_menu(&mut app);
     assert_eq!(app.startup_player_models.len(), 2);
     app.open_player_selection_dialog();
@@ -5240,19 +4882,13 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         )
     };
     let open_on_row = |app: &mut GameApp, index: usize| {
-        app.handle_cursor_moved(row_point(index))
-            .expect("move over whole player row");
-        app.handle_right_mouse_button(ElementState::Pressed)
-            .expect("open row context menu");
+        app.test_cursor(row_point(index));
+        app.test_right_button(ElementState::Pressed);
     };
 
-    let focus_before = app
-        .startup_player_dialog
-        .as_ref()
-        .expect("player controller")
-        .focused_control();
+    let focus_before = app.startup_player_dialog.test_ref().focused_control();
     open_on_row(&mut app, 1);
-    let popup = app.context_menu.as_ref().expect("context menu");
+    let popup = app.context_menu.test_ref();
     assert_eq!(popup.layout().panels.len(), 1);
     assert_eq!(popup.layout().panels[0].rows.len(), 2);
     assert_eq!(popup.layout().panels[0].selected, None);
@@ -5273,13 +4909,11 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     );
 
     let properties = popup.layout().panels[0].rows[0].rect;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(properties.x + 1),
         f64::from(properties.y + 1),
-    ))
-    .expect("hover Properties");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("activate Properties on left-down");
+    ));
+    app.test_left_button(ElementState::Pressed);
     assert!(app.context_menu.is_none());
     assert!(matches!(
         app.startup_player_properties_dialog
@@ -5293,30 +4927,18 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         app.context_menu_pointer_capture,
         Some(ContextMenuPointerButton::Left)
     );
-    app.handle_mouse_button(ElementState::Released)
-        .expect("swallow Properties activation release");
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.context_menu_pointer_capture, None);
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("close Properties");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release Properties close");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
     open_on_row(&mut app, 1);
-    let delete = app
-        .context_menu
-        .as_ref()
-        .expect("context menu")
-        .layout()
-        .panels[0]
-        .rows[1]
-        .rect;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    let delete = app.context_menu.test_ref().layout().panels[0].rows[1].rect;
+    app.test_cursor(PhysicalPosition::new(
         f64::from(delete.x + 1),
         f64::from(delete.y + 1),
-    ))
-    .expect("hover Delete");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("activate Delete on left-down");
+    ));
+    app.test_left_button(ElementState::Pressed);
     assert!(app.context_menu.is_none());
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.message_dialogs[0].state.caption(), "Delete");
@@ -5324,16 +4946,15 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         app.message_dialogs[0].state.message(),
         "Do you really want to delete player Bob?"
     );
-    app.handle_mouse_button(ElementState::Released)
-        .expect("swallow Delete activation release before modal");
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.context_menu_pointer_capture, None);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
-        .expect("decline deletion");
+        .test_value();
 
     open_on_row(&mut app, 1);
     let slot = GamepadSlot::new(0);
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::Direction {
             slot,
             button: ControlButton::Down,
@@ -5359,13 +4980,12 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
             button: LegacyGamepadButton::new(0),
             state: ElementState::Pressed,
         },
-    ])
-    .expect("activate Delete through one controller batch");
+    ]);
     assert!(app.context_menu.is_none());
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
-        .expect("decline gamepad deletion");
-    app.process_gamepad_event_batch([
+        .test_value();
+    app.test_gamepad_events([
         GamepadEvent::GuiButton {
             slot,
             class: GuiButtonClass::Low,
@@ -5381,14 +5001,11 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
             button: LegacyGamepadButton::new(0),
             state: ElementState::Released,
         },
-    ])
-    .expect("release captured controller batch");
+    ]);
 
     open_on_row(&mut app, 1);
-    app.handle_cursor_moved(row_point(0))
-        .expect("move outside popup to first row");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("outside right-down closes and passes through");
+    app.test_cursor(row_point(0));
+    app.test_right_button(ElementState::Pressed);
     assert_eq!(
         app.startup_player_dialog
             .as_ref()
@@ -5403,8 +5020,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
 
     let mut with_context = vec![0_u8; 1280 * 720 * 4];
     assert!(app.render(&mut with_context).expect("render popup"));
-    app.handle_focus_lost()
-        .expect("focus loss closes popup silently");
+    app.handle_focus_lost().test_value();
     assert!(app.context_menu.is_none());
     let mut without_context = vec![0_u8; 1280 * 720 * 4];
     assert!(app
@@ -5421,7 +5037,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     assert_eq!(without_context, stable);
 
     open_on_row(&mut app, 1);
-    app.resize(1024, 640).expect("resize closes popup");
+    app.resize(1024, 640).test_value();
     assert!(app.context_menu.is_none());
     reset_cached_app_paths();
 }
@@ -5438,15 +5054,13 @@ fn message_dialog_stack_closes_only_the_top_entry() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("push modal");
+        .test_value();
     }
     assert_eq!(app.message_dialogs.len(), 2);
     assert_eq!(app.message_dialogs[1].state.caption(), "Second");
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("close top");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("swallow top release");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.message_dialogs[0].state.caption(), "First");
 }
@@ -5462,24 +5076,21 @@ fn message_dialog_focus_loss_cancels_held_input_and_stale_release_guards() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("push modal");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("press modal button");
-    app.handle_focus_lost().expect("lose focus");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("release after refocus");
+    .test_value();
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.handle_focus_lost().test_value();
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(
         app.message_dialogs.len(),
         1,
         "a release missing its pre-focus-loss press must not activate"
     );
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("dismiss modal");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app
         .message_dialog_consumed_keys
         .contains(&VirtualKeyCode::Escape));
-    app.handle_focus_lost().expect("lose focus after dismissal");
+    app.handle_focus_lost().test_value();
     assert!(app.message_dialog_consumed_keys.is_empty());
 }
 
@@ -5495,7 +5106,7 @@ fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("push modal");
+    .test_value();
     let source = |cluster, event| SourcedGamepadEvent {
         gamepad: 0,
         cluster,
@@ -5512,10 +5123,10 @@ fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
         )],
         true,
     )
-    .expect("press primary gamepad button");
+    .test_value();
 
     app.process_sourced_gamepad_event_batch([source(31, GamepadEvent::Clear { slot })], true)
-        .expect("disconnect/reset gamepad");
+        .test_value();
     assert_eq!(app.message_dialogs.len(), 1);
 
     app.process_sourced_gamepad_event_batch(
@@ -5539,23 +5150,20 @@ fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
         ],
         true,
     )
-    .expect("release after standalone Clear is a fresh physical cluster");
+    .test_value();
     assert_eq!(
         app.message_dialogs.len(),
         1,
         "Clear cancels the pressed state before the fresh release cluster"
     );
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("dismiss by keyboard");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release dismiss key");
-    app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    app.test_gamepad_events([GamepadEvent::GuiButton {
         slot,
         class: GuiButtonClass::High,
         state: ElementState::Pressed,
-    }])
-    .expect("next controller input");
+    }]);
 }
 
 #[test]
@@ -5580,12 +5188,11 @@ fn configured_gamepad_button10_routes_player_menu_to_control_set_five_owner() {
         disable_mouse: false,
     });
 
-    app.process_gamepad_event_batch([GamepadEvent::Button {
+    app.test_gamepad_events([GamepadEvent::Button {
         slot: GamepadSlot::new(1),
         button: LegacyGamepadButton::new(0),
         state: ElementState::Pressed,
-    }])
-    .expect("press configured gamepad button");
+    }]);
 
     assert!(
         app.ingame_menu.is_some(),
@@ -5597,7 +5204,7 @@ fn configured_gamepad_button10_routes_player_menu_to_control_set_five_owner() {
 fn modal_message_dialog_keeps_running_simulation_and_clock_alive() {
     let mut app = new_menu_app(640, 480);
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start sandbox");
+        .test_value();
     let frame = app.engine.frame();
     let game_time = app.engine.game_time();
     app.push_message_dialog(
@@ -5608,9 +5215,9 @@ fn modal_message_dialog_keeps_running_simulation_and_clock_alive() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("push modal");
+    .test_value();
 
-    app.update().expect("modal update");
+    app.test_update();
     assert!(
         app.sec1_timer().expect("modal clock pulse"),
         "modal loop must keep the game clock alive"
@@ -5623,7 +5230,7 @@ fn modal_message_dialog_keeps_running_simulation_and_clock_alive() {
 fn message_dialog_malformed_specific_assets_fail_before_modal_mutation() {
     let mut app = new_menu_app(640, 480);
     Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .insert(
             "GUIIcons.png".to_string(),
@@ -5654,11 +5261,10 @@ fn menu_input_changes_the_composed_frame() {
 
     let mut app = new_real_classic_menu_app(320, 200);
     let mut before = vec![0u8; 320 * 200 * 4];
-    app.render(&mut before).expect("render");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("key input");
+    app.test_render(&mut before);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     let mut after = vec![0u8; 320 * 200 * 4];
-    app.render(&mut after).expect("render after input");
+    app.test_render(&mut after);
     assert_ne!(
         before, after,
         "input events must change what the menu presents"
@@ -5672,16 +5278,16 @@ fn menu_backdrop_restore_matches_full_recomposition() {
     let mut app = new_real_classic_menu_app(320, 200);
     let len = 320 * 200 * 4;
     let mut first = vec![0u8; len];
-    app.render(&mut first).expect("cold render");
+    app.test_render(&mut first);
 
     // A recomposition that restores the cached static backdrop...
     let mut restored = vec![0u8; len];
-    app.render(&mut restored).expect("backdrop-restored render");
+    app.test_render(&mut restored);
 
     // ...must match one composed from scratch.
     app.menu_backdrop_cache = StartupBackdropCache::default();
     let mut recomposed = vec![0u8; len];
-    app.render(&mut recomposed).expect("full recomposition");
+    app.test_render(&mut recomposed);
 
     assert_eq!(
         restored, recomposed,
@@ -5699,10 +5305,10 @@ fn menu_resize_renders_at_new_dimensions() {
 
     let mut app = new_real_classic_menu_app(320, 200);
     let mut frame = vec![0u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("render");
-    app.resize(400, 300).expect("resize");
+    app.test_render(&mut frame);
+    app.resize(400, 300).test_value();
     let mut larger = vec![0u8; 400 * 300 * 4];
-    app.render(&mut larger).expect("render after resize");
+    app.test_render(&mut larger);
     let surface = app.graphics.surface();
     assert_eq!(
         (surface.width(), surface.height()),

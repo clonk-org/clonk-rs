@@ -39,9 +39,7 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
     engine.debug_set_in_liquid(object_id, true);
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after swimming up-right");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 2);
     assert_eq!(object.velocity.y, -2);
     // DFA_SWIM steers with SwimAccel only — no GravAccel component
@@ -61,9 +59,7 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after drifting in water");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 0);
     assert_eq!(object.velocity.y, 0);
     // With no gravity component on DFA_SWIM the Stop deceleration comes

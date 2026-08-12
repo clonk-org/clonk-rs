@@ -6,17 +6,12 @@
     fn assign_death_clears_preexisting_authoritative_command_queue() {
         // AssignDeath calls ClearCommands before contents, player pointers, and Death
         // (oracle-src-pinned src/C4Object.cpp:1180-1200,3873-3884).
-        let mut definition = crate::Definition::from_script(
-            "QDED",
-            "Queued death",
-            r#"#strict
-public func Trigger()
-{
-    return Kill(this, true);
-}
-"#,
-        )
-        .expect("queued-death script compiles");
+        let mut definition = test_definition("QDED", "Queued death", r#"#strict
+        public func Trigger()
+        {
+            return Kill(this, true);
+        }
+        "#);
         definition.configure_actions(
             Some("Idle".to_string()),
             HashMap::from([
@@ -26,15 +21,10 @@ public func Trigger()
         );
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("queued-death definition registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("QDED").with_alive(true))
-            .expect("queued-death object spawns");
+        engine.register_test_definition(definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("QDED").with_alive(true));
         let index = engine
-            .find_object_index(target)
-            .expect("queued-death object exists");
+            .find_object_index(target).test_value();
         engine.objects[index]
             .command_queue
             .push_back(QueuedCommand::new(7, ObjectUpdate::default()));
@@ -60,17 +50,12 @@ public func Trigger()
         // copy-out must therefore move the FoW link to the new owner even
         // though PlrViewRange itself did not change
         // (oracle-src-pinned src/C4Object.cpp:1193-1204,5493-5522).
-        let mut target_definition = crate::Definition::from_script(
-            "FOWD",
-            "FoW death",
-            r#"#strict
-protected func Death()
-{
-    SetOwner(1);
-}
-"#,
-        )
-        .expect("FoW-death script compiles");
+        let mut target_definition = test_definition("FOWD", "FoW death", r#"#strict
+        protected func Death()
+        {
+            SetOwner(1);
+        }
+        "#);
         target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         target_definition.configure_actions(
             Some("Idle".to_string()),
@@ -79,41 +64,24 @@ protected func Death()
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let caller_definition = crate::Definition::from_script(
-            "FOWC",
-            "FoW caller",
-            r#"#strict
-public func Trigger(target)
-{
-    return Kill(target, true);
-}
-"#,
-        )
-        .expect("FoW caller script compiles");
+        let caller_definition = test_definition("FOWC", "FoW caller", r#"#strict
+        public func Trigger(target)
+        {
+            return Kill(target, true);
+        }
+        "#);
 
         let mut engine = crate::Engine::with_seed(0);
         for player in [0, 1] {
-            engine
-                .register_player(crate::PlayerConfig::new(player, format!("Player {player}")))
-                .expect("FoW player registers");
+            engine.register_test_player(crate::PlayerConfig::new(player, format!("Player {player}")));
         }
-        engine
-            .register_definition(target_definition)
-            .expect("FoW-death definition registers");
-        engine
-            .register_definition(caller_definition)
-            .expect("FoW caller definition registers");
-        let target = engine
-            .spawn_object(
-                SpawnConfig::new("FOWD")
-                    .with_owner(0)
-                    .with_alive(true)
-                    .with_plr_view_range(500),
-            )
-            .expect("FoW-death target spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("FOWC"))
-            .expect("FoW caller spawns");
+        engine.register_test_definition(target_definition);
+        engine.register_test_definition(caller_definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("FOWD")
+            .with_owner(0)
+            .with_alive(true)
+            .with_plr_view_range(500));
+        let caller = engine.spawn_test_object(SpawnConfig::new("FOWC"));
         assert!(engine
             .player(0)
             .is_some_and(|player| player.has_fow_view_object(target)));
@@ -121,7 +89,7 @@ public func Trigger(target)
             .player(1)
             .is_some_and(|player| player.has_fow_view_object(target)));
 
-        let caller_index = engine.find_object_index(caller).expect("FoW caller exists");
+        let caller_index = engine.find_object_index(caller).test_value();
         assert_eq!(
             engine
                 .call_object_function(
@@ -133,8 +101,7 @@ public func Trigger(target)
             Value::Bool(true)
         );
         let target_state = engine
-            .object_snapshot(target)
-            .expect("dead FoW target remains allocated");
+            .object_snapshot(target).test_value();
         assert_eq!(target_state.owner, 1);
         assert_eq!(
             target_state.plr_view_range, 500,
@@ -162,8 +129,7 @@ public func Trigger(target)
         // 1235-1259,1692-1716; src/C4Object.cpp:1193-1195).
         fn run(foreign_vm_path: bool) -> (crate::Engine, ObjectId, ObjectId) {
             let mut crew_definition =
-                crate::Definition::from_script("VCRE", "View crew", "#strict")
-                    .expect("view-crew script compiles");
+                test_definition("VCRE", "View crew", "#strict");
             crew_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
             crew_definition.set_crew_member(true);
             crew_definition.configure_actions(
@@ -173,54 +139,33 @@ public func Trigger(target)
                     ("Dead".to_string(), crate::ActionSpec::default()),
                 ]),
             );
-            let caller_definition = crate::Definition::from_script(
-                "VCRL",
-                "View caller",
-                r#"#strict
-public func Trigger(target)
-{
-    return Kill(target, true);
-}
-"#,
-            )
-            .expect("view caller script compiles");
+            let caller_definition = test_definition("VCRL", "View caller", r#"#strict
+            public func Trigger(target)
+            {
+                return Kill(target, true);
+            }
+            "#);
 
             let mut engine = crate::Engine::with_seed(0);
+            engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+            engine.register_test_definition(crew_definition);
+            engine.register_test_definition(caller_definition);
+            let dying = engine.spawn_test_object(SpawnConfig::new("VCRE")
+                .with_owner(0)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_position(Vector2::new(40, 50)));
+            let replacement = engine.spawn_test_object(SpawnConfig::new("VCRE")
+                .with_owner(0)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_position(Vector2::new(140, 150)));
             engine
-                .register_player(crate::PlayerConfig::new(0, "Player"))
-                .expect("view player registers");
+                .select_crew(0, [dying, replacement]).test_value();
             engine
-                .register_definition(crew_definition)
-                .expect("view-crew definition registers");
-            engine
-                .register_definition(caller_definition)
-                .expect("view caller definition registers");
-            let dying = engine
-                .spawn_object(
-                    SpawnConfig::new("VCRE")
-                        .with_owner(0)
-                        .with_alive(true)
-                        .with_crew_member(true)
-                        .with_position(Vector2::new(40, 50)),
-                )
-                .expect("dying view crew spawns");
-            let replacement = engine
-                .spawn_object(
-                    SpawnConfig::new("VCRE")
-                        .with_owner(0)
-                        .with_alive(true)
-                        .with_crew_member(true)
-                        .with_position(Vector2::new(140, 150)),
-                )
-                .expect("replacement view crew spawns");
-            engine
-                .select_crew(0, [dying, replacement])
-                .expect("view crew selects");
-            engine
-                .set_crew_cursor(0, Some(dying))
-                .expect("dying crew becomes cursor");
+                .set_crew_cursor(0, Some(dying)).test_value();
             {
-                let player = engine.player_mut(0).expect("view player remains");
+                let player = engine.player_mut(0).test_value();
                 player.set_view_cursor(Some(dying));
                 player.set_view_target(Some(replacement));
                 player.set_view_center(Vector2::new(1, 2));
@@ -230,12 +175,9 @@ public func Trigger(target)
             }
 
             if foreign_vm_path {
-                let caller = engine
-                    .spawn_object(SpawnConfig::new("VCRL"))
-                    .expect("view caller spawns");
+                let caller = engine.spawn_test_object(SpawnConfig::new("VCRL"));
                 let caller_index = engine
-                    .find_object_index(caller)
-                    .expect("view caller exists");
+                    .find_object_index(caller).test_value();
                 assert_eq!(
                     engine
                         .call_object_function(
@@ -247,17 +189,16 @@ public func Trigger(target)
                     Value::Bool(true)
                 );
             } else {
-                let dying_index = engine.find_object_index(dying).expect("dying crew exists");
+                let dying_index = engine.find_object_index(dying).test_value();
                 engine
-                    .assign_death(dying_index, true)
-                    .expect("direct view death succeeds");
+                    .assign_death(dying_index, true).test_value();
             }
             (engine, dying, replacement)
         }
 
         for foreign_vm_path in [false, true] {
             let (engine, dying, replacement) = run(foreign_vm_path);
-            let player = engine.player(0).expect("view player survives");
+            let player = engine.player(0).test_value();
             assert_eq!(
                 player.cursor(),
                 Some(replacement),
@@ -298,26 +239,21 @@ public func Trigger(target)
         let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_stops = Arc::clone(&stop_calls);
         let observed_deaths = Arc::clone(&death_calls);
-        let mut target_definition = crate::Definition::from_script(
-            "TARG",
-            "Target",
-            r#"#strict
-public func Setup()
-{
-    AddEffect("Vanish", this, 1, 0, this);
-}
-protected func FxVanishStop(target, number, reason)
-{
-    if (reason == 4) RemoveObject(target);
-    return 0;
-}
-protected func Death()
-{
-    return 0;
-}
-"#,
-        )
-        .expect("removal target script compiles");
+        let mut target_definition = test_definition("TARG", "Target", r#"#strict
+        public func Setup()
+        {
+            AddEffect("Vanish", this, 1, 0, this);
+        }
+        protected func FxVanishStop(target, number, reason)
+        {
+            if (reason == 4) RemoveObject(target);
+            return 0;
+        }
+        protected func Death()
+        {
+            return 0;
+        }
+        "#);
         target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
             move |name, _| match name {
                 "FxVanishStop" => {
@@ -329,36 +265,22 @@ protected func Death()
                 _ => {}
             },
         ));
-        let caller_definition = crate::Definition::from_script(
-            "CALL",
-            "Caller",
-            r#"#strict
-public func Trigger(target)
-{
-    return Kill(target, true);
-}
-"#,
-        )
-        .expect("removal caller script compiles");
+        let caller_definition = test_definition("CALL", "Caller", r#"#strict
+        public func Trigger(target)
+        {
+            return Kill(target, true);
+        }
+        "#);
 
         let mut engine = crate::Engine::with_seed(0);
+        engine.register_test_definition(target_definition);
+        engine.register_test_definition(caller_definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_alive(true));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let target_index = engine.find_object_index(target).test_value();
         engine
-            .register_definition(target_definition)
-            .expect("removal target registers");
-        engine
-            .register_definition(caller_definition)
-            .expect("removal caller registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
-            .expect("removal target spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("removal caller spawns");
-        let target_index = engine.find_object_index(target).expect("target exists");
-        engine
-            .call_object_function(target_index, "Setup", Vec::new())
-            .expect("death-removal effect installs");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+            .call_object_function(target_index, "Setup", Vec::new()).test_value();
+        let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -395,27 +317,22 @@ public func Trigger(target)
         // AssignDeath re-reads Contents.GetObject after every Exit; Exit reports
         // re-entry through its Ejection callback before returning
         // (oracle-src-pinned src/C4Object.cpp:1191-1192,1532-1563).
-        let mut container_definition = crate::Definition::from_script(
-            "CONT",
-            "Container",
-            r#"#strict
-local ejections, death_ejections;
-public func Trigger()
-{
-    Kill(this, true);
-}
-protected func Ejection(item)
-{
-    ejections++;
-    if (ejections == 1) Enter(this, item);
-}
-protected func Death()
-{
-    death_ejections = ejections;
-}
-"#,
-        )
-        .expect("contents retry script compiles");
+        let mut container_definition = test_definition("CONT", "Container", r#"#strict
+        local ejections, death_ejections;
+        public func Trigger()
+        {
+            Kill(this, true);
+        }
+        protected func Ejection(item)
+        {
+            ejections++;
+            if (ejections == 1) Enter(this, item);
+        }
+        protected func Death()
+        {
+            death_ejections = ejections;
+        }
+        "#);
         container_definition.configure_actions(
             Some("Idle".to_string()),
             HashMap::from([
@@ -423,33 +340,21 @@ protected func Death()
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let item_definition = crate::Definition::from_script("ITEM", "Item", "#strict")
-            .expect("contents item compiles");
+        let item_definition = test_definition("ITEM", "Item", "#strict");
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(container_definition)
-            .expect("contents container registers");
-        engine
-            .register_definition(item_definition)
-            .expect("contents item registers");
-        let container = engine
-            .spawn_object(SpawnConfig::new("CONT").with_alive(true))
-            .expect("contents container spawns");
-        let item = engine
-            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
-            .expect("contained item spawns");
+        engine.register_test_definition(container_definition);
+        engine.register_test_definition(item_definition);
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT").with_alive(true));
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(container));
         let container_index = engine
-            .find_object_index(container)
-            .expect("contents container exists");
+            .find_object_index(container).test_value();
 
         engine
-            .call_object_function(container_index, "Trigger", Vec::new())
-            .expect("contents death succeeds");
+            .call_object_function(container_index, "Trigger", Vec::new()).test_value();
 
         let container_state = engine
-            .object_snapshot(container)
-            .expect("dead container remains");
+            .object_snapshot(container).test_value();
         assert_eq!(
             container_state.local_vars.get("ejections"),
             Some(&Value::Int(2)),
@@ -477,38 +382,33 @@ protected func Death()
         // each re-entry before the first matching category/id link at the
         // instant Enter runs (src/C4ObjectList.cpp:147-175), so entering B then
         // A yields the later A as the next object to eject.
-        let mut container_definition = crate::Definition::from_script(
-            "CONT",
-            "Container",
-            r#"#strict
-local seed, first, second, ejection_order;
-public func Trigger(object a, object b, object marker)
-{
-    first = a;
-    second = b;
-    seed = marker;
-    a->SetTag(1);
-    b->SetTag(2);
-    a->Prime();
-    b->Prime();
-    Kill(this, true);
-    return ejection_order;
-}
-protected func Ejection(object item)
-{
-    if (item == seed)
-    {
-        Enter(this, second);
-        Enter(this, first);
-    }
-    else
-    {
-        ejection_order = ejection_order * 10 + item->Tag();
-    }
-}
-"#,
-        )
-        .expect("ordered contents script compiles");
+        let mut container_definition = test_definition("CONT", "Container", r#"#strict
+        local seed, first, second, ejection_order;
+        public func Trigger(object a, object b, object marker)
+        {
+            first = a;
+            second = b;
+            seed = marker;
+            a->SetTag(1);
+            b->SetTag(2);
+            a->Prime();
+            b->Prime();
+            Kill(this, true);
+            return ejection_order;
+        }
+        protected func Ejection(object item)
+        {
+            if (item == seed)
+            {
+                Enter(this, second);
+                Enter(this, first);
+            }
+            else
+            {
+                ejection_order = ejection_order * 10 + item->Tag();
+            }
+        }
+        "#);
         container_definition.configure_actions(
             Some("Idle".to_string()),
             HashMap::from([
@@ -516,45 +416,24 @@ protected func Ejection(object item)
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let item_definition = crate::Definition::from_script(
-            "ITEM",
-            "Item",
-            r#"#strict
-local tag;
-public func SetTag(int value) { tag = value; }
-public func Prime() { return tag; }
-public func Tag() { return tag; }
-"#,
-        )
-        .expect("ordered item script compiles");
-        let seed_definition = crate::Definition::from_script("SEED", "Seed", "#strict")
-            .expect("ordered seed script compiles");
+        let item_definition = test_definition("ITEM", "Item", r#"#strict
+        local tag;
+        public func SetTag(int value) { tag = value; }
+        public func Prime() { return tag; }
+        public func Tag() { return tag; }
+        "#);
+        let seed_definition = test_definition("SEED", "Seed", "#strict");
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(container_definition)
-            .expect("ordered container registers");
-        engine
-            .register_definition(item_definition)
-            .expect("ordered item registers");
-        engine
-            .register_definition(seed_definition)
-            .expect("ordered seed registers");
-        let container = engine
-            .spawn_object(SpawnConfig::new("CONT").with_alive(true))
-            .expect("ordered container spawns");
-        let first = engine
-            .spawn_object(SpawnConfig::new("ITEM"))
-            .expect("first ordered item spawns");
-        let second = engine
-            .spawn_object(SpawnConfig::new("ITEM"))
-            .expect("second ordered item spawns");
-        let seed = engine
-            .spawn_object(SpawnConfig::new("SEED").with_container(container))
-            .expect("ordered seed contents spawn");
+        engine.register_test_definition(container_definition);
+        engine.register_test_definition(item_definition);
+        engine.register_test_definition(seed_definition);
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT").with_alive(true));
+        let first = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+        let second = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+        let seed = engine.spawn_test_object(SpawnConfig::new("SEED").with_container(container));
         let container_index = engine
-            .find_object_index(container)
-            .expect("ordered container exists");
+            .find_object_index(container).test_value();
 
         assert_eq!(
             engine
@@ -582,30 +461,25 @@ public func Tag() { return tag; }
         // position (src/C4ObjectList.cpp:147-175); the old rotation is not a
         // persistent preference. AssignDeath observes that new head on its
         // next Contents.GetObject() (src/C4Object.cpp:1191-1192).
-        let mut container_definition = crate::Definition::from_script(
-            "CONT",
-            "Container",
-            r#"#strict
-local low, reentered, ejection_order;
-public func Trigger(object low_item)
-{
-    low = low_item;
-    ScrollContents();
-    Kill(this, true);
-    return ejection_order;
-}
-protected func Ejection(object item)
-{
-    ejection_order = ejection_order * 10 + item->Tag();
-    if (item == low && !reentered)
-    {
-        reentered = true;
-        Enter(this, item);
-    }
-}
-"#,
-        )
-        .expect("rotated contents script compiles");
+        let mut container_definition = test_definition("CONT", "Container", r#"#strict
+        local low, reentered, ejection_order;
+        public func Trigger(object low_item)
+        {
+            low = low_item;
+            ScrollContents();
+            Kill(this, true);
+            return ejection_order;
+        }
+        protected func Ejection(object item)
+        {
+            ejection_order = ejection_order * 10 + item->Tag();
+            if (item == low && !reentered)
+            {
+                reentered = true;
+                Enter(this, item);
+            }
+        }
+        "#);
         container_definition.configure_actions(
             Some("Idle".to_string()),
             HashMap::from([
@@ -613,43 +487,20 @@ protected func Ejection(object item)
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let mut high_definition = crate::Definition::from_script(
-            "HIGH",
-            "High",
-            "#strict\npublic func Tag() { return 2; }",
-        )
-        .expect("high contents script compiles");
+        let mut high_definition = test_definition("HIGH", "High", "#strict\npublic func Tag() { return 2; }");
         high_definition.set_category(crate::CATEGORY_OBJECT);
-        let mut low_definition = crate::Definition::from_script(
-            "LOW",
-            "Low",
-            "#strict\npublic func Tag() { return 1; }",
-        )
-        .expect("low contents script compiles");
+        let mut low_definition = test_definition("LOW", "Low", "#strict\npublic func Tag() { return 1; }");
         low_definition.set_category(crate::CATEGORY_VEHICLE);
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(container_definition)
-            .expect("rotated container registers");
-        engine
-            .register_definition(high_definition)
-            .expect("high contents register");
-        engine
-            .register_definition(low_definition)
-            .expect("low contents register");
-        let container = engine
-            .spawn_object(SpawnConfig::new("CONT").with_alive(true))
-            .expect("rotated container spawns");
-        let low = engine
-            .spawn_object(SpawnConfig::new("LOW").with_container(container))
-            .expect("low contents spawn");
-        let high = engine
-            .spawn_object(SpawnConfig::new("HIGH").with_container(container))
-            .expect("high contents spawn");
+        engine.register_test_definition(container_definition);
+        engine.register_test_definition(high_definition);
+        engine.register_test_definition(low_definition);
+        let container = engine.spawn_test_object(SpawnConfig::new("CONT").with_alive(true));
+        let low = engine.spawn_test_object(SpawnConfig::new("LOW").with_container(container));
+        let high = engine.spawn_test_object(SpawnConfig::new("HIGH").with_container(container));
         let container_index = engine
-            .find_object_index(container)
-            .expect("rotated container exists");
+            .find_object_index(container).test_value();
         assert_eq!(
             engine.objects[container_index].state.contents,
             vec![high, low],
@@ -677,23 +528,18 @@ protected func Ejection(object item)
         // src/C4Object.h:361; src/C4Script.cpp:814-818).
         let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_deaths = Arc::clone(&death_calls);
-        let mut definition = crate::Definition::from_script(
-            "CLNK",
-            "Clonk",
-            r#"#strict
-public func Trigger()
-{
-    Kill(this, true);
-    return GetAlive();
-}
-protected func Death()
-{
-    SetAlive(true);
-    return 0;
-}
-"#,
-        )
-        .expect("Death-revival script compiles");
+        let mut definition = test_definition("CLNK", "Clonk", r#"#strict
+        public func Trigger()
+        {
+            Kill(this, true);
+            return GetAlive();
+        }
+        protected func Death()
+        {
+            SetAlive(true);
+            return 0;
+        }
+        "#);
         definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         definition.set_crew_member(true);
         definition.configure_actions(
@@ -712,13 +558,9 @@ protected func Death()
         ));
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("Death-revival definition registers");
-        let clonk = engine
-            .spawn_object(SpawnConfig::new("CLNK"))
-            .expect("clonk spawns");
-        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.register_test_definition(definition);
+        let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
+        let index = engine.find_object_index(clonk).test_value();
         engine.objects[index].state.alive = true;
         engine.refresh_object_ocf(index);
 
@@ -760,18 +602,13 @@ protected func Death()
         // (oracle-src-pinned src/C4Object.cpp:622-624,1193-1204).
         // AssignDeath clears the runtime roster before Death, and a foreign
         // target executes through a freshly materialized nested scope.
-        let mut target_definition = crate::Definition::from_script(
-            "CLNK",
-            "Foreign revived Clonk",
-            r#"#strict
-protected func Death()
-{
-    SetAlive(true);
-    return 0;
-}
-"#,
-        )
-        .expect("foreign revival target compiles");
+        let mut target_definition = test_definition("CLNK", "Foreign revived Clonk", r#"#strict
+        protected func Death()
+        {
+            SetAlive(true);
+            return 0;
+        }
+        "#);
         target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         target_definition.set_crew_member(true);
         target_definition.configure_actions(
@@ -781,39 +618,23 @@ protected func Death()
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let caller_definition = crate::Definition::from_script(
-            "CALL",
-            "Foreign revival caller",
-            r#"#strict
-public func Trigger(target)
-{
-    Kill(target, true);
-    return [GetAlive(target), GetOCF(target) & OCF_CrewMember];
-}
-"#,
-        )
-        .expect("foreign revival caller compiles");
+        let caller_definition = test_definition("CALL", "Foreign revival caller", r#"#strict
+        public func Trigger(target)
+        {
+            Kill(target, true);
+            return [GetAlive(target), GetOCF(target) & OCF_CrewMember];
+        }
+        "#);
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(target_definition)
-            .expect("foreign revival target registers");
-        engine
-            .register_definition(caller_definition)
-            .expect("foreign revival caller registers");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("foreign revival caller spawns");
-        let target = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK")
-                    .with_alive(true)
-                    .with_crew_member(false),
-            )
-            .expect("foreign revival target spawns outside every runtime roster");
+        engine.register_test_definition(target_definition);
+        engine.register_test_definition(caller_definition);
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let target = engine.spawn_test_object(SpawnConfig::new("CLNK")
+            .with_alive(true)
+            .with_crew_member(false));
         let caller_index = engine
-            .find_object_index(caller)
-            .expect("foreign revival caller exists");
+            .find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -830,8 +651,7 @@ public func Trigger(target)
             "the caller immediately observes final SetOCF using Def->CrewMember"
         );
         let target_index = engine
-            .find_object_index(target)
-            .expect("foreign revived target remains");
+            .find_object_index(target).test_value();
         let object = &engine.objects[target_index];
         assert!(object.state.alive);
         assert!(
@@ -853,25 +673,20 @@ public func Trigger(target)
         // nonzero-range PlrFoWActualize arm before AssignDeath performs the
         // retention test (oracle-src-pinned src/C4Object.cpp:1193-1198;
         // src/C4Player.cpp:1194-1199).
-        let mut definition = crate::Definition::from_script(
-            "CLNK",
-            "Death recruitment",
-            r#"#strict
-local victim, death_view_range;
-public func SetVictim(target) { victim = target; }
-public func Trigger() { Kill(this, true); }
-protected func CrewSelection(unselect, cursor)
-{
-    if (!unselect && !cursor && victim)
-        SetCrewStatus(0, true, victim);
-}
-protected func Death()
-{
-    death_view_range = GetObjectVal("PlrViewRange", 0, this());
-}
-"#,
-        )
-        .expect("death-recruitment definition compiles");
+        let mut definition = test_definition("CLNK", "Death recruitment", r#"#strict
+        local victim, death_view_range;
+        public func SetVictim(target) { victim = target; }
+        public func Trigger() { Kill(this, true); }
+        protected func CrewSelection(unselect, cursor)
+        {
+            if (!unselect && !cursor && victim)
+                SetCrewStatus(0, true, victim);
+        }
+        protected func Death()
+        {
+            death_view_range = GetObjectVal("PlrViewRange", 0, this());
+        }
+        "#);
         definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         definition.set_crew_member(true);
         definition.configure_actions(
@@ -883,50 +698,34 @@ protected func Death()
         );
 
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Owner"))
-            .expect("death-recruitment owner registers");
-        engine
-            .register_definition(definition)
-            .expect("death-recruitment definition registers");
-        let target = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK")
-                    .with_owner(0)
-                    .with_alive(true)
-                    .with_crew_member(true)
-                    .with_plr_view_range(333),
-            )
-            .expect("dying crew target spawns");
-        let replacement = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK")
-                    .with_owner(0)
-                    .with_alive(true)
-                    .with_crew_member(true),
-            )
-            .expect("replacement crew spawns");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Owner"));
+        engine.register_test_definition(definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("CLNK")
+            .with_owner(0)
+            .with_alive(true)
+            .with_crew_member(true)
+            .with_plr_view_range(333));
+        let replacement = engine.spawn_test_object(SpawnConfig::new("CLNK")
+            .with_owner(0)
+            .with_alive(true)
+            .with_crew_member(true));
         let replacement_index = engine
-            .find_object_index(replacement)
-            .expect("replacement crew exists");
+            .find_object_index(replacement).test_value();
         engine
             .call_object_function(
                 replacement_index,
                 "SetVictim",
                 vec![object_reference_value(target)],
-            )
-            .expect("replacement remembers the dying target");
+            ).test_value();
         engine
-            .set_crew_cursor(0, Some(target))
-            .expect("dying target becomes cursor");
+            .set_crew_cursor(0, Some(target)).test_value();
 
         // Model a live nonzero PlrViewRange whose runtime FoW link was
         // cleared earlier. The replacement's recruitment must restore it
         // synchronously, before AssignDeath decides whether to zero range.
         engine
             .players
-            .get_mut(&0)
-            .expect("owner exists")
+            .get_mut(&0).test_value()
             .remove_fow_view_object(target);
         assert!(!engine
             .player(0)
@@ -934,15 +733,12 @@ protected func Death()
             .has_fow_view_object(target));
 
         let target_index = engine
-            .find_object_index(target)
-            .expect("dying target exists");
+            .find_object_index(target).test_value();
         engine
-            .call_object_function(target_index, "Trigger", Vec::new())
-            .expect("forced death completes");
+            .call_object_function(target_index, "Trigger", Vec::new()).test_value();
 
         let target_state = engine
-            .object_snapshot(target)
-            .expect("dead recruited target remains");
+            .object_snapshot(target).test_value();
         assert_eq!(target_state.plr_view_range, 333);
         assert_eq!(
             target_state.local_vars.get("death_view_range"),
@@ -1037,11 +833,11 @@ protected func Death()
             assert_eq!(reset_physical(&[])?, Value::Bool(false));
             Ok(Value::Nil)
         });
-        result.expect("physicals host fns run");
+        result.test_value();
         // The scope records the final physical state for the engine — the
         // cleared temp mode must overwrite any prior engine-side state.
-        let update = outcome.object_update.expect("physicals update recorded");
-        let physicals = update.physicals.expect("physicals state recorded");
+        let update = outcome.object_update.test_value();
+        let physicals = update.physicals.test_value();
         assert_eq!(physicals.info, None);
         assert_eq!(physicals.temporary, None);
         assert_eq!(physicals.changes, Vec::<(String, i32)>::new());
@@ -1133,7 +929,7 @@ protected func Death()
             Ok(Value::Nil)
         });
 
-        result.expect("definition physical reads succeed");
+        result.test_value();
     }
 
     #[test]
@@ -1206,15 +1002,8 @@ protected func Death()
         // pass their carrier explicitly to SetPhysical/TrainPhysical. C++
         // mutates that object directly (C4Script.cpp:557-611).
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CLNK", "Clonk", "#strict\n")
-                    .expect("definition compiles"),
-            )
-            .expect("definition registers");
-        let clonk = engine
-            .spawn_object(crate::SpawnConfig::new("CLNK"))
-            .expect("clonk spawns");
+        engine.register_test_definition(test_definition("CLNK", "Clonk", "#strict\n"));
+        let clonk = engine.spawn_test_object(crate::SpawnConfig::new("CLNK"));
         let target = object_reference_value(clonk);
 
         let (result, outcome) = with_effect_context(
@@ -1258,8 +1047,7 @@ protected func Death()
             .iter()
             .find(|other| other.object_id == clonk)
             .and_then(|other| other.update.as_ref())
-            .and_then(|update| update.physicals.as_ref())
-            .expect("foreign physical writes are recorded");
+            .and_then(|update| update.physicals.as_ref()).test_value();
         assert_eq!(
             physicals
                 .temporary
@@ -1274,21 +1062,16 @@ protected func Death()
         // FnResetPhysical uses its explicit pObj even when cthr->Obj is null
         // (C4Script.cpp:614-636). Tutorial01 Script160 relies on the global
         // `ResetPhysical(GetCrew())` form to unlock digging.
-        let mut definition = crate::Definition::from_script("CLNK", "Clonk", "#strict\n")
-            .expect("definition compiles");
+        let mut definition = test_definition("CLNK", "Clonk", "#strict\n");
         let permanent = PhysicalInfo {
             can_dig: C4_MAX_PHYSICAL,
             ..PhysicalInfo::default()
         };
         definition.set_physical(permanent);
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let clonk = engine
-            .spawn_object(crate::SpawnConfig::new("CLNK"))
-            .expect("clonk spawns");
-        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.register_test_definition(definition);
+        let clonk = engine.spawn_test_object(crate::SpawnConfig::new("CLNK"));
+        let index = engine.find_object_index(clonk).test_value();
         engine.objects[index].state.temporary_physical = Some(PhysicalInfo {
             can_dig: 0,
             ..permanent
@@ -1305,8 +1088,7 @@ protected func Death()
             .iter()
             .find(|other| other.object_id == clonk)
             .and_then(|other| other.update.as_ref())
-            .and_then(|update| update.physicals.as_ref())
-            .expect("foreign physical reset is recorded");
+            .and_then(|update| update.physicals.as_ref()).test_value();
         assert_eq!(physicals.temporary, None);
         assert!(physicals.changes.is_empty());
     }
@@ -1317,15 +1099,15 @@ protected func Death()
         // DoEnergy(-25) = -25% = -25000 raw (C4Object.cpp:1347), and its
         // missing Physical Energy gives both changes a zero upper bound.
         let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(-25)]));
-        let value = result.expect("DoEnergy returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("energy update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.energy, Some(0));
 
         let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(50)]));
-        let value = result.expect("DoEnergy returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("energy update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.energy, Some(0));
     }
 
@@ -1335,7 +1117,7 @@ protected func Death()
         target.insert("id".into(), Value::Int(99));
         let args = [Value::Int(-10), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| do_energy(&args));
-        let value = result.expect("DoEnergy returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -1343,15 +1125,15 @@ protected func Death()
     #[test]
     fn do_damage_applies_delta_and_clamps() {
         let (result, outcome) = with_object_host_context(|| do_damage(&[Value::Int(15)]));
-        let value = result.expect("DoDamage returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("damage update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.damage, Some(15));
 
         let (result, outcome) = with_object_host_context(|| do_damage(&[Value::Int(-20)]));
-        let value = result.expect("DoDamage returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
-        let update = outcome.object_update.expect("damage update recorded");
+        let update = outcome.object_update.test_value();
         assert_eq!(update.damage, Some(0));
     }
 
@@ -1361,7 +1143,7 @@ protected func Death()
         target.insert("id".into(), Value::Int(77));
         let args = [Value::Int(5), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| do_damage(&args));
-        let value = result.expect("DoDamage returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -1379,7 +1161,7 @@ protected func Death()
             1,
             || do_energy(&args),
         );
-        let value = result.expect("DoEnergy returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert!(outcome
             .object_update
@@ -1420,7 +1202,7 @@ protected func Death()
             || get_energy(&[]),
         );
 
-        let value = result.expect("GetEnergy succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(75));
     }
 
@@ -1437,18 +1219,17 @@ protected func Death()
             || get_con(&[]),
         );
 
-        let value = result.expect("GetCon succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(50));
     }
 
     #[test]
     fn do_con_adjusts_construction() {
         let (result, outcome) = with_object_host_context(|| do_con(&[Value::Int(-25)]));
-        let value = result.expect("DoCon returns bool");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         let update = outcome
-            .object_update
-            .expect("DoCon should produce an object update");
+            .object_update.test_value();
         let expected = crate::FULL_CON - ((crate::FULL_CON * 25) / 100);
         assert_eq!(update.construction, Some(expected));
     }
@@ -1463,7 +1244,7 @@ protected func Death()
         let args = [object_reference_value(ObjectId::new(55))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_energy(&args));
 
-        let value = result.expect("GetEnergy target succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(33));
     }
 
@@ -1477,7 +1258,7 @@ protected func Death()
                 1,
                 || get_energy(&[]),
             );
-        let value = result.expect("GetEnergy handles missing context");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -1495,7 +1276,7 @@ protected func Death()
             || get_energy(&[]),
         );
 
-        let value = result.expect("GetEnergy converts raw energy");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(50));
     }
 
@@ -1503,7 +1284,7 @@ protected func Death()
     fn create_object_registers_spawn_and_returns_reference() {
         let args = [Value::C4Id("CLNK".into())];
         let (result, outcome) = with_object_host_context(|| create_object(&args));
-        let value = result.expect("CreateObject succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(ObjectId::new(1)));
         assert_eq!(outcome.spawns.len(), 1);
         let spawn = &outcome.spawns[0];
@@ -1554,7 +1335,7 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
 "#;
         let mut engine = crate::Engine::with_seed(1);
         let mut hut =
-            crate::Definition::from_script("HUT1", "Hut", hut_script).expect("hut script compiles");
+            test_definition("HUT1", "Hut", hut_script);
         hut.set_shape_rect(Some(DefinitionRect::new(-18, -24, 36, 40)));
         hut.set_components(vec![
             crate::DefinitionComponent {
@@ -1566,28 +1347,19 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
                 count: 2,
             },
         ]);
-        engine.register_definition(hut).expect("hut registers");
-        let mut basement = crate::Definition::from_script("BASE", "Basement", "#strict")
-            .expect("basement script compiles");
+        engine.register_test_definition(hut);
+        let mut basement = test_definition("BASE", "Basement", "#strict");
         basement.set_shape_rect(Some(DefinitionRect::new(-4, -2, 8, 4)));
-        engine
-            .register_definition(basement)
-            .expect("basement registers");
-        let caller = crate::Definition::from_script("CALL", "Caller", caller_script)
-            .expect("caller script compiles");
-        engine
-            .register_definition(caller)
-            .expect("caller registers");
-        let caller_id = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+        engine.register_test_definition(basement);
+        let caller = test_definition("CALL", "Caller", caller_script);
+        engine.register_test_definition(caller);
+        let caller_id = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let caller_index = engine.find_object_index(caller_id).test_value();
 
         let hut_value = engine
-            .call_object_function(caller_index, "Seed", Vec::new())
-            .expect("Seed runs");
-        let hut_id = object_id_from_value(&hut_value).expect("Seed returns hut");
-        let hut_index = engine.find_object_index(hut_id).expect("hut exists");
+            .call_object_function(caller_index, "Seed", Vec::new()).test_value();
+        let hut_id = object_id_from_value(&hut_value).test_value();
+        let hut_index = engine.find_object_index(hut_id).test_value();
         let hut = &engine.objects[hut_index].state;
         assert_eq!(hut.position, Vector2::new(100, 84));
         assert_eq!(hut.construction, FULL_CON);
@@ -1604,8 +1376,7 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
         let basement = engine
             .objects
             .iter()
-            .find(|object| object.definition_id == "BASE")
-            .expect("Construction creates basement");
+            .find(|object| object.definition_id == "BASE").test_value();
         assert_eq!(
             basement.state.position,
             Vector2::new(100, 106),
@@ -1616,70 +1387,44 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
     #[test]
     fn create_contents_change_def_uses_the_new_definition_for_growth_and_callbacks() {
         let mut engine = crate::Engine::with_seed(3);
-        let builder = crate::Definition::from_script(
-            "BLDR",
-            "Builder",
-            "#strict\npublic func Make() { return CreateContents(OLD1); }",
-        )
-        .expect("builder script compiles");
-        engine
-            .register_definition(builder)
-            .expect("builder registers");
+        let builder = test_definition("BLDR", "Builder", "#strict\npublic func Make() { return CreateContents(OLD1); }");
+        engine.register_test_definition(builder);
 
-        let mut old = crate::Definition::from_script(
-            "OLD1",
-            "Old",
-            r#"#strict
-protected func Construction() { ChangeDef(NEW1); }
-protected func Completion() { SetComponent(METL, 9); }
-"#,
-        )
-        .expect("old script compiles");
+        let mut old = test_definition("OLD1", "Old", r#"#strict
+        protected func Construction() { ChangeDef(NEW1); }
+        protected func Completion() { SetComponent(METL, 9); }
+        "#);
         old.set_components(vec![crate::DefinitionComponent {
             id: "METL".to_owned(),
             count: 3,
         }]);
-        engine.register_definition(old).expect("old registers");
+        engine.register_test_definition(old);
 
-        let mut new = crate::Definition::from_script(
-            "NEW1",
-            "New",
-            r#"#strict
-local completion_wood, completion_metal, initialized;
-protected func Completion()
-{
-    completion_wood = GetComponent(WOOD);
-    completion_metal = GetComponent(METL);
-}
-protected func Initialize() { initialized = 1; }
-"#,
-        )
-        .expect("new script compiles");
+        let mut new = test_definition("NEW1", "New", r#"#strict
+        local completion_wood, completion_metal, initialized;
+        protected func Completion()
+        {
+            completion_wood = GetComponent(WOOD);
+            completion_metal = GetComponent(METL);
+        }
+        protected func Initialize() { initialized = 1; }
+        "#);
         new.set_components(vec![crate::DefinitionComponent {
             id: "WOOD".to_owned(),
             count: 2,
         }]);
-        engine.register_definition(new).expect("new registers");
+        engine.register_test_definition(new);
         for (id, name) in [("WOOD", "Wood"), ("METL", "Metal")] {
-            engine
-                .register_definition(
-                    crate::Definition::from_script(id, name, "#strict")
-                        .expect("component script compiles"),
-                )
-                .expect("component registers");
+            engine.register_test_definition(test_definition(id, name, "#strict"));
         }
 
-        let builder = engine
-            .spawn_object(SpawnConfig::new("BLDR"))
-            .expect("builder spawns");
-        let builder_index = engine.find_object_index(builder).expect("builder exists");
+        let builder = engine.spawn_test_object(SpawnConfig::new("BLDR"));
+        let builder_index = engine.find_object_index(builder).test_value();
         let created = engine
-            .call_object_function(builder_index, "Make", Vec::new())
-            .expect("CreateContents succeeds");
-        let created = object_id_from_value(&created).expect("created object returned");
+            .call_object_function(builder_index, "Make", Vec::new()).test_value();
+        let created = object_id_from_value(&created).test_value();
         let created = engine
-            .object_snapshot(created)
-            .expect("created object survives");
+            .object_snapshot(created).test_value();
 
         assert_eq!(created.definition_id, "NEW1");
         // ChangeDef keeps the old C4IDList's IDs. Initial DoCon then looks
@@ -1742,20 +1487,13 @@ protected func Completion() { order = order * 10 + 2; }
 protected func Initialize() { order = order * 10 + 3; }
 "#;
         let mut engine = crate::Engine::with_seed(17);
-        let builder = crate::Definition::from_script("BLDR", "Builder", builder_script)
-            .expect("builder script compiles");
-        engine
-            .register_definition(builder)
-            .expect("builder registers");
+        let builder = test_definition("BLDR", "Builder", builder_script);
+        engine.register_test_definition(builder);
         for (id, name) in [("WOOD", "Wood"), ("METL", "Metal")] {
-            let material = crate::Definition::from_script(id, name, "#strict")
-                .expect("material script compiles");
-            engine
-                .register_definition(material)
-                .expect("material registers");
+            let material = test_definition(id, name, "#strict");
+            engine.register_test_definition(material);
         }
-        let mut product = crate::Definition::from_script("PROD", "Product", product_script)
-            .expect("product script compiles");
+        let mut product = test_definition("PROD", "Product", product_script);
         // Construction runs while Con=0. C4Object::SetAction only keeps a
         // non-idle action there when the definition enables IncompleteActivity.
         product.set_incomplete_activity(true);
@@ -1776,28 +1514,19 @@ protected func Initialize() { order = order * 10 + 3; }
                 count: 1,
             },
         ]);
-        engine
-            .register_definition(product)
-            .expect("product registers");
-        let builder_id = engine
-            .spawn_object(
-                SpawnConfig::new("BLDR")
-                    .with_position(Vector2::new(300, 200))
-                    .with_owner(3)
-                    .with_controller(7),
-            )
-            .expect("builder spawns");
+        engine.register_test_definition(product);
+        let builder_id = engine.spawn_test_object(SpawnConfig::new("BLDR")
+            .with_position(Vector2::new(300, 200))
+            .with_owner(3)
+            .with_controller(7));
         let builder_index = engine
-            .find_object_index(builder_id)
-            .expect("builder exists");
+            .find_object_index(builder_id).test_value();
 
         let product_value = engine
-            .call_object_function(builder_index, "Build", Vec::new())
-            .expect("same-call composition succeeds");
-        let product_id = object_id_from_value(&product_value).expect("Build returns product");
+            .call_object_function(builder_index, "Build", Vec::new()).test_value();
+        let product_id = object_id_from_value(&product_value).test_value();
         let product_index = engine
-            .find_object_index(product_id)
-            .expect("product survives");
+            .find_object_index(product_id).test_value();
         let product = &engine.objects[product_index].state;
         assert_eq!(product.container, Some(builder_id));
         assert_eq!(product.position, Vector2::new(300, 200));
@@ -1831,8 +1560,7 @@ protected func Initialize() { order = order * 10 + 3; }
         );
 
         let builder_index = engine
-            .find_object_index(builder_id)
-            .expect("builder remains");
+            .find_object_index(builder_id).test_value();
         assert_eq!(
             engine
                 .call_object_function(builder_index, "Missing", Vec::new())
@@ -1916,14 +1644,9 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
 "#;
 
         let mut engine = crate::Engine::with_seed(29);
-        engine
-            .register_definition(
-                crate::Definition::from_script("BLDR", "Builder", builder_script)
-                    .expect("builder compiles"),
-            )
-            .expect("builder registers");
+        engine.register_test_definition(test_definition("BLDR", "Builder", builder_script));
         let mut wood =
-            crate::Definition::from_script("WOOD", "Wood", wood_script).expect("wood compiles");
+            test_definition("WOOD", "Wood", wood_script);
         wood.configure_actions(
             None,
             HashMap::from([(
@@ -1931,19 +1654,14 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
                 ActionSpec::default().with_abort_call("RemovedAbort"),
             )]),
         );
-        engine.register_definition(wood).expect("wood registers");
+        engine.register_test_definition(wood);
         for (id, name, script) in [
             ("METL", "Metal", "#strict"),
             ("CHLD", "Child", first_child_script),
         ] {
-            engine
-                .register_definition(
-                    crate::Definition::from_script(id, name, script).expect("component compiles"),
-                )
-                .expect("component registers");
+            engine.register_test_definition(test_definition(id, name, script));
         }
-        let mut product = crate::Definition::from_script("PROD", "Product", product_script)
-            .expect("product compiles");
+        let mut product = test_definition("PROD", "Product", product_script);
         product.set_components(vec![
             crate::DefinitionComponent {
                 id: "WOOD".to_owned(),
@@ -1954,38 +1672,22 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
                 count: 1,
             },
         ]);
-        engine
-            .register_definition(product)
-            .expect("product registers");
+        engine.register_test_definition(product);
 
-        let builder = engine
-            .spawn_object(SpawnConfig::new("BLDR"))
-            .expect("builder spawns");
-        let wood = engine
-            .spawn_object(
-                SpawnConfig::new("WOOD")
-                    .with_container(builder)
-                    .with_action(crate::ActionState::new("Active")),
-            )
-            .expect("wood spawns");
-        let metal = engine
-            .spawn_object(SpawnConfig::new("METL").with_container(builder))
-            .expect("metal spawns");
-        let saved_sibling = engine
-            .spawn_object(SpawnConfig::new("CHLD").with_container(wood))
-            .expect("older child spawns");
-        let first_child = engine
-            .spawn_object(SpawnConfig::new("CHLD").with_container(wood))
-            .expect("front child spawns");
-        let builder_index = engine.find_object_index(builder).expect("builder index");
+        let builder = engine.spawn_test_object(SpawnConfig::new("BLDR"));
+        let wood = engine.spawn_test_object(SpawnConfig::new("WOOD")
+            .with_container(builder)
+            .with_action(crate::ActionState::new("Active")));
+        let metal = engine.spawn_test_object(SpawnConfig::new("METL").with_container(builder));
+        let saved_sibling = engine.spawn_test_object(SpawnConfig::new("CHLD").with_container(wood));
+        let first_child = engine.spawn_test_object(SpawnConfig::new("CHLD").with_container(wood));
+        let builder_index = engine.find_object_index(builder).test_value();
         engine
-            .call_object_function(builder_index, "Install", Vec::new())
-            .expect("effects install");
+            .call_object_function(builder_index, "Install", Vec::new()).test_value();
 
         let product = engine
-            .call_object_function(builder_index, "Build", Vec::new())
-            .expect("composition runs");
-        let product = object_id_from_value(&product).expect("product returned");
+            .call_object_function(builder_index, "Build", Vec::new()).test_value();
+        let product = object_id_from_value(&product).test_value();
         for removed in [wood, metal, first_child] {
             assert!(
                 engine
@@ -1994,7 +1696,7 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
                 "consumed object {removed} is dead"
             );
         }
-        let builder_state = &engine.objects[engine.find_object_index(builder).unwrap()].state;
+        let builder_state = &engine.objects[engine.find_object_index(builder).test_value()].state;
         assert_eq!(
             engine
                 .object_snapshot(saved_sibling)
@@ -2029,7 +1731,7 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
             Some(&Value::Int(1))
         );
 
-        let product = engine.object_snapshot(product).expect("product survives");
+        let product = engine.object_snapshot(product).test_value();
         assert!(
             !product.mobile,
             "CopyMotion does not mobilize the new product"
@@ -2049,35 +1751,21 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
     #[test]
     fn create_contents_runs_the_cpp_base_auto_sell_tail_synchronously() {
         let mut engine = crate::Engine::with_seed(31);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script(
-                    "BASE",
-                    "Base",
-                    "#strict\npublic func MakeGold() { return CreateContents(GOLD); }",
-                )
-                .expect("base compiles"),
-            )
-            .expect("base registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+        engine.register_test_definition(test_definition("BASE", "Base", "#strict\npublic func MakeGold() { return CreateContents(GOLD); }"));
         let mut gold =
-            crate::Definition::from_script("GOLD", "Gold", "#strict").expect("gold compiles");
+            test_definition("GOLD", "Gold", "#strict");
         gold.set_value(25);
         gold.set_base_auto_sell(true);
         gold.set_rebuyable(true);
-        engine.register_definition(gold).expect("gold registers");
+        engine.register_test_definition(gold);
 
-        let base = engine
-            .spawn_object(SpawnConfig::new("BASE"))
-            .expect("base spawns");
-        let base_index = engine.find_object_index(base).expect("base index");
+        let base = engine.spawn_test_object(SpawnConfig::new("BASE"));
+        let base_index = engine.find_object_index(base).test_value();
         engine.objects[base_index].state.base = 0;
         let result = engine
-            .call_object_function(base_index, "MakeGold", Vec::new())
-            .expect("CreateContents returns normally");
-        let gold = object_id_from_value(&result).expect("native return keeps the C++ pointer");
+            .call_object_function(base_index, "MakeGold", Vec::new()).test_value();
+        let gold = object_id_from_value(&result).test_value();
 
         assert!(
             engine
@@ -2085,7 +1773,7 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
                 .is_none_or(|object| !object.status.is_active()),
             "the auto-sold gold is removed before CreateContents returns"
         );
-        let player = engine.player(0).expect("player remains");
+        let player = engine.player(0).test_value();
         assert_eq!(player.wealth(), 25);
         assert_eq!(
             player.home_base_material().get(&DefinitionId::from("GOLD")),
@@ -2123,73 +1811,45 @@ public func Purchase(int player, object base)
 "#;
 
         let mut engine = crate::Engine::with_seed(32);
-        engine
-            .register_player(crate::PlayerConfig::new(1, "Recipient").with_wealth(7))
-            .expect("recipient registers");
-        engine
-            .register_player(
-                crate::PlayerConfig::new(2, "Payer")
-                    .with_wealth(100)
-                    .with_home_base_material(HashMap::from([
-                        (DefinitionId::from("ITEM"), 2),
-                        (DefinitionId::from("CREW"), 1),
-                    ])),
-            )
-            .expect("payer registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
-            .expect("caller registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("BASE", "Base", "#strict").expect("base compiles"),
-            )
-            .expect("base registers");
+        engine.register_test_player(crate::PlayerConfig::new(1, "Recipient").with_wealth(7));
+        engine.register_test_player(crate::PlayerConfig::new(2, "Payer")
+            .with_wealth(100)
+            .with_home_base_material(HashMap::from([
+                (DefinitionId::from("ITEM"), 2),
+                (DefinitionId::from("CREW"), 1),
+            ])));
+        engine.register_test_definition(test_definition("CALL", "Caller", caller_script));
+        engine.register_test_definition(test_definition("BASE", "Base", "#strict"));
         let mut item =
-            crate::Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+            test_definition("ITEM", "Item", item_script);
         item.set_value(99);
-        engine.register_definition(item).expect("item registers");
-        let mut crew = crate::Definition::from_script(
-            "CREW",
-            "Crew",
-            r#"#strict
-local order;
-public func MakeCrewMember() { order = 9; return false; }
-public func Recruitment(int player) { order = order * 10 + player; }
-public func Purchase(int player, object base) { order = order * 10 + player; }
-"#,
-        )
-        .expect("crew compiles");
+        engine.register_test_definition(item);
+        let mut crew = test_definition("CREW", "Crew", r#"#strict
+        local order;
+        public func MakeCrewMember() { order = 9; return false; }
+        public func Recruitment(int player) { order = order * 10 + player; }
+        public func Purchase(int player, object base) { order = order * 10 + player; }
+        "#);
         crew.set_value(10);
         crew.set_category(crate::CATEGORY_LIVING);
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("crew registers");
+        engine.register_test_definition(crew);
 
-        let caller = engine
-            .spawn_object(
-                SpawnConfig::new("CALL")
-                    .with_owner(1)
-                    .with_controller(1)
-                    .with_position(Vector2::new(123, 234)),
-            )
-            .expect("caller spawns");
-        let base = engine
-            .spawn_object(
-                SpawnConfig::new("BASE")
-                    .with_owner(2)
-                    .with_controller(2)
-                    .with_position(Vector2::new(70, 80)),
-            )
-            .expect("base spawns");
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL")
+            .with_owner(1)
+            .with_controller(1)
+            .with_position(Vector2::new(123, 234)));
+        let base = engine.spawn_test_object(SpawnConfig::new("BASE")
+            .with_owner(2)
+            .with_controller(2)
+            .with_position(Vector2::new(70, 80)));
         (engine, caller, base)
     }
 
     #[test]
     fn buy_host_charges_payer_and_places_the_created_object() {
         let (mut engine, caller, base) = buy_host_fixture();
-        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let caller_index = engine.find_object_index(caller).test_value();
 
         let bought = engine
             .call_object_function(
@@ -2201,10 +1861,9 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
                     object_reference_value(base),
                     Value::Bool(false),
                 ],
-            )
-            .expect("Buy with an explicit target runs");
-        let bought = object_id_from_value(&bought).expect("Buy returns the item");
-        let snapshot = engine.object_snapshot(bought).expect("bought item exists");
+            ).test_value();
+        let bought = object_id_from_value(&bought).test_value();
+        let snapshot = engine.object_snapshot(bought).test_value();
         assert_eq!(snapshot.owner, 1);
         assert_eq!(snapshot.controller, 2, "Enter copies base controller");
         assert_eq!(snapshot.container, Some(base));
@@ -2233,12 +1892,10 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
                 caller_index,
                 "BuyHere",
                 vec![Value::Int(1), Value::Int(2), Value::Bool(false)],
-            )
-            .expect("Buy without a target runs");
-        let bought = object_id_from_value(&bought).expect("Buy returns the second item");
+            ).test_value();
+        let bought = object_id_from_value(&bought).test_value();
         let snapshot = engine
-            .object_snapshot(bought)
-            .expect("second bought item exists");
+            .object_snapshot(bought).test_value();
         assert_eq!(snapshot.owner, 1);
         assert_eq!(snapshot.controller, 1);
         assert_eq!(snapshot.container, None);
@@ -2262,16 +1919,15 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
     #[test]
     fn buy_host_uses_native_crew_enrollment_before_purchase() {
         let (mut engine, caller, base) = buy_host_fixture();
-        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let caller_index = engine.find_object_index(caller).test_value();
         let bought = engine
             .call_object_function(
                 caller_index,
                 "BuyCrew",
                 vec![Value::Int(1), Value::Int(2), object_reference_value(base)],
-            )
-            .expect("crew Buy runs");
-        let bought = object_id_from_value(&bought).expect("crew Buy returns the object");
-        let snapshot = engine.object_snapshot(bought).expect("bought crew exists");
+            ).test_value();
+        let bought = object_id_from_value(&bought).test_value();
+        let snapshot = engine.object_snapshot(bought).test_value();
         assert!(snapshot.crew_member);
         assert_eq!(snapshot.owner, 1);
         assert_eq!(snapshot.controller, 1);
@@ -2300,7 +1956,7 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
     #[test]
     fn buy_host_rejects_invalid_players_and_honors_silent_errors() {
         let (mut engine, caller, base) = buy_host_fixture();
-        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let caller_index = engine.find_object_index(caller).test_value();
         let initial_objects = engine.snapshot().objects.len();
 
         for (for_player, pay_player) in [(99, 2), (1, 99)] {
@@ -2314,8 +1970,7 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
                         object_reference_value(base),
                         Value::Bool(true),
                     ],
-                )
-                .expect("invalid-player Buy returns normally");
+                ).test_value();
             assert_eq!(rejected, Value::Nil);
         }
         assert_eq!(engine.snapshot().objects.len(), initial_objects);
@@ -2332,8 +1987,7 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
         assert!(engine.pending_audio.is_empty());
 
         engine
-            .set_player_home_base_material(2, HashMap::new())
-            .expect("empty stock installs");
+            .set_player_home_base_material(2, HashMap::new()).test_value();
         let unavailable = engine
             .call_object_function(
                 caller_index,
@@ -2344,19 +1998,16 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
                     object_reference_value(base),
                     Value::Bool(false),
                 ],
-            )
-            .expect("silent unavailable-item Buy returns normally");
+            ).test_value();
         assert_eq!(unavailable, Value::Nil);
         assert_eq!(engine.snapshot().objects.len(), initial_objects);
         assert!(engine.snapshot().hud.messages.is_empty());
         assert!(engine.pending_audio.is_empty());
         engine
-            .set_player_home_base_material(2, HashMap::from([(DefinitionId::from("ITEM"), 2)]))
-            .expect("stock restores");
+            .set_player_home_base_material(2, HashMap::from([(DefinitionId::from("ITEM"), 2)])).test_value();
 
         engine
-            .set_player_wealth(2, 24)
-            .expect("insufficient wealth installs");
+            .set_player_wealth(2, 24).test_value();
         let rejected = engine
             .call_object_function(
                 caller_index,
@@ -2367,8 +2018,7 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
                     object_reference_value(base),
                     Value::Bool(false),
                 ],
-            )
-            .expect("silent insufficient-wealth Buy returns normally");
+            ).test_value();
         assert_eq!(rejected, Value::Nil);
         assert_eq!(engine.snapshot().objects.len(), initial_objects);
         assert_eq!(engine.player(2).expect("payer remains").wealth(), 24);
@@ -2393,8 +2043,7 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
                     object_reference_value(base),
                     Value::Bool(true),
                 ],
-            )
-            .expect("visible insufficient-wealth Buy returns normally");
+            ).test_value();
         assert_eq!(rejected, Value::Nil);
         let messages = engine.snapshot().hud.messages;
         assert_eq!(messages.len(), 1);
@@ -2440,44 +2089,26 @@ public func RecordSale(int wealth, int stock)
 "#;
 
         let mut engine = crate::Engine::with_seed(32);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller compiles"),
-            )
-            .expect("caller registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("BASE", "Base", base_script).expect("base compiles"),
-            )
-            .expect("base registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+        engine.register_test_definition(test_definition("CALL", "Caller", caller_script));
+        engine.register_test_definition(test_definition("BASE", "Base", base_script));
         let mut item =
-            crate::Definition::from_script("VALU", "Valuable", item_script).expect("item compiles");
+            test_definition("VALU", "Valuable", item_script);
         item.set_value(99);
         item.set_rebuyable(true);
-        engine.register_definition(item).expect("item registers");
+        engine.register_test_definition(item);
 
-        let base = engine
-            .spawn_object(SpawnConfig::new("BASE"))
-            .expect("base spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let base = engine.spawn_test_object(SpawnConfig::new("BASE"));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let caller_index = engine.find_object_index(caller).test_value();
 
-        let explicit = engine
-            .spawn_object(SpawnConfig::new("VALU").with_container(base))
-            .expect("explicit target spawns");
+        let explicit = engine.spawn_test_object(SpawnConfig::new("VALU").with_container(base));
         let sold = engine
             .call_object_function(
                 caller_index,
                 "SellTarget",
                 vec![Value::Int(0), object_reference_value(explicit)],
-            )
-            .expect("explicit Sell runs");
+            ).test_value();
         assert_eq!(sold, Value::Bool(true));
         assert!(
             engine
@@ -2494,7 +2125,7 @@ public func RecordSale(int wealth, int stock)
                 .get(&DefinitionId::from("VALU")),
             Some(&1)
         );
-        let base_snapshot = engine.object_snapshot(base).expect("base remains");
+        let base_snapshot = engine.object_snapshot(base).test_value();
         assert_eq!(base_snapshot.local_vars.get("sales"), Some(&Value::Int(1)));
         assert_eq!(
             base_snapshot.local_vars.get("sale_wealth"),
@@ -2505,20 +2136,16 @@ public func RecordSale(int wealth, int stock)
             Some(&Value::Int(1))
         );
 
-        let invalid = engine
-            .spawn_object(SpawnConfig::new("VALU").with_container(base))
-            .expect("invalid-player target spawns");
+        let invalid = engine.spawn_test_object(SpawnConfig::new("VALU").with_container(base));
         let rejected = engine
             .call_object_function(
                 caller_index,
                 "SellTarget",
                 vec![Value::Int(99), object_reference_value(invalid)],
-            )
-            .expect("invalid-player Sell returns normally");
+            ).test_value();
         assert_eq!(rejected, Value::Bool(false));
         let invalid_snapshot = engine
-            .object_snapshot(invalid)
-            .expect("rejected object remains");
+            .object_snapshot(invalid).test_value();
         assert!(invalid_snapshot.status.is_active());
         assert_eq!(invalid_snapshot.container, Some(base));
         assert_eq!(engine.player(0).expect("player remains").wealth(), 23);
@@ -2540,15 +2167,11 @@ public func RecordSale(int wealth, int stock)
         );
 
         engine
-            .set_player_wealth(0, 9_990)
-            .expect("near-cap wealth installs");
-        let implicit = engine
-            .spawn_object(SpawnConfig::new("VALU").with_container(base))
-            .expect("implicit target spawns");
-        let implicit_index = engine.find_object_index(implicit).expect("implicit index");
+            .set_player_wealth(0, 9_990).test_value();
+        let implicit = engine.spawn_test_object(SpawnConfig::new("VALU").with_container(base));
+        let implicit_index = engine.find_object_index(implicit).test_value();
         let sold = engine
-            .call_object_function(implicit_index, "SellSelf", vec![Value::Int(0)])
-            .expect("implicit Sell runs");
+            .call_object_function(implicit_index, "SellSelf", vec![Value::Int(0)]).test_value();
         assert_eq!(sold, Value::Bool(true));
         assert!(
             engine
@@ -2565,7 +2188,7 @@ public func RecordSale(int wealth, int stock)
                 .get(&DefinitionId::from("VALU")),
             Some(&2)
         );
-        let base_snapshot = engine.object_snapshot(base).expect("base remains");
+        let base_snapshot = engine.object_snapshot(base).test_value();
         assert_eq!(base_snapshot.local_vars.get("sales"), Some(&Value::Int(2)));
         assert_eq!(
             base_snapshot.local_vars.get("sale_wealth"),
@@ -2614,8 +2237,7 @@ public func RecordSale(int wealth, int stock)
         let start_y = expected_rng.random(100);
         let raw = landscape
             .find_solid_ground(start_x, start_y, 4)
-            .map(|(x, y)| Vector2::new(x, y))
-            .expect("flat world has solid ground");
+            .map(|(x, y)| Vector2::new(x, y)).test_value();
         let final_position = Vector2::new(
             raw.x,
             crate::docon_initial_center_y(
@@ -2659,7 +2281,7 @@ public func RecordSale(int wealth, int stock)
         // (C4Game.cpp:3044-3052; C4Landscape.cpp:1860-1915).
         let mut landscape = Landscape::flat(100, 80);
         landscape.set_world_height(100);
-        let water = crate::MaterialId::new(1).expect("water id");
+        let water = crate::MaterialId::new(1).test_value();
         for x in 20..80 {
             for y in 40..80 {
                 assert!(landscape.insert_liquid_at(x, y, Some(water)));
@@ -2714,8 +2336,7 @@ public func RecordSale(int wealth, int stock)
         let mut expected_rng = LcgRng::new(31);
         let expected_x = expected_rng.random(100);
         let ceiling = (0..100)
-            .find(|&y| landscape.is_semi_solid_at(expected_x, y))
-            .expect("flat ground is semi-solid");
+            .find(|&y| landscape.is_semi_solid_at(expected_x, y)).test_value();
         let raw = Vector2::new(expected_x, expected_rng.random(ceiling));
         let final_position = Vector2::new(
             raw.x,
@@ -2871,41 +2492,25 @@ public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
         let mut landscape = Landscape::flat(100, 60);
         landscape.set_world_height(100);
         engine.set_landscape(landscape);
-        let mut animal = crate::Definition::from_script("ANML", "Animal", animal_script)
-            .expect("animal script compiles");
+        let mut animal = test_definition("ANML", "Animal", animal_script);
         animal.set_category(crate::CATEGORY_LIVING);
         animal.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
         animal.set_placement(2);
-        engine
-            .register_definition(animal)
-            .expect("animal registers");
-        let mut removed = crate::Definition::from_script(
-            "DIEA",
-            "Removed animal",
-            "#strict\nprotected func Construction() { RemoveObject(); }",
-        )
-        .expect("removed animal script compiles");
+        engine.register_test_definition(animal);
+        let mut removed = test_definition("DIEA", "Removed animal", "#strict\nprotected func Construction() { RemoveObject(); }");
         removed.set_category(crate::CATEGORY_LIVING);
         removed.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
         removed.set_placement(2);
-        engine
-            .register_definition(removed)
-            .expect("removed animal registers");
-        let caller = crate::Definition::from_script("CALL", "Caller", caller_script)
-            .expect("caller script compiles");
-        engine
-            .register_definition(caller)
-            .expect("caller registers");
-        let caller_id = engine
-            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(1_000, 1_000)))
-            .expect("caller spawns");
-        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+        engine.register_test_definition(removed);
+        let caller = test_definition("CALL", "Caller", caller_script);
+        engine.register_test_definition(caller);
+        let caller_id = engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(1_000, 1_000)));
+        let caller_index = engine.find_object_index(caller_id).test_value();
 
         let value = engine
-            .call_object_function(caller_index, "Seed", Vec::new())
-            .expect("Seed runs");
-        let animal_id = object_id_from_value(&value).expect("Seed returns live animal");
-        let animal_index = engine.find_object_index(animal_id).expect("animal exists");
+            .call_object_function(caller_index, "Seed", Vec::new()).test_value();
+        let animal_id = object_id_from_value(&value).test_value();
+        let animal_index = engine.find_object_index(animal_id).test_value();
         let animal = &engine.objects[animal_index].state;
         assert_eq!(animal.owner, OWNER_NONE);
         assert_eq!(animal.controller, OWNER_NONE);
@@ -2921,7 +2526,7 @@ public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
             Some(&Value::Int(animal.position.y + 3)),
             "Construction sees the raw pre-DoCon y"
         );
-        let caller_index = engine.find_object_index(caller_id).expect("caller remains");
+        let caller_index = engine.find_object_index(caller_id).test_value();
         assert_eq!(
             engine.objects[caller_index]
                 .state
@@ -2933,8 +2538,7 @@ public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
 
         let before_next_id = engine.capture_state().next_object_id;
         let value = engine
-            .call_object_function(caller_index, "SeedRemoved", Vec::new())
-            .expect("SeedRemoved runs");
+            .call_object_function(caller_index, "SeedRemoved", Vec::new()).test_value();
         assert_eq!(value, Value::Nil);
         assert!(engine
             .snapshot()

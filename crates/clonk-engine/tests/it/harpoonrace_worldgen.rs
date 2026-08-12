@@ -65,19 +65,14 @@ fn generated_skyrace_uses_the_same_skyparcour_guard() {
 }
 
 fn water_pixels_after_activation(engine: &Engine) -> (usize, Vec<(i32, i32)>) {
-    let landscape = engine
-        .landscape()
-        .expect("applied HarpoonRace has a live landscape");
-    let grid = landscape
-        .pixel_grid()
-        .expect("applied HarpoonRace has a Surface8 plane");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
+    let grid = crate::support::TestValueExt::test_value(landscape.pixel_grid());
     let materials = engine.materials();
-    let water = materials
-        .get("Water")
-        .filter(|water| water.instable())
-        .expect("installed Water is an unstable material");
-    let width = i32::try_from(grid.width()).expect("landscape width fits C4 coordinates");
-    let height = i32::try_from(grid.height()).expect("landscape height fits C4 coordinates");
+    let water = crate::support::TestValueExt::test_value(
+        materials.get("Water").filter(|water| water.instable()),
+    );
+    let width = crate::support::TestValueExt::test_value(i32::try_from(grid.width()));
+    let height = crate::support::TestValueExt::test_value(i32::try_from(grid.height()));
     let mut water_pixels = 0;
     let mut movable = Vec::new();
 

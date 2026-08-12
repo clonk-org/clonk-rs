@@ -1,4 +1,5 @@
 use crate::support::real_scenario::{join_local_player, PreparedInstalledScenario};
+use crate::support::EngineTestExt;
 use clonk_engine::{Definition, SpawnConfig, VIS_ALL, VIS_ALLIES, VIS_GOD, VIS_OWNER};
 use clonk_script::Value;
 
@@ -11,30 +12,20 @@ pub(crate) fn shipped_invisibility_spell_hides_and_restores_its_mage(
         "the installed MINV definition retains its shipped effect callback"
     );
     let owner = join_local_player(&mut engine, "Invisibility owner");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK cursor");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let observer = join_local_player(&mut engine, "Invisibility observer");
-    engine
-        .set_hostility(owner, observer, true)
-        .expect("players become hostile");
+    crate::support::TestValueExt::test_value(engine.set_hostility(owner, observer, true));
 
-    let spell = engine
-        .spawn_object(SpawnConfig::new("MINV").with_owner(owner))
-        .expect("the shipped MINV spell spawns");
-    engine
-        .call_object_function(
-            engine.find_object_index(spell).expect("MINV index"),
-            "Activate",
-            vec![Value::Object(mage.as_u64()), Value::Nil],
-        )
-        .expect("the shipped invisibility spell activates");
-    engine
-        .tick_without_snapshot()
-        .expect("the effect-start callback executes on the next engine pass");
+    let spell = engine.spawn_test_object(SpawnConfig::new("MINV").with_owner(owner));
+    engine.call_test_object_function(
+        engine.test_object_index(spell),
+        "Activate",
+        vec![Value::Object(mage.as_u64()), Value::Nil],
+    );
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     let hidden = engine.snapshot();
-    let mage_snapshot = hidden.object(mage).expect("mage remains after cast");
+    let mage_snapshot = crate::support::TestValueExt::test_value(hidden.object(mage));
     assert_eq!(
         mage_snapshot.visibility,
         VIS_OWNER | VIS_ALLIES | VIS_GOD,
@@ -50,31 +41,24 @@ pub(crate) fn shipped_invisibility_spell_hides_and_restores_its_mage(
     assert!(!hidden.object_visible_for_player(mage, observer, false));
     assert!(hidden.object_visible_for_player(mage, -1, false));
 
-    engine
-        .register_definition(
-            Definition::from_script(
-                "VSTP",
-                "Visibility stop probe",
-                r#"#strict
-public func Stop(object target)
-{
-    return RemoveEffect("InvisPSpell", target);
-}
-"#,
-            )
-            .expect("stop probe compiles"),
-        )
-        .expect("stop probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("VSTP"))
-        .expect("stop probe spawns");
-    engine
-        .call_object_function(
-            engine.find_object_index(probe).expect("stop probe index"),
-            "Stop",
-            vec![Value::Object(mage.as_u64())],
-        )
-        .expect("the shipped invisibility stop callback runs");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "VSTP",
+            "Visibility stop probe",
+            r#"#strict
+        public func Stop(object target)
+        {
+            return RemoveEffect("InvisPSpell", target);
+        }
+        "#,
+        ),
+    ));
+    let probe = engine.spawn_test_object(SpawnConfig::new("VSTP"));
+    engine.call_test_object_function(
+        engine.test_object_index(probe),
+        "Stop",
+        vec![Value::Object(mage.as_u64())],
+    );
 
     let restored = engine.snapshot();
     assert_eq!(
@@ -98,42 +82,33 @@ pub(crate) fn shipped_invisibility_recast_carries_remaining_time_into_reset_time
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Invisibility owner");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK cursor");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     let cast = |engine: &mut clonk_engine::Engine| {
-        let spell = engine
-            .spawn_object(SpawnConfig::new("MINV").with_owner(owner))
-            .expect("the shipped MINV spell spawns");
-        engine
-            .call_object_function(
-                engine.find_object_index(spell).expect("MINV index"),
-                "Activate",
-                vec![Value::Object(mage.as_u64()), Value::Nil],
-            )
-            .expect("the shipped invisibility spell activates");
+        let spell = engine.spawn_test_object(SpawnConfig::new("MINV").with_owner(owner));
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(mage.as_u64()), Value::Nil],
+        );
     };
 
     cast(&mut engine);
     for _ in 0..7 {
-        engine
-            .tick_without_snapshot()
-            .expect("the invisibility timer advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let before = engine
-        .object_snapshot(mage)
-        .expect("mage remains after first cast")
-        .effects
-        .into_iter()
-        .find(|effect| effect.name == "InvisPSpell")
-        .expect("first invisibility effect exists");
+    let before = crate::support::TestValueExt::test_value(
+        engine
+            .test_object_snapshot(mage)
+            .effects
+            .into_iter()
+            .find(|effect| effect.name == "InvisPSpell"),
+    );
     assert!(before.timer > 0, "the first spell has consumed some time");
 
     cast(&mut engine);
     let effects = engine
-        .object_snapshot(mage)
-        .expect("mage remains after recast")
+        .test_object_snapshot(mage)
         .effects
         .into_iter()
         .filter(|effect| effect.name == "InvisPSpell" && effect.priority != 0)
@@ -153,17 +128,13 @@ pub(crate) fn shipped_invisibility_recast_carries_remaining_time_into_reset_time
         "ChangeEffect restarts the merged invisibility clock"
     );
     assert!(engine
-        .object_snapshot(mage)
-        .expect("mage remains after recast")
+        .test_object_snapshot(mage)
         .effects
         .iter()
         .any(|effect| effect.name == "InvisPSpell" && effect.priority == 0));
-    engine
-        .tick_without_snapshot()
-        .expect("the mage's next Execute cleans the dead recast node");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     let after = engine
-        .object_snapshot(mage)
-        .expect("mage remains after cleanup")
+        .test_object_snapshot(mage)
         .effects
         .into_iter()
         .filter(|effect| effect.name == "InvisPSpell")

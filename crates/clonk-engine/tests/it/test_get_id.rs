@@ -3,10 +3,11 @@ use clonk_engine::{Engine, SpawnConfig};
 #[test]
 fn get_id_returns_current_object_definition() {
     let mut engine = Engine::new();
-    let definition = clonk_engine::Definition::from_script(
-        "COWB",
-        "Cowboy",
-        r#"
+    let definition =
+        crate::support::TestValueExt::test_value(clonk_engine::Definition::from_script(
+            "COWB",
+            "Cowboy",
+            r#"
         #strict
         protected func Initialize() {
             var myId = GetID();
@@ -16,14 +17,13 @@ fn get_id_returns_current_object_definition() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+        ));
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("COWB".to_string()))
-        .expect("spawn should succeed");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("COWB".to_string())),
+    );
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn get_id_with_different_definitions() {
     let mut engine = Engine::new();
 
     // Test that different objects return different IDs
-    let cowboy = clonk_engine::Definition::from_script(
+    let cowboy = crate::support::TestValueExt::test_value(clonk_engine::Definition::from_script(
         "COWB",
         "Cowboy",
         r#"
@@ -42,10 +42,9 @@ fn get_id_with_different_definitions() {
             return 0;
         }
         "#,
-    )
-    .expect("cowboy compiles");
+    ));
 
-    let clonk = clonk_engine::Definition::from_script(
+    let clonk = crate::support::TestValueExt::test_value(clonk_engine::Definition::from_script(
         "CLNK",
         "Clonk",
         r#"
@@ -56,29 +55,29 @@ fn get_id_with_different_definitions() {
             return 0;
         }
         "#,
-    )
-    .expect("clonk compiles");
+    ));
 
-    engine.register_definition(cowboy).unwrap();
-    engine.register_definition(clonk).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(cowboy));
+    crate::support::TestValueExt::test_value(engine.register_definition(clonk));
 
     // Spawn both and verify they succeed
-    let _cowboy_id = engine
-        .spawn_object(SpawnConfig::new("COWB".to_string()))
-        .expect("cowboy spawn should succeed");
+    let _cowboy_id = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("COWB".to_string())),
+    );
 
-    let _clonk_id = engine
-        .spawn_object(SpawnConfig::new("CLNK".to_string()))
-        .expect("clonk spawn should succeed");
+    let _clonk_id = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("CLNK".to_string())),
+    );
 }
 
 #[test]
 fn get_id_in_clonk_initialize_matches_definition() {
     let mut engine = Engine::new();
-    let definition = clonk_engine::Definition::from_script(
-        "CLNK",
-        "Clonk",
-        r#"
+    let definition =
+        crate::support::TestValueExt::test_value(clonk_engine::Definition::from_script(
+            "CLNK",
+            "Clonk",
+            r#"
         #strict
         protected func Initialize() {
             var id = GetID();
@@ -86,12 +85,11 @@ fn get_id_in_clonk_initialize_matches_definition() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+        ));
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("CLNK".to_string()))
-        .expect("spawn should succeed");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("CLNK".to_string())),
+    );
 }

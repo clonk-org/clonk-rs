@@ -14,26 +14,24 @@ fn load_tutorial08() -> (Engine, i32) {
     // WIPF. Seed 202 deterministically places all ten WIPFs on the walkable
     // surface under MapSeed propagation while exercising the C++ path.
     let mut engine = load_tutorial(8, 202);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 8 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial08 virtual player joins")
-        .number();
+    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial 8 virtual player".to_owned(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }))
+    .number();
     (engine, owner)
 }
 
@@ -70,7 +68,7 @@ fn wait_for_tutorial_message_lines(
         .map(|line| (*line).to_string())
         .collect::<Vec<_>>();
     for _ in 0..max_ticks {
-        let frame = engine.tick().expect("Tutorial08 script tick succeeds");
+        let frame = crate::support::TestValueExt::test_value(engine.tick());
         let lines = frame
             .hud
             .messages
@@ -108,18 +106,19 @@ fn move_next_to(
 ) -> Result<(), Box<dyn Error>> {
     release_direction_controls(player)?;
     player.ticks(12)?;
-    let direction = player
-        .engine()
-        .object_snapshot(clonk)
-        .zip(player.engine().object_snapshot(target))
-        .map(|(clonk, target)| {
-            if clonk.position.x < target.position.x {
-                COM_RIGHT
-            } else {
-                COM_LEFT
-            }
-        })
-        .expect("the Clonk and target remain observable");
+    let direction = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .object_snapshot(clonk)
+            .zip(player.engine().object_snapshot(target))
+            .map(|(clonk, target)| {
+                if clonk.position.x < target.position.x {
+                    COM_RIGHT
+                } else {
+                    COM_LEFT
+                }
+            }),
+    );
     player.hold_until(direction, milestone, 1_200, |engine| {
         engine
             .object_snapshot(clonk)
@@ -137,8 +136,7 @@ fn load_carried_object_into_lorry(
     clonk: ObjectId,
     lorry: ObjectId,
 ) -> Result<(), Box<dyn Error>> {
-    let item = carried_object(player.engine(), clonk)
-        .expect("the surface-searching Clonk carries an object");
+    let item = crate::support::TestValueExt::test_value(carried_object(player.engine(), clonk));
     move_next_to(player, clonk, lorry, "the Clonk returns to LORY")?;
     player.double_tap(COM_DOWN)?;
     player.wait_until("the Clonk grabs LORY for loading", 80, |engine| {
@@ -164,11 +162,9 @@ fn load_carried_object_into_lorry(
 #[test]
 fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn Error>> {
     let (mut engine, owner) = load_tutorial08();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial08 joins one selected CLNK");
-    let lorry = object_with_definition(&engine, "LORY").expect("Tutorial08 creates LORY");
-    let hut = object_with_definition(&engine, "HUT3").expect("Tutorial08 creates HUT3");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let lorry = crate::support::TestValueExt::test_value(object_with_definition(&engine, "LORY"));
+    let hut = crate::support::TestValueExt::test_value(object_with_definition(&engine, "HUT3"));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     player.wait_until("Tutorial08 teaches catching WIPFs", 500, |engine| {
@@ -203,12 +199,11 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 if carried_object(player.engine(), clonk).is_some() {
                     break;
                 }
-                let x = player
-                    .engine()
-                    .object_snapshot(clonk)
-                    .expect("the surface-searching Clonk remains observable")
-                    .position
-                    .x;
+                let x = crate::support::TestValueExt::test_value(
+                    player.engine().object_snapshot(clonk),
+                )
+                .position
+                .x;
                 let next_control = if x <= 8 {
                     COM_RIGHT
                 } else if x >= 790 {
@@ -251,18 +246,19 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             object.action.name == "Push" && object.action.target == Some(lorry)
         })
     })?;
-    let toward_hut = player
-        .engine()
-        .object_snapshot(lorry)
-        .zip(player.engine().object_snapshot(hut))
-        .map(|(lorry, hut)| {
-            if lorry.position.x < hut.position.x + 10 {
-                COM_RIGHT
-            } else {
-                COM_LEFT
-            }
-        })
-        .expect("LORY and HUT3 remain observable");
+    let toward_hut = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .object_snapshot(lorry)
+            .zip(player.engine().object_snapshot(hut))
+            .map(|(lorry, hut)| {
+                if lorry.position.x < hut.position.x + 10 {
+                    COM_RIGHT
+                } else {
+                    COM_LEFT
+                }
+            }),
+    );
     player.hold_until(
         toward_hut,
         "loaded LORY aligns with HUT3's entrance",
@@ -293,18 +289,19 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
-    let toward_entrance = player
-        .engine()
-        .object_snapshot(clonk)
-        .zip(player.engine().object_snapshot(hut))
-        .map(|(clonk, hut)| {
-            if clonk.position.x < hut.position.x + 10 {
-                COM_RIGHT
-            } else {
-                COM_LEFT
-            }
-        })
-        .expect("the Clonk and HUT3 remain observable");
+    let toward_entrance = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .object_snapshot(clonk)
+            .zip(player.engine().object_snapshot(hut))
+            .map(|(clonk, hut)| {
+                if clonk.position.x < hut.position.x + 10 {
+                    COM_RIGHT
+                } else {
+                    COM_LEFT
+                }
+            }),
+    );
     player.hold_until(
         toward_entrance,
         "the Clonk aligns with HUT3's entrance",
@@ -333,11 +330,12 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("HUT3 opens its real Sell menu", 40, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(5))
     })?;
-    let wipf_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "WIPF"))
-        .expect("HUT3 offers its ten WIPFs for sale");
+    let wipf_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "WIPF")),
+    );
     player.menu_navigate_to_index(wipf_index)?;
     player.tap(COM_SPECIAL2)?;
     player.wait_until(

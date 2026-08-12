@@ -24,16 +24,15 @@ fn hazard_death_relaunch_enters_the_holder_created_after_the_clonk() {
     let mut engine = load_installed_scenario("Hazard.c4f/AH_Predator.c4s", 0);
     let victim_owner = join_local_player(&mut engine, "Victim");
     let killer_owner = join_local_player(&mut engine, "Killer");
-    let victim = engine
-        .crew_cursor(victim_owner)
-        .expect("AH - Predator joins a HazardClonk");
-    engine
-        .register_script_definition("KILP", "Kill probe", KILL_PROBE)
-        .expect("probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("KILP"))
-        .expect("probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe index");
+    let victim = crate::support::TestValueExt::test_value(engine.crew_cursor(victim_owner));
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "KILP",
+        "Kill probe",
+        KILL_PROBE,
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("KILP")));
+    let probe_index = crate::support::TestValueExt::test_value(engine.find_object_index(probe));
 
     assert_eq!(
         engine
@@ -47,16 +46,18 @@ fn hazard_death_relaunch_enters_the_holder_created_after_the_clonk() {
     );
 
     let snapshot = engine.snapshot();
-    let holder = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "TIM2")
-        .expect("Arena_RelaunchClonk creates the TIM2 holder");
-    let relaunched = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "HZCK" && object.container == Some(holder.id))
-        .expect("the replacement Clonk enters the holder created after it");
+    let holder = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "TIM2"),
+    );
+    let relaunched = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "HZCK" && object.container == Some(holder.id)),
+    );
     assert!(
         holder.contents.contains(&relaunched.id),
         "the holder's contents list must carry the relaunched Clonk"

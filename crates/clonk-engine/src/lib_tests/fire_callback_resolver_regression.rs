@@ -8,18 +8,18 @@ fn native_fire_shadow_probe_uses_script_tables_without_building_host_world(
     // C4Object::ExecFire only dispatches the script timer when that lookup
     // shadows the native callback (src/C4Object.cpp:1257-1267).
     let mut engine = Engine::new();
-    engine.register_definition(Definition::from_script("HUT1", "Hut", "")?)?;
+    engine.register_definition(test_definition("HUT1", "Hut", ""))?;
     let fire = EffectState::new(C4FX_FIRE);
     let fallback = DefinitionId::from("HUT1");
 
     HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(|count| count.set(0));
     assert!(!engine.effect_has_script_callback(&fire, &fallback, "Timer"));
 
-    engine.register_definition(Definition::from_script(
+    engine.register_definition(test_definition(
         "OVRD",
         "Override",
         "#strict\nglobal func FxFireTimer(target, number, time) { return 0; }\n",
-    )?)?;
+    ))?;
     assert!(engine.effect_has_script_callback(&fire, &fallback, "Timer"));
 
     assert!(engine.remove_definition("OVRD"));

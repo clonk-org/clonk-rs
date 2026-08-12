@@ -11,26 +11,24 @@ use clonk_engine::{
 
 fn load_tutorial03() -> (Engine, i32) {
     let mut engine = load_tutorial(3, 0);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 3 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial03 virtual player joins")
-        .number();
+    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial 3 virtual player".to_owned(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: true,
+        startup_player_count: 1,
+    }))
+    .number();
     (engine, owner)
 }
 
@@ -66,14 +64,13 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
 fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial03();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial03 joins one selected CLNK");
-    let hut = object_with_definition(&engine, "HUT3").expect("Tutorial03 creates HUT3");
-    let sawmill = object_with_definition(&engine, "SAWM").expect("Tutorial03 creates SAWM");
-    let foundry = object_with_definition(&engine, "FNDR").expect("Tutorial03 creates FNDR");
-    let tree = object_with_definition_near_x(&engine, "TRE2", 167)
-        .expect("Tutorial03 saves its first full TRE2 at x=167");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let hut = crate::support::TestValueExt::test_value(object_with_definition(&engine, "HUT3"));
+    let sawmill = crate::support::TestValueExt::test_value(object_with_definition(&engine, "SAWM"));
+    let foundry = crate::support::TestValueExt::test_value(object_with_definition(&engine, "FNDR"));
+    let tree = crate::support::TestValueExt::test_value(object_with_definition_near_x(
+        &engine, "TRE2", 167,
+    ));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     player.wait_until("the ready base and Clonk finish joining", 120, |engine| {
@@ -127,11 +124,12 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("Tutorial03 asks the player to buy LORY", 240, |engine| {
         tutorial_message_contains(engine, "Buy a lorry")
     })?;
-    let buy_lorry_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "LORY"))
-        .expect("Tutorial03 home-base material offers LORY");
+    let buy_lorry_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "LORY")),
+    );
     player.menu_navigate_to_index(buy_lorry_index)?;
     player.menu_enter()?;
     let lorry = player
@@ -142,7 +140,12 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                     .is_some_and(|object| object.container == Some(hut))
             })
         })
-        .map(|_| object_with_definition(player.engine(), "LORY").expect("bought LORY"))?;
+        .map(|_| {
+            crate::support::TestValueExt::test_value(object_with_definition(
+                player.engine(),
+                "LORY",
+            ))
+        })?;
 
     player.wait_until("Tutorial03 asks to close the Buy menu", 240, |engine| {
         tutorial_message_contains(engine, "close the buy menu")
@@ -164,11 +167,12 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         240,
         |engine| tutorial_message_contains(engine, "Activate the lorry"),
     )?;
-    let contents_lorry_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "LORY"))
-        .expect("HUT3 Contents contains the bought LORY");
+    let contents_lorry_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "LORY")),
+    );
     player.menu_navigate_to_index(contents_lorry_index)?;
     player.menu_enter()?;
     player.wait_until("Contents activation exits LORY from HUT3", 40, |engine| {
@@ -248,10 +252,8 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     // C++ turns the full tree from StaticBack into Vehicle after Chop's
     // repeated damage crosses TreeStrength, at which point the Clonk can grab
     // it (Tree.c4d/Script.c:89-103,116-131; C4Object.cpp:5202-5221).
-    let tree_before_chop = player
-        .engine()
-        .object_snapshot(tree)
-        .expect("TRE2 before Chop");
+    let tree_before_chop =
+        crate::support::TestValueExt::test_value(player.engine().object_snapshot(tree));
     assert_ne!(
         tree_before_chop.ocf & ocf::CHOP,
         0,
@@ -326,18 +328,13 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     // picture stack whose count is five when CanConcatPictureWith succeeds
     // (C4ObjectList.cpp:144-173,343-372,849-903;
     // C4Object.cpp:6173-6213).
-    let lorry_after_sawmill = player
-        .engine()
-        .object_snapshot(lorry)
-        .expect("the loaded Tutorial03 LORY remains live");
+    let lorry_after_sawmill =
+        crate::support::TestValueExt::test_value(player.engine().object_snapshot(lorry));
     let wood_stack = lorry_after_sawmill
         .contents
         .iter()
         .map(|item| {
-            player
-                .engine()
-                .object_snapshot(*item)
-                .expect("every LORY content remains live")
+            crate::support::TestValueExt::test_value(player.engine().object_snapshot(*item))
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -377,7 +374,8 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         tutorial_message_contains(engine, "dig out the chunk of ore")
             && object_with_definition(engine, "ORE1").is_some()
     })?;
-    let ore = object_with_definition(player.engine(), "ORE1").expect("Tutorial03 ORE1");
+    let ore =
+        crate::support::TestValueExt::test_value(object_with_definition(player.engine(), "ORE1"));
     player.hold_until(
         COM_RIGHT,
         "the Clonk walks to the ORE1 digging face",

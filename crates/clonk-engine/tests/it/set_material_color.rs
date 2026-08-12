@@ -7,40 +7,36 @@ pub(super) fn set_material_color_matches_native_modulation_formula_and_invalid_g
     prepared: &PreparedInstalledScenario,
 ) {
     let mut engine = prepared.instantiate();
-    engine
-        .register_definition(
-            Definition::from_script(
-                "SMCL",
-                "SetMaterialColor probe",
-                r#"#strict
-local result;
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_script(
+            "SMCL",
+            "SetMaterialColor probe",
+            r#"#strict
+                local result;
 
-public func Probe()
-{
-    var earth = Material("Earth");
-    var changed = SetMaterialColor(earth, 63, 190, 0, 1, 2, 3, 4, 5, 6);
-    var changed_modulation = GetMatAdjust();
-    var identity = SetMaterialColor(earth, 127, 95, 63);
-    var identity_modulation = GetMatAdjust();
-    var black = SetMaterialColor(earth, 0, 0, 0);
-    var black_modulation = GetMatAdjust();
-    var invalid = SetMaterialColor(-1, 255, 255, 255);
-    var after_invalid = GetMatAdjust();
-    result = [changed, changed_modulation,
+                public func Probe()
+                {
+                var earth = Material("Earth");
+                var changed = SetMaterialColor(earth, 63, 190, 0, 1, 2, 3, 4, 5, 6);
+                var changed_modulation = GetMatAdjust();
+                var identity = SetMaterialColor(earth, 127, 95, 63);
+                var identity_modulation = GetMatAdjust();
+                var black = SetMaterialColor(earth, 0, 0, 0);
+                var black_modulation = GetMatAdjust();
+                var invalid = SetMaterialColor(-1, 255, 255, 255);
+                var after_invalid = GetMatAdjust();
+                result = [changed, changed_modulation,
               identity, identity_modulation,
               black, black_modulation,
               invalid, after_invalid];
-    return(result);
-}
-"#,
-            )
-            .expect("the material recoloring probe compiles"),
-        )
-        .expect("the material recoloring probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("SMCL"))
-        .expect("the material recoloring probe spawns");
-    let index = engine.find_object_index(probe).expect("the probe exists");
+                return(result);
+                }
+                "#,
+        )),
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("SMCL")));
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(probe));
 
     // Earth starts at Color=127,95,63. Native GetClrModulation therefore
     // computes min(target*256/max(source,1),255) per channel: 126,255,0.

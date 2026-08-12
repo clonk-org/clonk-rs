@@ -2095,129 +2095,25 @@ fn parse_legacy_parameters_i32(
 pub(in crate::scenario) fn parse_legacy_scenario_text(
     text: &str,
 ) -> Result<LegacyScenarioManifest, ScenarioError> {
-    const HEAD_KEYS: &[&str] = &[
-        "Icon",
-        "Title",
-        "Description",
-        "Loader",
-        "Font",
-        "Version",
-        "Difficulty",
-        "MaxPlayer",
-        "MaxPlayerLeague",
-        "MinPlayer",
-        "SaveGame",
-        "Replay",
-        "Film",
-        "DisableMouse",
-        "NoInitialize",
-        "RandomSeed",
-        "ForcedAutoContextMenu",
-        "ForcedAutoStopControl",
-        "Engine",
-        "MissionAccess",
-        "NetworkGame",
-        "NetworkRuntimeJoin",
-        "ForcedGfxMode",
-        "ForcedNoCrew",
-        "DefCrewStrength",
-        "Origin",
-    ];
-    const DEFINITION_KEYS: &[&str] = &[
-        "LocalOnly",
-        "AllowUserChange",
-        "Definitions",
-        "Definition1",
-        "Definition2",
-        "Definition3",
-        "Definition4",
-        "Definition5",
-        "Definition6",
-        "Definition7",
-        "Definition8",
-        "Definition9",
-        "Definition10",
-        "SkipDefs",
-    ];
-    const GAME_KEYS: &[&str] = &[
-        "Mode",
-        "Elimination",
-        "CooperativeGoal",
-        "CreateObjects",
-        "ClearObjects",
-        "ClearMaterials",
-        "ValueGain",
-        "EnableRemoveFlag",
-        "StructNeedMaterial",
-        "StructNeedEnergy",
-        "ValueOverloads",
-        "LandscapePushPull",
-        "LandscapeInsertThrust",
-        "BaseFunctionality",
-        "BaseRegenerateEnergyPrice",
-        "Goals",
-        "Rules",
-        "FoWColor",
-    ];
-    const PLAYER_KEYS: &[&str] = &[
-        "StandardCrew",
-        "Clonks",
-        "Wealth",
-        "Position",
-        "EnforcePosition",
-        "Crew",
-        "Buildings",
-        "Vehicles",
-        "Material",
-        "Knowledge",
-        "HomeBaseMaterial",
-        "HomeBaseProduction",
-        "Magic",
-    ];
-    const LANDSCAPE_KEYS: &[&str] = &[
-        "ExactLandscape",
-        "Vegetation",
-        "VegetationLevel",
-        "InEarth",
-        "InEarthLevel",
-        "Sky",
-        "SkyFade",
-        "NoSky",
-        "BottomOpen",
-        "TopOpen",
-        "LeftOpen",
-        "RightOpen",
-        "AutoScanSideOpen",
-        "MapWidth",
-        "MapHeight",
-        "MapZoom",
-        "Amplitude",
-        "Phase",
-        "Period",
-        "Random",
-        "Material",
-        "Liquid",
-        "LiquidLevel",
-        "MapPlayerExtend",
-        "Layers",
-        "Gravity",
-        "NoScan",
-        "KeepMapCreator",
-        "SkyScrollMode",
-        "NewStyleLandscape",
-        "FoWRes",
-        "ShadeMaterials",
-    ];
-    const WEATHER_KEYS: &[&str] = &[
-        "Climate",
-        "StartSeason",
-        "YearSpeed",
-        "Rain",
-        "Wind",
-        "Lightning",
-        "Precipitation",
-        "NoGamma",
-    ];
+    const HEAD_KEYS: &str = "Icon Title Description Loader Font Version Difficulty MaxPlayer \
+        MaxPlayerLeague MinPlayer SaveGame Replay Film DisableMouse NoInitialize RandomSeed \
+        ForcedAutoContextMenu ForcedAutoStopControl Engine MissionAccess NetworkGame \
+        NetworkRuntimeJoin ForcedGfxMode ForcedNoCrew DefCrewStrength Origin";
+    const DEFINITION_KEYS: &str = "LocalOnly AllowUserChange Definitions Definition1 Definition2 \
+        Definition3 Definition4 Definition5 Definition6 Definition7 Definition8 Definition9 \
+        Definition10 SkipDefs";
+    const GAME_KEYS: &str = "Mode Elimination CooperativeGoal CreateObjects ClearObjects \
+        ClearMaterials ValueGain EnableRemoveFlag StructNeedMaterial StructNeedEnergy ValueOverloads \
+        LandscapePushPull LandscapeInsertThrust BaseFunctionality BaseRegenerateEnergyPrice Goals \
+        Rules FoWColor";
+    const PLAYER_KEYS: &str = "StandardCrew Clonks Wealth Position EnforcePosition Crew Buildings \
+        Vehicles Material Knowledge HomeBaseMaterial HomeBaseProduction Magic";
+    const LANDSCAPE_KEYS: &str = "ExactLandscape Vegetation VegetationLevel InEarth InEarthLevel \
+        Sky SkyFade NoSky BottomOpen TopOpen LeftOpen RightOpen AutoScanSideOpen MapWidth MapHeight \
+        MapZoom Amplitude Phase Period Random Material Liquid LiquidLevel MapPlayerExtend Layers \
+        Gravity NoScan KeepMapCreator SkyScrollMode NewStyleLandscape FoWRes ShadeMaterials";
+    const WEATHER_KEYS: &str =
+        "Climate StartSeason YearSpeed Rain Wind Lightning Precipitation NoGamma";
 
     let tree = LegacyIniTree::parse(text);
     let mut sections = HashMap::new();
@@ -2301,7 +2197,7 @@ pub(in crate::scenario) fn parse_legacy_scenario_text(
         &mut sections,
         "Disasters",
         "disasters",
-        &["Meteorite", "Volcano", "Earthquake"],
+        "Meteorite Volcano Earthquake",
         &[],
         &[],
         LegacyDisasters::apply_entries,
@@ -2311,7 +2207,7 @@ pub(in crate::scenario) fn parse_legacy_scenario_text(
         &mut sections,
         "Animals",
         "animals",
-        &["Animal", "Nest"],
+        "Animal Nest",
         &[],
         &[],
         LegacyAnimals::apply_entries,
@@ -2321,7 +2217,7 @@ pub(in crate::scenario) fn parse_legacy_scenario_text(
         &mut sections,
         "Environment",
         "environment",
-        &["Objects"],
+        "Objects",
         &[],
         &[],
         LegacyEnvironment::apply_entries,
@@ -2355,7 +2251,7 @@ fn insert_validated_scenario_section<T: Default>(
     sections: &mut HashMap<String, Vec<(String, String)>>,
     source_name: &str,
     storage_name: &str,
-    allowed_keys: &[&str],
+    allowed_keys: &str,
     bool_keys: &[&str],
     integer_bool_keys: &[&str],
     apply: fn(&mut T, &[(String, String)]) -> Result<(), ScenarioError>,
@@ -2363,7 +2259,7 @@ fn insert_validated_scenario_section<T: Default>(
     let Some(section) = tree.first_section(0, source_name) else {
         return;
     };
-    let allowed = allowed_keys.iter().copied().collect::<HashSet<_>>();
+    let allowed: HashSet<_> = allowed_keys.split_ascii_whitespace().collect();
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     for child in tree.nodes[section].children.iter().copied() {

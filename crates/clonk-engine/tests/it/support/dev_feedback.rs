@@ -634,10 +634,8 @@ pub fn run_replay_twice_with_policy(
         .checkpoints
         .iter()
         .map(|checkpoint| {
-            let snapshot = first
-                .observations
-                .get(&checkpoint.frame)
-                .expect("checkpoint frame included in observation set");
+            let snapshot =
+                crate::support::TestValueExt::test_value(first.observations.get(&checkpoint.frame));
             ReplayCheckpointV1::new(
                 checkpoint.frame,
                 snapshot_hash(snapshot, replay.snapshot_hash_version),
@@ -838,9 +836,8 @@ fn run_replay_once(
     }
 
     let simulation_elapsed = simulation_started.elapsed().saturating_sub(join_elapsed);
-    let final_snapshot = observations
-        .get(&replay.stop_frame)
-        .expect("stop frame is always observed");
+    let final_snapshot =
+        crate::support::TestValueExt::test_value(observations.get(&replay.stop_frame));
     let metrics = ReplayRunMetricsV1 {
         schema_version: REPLAY_SCHEMA_VERSION,
         load_micros: load_elapsed.as_micros(),
@@ -1206,12 +1203,12 @@ fn snapshot_hash(snapshot: &SimulationSnapshot, version: u32) -> String {
         object.vertex_contacts.clear();
         object.solid_mask_override = None;
     }
-    let mut value = serde_json::to_value(&deterministic).expect("snapshot serializes");
+    let mut value = crate::support::TestValueExt::test_value(serde_json::to_value(&deterministic));
     if version == SNAPSHOT_HASH_VERSION {
         exclude_surface8_render_cache_lineage(&mut value);
     }
     let canonical = canonicalize_json(value);
-    let bytes = serde_json::to_vec(&canonical).expect("canonical snapshot serializes");
+    let bytes = crate::support::TestValueExt::test_value(serde_json::to_vec(&canonical));
     let hash = bytes.into_iter().fold(FNV_OFFSET, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
     });
@@ -1242,15 +1239,14 @@ const fn legacy_snapshot_hash_version() -> u32 {
 #[test]
 fn snapshot_hash_ignores_serialized_debug_draw_sidecars() {
     let mut engine = Engine::with_seed(0);
-    engine
-        .register_definition(
-            clonk_engine::Definition::from_script("DBUG", "Debug", "")
-                .expect("debug definition compiles"),
-        )
-        .expect("debug definition registers");
-    engine
-        .spawn_object(clonk_engine::SpawnConfig::new("DBUG"))
-        .expect("debug object spawns");
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(clonk_engine::Definition::from_script(
+            "DBUG", "Debug", "",
+        )),
+    ));
+    crate::support::TestValueExt::test_value(
+        engine.spawn_object(clonk_engine::SpawnConfig::new("DBUG")),
+    );
     let baseline = engine.snapshot();
     let mut with_debug = baseline.clone();
     with_debug.objects[0].vertex_contacts = vec![17];
@@ -1261,9 +1257,9 @@ fn snapshot_hash_ignores_serialized_debug_draw_sidecars() {
         .rays
         .push(clonk_engine::PathfinderDebugRay::default());
 
-    let encoded = serde_json::to_string(&with_debug).expect("snapshot serializes");
+    let encoded = crate::support::TestValueExt::test_value(serde_json::to_string(&with_debug));
     let restored: SimulationSnapshot =
-        serde_json::from_str(&encoded).expect("snapshot round-trips");
+        crate::support::TestValueExt::test_value(serde_json::from_str(&encoded));
     assert_eq!(restored.objects[0].vertex_contacts, vec![17]);
     assert_eq!(
         restored.objects[0].solid_mask_override,
@@ -1283,7 +1279,8 @@ fn snapshot_hash_ignores_surface8_render_cache_lineage() {
     // Surface8 byte (C4SolidMask.cpp:323-360; C4Landscape.cpp:846-849). C++
     // carries no revision/token/dirty-generation history for those writes;
     // equal final landscape bytes are therefore equal replay state.
-    let mut landscape = clonk_engine::Landscape::new(2, vec![2; 2]).expect("landscape builds");
+    let mut landscape =
+        crate::support::TestValueExt::test_value(clonk_engine::Landscape::new(2, vec![2; 2]));
     landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
         2,
         2,
@@ -1296,10 +1293,7 @@ fn snapshot_hash_ignores_surface8_render_cache_lineage() {
     engine.set_landscape(landscape);
     let baseline = engine.snapshot();
     let mut after_mask_cycle = baseline.clone();
-    let cycled = after_mask_cycle
-        .landscape
-        .as_mut()
-        .expect("snapshot has landscape");
+    let cycled = crate::support::TestValueExt::test_value(after_mask_cycle.landscape.as_mut());
     cycled.grid_write_mask_byte(0, 0, 2);
     cycled.grid_write_mask_byte(0, 0, 1);
 
@@ -1324,10 +1318,7 @@ fn snapshot_hash_ignores_surface8_render_cache_lineage() {
     );
 
     let mut changed = baseline.clone();
-    changed
-        .landscape
-        .as_mut()
-        .expect("snapshot has landscape")
+    crate::support::TestValueExt::test_value(changed.landscape.as_mut())
         .grid_write_mask_byte(0, 0, 2);
     assert_ne!(
         snapshot_hash(&baseline, SNAPSHOT_HASH_VERSION),

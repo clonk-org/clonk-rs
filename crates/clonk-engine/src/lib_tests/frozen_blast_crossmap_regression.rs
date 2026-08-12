@@ -16,10 +16,9 @@ fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, Mate
             Density=30
             "#
     );
-    let library =
-        clonk_resources::MaterialLibrary::parse(&source).expect("material fixture parses");
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(&source));
     let materials = MaterialSet::from_resource_library(&library);
-    let rock = materials.id_of("Rock").expect("Rock exists");
+    let rock = crate::TestValueExt::test_value(materials.id_of("Rock"));
 
     let mut densities = vec![0; 128];
     densities[10] = 80;
@@ -62,16 +61,14 @@ fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, Mate
         material_crossmap_entries: vec![40],
         ..Default::default()
     };
-    let mut landscape = Landscape::new(5, vec![5; 5]).expect("landscape builds");
+    let mut landscape = crate::TestValueExt::test_value(Landscape::new(5, vec![5; 5]));
     landscape.set_world_height(5);
     landscape.set_pixel_grid(grid);
     landscape.refresh_all_raster_columns();
     landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
 
     if copy_to_lower_slot {
-        let mut moved_texmap = landscape
-            .raster_state()
-            .expect("raster state exists")
+        let mut moved_texmap = crate::TestValueExt::test_value(landscape.raster_state())
             .texmap()
             .clone();
         let (success, indices) = moved_texmap.set_texture_index("Target-Smooth", 5, false);
@@ -95,12 +92,10 @@ fn blast_shift_uses_frozen_crossmap_slot_after_lower_index_copy() {
     let _ = expected_baseline_rng.random(1);
     let _ = expected_moved_rng.random(1);
 
-    let baseline_result = baseline
-        .blast_circle(Vector2::new(2, 2), 2, None)
-        .expect("blast runs");
-    let moved_result = moved
-        .blast_circle(Vector2::new(2, 2), 2, None)
-        .expect("blast runs");
+    let baseline_result =
+        crate::TestValueExt::test_value(baseline.blast_circle(Vector2::new(2, 2), 2, None));
+    let moved_result =
+        crate::TestValueExt::test_value(moved.blast_circle(Vector2::new(2, 2), 2, None));
 
     assert_eq!(baseline_result.pixel_count_by_material[&baseline_rock], 1);
     assert_eq!(moved_result.pixel_count_by_material[&moved_rock], 1);
@@ -118,12 +113,10 @@ fn blast_shift_uses_frozen_crossmap_slot_after_lower_index_copy() {
     );
     assert_eq!(baseline.rng, expected_baseline_rng);
     assert_eq!(moved.rng, expected_moved_rng);
-    let texmap = moved
-        .landscape()
-        .unwrap()
-        .raster_state()
-        .expect("raster state exists")
-        .texmap();
+    let texmap = crate::TestValueExt::test_value(
+        crate::TestValueExt::test_value(moved.landscape()).raster_state(),
+    )
+    .texmap();
     assert_eq!(texmap.material_names[5].as_deref(), Some("Target"));
     assert_eq!(texmap.material_names[40].as_deref(), Some("Target"));
     assert_eq!(texmap.material_crossmap_entries, vec![40]);
@@ -132,19 +125,12 @@ fn blast_shift_uses_frozen_crossmap_slot_after_lower_index_copy() {
 #[test]
 fn frozen_zero_crossmap_does_not_re_resolve_a_later_pair() {
     let (mut engine, rock) = blast_engine(true, "Target-Smooth");
-    engine
-        .landscape
-        .as_mut()
-        .unwrap()
-        .raster_state_mut()
-        .unwrap()
+    crate::TestValueExt::test_value(engine.landscape.as_mut().unwrap().raster_state_mut())
         .texmap_mut()
         .material_crossmap_entries[0] = 0;
     let before_rng = engine.rng.clone();
 
-    let result = engine
-        .blast_circle(Vector2::new(2, 2), 2, None)
-        .expect("blast runs");
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(2, 2), 2, None));
 
     assert_eq!(result.pixel_count_by_material[&rock], 1);
     assert_eq!(
@@ -160,9 +146,7 @@ fn blast_shift_without_texture_keeps_frozen_default_slot() {
     let mut expected_rng = engine.rng.clone();
     let _ = expected_rng.random(1);
 
-    let result = engine
-        .blast_circle(Vector2::new(2, 2), 2, None)
-        .expect("blast runs");
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(2, 2), 2, None));
 
     assert_eq!(result.pixel_count_by_material[&rock], 1);
     assert_eq!(

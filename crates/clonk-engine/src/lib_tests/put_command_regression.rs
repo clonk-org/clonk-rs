@@ -1,5 +1,40 @@
 use super::*;
 
+trait TestEngineExt {
+    fn test_object_index(&self, object: ObjectId) -> usize;
+    fn register_test_definition(&mut self, definition: Definition);
+    fn register_test_player(&mut self, player: PlayerConfig);
+    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str);
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
+}
+
+impl TestEngineExt for Engine {
+    #[track_caller]
+    fn test_object_index(&self, object: ObjectId) -> usize {
+        crate::TestValueExt::test_value(self.find_object_index(object))
+    }
+
+    #[track_caller]
+    fn register_test_definition(&mut self, definition: Definition) {
+        crate::TestValueExt::test_value(self.register_definition(definition));
+    }
+
+    #[track_caller]
+    fn register_test_player(&mut self, player: PlayerConfig) {
+        crate::TestValueExt::test_value(self.register_player(player));
+    }
+
+    #[track_caller]
+    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str) {
+        crate::TestValueExt::test_value(self.register_script_definition(id, name, script));
+    }
+
+    #[track_caller]
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
+        crate::TestValueExt::test_value(self.spawn_object(config))
+    }
+}
+
 fn put_fixture_engine() -> Engine {
     let actor_script = r#"#strict
 local tracked, nested_throw, reject_contents_seen, menu_after_nested, menu_selection_after_nested;
@@ -121,7 +156,7 @@ protected func Departure(pTarget)
 }
 "#;
 
-    let mut actor = Definition::from_script("ACTR", "Actor", actor_script).expect("actor compiles");
+    let mut actor = test_definition("ACTR", "Actor", actor_script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
@@ -142,61 +177,51 @@ protected func Departure(pTarget)
             ),
         ]),
     );
-    let mut target =
-        Definition::from_script("TARG", "Target", target_script).expect("target compiles");
+    let mut target = test_definition("TARG", "Target", target_script);
     target.set_c4_callback_convention(true);
     target.set_grab_put_get(GRAB_PUT_GET_PUT);
-    let mut item = Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+    let mut item = test_definition("ITEM", "Item", item_script);
     item.set_c4_callback_convention(true);
     item.set_collectible(true);
 
     let mut engine = Engine::with_seed(118);
-    engine.register_definition(actor).expect("actor registers");
-    engine
-        .register_definition(target)
-        .expect("target registers");
-    engine.register_definition(item).expect("item registers");
+    engine.register_test_definition(actor);
+    engine.register_test_definition(target);
+    engine.register_test_definition(item);
     engine
 }
 
 fn spawn_push_put_triplet(engine: &mut Engine, reject: bool) -> (ObjectId, ObjectId, ObjectId) {
-    let target = engine
-        .spawn_object(
-            SpawnConfig::new("TARG")
-                .with_position(Vector2::new(80, 40))
-                .with_velocity(Vector2::new(3, -2))
-                .with_local_vars(HashMap::from([(
-                    "reject".to_string(),
-                    Value::Int(i32::from(reject)),
-                )])),
-        )
-        .expect("target spawns");
+    let target = engine.spawn_test_object(
+        SpawnConfig::new("TARG")
+            .with_position(Vector2::new(80, 40))
+            .with_velocity(Vector2::new(3, -2))
+            .with_local_vars(HashMap::from([(
+                "reject".to_string(),
+                Value::Int(i32::from(reject)),
+            )])),
+    );
     let mut push = ActionState::new("Push");
     push.target = Some(target);
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("ACTR")
-                .with_position(Vector2::new(20, 40))
-                .with_action(push),
-        )
-        .expect("actor spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("ACTR")
+            .with_position(Vector2::new(20, 40))
+            .with_action(push),
+    );
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
         .local_vars
         .insert("tracked".to_string(), object_reference_value(item));
-    engine.objects[actor_index]
-        .commands
-        .push_front(
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index].commands.push_front(
             CommandRequest::new(CommandId::Put)
                 .with_target(Some(target))
                 .with_target2(Some(item))
                 .with_ty(Some(1)),
-        )
-        .expect("Put queues");
+        ),
+    );
     (actor, item, target)
 }
 
@@ -205,43 +230,31 @@ fn spawn_contained_put_take_triplet(
     reject: bool,
     command: CommandId,
 ) -> (ObjectId, ObjectId, ObjectId) {
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG").with_local_vars(HashMap::from([(
-            "reject".to_string(),
-            Value::Int(i32::from(reject)),
-        )])))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-        .expect("contained actor spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("carried item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_local_vars(HashMap::from(
+        [("reject".to_string(), Value::Int(i32::from(reject)))],
+    )));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
         .local_vars
         .insert("tracked".to_string(), object_reference_value(item));
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(command).with_target(Some(item)))
-        .expect("put/take command queues");
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(command).with_target(Some(item))),
+    );
     (actor, item, target)
 }
 
 #[test]
 fn object_com_put_accepts_an_explicit_non_content_object() {
     let mut engine = put_fixture_engine();
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR"))
-        .expect("actor spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM"))
-        .expect("uncontained item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR"));
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM"));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
         .local_vars
@@ -250,7 +263,7 @@ fn object_com_put_accepts_an_explicit_non_content_object() {
     assert!(engine
         .try_object_com_put(actor, target, item)
         .expect("ObjectComPut executes"));
-    let item_state = &engine.objects[engine.find_object_index(item).expect("item remains")].state;
+    let item_state = &engine.objects[engine.test_object_index(item)].state;
     assert_eq!(item_state.container, Some(target));
     assert_eq!(
         item_state.local_vars.get("callback_order"),
@@ -261,13 +274,9 @@ fn object_com_put_accepts_an_explicit_non_content_object() {
 #[test]
 fn empty_put_take_opens_menu_on_a_retained_status_zero_target() {
     let mut engine = put_fixture_engine();
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-        .expect("contained actor spawns");
-    let target_index = engine.find_object_index(target).expect("target exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+    let target_index = engine.test_object_index(target);
     let _ = engine.objects[target_index].mark_destroyed();
 
     assert_eq!(
@@ -276,11 +285,12 @@ fn empty_put_take_opens_menu_on_a_retained_status_zero_target() {
             .expect("ObjectComPutTake executes"),
         ObjectComPutTakeOutcome::Finished
     );
-    let menu = engine.objects[engine.find_object_index(actor).expect("actor remains")]
-        .state
-        .menu
-        .as_ref()
-        .expect("activate menu opens");
+    let menu = crate::TestValueExt::test_value(
+        engine.objects[engine.test_object_index(actor)]
+            .state
+            .menu
+            .as_ref(),
+    );
     assert_eq!(menu.identification, Value::Int(6));
     assert_eq!(menu.refill_object, Some(target));
 }
@@ -288,13 +298,9 @@ fn empty_put_take_opens_menu_on_a_retained_status_zero_target() {
 #[test]
 fn exit_unlinks_a_retained_status_zero_object() {
     let mut engine = put_fixture_engine();
-    let container = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("container spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(container))
-        .expect("contained item spawns");
-    let item_index = engine.find_object_index(item).expect("item exists");
+    let container = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(container));
+    let item_index = engine.test_object_index(item);
     let position = engine.objects[item_index].state.position;
     let rotation = engine.objects[item_index].state.rotation;
     let _ = engine.objects[item_index].mark_destroyed();
@@ -303,17 +309,15 @@ fn exit_unlinks_a_retained_status_zero_object() {
         .exit_object_at_position_with_zero_motion(item, container, position, rotation)
         .expect("Exit executes"));
     assert_eq!(
-        engine.objects[engine.find_object_index(item).expect("item remains")]
+        engine.objects[engine.test_object_index(item)]
             .state
             .container,
         None
     );
-    assert!(!engine.objects[engine
-        .find_object_index(container)
-        .expect("container remains")]
-    .state
-    .contents
-    .contains(&item));
+    assert!(!engine.objects[engine.test_object_index(container)]
+        .state
+        .contents
+        .contains(&item));
 }
 
 #[test]
@@ -327,30 +331,17 @@ protected func Departure(pTarget)
   return(1);
 }
 "#;
-    let mut reentering = Definition::from_script("RITM", "Reentering item", reentering_script)
-        .expect("reentering item compiles");
+    let mut reentering = test_definition("RITM", "Reentering item", reentering_script);
     reentering.set_c4_callback_convention(true);
-    engine
-        .register_definition(reentering)
-        .expect("reentering item registers");
-    let destination = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("destination spawns");
-    let parent = engine
-        .spawn_object(SpawnConfig::new("ACTR"))
-        .expect("parent spawns");
-    let first = engine
-        .spawn_object(SpawnConfig::new("RITM").with_container(parent))
-        .expect("first child spawns");
-    let second = engine
-        .spawn_object(SpawnConfig::new("RITM").with_container(parent))
-        .expect("second child spawns");
-    let parent_index = engine.find_object_index(parent).expect("parent exists");
+    engine.register_test_definition(reentering);
+    let destination = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let parent = engine.spawn_test_object(SpawnConfig::new("ACTR"));
+    let first = engine.spawn_test_object(SpawnConfig::new("RITM").with_container(parent));
+    let second = engine.spawn_test_object(SpawnConfig::new("RITM").with_container(parent));
+    let parent_index = engine.test_object_index(parent);
     let first_link = engine.objects[parent_index].state.contents[0];
     let sibling = if first_link == first { second } else { first };
-    let first_link_index = engine
-        .find_object_index(first_link)
-        .expect("first linked child exists");
+    let first_link_index = engine.test_object_index(first_link);
     engine.objects[first_link_index].state.local_vars.insert(
         "reenter_target".to_string(),
         object_reference_value(destination),
@@ -360,19 +351,15 @@ protected func Departure(pTarget)
         .assign_object_removal_with_contents(parent, true)
         .expect("AssignRemoval executes"));
     assert_eq!(
-        engine.objects[engine
-            .find_object_index(first_link)
-            .expect("reentered child remains")]
-        .state
-        .container,
+        engine.objects[engine.test_object_index(first_link)]
+            .state
+            .container,
         Some(destination)
     );
     assert_eq!(
-        engine.objects[engine
-            .find_object_index(sibling)
-            .expect("exited sibling remains")]
-        .state
-        .container,
+        engine.objects[engine.test_object_index(sibling)]
+            .state
+            .container,
         None,
         "the loop re-reads Contents.First even when the prior Exit returned false"
     );
@@ -383,12 +370,10 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
     let mut engine = put_fixture_engine();
     let (actor, item, target) = spawn_push_put_triplet(&mut engine, false);
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("successful Put executes");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-    let item_index = engine.find_object_index(item).expect("item remains");
-    let target_index = engine.find_object_index(target).expect("target remains");
+    let item_index = engine.test_object_index(item);
+    let target_index = engine.test_object_index(target);
     assert_eq!(engine.objects[item_index].state.container, Some(target));
     assert_eq!(
         engine.objects[item_index]
@@ -406,7 +391,7 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
         engine.objects[item_index].fixed_velocity,
         engine.objects[target_index].fixed_velocity
     );
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index]
             .commands
@@ -425,12 +410,8 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
     );
 
     let (rejected_actor, rejected_item, _) = spawn_push_put_triplet(&mut engine, true);
-    engine
-        .execute_object_command_now(rejected_actor)
-        .expect("rejected Put resolves");
-    let rejected_item_index = engine
-        .find_object_index(rejected_item)
-        .expect("rejected item remains");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(rejected_actor));
+    let rejected_item_index = engine.test_object_index(rejected_item);
     assert_eq!(
         engine.objects[rejected_item_index].state.container,
         Some(rejected_actor)
@@ -442,9 +423,7 @@ fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
             .get("callback_order"),
         Some(&Value::Int(12))
     );
-    let rejected_actor_index = engine
-        .find_object_index(rejected_actor)
-        .expect("rejected actor remains");
+    let rejected_actor_index = engine.test_object_index(rejected_actor);
     assert!(
         engine.objects[rejected_actor_index]
             .commands
@@ -459,14 +438,9 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut accepted = put_fixture_engine();
         let (actor, item, target) = spawn_contained_put_take_triplet(&mut accepted, false, command);
-        accepted
-            .execute_object_command_now(actor)
-            .expect("accepted ObjectComPutTake executes");
+        crate::TestValueExt::test_value(accepted.execute_object_command_now(actor));
 
-        let item_state = &accepted.objects[accepted
-            .find_object_index(item)
-            .expect("accepted item remains")]
-        .state;
+        let item_state = &accepted.objects[accepted.test_object_index(item)].state;
         assert_eq!(item_state.container, Some(target), "{command:?} transfers");
         assert_eq!(
             item_state.local_vars.get("callback_order"),
@@ -474,24 +448,17 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
                 "{command:?}: RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> Put -> Collection"
         );
         assert!(
-            accepted.objects[accepted
-                .find_object_index(actor)
-                .expect("accepted actor remains")]
-            .commands
-            .snapshot()
-            .is_empty(),
+            accepted.objects[accepted.test_object_index(actor)]
+                .commands
+                .snapshot()
+                .is_empty(),
             "{command:?} finishes after the callback tail"
         );
 
         let mut rejected = put_fixture_engine();
         let (actor, item, _) = spawn_contained_put_take_triplet(&mut rejected, true, command);
-        rejected
-            .execute_object_command_now(actor)
-            .expect("rejected ObjectComPutTake executes");
-        let item_state = &rejected.objects[rejected
-            .find_object_index(item)
-            .expect("rejected item remains")]
-        .state;
+        crate::TestValueExt::test_value(rejected.execute_object_command_now(actor));
+        let item_state = &rejected.objects[rejected.test_object_index(item)].state;
         assert_eq!(
             item_state.container,
             Some(actor),
@@ -503,12 +470,10 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
             "Put/Collection must not run after RejectCollect"
         );
         assert!(
-            rejected.objects[rejected
-                .find_object_index(actor)
-                .expect("rejected actor remains")]
-            .commands
-            .snapshot()
-            .is_empty(),
+            rejected.objects[rejected.test_object_index(actor)]
+                .commands
+                .snapshot()
+                .is_empty(),
             "{command:?} ignores the helper result and still finishes"
         );
     }
@@ -518,35 +483,24 @@ fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
 fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG"))
-            .expect("target spawns");
-        let actor = engine
-            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-            .expect("contained actor spawns");
-        let deleted = engine
-            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-            .expect("tombstone item spawns");
-        let inactive = engine
-            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-            .expect("inactive item spawns");
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+        let deleted = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+        let inactive = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
 
-        let deleted_index = engine.find_object_index(deleted).expect("tombstone exists");
+        let deleted_index = engine.test_object_index(deleted);
         let _ = engine.objects[deleted_index].mark_destroyed();
-        let inactive_index = engine
-            .find_object_index(inactive)
-            .expect("inactive item exists");
+        let inactive_index = engine.test_object_index(inactive);
         engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
-        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        let actor_index = engine.test_object_index(actor);
         engine.objects[actor_index].state.contents = vec![deleted, inactive];
-        engine.objects[actor_index]
-            .commands
-            .push_front(CommandRequest::new(command))
-            .expect("put/take command queues");
+        crate::TestValueExt::test_value(
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command)),
+        );
 
-        engine
-            .execute_object_command_now(actor)
-            .expect("ObjectComPutTake executes");
+        crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
         assert_eq!(
             engine
@@ -570,29 +524,17 @@ fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
 #[test]
 fn command_references_accept_inactive_sell_candidates_like_cpp() {
     let mut engine = put_fixture_engine();
-    engine
-        .register_player(PlayerConfig::new(1, "Seller"))
-        .expect("seller registers");
-    let base = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("base spawns");
-    let base_index = engine.find_object_index(base).expect("base exists");
+    engine.register_test_player(PlayerConfig::new(1, "Seller"));
+    let base = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let base_index = engine.test_object_index(base);
     engine.objects[base_index].state.base = 1;
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_owner(1))
-        .expect("seller spawns");
-    let deleted = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(base))
-        .expect("tombstone item spawns");
-    let inactive = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(base))
-        .expect("inactive item spawns");
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_owner(1));
+    let deleted = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(base));
+    let inactive = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(base));
 
-    let deleted_index = engine.find_object_index(deleted).expect("tombstone exists");
+    let deleted_index = engine.test_object_index(deleted);
     let _ = engine.objects[deleted_index].mark_destroyed();
-    let inactive_index = engine
-        .find_object_index(inactive)
-        .expect("inactive item exists");
+    let inactive_index = engine.test_object_index(inactive);
     engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
     engine.objects[base_index].state.contents = vec![deleted, inactive];
 
@@ -611,24 +553,17 @@ fn command_references_accept_inactive_sell_candidates_like_cpp() {
 #[test]
 fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
     let mut engine = put_fixture_engine();
-    engine
-        .definitions
-        .get_mut(&DefinitionId::from("TARG"))
-        .expect("target definition exists")
+    crate::TestValueExt::test_value(engine.definitions.get_mut(&DefinitionId::from("TARG")))
         .set_collection_limit(1);
     let (actor, first_item, target) = spawn_push_put_triplet(&mut engine, false);
-    let second_item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("second carried item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let second_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
         .local_vars
         .insert("nested_throw".to_string(), Value::Int(1));
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("outer Put and nested Throw execute");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
     assert_eq!(
         engine
@@ -646,7 +581,7 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
         Some(actor),
         "the nested Throw's put is rejected by the now-full target"
     );
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index]
             .commands
@@ -656,14 +591,10 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
         "the nested false PutTake result must not fail the outer successful Put"
     );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("Ty cleanup UnGrab executes");
-    engine
-        .execute_object_command_now(actor)
-        .expect("outer Put observes the transferred item and completes");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
     assert!(
-        engine.objects[engine.find_object_index(actor).expect("actor remains")]
+        engine.objects[engine.test_object_index(actor)]
             .commands
             .snapshot()
             .is_empty(),
@@ -674,19 +605,11 @@ fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
 #[test]
 fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
     let mut engine = put_fixture_engine();
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-        .expect("contained actor spawns");
-    let outer_item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("outer item spawns");
-    let replacement_item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("replacement item spawns");
-    let target_index = engine.find_object_index(target).expect("target exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+    let outer_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let replacement_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let target_index = engine.test_object_index(target);
     engine.objects[target_index].state.local_vars.extend([
         (
             "nested_put_actor".to_string(),
@@ -697,23 +620,20 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
             object_reference_value(replacement_item),
         ),
     ]);
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.insert(
         "tracked".to_string(),
         object_reference_value(replacement_item),
     );
-    engine.objects[actor_index]
-        .commands
-        .push_front(
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index].commands.push_front(
             CommandRequest::new(CommandId::Put)
                 .with_target(Some(target))
                 .with_target2(Some(outer_item)),
-        )
-        .expect("outer Put queues");
+        ),
+    );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("outer and replacement Put execute");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
     assert_eq!(
         engine
@@ -731,7 +651,7 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
         Some(target),
         "recursive ExecuteCommand completes the replacement helper synchronously"
     );
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let commands = engine.objects[actor_index].commands.command_views();
     let [replacement] = commands.as_slice() else {
         panic!("replacement Put must remain for its next native Execute: {commands:?}");
@@ -748,34 +668,25 @@ fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
 #[test]
 fn removed_nested_throw_does_not_finish_the_outer_throw_instance() {
     let mut engine = put_fixture_engine();
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-        .expect("actor spawns contained");
-    let first_item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("first item spawns");
-    let second_item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("second item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+    let first_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let second_item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.extend([
         ("tracked".to_string(), object_reference_value(first_item)),
         ("nested_throw".to_string(), Value::Int(1)),
         ("finish_nested_throw".to_string(), Value::Int(1)),
     ]);
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(first_item)))
-        .expect("outer Throw queues");
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(first_item))),
+    );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("outer and nested Throw execute");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index]
             .state
@@ -802,30 +713,23 @@ fn removed_nested_throw_does_not_finish_the_outer_throw_instance() {
 #[test]
 fn callback_execute_command_reenters_the_same_in_flight_throw() {
     let mut engine = put_fixture_engine();
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-        .expect("actor spawns contained");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.extend([
         ("tracked".to_string(), object_reference_value(item)),
         ("reexecute_same_throw".to_string(), Value::Int(1)),
     ]);
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item)))
-        .expect("Throw queues");
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item))),
+    );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("Throw and callback reentry execute");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index]
             .state
@@ -847,23 +751,22 @@ fn callback_execute_command_reenters_the_same_in_flight_throw() {
 #[test]
 fn script_execute_command_runs_outside_throw_callbacks_before_returning() {
     let mut engine = put_fixture_engine();
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_action(ActionState::new("Walk")))
-        .expect("walking actor spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("carried item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let actor =
+        engine.spawn_test_object(SpawnConfig::new("ACTR").with_action(ActionState::new("Walk")));
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index]
         .state
         .local_vars
         .insert("tracked".to_string(), object_reference_value(item));
 
-    engine
-        .call_object_function(actor_index, "RunOutsideThrow", Vec::new())
-        .expect("script ExecuteCommand returns");
+    crate::TestValueExt::test_value(engine.call_object_function(
+        actor_index,
+        "RunOutsideThrow",
+        Vec::new(),
+    ));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let actor_state = &engine.objects[actor_index].state;
     assert_eq!(
         actor_state.local_vars.get("command_during_throw_start"),
@@ -894,8 +797,7 @@ public func RunExecute()
   return(1);
 }
 "#;
-    let mut actor =
-        Definition::from_script("NDIG", "NoOtherAction digger", script).expect("actor compiles");
+    let mut actor = test_definition("NDIG", "NoOtherAction digger", script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
@@ -916,34 +818,32 @@ public func RunExecute()
             ),
         ]),
     );
-    let mut item =
-        Definition::from_script("NDIT", "NoOtherAction item", "#strict").expect("item compiles");
+    let mut item = test_definition("NDIT", "NoOtherAction item", "#strict");
     item.set_collectible(true);
 
     let mut engine = Engine::with_seed(119);
-    engine.register_definition(actor).expect("actor registers");
-    engine.register_definition(item).expect("item registers");
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("NDIG")
-                .with_action(ActionState::new("Dig"))
-                .with_velocity(Vector2::new(7, -3)),
-        )
-        .expect("digger spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("NDIT").with_container(actor))
-        .expect("item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item)))
-        .expect("Throw queues");
+    engine.register_test_definition(actor);
+    engine.register_test_definition(item);
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("NDIG")
+            .with_action(ActionState::new("Dig"))
+            .with_velocity(Vector2::new(7, -3)),
+    );
+    let item = engine.spawn_test_object(SpawnConfig::new("NDIT").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item))),
+    );
 
-    engine
-        .call_object_function(actor_index, "RunExecute", Vec::new())
-        .expect("script ExecuteCommand returns");
+    crate::TestValueExt::test_value(engine.call_object_function(
+        actor_index,
+        "RunExecute",
+        Vec::new(),
+    ));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(engine.objects[actor_index].state.action.name, "Dig");
     assert_eq!(
         engine.objects[actor_index].fixed_velocity,
@@ -986,8 +886,7 @@ protected func StartWalk()
   return(1);
 }
 "#;
-    let mut actor =
-        Definition::from_script("DDIG", "Digging dropper", script).expect("actor compiles");
+    let mut actor = test_definition("DDIG", "Digging dropper", script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
@@ -1006,34 +905,32 @@ protected func StartWalk()
             ),
         ]),
     );
-    let mut item =
-        Definition::from_script("DDIT", "Dropped item", "#strict").expect("item compiles");
+    let mut item = test_definition("DDIT", "Dropped item", "#strict");
     item.set_collectible(true);
 
     let mut engine = Engine::with_seed(121);
-    engine.register_definition(actor).expect("actor registers");
-    engine.register_definition(item).expect("item registers");
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("DDIG")
-                .with_action(ActionState::new("Dig"))
-                .with_velocity(Vector2::new(7, -3)),
-        )
-        .expect("digger spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("DDIT").with_container(actor))
-        .expect("item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item)))
-        .expect("Drop queues");
+    engine.register_test_definition(actor);
+    engine.register_test_definition(item);
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("DDIG")
+            .with_action(ActionState::new("Dig"))
+            .with_velocity(Vector2::new(7, -3)),
+    );
+    let item = engine.spawn_test_object(SpawnConfig::new("DDIT").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item))),
+    );
 
-    engine
-        .call_object_function(actor_index, "RunExecute", Vec::new())
-        .expect("script ExecuteCommand returns");
+    crate::TestValueExt::test_value(engine.call_object_function(
+        actor_index,
+        "RunExecute",
+        Vec::new(),
+    ));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
     assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
     assert_eq!(
@@ -1072,8 +969,7 @@ protected func Grabbed(object actor, bool grab)
   return(1);
 }
 "#;
-    let mut actor =
-        Definition::from_script("UNGA", "Locked pusher", actor_script).expect("actor compiles");
+    let mut actor = test_definition("UNGA", "Locked pusher", actor_script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
@@ -1090,39 +986,31 @@ protected func Grabbed(object actor, bool grab)
             ),
         ]),
     );
-    let mut target =
-        Definition::from_script("UNGT", "Push target", target_script).expect("target compiles");
+    let mut target = test_definition("UNGT", "Push target", target_script);
     target.set_c4_callback_convention(true);
 
     let mut engine = Engine::new();
-    engine.register_definition(actor).expect("actor registers");
-    engine
-        .register_definition(target)
-        .expect("target registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("UNGT"))
-        .expect("target spawns");
+    engine.register_test_definition(actor);
+    engine.register_test_definition(target);
+    let target = engine.spawn_test_object(SpawnConfig::new("UNGT"));
     let mut push = ActionState::new("Push");
     push.target = Some(target);
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("UNGA")
-                .with_action(push)
-                .with_velocity(Vector2::new(4, -2)),
-        )
-        .expect("actor spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("UNGA")
+            .with_action(push)
+            .with_velocity(Vector2::new(4, -2)),
+    );
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.command_direction = CommandDirection::Left;
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::UnGrab))
-        .expect("UnGrab queues");
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::UnGrab)),
+    );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("UnGrab executes");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(engine.objects[actor_index].state.action.name, "Push");
     assert_eq!(
         engine.objects[actor_index].state.action.target,
@@ -1144,7 +1032,7 @@ protected func Grabbed(object actor, bool grab)
             .get("grab_calls"),
         None
     );
-    let target_index = engine.find_object_index(target).expect("target remains");
+    let target_index = engine.test_object_index(target);
     assert_eq!(
         engine.objects[target_index]
             .state
@@ -1183,8 +1071,7 @@ protected func Grabbed(object actor, bool grab)
   return(1);
 }
 "#;
-    let mut actor =
-        Definition::from_script("UGMA", "Menu pusher", actor_script).expect("actor compiles");
+    let mut actor = test_definition("UGMA", "Menu pusher", actor_script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
@@ -1199,35 +1086,26 @@ protected func Grabbed(object actor, bool grab)
             ),
         ]),
     );
-    let mut target = Definition::from_script("UGMT", "Menu push target", target_script)
-        .expect("target compiles");
+    let mut target = test_definition("UGMT", "Menu push target", target_script);
     target.set_c4_callback_convention(true);
 
     let mut engine = Engine::new();
-    engine.register_definition(actor).expect("actor registers");
-    engine
-        .register_definition(target)
-        .expect("target registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("UGMT"))
-        .expect("target spawns");
+    engine.register_test_definition(actor);
+    engine.register_test_definition(target);
+    let target = engine.spawn_test_object(SpawnConfig::new("UGMT"));
     let mut push = ActionState::new("Push");
     push.target = Some(target);
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("UGMA")
-                .with_action(push)
-                .with_velocity(Vector2::new(4, -2)),
-        )
-        .expect("actor spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("UGMA")
+            .with_action(push)
+            .with_velocity(Vector2::new(4, -2)),
+    );
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.command_direction = CommandDirection::Left;
 
     let call_actor = |engine: &mut Engine, name: &str, args: Vec<Value>| {
-        let actor_index = engine.find_object_index(actor).expect("actor remains");
-        engine
-            .call_object_function(actor_index, name, args)
-            .expect("actor call succeeds")
+        let actor_index = engine.test_object_index(actor);
+        crate::TestValueExt::test_value(engine.call_object_function(actor_index, name, args))
     };
     assert_eq!(
         call_actor(&mut engine, "OpenMenu", Vec::new()),
@@ -1238,11 +1116,11 @@ protected func Grabbed(object actor, bool grab)
         Value::Int(1)
     );
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert!(!engine
         .object_com_ungrab(actor_index)
         .expect("denied ungrab returns"));
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
     assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
     assert_eq!(
@@ -1265,7 +1143,7 @@ protected func Grabbed(object actor, bool grab)
         Some(&Value::Nil),
         "a denied close stops before Grab(false)"
     );
-    let target_index = engine.find_object_index(target).expect("target remains");
+    let target_index = engine.test_object_index(target);
     assert_eq!(
         engine.objects[target_index]
             .state
@@ -1279,7 +1157,7 @@ protected func Grabbed(object actor, bool grab)
         call_actor(&mut engine, "SetDeny", vec![Value::Int(0)]),
         Value::Int(1)
     );
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let mut push = ActionState::new("Push");
     push.target = Some(target);
     engine.objects[actor_index].state.action = push;
@@ -1287,7 +1165,7 @@ protected func Grabbed(object actor, bool grab)
         .object_com_ungrab(actor_index)
         .expect("allowed ungrab succeeds"));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
     assert!(engine.objects[actor_index].state.menu.is_none());
     assert_eq!(
@@ -1312,7 +1190,7 @@ protected func Grabbed(object actor, bool grab)
         Some(&Value::Int(0)),
         "Grab(false) observes the menu already closed"
     );
-    let target_index = engine.find_object_index(target).expect("target remains");
+    let target_index = engine.test_object_index(target);
     assert_eq!(
         engine.objects[target_index]
             .state
@@ -1349,8 +1227,7 @@ protected func Grabbed(object actor, bool grab)
   return(1);
 }
 "#;
-    let mut actor =
-        Definition::from_script("UGRA", "Pusher", actor_script).expect("actor compiles");
+    let mut actor = test_definition("UGRA", "Pusher", actor_script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         None,
@@ -1365,32 +1242,22 @@ protected func Grabbed(object actor, bool grab)
             ),
         ]),
     );
-    let mut target =
-        Definition::from_script("UGRT", "Target", target_script).expect("target compiles");
+    let mut target = test_definition("UGRT", "Target", target_script);
     target.set_c4_callback_convention(true);
     let mut engine = Engine::new();
-    engine.register_definition(actor).expect("actor registers");
-    engine
-        .register_definition(target)
-        .expect("target registers");
+    engine.register_test_definition(actor);
+    engine.register_test_definition(target);
 
-    let inactive_target = engine
-        .spawn_object(SpawnConfig::new("UGRT").with_status(ObjectStatus::Inactive))
-        .expect("inactive target spawns");
+    let inactive_target =
+        engine.spawn_test_object(SpawnConfig::new("UGRT").with_status(ObjectStatus::Inactive));
     let mut push = ActionState::new("Push");
     push.target = Some(inactive_target);
-    let first_actor = engine
-        .spawn_object(SpawnConfig::new("UGRA").with_action(push))
-        .expect("first actor spawns");
-    let first_actor_index = engine
-        .find_object_index(first_actor)
-        .expect("first actor exists");
+    let first_actor = engine.spawn_test_object(SpawnConfig::new("UGRA").with_action(push));
+    let first_actor_index = engine.test_object_index(first_actor);
     assert!(engine
         .object_com_ungrab(first_actor_index)
         .expect("inactive target ungrab succeeds"));
-    let first_actor_index = engine
-        .find_object_index(first_actor)
-        .expect("first actor remains");
+    let first_actor_index = engine.test_object_index(first_actor);
     assert_eq!(engine.objects[first_actor_index].state.action.name, "Walk");
     assert_eq!(
         engine.objects[first_actor_index]
@@ -1399,9 +1266,7 @@ protected func Grabbed(object actor, bool grab)
             .get("grab_calls"),
         Some(&Value::Int(1))
     );
-    let inactive_target_index = engine
-        .find_object_index(inactive_target)
-        .expect("inactive target remains");
+    let inactive_target_index = engine.test_object_index(inactive_target);
     assert_eq!(
         engine.objects[inactive_target_index]
             .state
@@ -1411,17 +1276,11 @@ protected func Grabbed(object actor, bool grab)
         "inactive Status is nonzero and still receives Grabbed(false)"
     );
 
-    let live_target = engine
-        .spawn_object(SpawnConfig::new("UGRT"))
-        .expect("live target spawns");
+    let live_target = engine.spawn_test_object(SpawnConfig::new("UGRT"));
     let mut push = ActionState::new("Push");
     push.target = Some(live_target);
-    let removing_actor = engine
-        .spawn_object(SpawnConfig::new("UGRA").with_action(push))
-        .expect("removing actor spawns");
-    let removing_actor_index = engine
-        .find_object_index(removing_actor)
-        .expect("removing actor exists");
+    let removing_actor = engine.spawn_test_object(SpawnConfig::new("UGRA").with_action(push));
+    let removing_actor_index = engine.test_object_index(removing_actor);
     engine.objects[removing_actor_index]
         .state
         .local_vars
@@ -1436,9 +1295,7 @@ protected func Grabbed(object actor, bool grab)
             .status,
         ObjectStatus::Deleted
     );
-    let live_target_index = engine
-        .find_object_index(live_target)
-        .expect("live target remains");
+    let live_target_index = engine.test_object_index(live_target);
     assert_eq!(
         engine.objects[live_target_index]
             .state
@@ -1469,8 +1326,7 @@ protected func StartThrow()
   return(1);
 }
 "#;
-    let mut actor =
-        Definition::from_script("TTRN", "Turning thrower", script).expect("actor compiles");
+    let mut actor = test_definition("TTRN", "Turning thrower", script);
     actor.set_c4_callback_convention(true);
     actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
     actor.set_physical(PhysicalInfo {
@@ -1502,43 +1358,39 @@ protected func StartThrow()
             ),
         ]),
     );
-    let mut item =
-        Definition::from_script("TIT2", "Turning throw item", "#strict").expect("item compiles");
+    let mut item = test_definition("TIT2", "Turning throw item", "#strict");
     item.set_collectible(true);
 
     let mut engine = Engine::with_seed(120);
     let mut landscape = Landscape::flat(200, 100);
     landscape.set_world_height(150);
     engine.set_landscape(landscape);
-    engine.register_definition(actor).expect("actor registers");
-    engine.register_definition(item).expect("item registers");
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("TTRN")
-                .with_position(Vector2::new(99, 99))
-                .with_direction(Direction::Left)
-                .with_action(ActionState::new("Walk")),
-        )
-        .expect("thrower spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("TIT2").with_container(actor))
-        .expect("item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine.objects[actor_index]
-        .commands
-        .push_front(
+    engine.register_test_definition(actor);
+    engine.register_test_definition(item);
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("TTRN")
+            .with_position(Vector2::new(99, 99))
+            .with_direction(Direction::Left)
+            .with_action(ActionState::new("Walk")),
+    );
+    let item = engine.spawn_test_object(SpawnConfig::new("TIT2").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index].commands.push_front(
             CommandRequest::new(CommandId::Throw)
                 .with_target(Some(item))
                 .with_tx(Some(100))
                 .with_ty(Some(70)),
-        )
-        .expect("targeted Throw queues");
+        ),
+    );
 
-    engine
-        .call_object_function(actor_index, "RunExecute", Vec::new())
-        .expect("script ExecuteCommand returns");
+    crate::TestValueExt::test_value(engine.call_object_function(
+        actor_index,
+        "RunExecute",
+        Vec::new(),
+    ));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index].state.direction,
         Direction::Right
@@ -1597,8 +1449,7 @@ protected func Departure(pContainer)
 "#;
 
     let mut engine = Engine::with_seed(118);
-    let mut actor =
-        Definition::from_script("TACT", "Throw actor", actor_script).expect("actor compiles");
+    let mut actor = test_definition("TACT", "Throw actor", actor_script);
     actor.set_c4_callback_convention(true);
     actor.configure_actions(
         Some("Walk".to_string()),
@@ -1617,28 +1468,23 @@ protected func Departure(pContainer)
         throw: 50_000,
         ..PhysicalInfo::default()
     });
-    engine.register_definition(actor).expect("actor registers");
+    engine.register_test_definition(actor);
 
-    let mut item =
-        Definition::from_script("TITM", "Thrown item", item_script).expect("item compiles");
+    let mut item = test_definition("TITM", "Thrown item", item_script);
     item.set_c4_callback_convention(true);
     item.set_contact_function_calls(true);
     item.set_border_bound(C4D_BORDER_TOP);
     item.set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
-    engine.register_definition(item).expect("item registers");
+    engine.register_test_definition(item);
 
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("TACT")
-                .with_position(Vector2::new(20, 0))
-                .with_direction(Direction::Right)
-                .with_action(ActionState::new("Walk")),
-        )
-        .expect("actor spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("TITM").with_container(actor))
-        .expect("item spawns");
-    let item_index = engine.find_object_index(item).expect("item exists");
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("TACT")
+            .with_position(Vector2::new(20, 0))
+            .with_direction(Direction::Right)
+            .with_action(ActionState::new("Walk")),
+    );
+    let item = engine.spawn_test_object(SpawnConfig::new("TITM").with_container(actor));
+    let item_index = engine.test_object_index(item);
     engine.objects[item_index].state.shape_override = Some(DefinitionRect::new(0, 0, 6, 6));
     engine.objects[item_index].shape_rect = Some(DefinitionRect::new(0, 0, 6, 6));
     engine.objects[item_index].fixed_velocity = FixedVec2::new(itofix(7), itofix(-9));
@@ -1648,7 +1494,7 @@ protected func Departure(pContainer)
         .expect("ObjectActionThrow succeeds"));
 
     let force = math::val_by_physical(400, 50_000);
-    let item_index = engine.find_object_index(item).expect("item remains");
+    let item_index = engine.test_object_index(item);
     let item = &engine.objects[item_index];
     assert_eq!(item.state.container, None);
     assert_eq!(item.state.position, Vector2::new(20, 0));
@@ -1665,51 +1511,39 @@ protected func Departure(pContainer)
 #[test]
 fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
     let mut engine = put_fixture_engine();
-    let mut new_item =
-        Definition::from_script("NITM", "New menu item", "#strict").expect("new item compiles");
+    let mut new_item = test_definition("NITM", "New menu item", "#strict");
     new_item.set_category(CATEGORY_STRUCTURE);
-    engine
-        .register_definition(new_item)
-        .expect("new item registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("ACTR")
-                .with_container(target)
-                .with_category(CATEGORY_OBJECT),
-        )
-        .expect("contained actor spawns");
-    let item = engine
-        .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-        .expect("carried item spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    engine.register_test_definition(new_item);
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("ACTR")
+            .with_container(target)
+            .with_category(CATEGORY_OBJECT),
+    );
+    let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
+    let actor_index = engine.test_object_index(actor);
     engine.objects[actor_index].state.local_vars.extend([
         ("tracked".to_string(), object_reference_value(item)),
         ("nested_throw".to_string(), Value::Int(1)),
         ("mutate_menu_during_value".to_string(), Value::Int(1)),
         ("spawn_menu_item".to_string(), Value::Int(1)),
     ]);
-    let target_index = engine.find_object_index(target).expect("target exists");
+    let target_index = engine.test_object_index(target);
     engine.objects[target_index].state.local_vars.insert(
         "reject_contents_actor".to_string(),
         object_reference_value(actor),
     );
-    engine.objects[actor_index]
-        .commands
-        .push_front(
+    crate::TestValueExt::test_value(
+        engine.objects[actor_index].commands.push_front(
             CommandRequest::new(CommandId::Put)
                 .with_target(Some(target))
                 .with_target2(Some(item)),
-        )
-        .expect("outer Put queues");
+        ),
+    );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("outer Put callback executes nested empty Throw");
+    crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let actor_state = &engine.objects[actor_index].state;
     assert_eq!(
         actor_state.local_vars.get("reject_contents_seen"),
@@ -1736,10 +1570,7 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
         Some(&Value::Int(-1)),
         "selection adjustment stays frozen until the full refill completes"
     );
-    let menu = actor_state
-        .menu
-        .as_ref()
-        .expect("activate menu remains open");
+    let menu = crate::TestValueExt::test_value(actor_state.menu.as_ref());
     assert_eq!(menu.identification, Value::Int(6));
     assert_eq!(menu.refill_object, Some(target));
     assert_eq!((menu.columns, menu.lines), (3, 4));
@@ -1768,49 +1599,31 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
 fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double_is_armed() {
     for (down_double, should_drop) in [(0, false), (-3, true)] {
         let mut engine = put_fixture_engine();
-        let actor_definition = engine
-            .definitions
-            .get_mut("ACTR")
-            .expect("actor definition remains");
+        let actor_definition = crate::TestValueExt::test_value(engine.definitions.get_mut("ACTR"));
         actor_definition.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
         actor_definition.set_physical(PhysicalInfo {
             throw: 50_000,
             ..PhysicalInfo::default()
         });
-        engine
-            .definitions
-            .get_mut("ITEM")
-            .expect("item definition remains")
+        crate::TestValueExt::test_value(engine.definitions.get_mut("ITEM"))
             .set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
-        engine
-            .register_script_definition("NOPU", "No put", "#strict")
-            .expect("no-put target registers");
-        engine
-            .register_player(PlayerConfig::new(1, "PutTake owner"))
-            .expect("player registers");
-        engine
-            .player_mut(1)
-            .expect("player remains")
+        engine.register_test_script_definition("NOPU", "No put", "#strict");
+        engine.register_test_player(PlayerConfig::new(1, "PutTake owner"));
+        crate::TestValueExt::test_value(engine.player_mut(1))
             .control
             .last_com_down_double = down_double;
-        let target = engine
-            .spawn_object(SpawnConfig::new("NOPU"))
-            .expect("no-put target spawns");
+        let target = engine.spawn_test_object(SpawnConfig::new("NOPU"));
         let mut push = ActionState::new("Push");
         push.target = Some(target);
-        let actor = engine
-            .spawn_object(
-                SpawnConfig::new("ACTR")
-                    .with_owner(1)
-                    .with_position(Vector2::new(20, 40))
-                    .with_velocity(Vector2::new(-2, 0))
-                    .with_command_direction(CommandDirection::Right)
-                    .with_action(push),
-            )
-            .expect("pushing actor spawns");
-        let item = engine
-            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
-            .expect("carried item spawns");
+        let actor = engine.spawn_test_object(
+            SpawnConfig::new("ACTR")
+                .with_owner(1)
+                .with_position(Vector2::new(20, 40))
+                .with_velocity(Vector2::new(-2, 0))
+                .with_command_direction(CommandDirection::Right)
+                .with_action(push),
+        );
+        let item = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(actor));
         assert_eq!(
             engine
                 .try_object_com_put(actor, target, item)
@@ -1819,8 +1632,8 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
             "LastComDownDouble={down_double}"
         );
 
-        let actor_index = engine.find_object_index(actor).expect("actor remains");
-        let item_index = engine.find_object_index(item).expect("item remains");
+        let actor_index = engine.test_object_index(actor);
+        let item_index = engine.test_object_index(item);
         if should_drop {
             let force = math::val_by_physical(400, 50_000);
             assert_eq!(engine.objects[item_index].state.container, None);
@@ -1867,25 +1680,20 @@ fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double
 fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG"))
-            .expect("target spawns");
-        let actor = engine
-            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
-            .expect("empty contained actor spawns");
-        let actor_index = engine.find_object_index(actor).expect("actor exists");
-        engine.objects[actor_index]
-            .commands
-            .push_front(CommandRequest::new(command))
-            .expect("empty put/take command queues");
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(target));
+        let actor_index = engine.test_object_index(actor);
+        crate::TestValueExt::test_value(
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command)),
+        );
 
-        engine
-            .execute_object_command_now(actor)
-            .expect("empty ObjectComPutTake executes");
+        crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let actor_index = engine.test_object_index(actor);
         let actor_state = &engine.objects[actor_index].state;
-        let menu = actor_state.menu.as_ref().expect("activate menu opens");
+        let menu = crate::TestValueExt::test_value(actor_state.menu.as_ref());
         assert_eq!(menu.identification, Value::Int(6));
         assert_eq!(menu.refill_object, Some(target));
         assert!(
@@ -1899,58 +1707,41 @@ fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
 fn empty_pushing_throw_and_drop_open_get_only_for_grab_get_targets() {
     for command in [CommandId::Throw, CommandId::Drop] {
         let mut engine = put_fixture_engine();
-        let mut target_definition =
-            Definition::from_script("GETT", "Get target", "#strict").expect("get target compiles");
+        let mut target_definition = test_definition("GETT", "Get target", "#strict");
         target_definition.set_grab_put_get(GRAB_PUT_GET_GET);
-        engine
-            .register_definition(target_definition)
-            .expect("get target registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("GETT"))
-            .expect("get target spawns");
+        engine.register_test_definition(target_definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("GETT"));
         let mut push = ActionState::new("Push");
         push.target = Some(target);
-        let actor = engine
-            .spawn_object(SpawnConfig::new("ACTR").with_action(push))
-            .expect("empty pusher spawns");
-        let actor_index = engine.find_object_index(actor).expect("actor exists");
-        engine.objects[actor_index]
-            .commands
-            .push_front(CommandRequest::new(command))
-            .expect("empty pushing command queues");
+        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_action(push));
+        let actor_index = engine.test_object_index(actor);
+        crate::TestValueExt::test_value(
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command)),
+        );
 
-        engine
-            .execute_object_command_now(actor)
-            .expect("empty pushing ObjectComPutTake executes");
+        crate::TestValueExt::test_value(engine.execute_object_command_now(actor));
 
-        let actor_index = engine.find_object_index(actor).expect("actor remains");
-        let menu = engine.objects[actor_index]
-            .state
-            .menu
-            .as_ref()
-            .expect("get menu opens");
+        let actor_index = engine.test_object_index(actor);
+        let menu = crate::TestValueExt::test_value(engine.objects[actor_index].state.menu.as_ref());
         assert_eq!(menu.identification, Value::Int(13));
         assert_eq!(menu.refill_object, Some(target));
         assert!(engine.objects[actor_index].commands.snapshot().is_empty());
 
         let mut denied = put_fixture_engine();
-        let target = denied
-            .spawn_object(SpawnConfig::new("TARG"))
-            .expect("non-GrabGet target spawns");
+        let target = denied.spawn_test_object(SpawnConfig::new("TARG"));
         let mut push = ActionState::new("Push");
         push.target = Some(target);
-        let actor = denied
-            .spawn_object(SpawnConfig::new("ACTR").with_action(push))
-            .expect("empty denied pusher spawns");
-        let actor_index = denied.find_object_index(actor).expect("actor exists");
-        denied.objects[actor_index]
-            .commands
-            .push_front(CommandRequest::new(command))
-            .expect("denied pushing command queues");
-        denied
-            .execute_object_command_now(actor)
-            .expect("denied empty PutTake executes");
-        let actor_index = denied.find_object_index(actor).expect("actor remains");
+        let actor = denied.spawn_test_object(SpawnConfig::new("ACTR").with_action(push));
+        let actor_index = denied.test_object_index(actor);
+        crate::TestValueExt::test_value(
+            denied.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command)),
+        );
+        crate::TestValueExt::test_value(denied.execute_object_command_now(actor));
+        let actor_index = denied.test_object_index(actor);
         assert!(denied.objects[actor_index].state.menu.is_none());
         assert!(denied.objects[actor_index].commands.snapshot().is_empty());
     }

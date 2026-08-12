@@ -3,8 +3,7 @@ use super::*;
 #[test]
 fn object_action_fight_respects_no_other_action() {
     let mut engine = Engine::new();
-    let mut definition = Definition::from_script("FLOK", "Fight-locked actor", "#strict\n")
-        .expect("fight actor compiles");
+    let mut definition = test_definition("FLOK", "Fight-locked actor", "#strict\n");
     definition.configure_actions(
         Some("Fight".to_string()),
         HashMap::from([
@@ -18,21 +17,15 @@ fn object_action_fight_respects_no_other_action() {
             ),
         ]),
     );
-    engine
-        .register_definition(definition)
-        .expect("fight actor registers");
-    let locked = engine
-        .spawn_object(SpawnConfig::new("FLOK").with_action(ActionState::new("Dead")))
-        .expect("locked actor spawns");
-    let target = engine
-        .spawn_object(SpawnConfig::new("FLOK"))
-        .expect("fight target spawns");
+    crate::TestValueExt::test_value(engine.register_definition(definition));
+    let locked = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("FLOK").with_action(ActionState::new("Dead"))),
+    );
+    let target = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("FLOK")));
 
     engine.object_action_fight(locked, target);
 
-    let locked = engine
-        .object_snapshot(locked)
-        .expect("locked actor remains");
+    let locked = crate::TestValueExt::test_value(engine.object_snapshot(locked));
     assert_eq!(locked.action.name, "Dead");
     assert_eq!(locked.action.target, None);
 }

@@ -10,26 +10,24 @@ use clonk_engine::{
 
 fn load_tutorial10() -> (Engine, i32) {
     let mut engine = load_tutorial(10, 0);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 10 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial10 virtual player joins")
-        .number();
+    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial 10 virtual player".to_owned(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: true,
+        startup_player_count: 1,
+    }))
+    .number();
     (engine, owner)
 }
 
@@ -135,10 +133,7 @@ fn enter_hut(
     clonk: ObjectId,
     hut: ObjectId,
 ) -> Result<(), Box<dyn Error>> {
-    let x = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("Tutorial10 Clonk remains live")
+    let x = crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk))
         .position
         .x;
     if x < 458 {
@@ -177,9 +172,7 @@ fn enter_hut(
 fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial10();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial10 joins one selected CLNK");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     // The scenario starts by moving the ready crew to (500,439), then asks
@@ -187,7 +180,8 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("Tutorial10 asks for a derrick", 600, |engine| {
         tutorial_message_contains(engine, "build a derrick")
     })?;
-    let hut = object_with_definition(player.engine(), "HUT3").expect("Tutorial10 creates HUT3");
+    let hut =
+        crate::support::TestValueExt::test_value(object_with_definition(player.engine(), "HUT3"));
     if player
         .engine()
         .object_snapshot(clonk)
@@ -215,18 +209,24 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("CNKT opens the real CXCN menu", 30, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::C4Id("CXCN".into()))
     })?;
-    let derrick_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "DRCK"))
-        .expect("Tutorial10 gives the player DRCK knowledge");
+    let derrick_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "DRCK")),
+    );
     player.menu_navigate_to_index(derrick_index)?;
     player.menu_enter()?;
     let derrick = player
         .wait_until("the real DRCK construction site is created", 30, |engine| {
             object_with_definition(engine, "DRCK").is_some()
         })
-        .map(|_| object_with_definition(player.engine(), "DRCK").expect("DRCK exists"))?;
+        .map(|_| {
+            crate::support::TestValueExt::test_value(object_with_definition(
+                player.engine(),
+                "DRCK",
+            ))
+        })?;
     player.tap(COM_DOWN)?;
     player.wait_until("the Clonk starts building DRCK", 30, |engine| {
         engine
@@ -247,7 +247,7 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     enter_hut(&mut player, clonk, hut)?;
     take_from_hut_and_exit(&mut player, owner, clonk, hut, "LNKT")?;
     let power_plant =
-        object_with_definition(player.engine(), "POWR").expect("Tutorial10 creates POWR");
+        crate::support::TestValueExt::test_value(object_with_definition(player.engine(), "POWR"));
     player.hold_until(
         COM_LEFT,
         "the LNKT-carrying Clonk reaches POWR",
@@ -379,18 +379,24 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("CNKT reopens the real CXCN menu", 30, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::C4Id("CXCN".into()))
     })?;
-    let pump_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "PUMP"))
-        .expect("Tutorial10 grants PUMP knowledge after drilling oil");
+    let pump_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "PUMP")),
+    );
     player.menu_navigate_to_index(pump_index)?;
     player.menu_enter()?;
     let pump = player
         .wait_until("the real PUMP construction site is created", 30, |engine| {
             object_with_definition(engine, "PUMP").is_some()
         })
-        .map(|_| object_with_definition(player.engine(), "PUMP").expect("PUMP exists"))?;
+        .map(|_| {
+            crate::support::TestValueExt::test_value(object_with_definition(
+                player.engine(),
+                "PUMP",
+            ))
+        })?;
     player.tap(COM_DOWN)?;
     player.wait_until("the Clonk starts building PUMP", 30, |engine| {
         engine
@@ -556,8 +562,8 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         tutorial_message_contains(engine, "crystal is exposed")
     })?;
 
-    let crystal = object_with_definition(player.engine(), "CRYS")
-        .expect("Tutorial10 keeps its objective crystal until the player sells it");
+    let crystal =
+        crate::support::TestValueExt::test_value(object_with_definition(player.engine(), "CRYS"));
     player.hold_until(
         COM_RIGHT,
         "the Clonk approaches CRYS from the left",
@@ -642,11 +648,12 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("HUT3 opens its real Sell menu", 30, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(5))
     })?;
-    let crystal_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "CRYS"))
-        .expect("HUT3 offers the deposited CRYS for sale");
+    let crystal_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "CRYS")),
+    );
     player.menu_navigate_to_index(crystal_index)?;
     player.menu_enter()?;
     player.wait_until(

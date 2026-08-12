@@ -1,12 +1,11 @@
 use crate::support::real_scenario::content_root;
+use crate::support::EngineTestExt;
 use clonk_engine::{AudioCommand, Definition, Engine, SpawnConfig};
 use clonk_resources::Group;
 use clonk_script::Value;
 
 fn entrance_status(engine: &Engine, object: clonk_engine::ObjectId) -> bool {
-    let index = engine
-        .find_object_index(object)
-        .expect("object remains live");
+    let index = engine.test_object_index(object);
     engine.objects[index].state.entrance_status
 }
 
@@ -29,23 +28,13 @@ func Read(object target)
 }
 "#;
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("ENTR", "Entrance probe", script)
-        .expect("entrance probe registers");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("ENTR"))
-        .expect("caller spawns");
-    let open = engine
-        .spawn_object(SpawnConfig::new("ENTR").with_entrance_status(true))
-        .expect("open target spawns");
+    engine.register_test_script_definition("ENTR", "Entrance probe", script);
+    let caller = engine.spawn_test_object(SpawnConfig::new("ENTR"));
+    let open = engine.spawn_test_object(SpawnConfig::new("ENTR").with_entrance_status(true));
 
-    let caller_index = engine
-        .find_object_index(caller)
-        .expect("caller remains live");
+    let caller_index = engine.test_object_index(caller);
     assert_eq!(
-        engine
-            .call_object_function(caller_index, "Probe", Vec::new())
-            .expect("same-call entrance probe runs"),
+        engine.call_test_object_function(caller_index, "Probe", Vec::new()),
         Value::Array(vec![
             Value::Int(0),
             Value::Int(1),
@@ -55,9 +44,7 @@ func Read(object target)
     );
     assert!(!entrance_status(&engine, caller));
     assert_eq!(
-        engine
-            .call_object_function(caller_index, "Read", vec![Value::Object(open.as_u64())])
-            .expect("explicit target read runs"),
+        engine.call_test_object_function(caller_index, "Read", vec![Value::Object(open.as_u64())]),
         Value::Int(1)
     );
 }
@@ -71,23 +58,17 @@ func Open(object target)
 }
 "#;
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("ENTR", "Entrance setter", script)
-        .expect("entrance setter registers");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("ENTR"))
-        .expect("caller spawns");
-    let target = engine
-        .spawn_object(SpawnConfig::new("ENTR"))
-        .expect("target spawns");
-    let caller_index = engine
-        .find_object_index(caller)
-        .expect("caller remains live");
+    engine.register_test_script_definition("ENTR", "Entrance setter", script);
+    let caller = engine.spawn_test_object(SpawnConfig::new("ENTR"));
+    let target = engine.spawn_test_object(SpawnConfig::new("ENTR"));
+    let caller_index = engine.test_object_index(caller);
 
     assert_eq!(
-        engine
-            .call_object_function(caller_index, "Open", vec![Value::Object(target.as_u64())],)
-            .expect("foreign SetEntrance runs"),
+        engine.call_test_object_function(
+            caller_index,
+            "Open",
+            vec![Value::Object(target.as_u64())],
+        ),
         Value::Array(vec![Value::Bool(true), Value::Int(1), Value::Int(0)])
     );
     assert!(!entrance_status(&engine, caller));
@@ -97,37 +78,27 @@ func Open(object target)
 #[test]
 fn scenario_set_entrance_updates_explicit_targets_without_context_object() {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("ENTR", "Entrance target", "#strict 3")
-        .expect("entrance target registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("ENTR"))
-        .expect("target spawns");
-    let witness = engine
-        .spawn_object(SpawnConfig::new("ENTR"))
-        .expect("witness spawns");
-    engine
-        .load_scenario_script_with_convention(
-            "Scenario entrance setter",
-            r#"#strict 3
-func Open(object target, object witness)
-{
-  if (SetEntrance(1, target)) SetEntrance(1, witness);
-}
-"#,
-            true,
-        )
-        .expect("scenario entrance setter loads");
+    engine.register_test_script_definition("ENTR", "Entrance target", "#strict 3");
+    let target = engine.spawn_test_object(SpawnConfig::new("ENTR"));
+    let witness = engine.spawn_test_object(SpawnConfig::new("ENTR"));
+    crate::support::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "Scenario entrance setter",
+        r#"#strict 3
+    func Open(object target, object witness)
+    {
+      if (SetEntrance(1, target)) SetEntrance(1, witness);
+    }
+    "#,
+        true,
+    ));
 
-    engine
-        .call_scenario_script_function(
-            "Open",
-            vec![
-                Value::Object(target.as_u64()),
-                Value::Object(witness.as_u64()),
-            ],
-        )
-        .expect("scenario SetEntrance runs");
+    engine.call_test_scenario_script_function(
+        "Open",
+        vec![
+            Value::Object(target.as_u64()),
+            Value::Object(witness.as_u64()),
+        ],
+    );
 
     assert!(entrance_status(&engine, target));
     assert!(
@@ -138,44 +109,36 @@ func Open(object target, object witness)
 
 #[test]
 fn shipped_sub_airlock_toggles_once_per_transition() {
-    let group = Group::open(content_root().join("Objects.c4d/Vehicles.c4d/Sub.c4d"))
-        .expect("shipped Sub group opens");
-    let resource = clonk_resources::definition::Definition::load(&group)
-        .expect("shipped Sub definition loads");
+    let group = crate::support::TestValueExt::test_value(Group::open(
+        content_root().join("Objects.c4d/Vehicles.c4d/Sub.c4d"),
+    ));
+    let resource = crate::support::TestValueExt::test_value(
+        clonk_resources::definition::Definition::load(&group),
+    );
     let mut engine = Engine::new();
-    engine
-        .register_definition(Definition::from_resource(&resource).expect("Sub script compiles"))
-        .expect("Sub registers");
-    let sub = engine
-        .spawn_object(SpawnConfig::new("SUB1").with_loaded(true))
-        .expect("loaded Sub spawns without Completion dependencies");
-    let sub_index = engine.find_object_index(sub).expect("Sub remains live");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_resource(&resource),
+    ));
+    let sub = engine.spawn_test_object(SpawnConfig::new("SUB1").with_loaded(true));
+    let sub_index = engine.test_object_index(sub);
 
     assert_eq!(
-        engine
-            .call_object_function(sub_index, "OpenAirlock", Vec::new())
-            .expect("first OpenAirlock runs"),
+        engine.call_test_object_function(sub_index, "OpenAirlock", Vec::new()),
         Value::Int(1)
     );
     assert!(entrance_status(&engine, sub));
     assert_eq!(
-        engine
-            .call_object_function(sub_index, "OpenAirlock", Vec::new())
-            .expect("second OpenAirlock runs"),
+        engine.call_test_object_function(sub_index, "OpenAirlock", Vec::new()),
         Value::Nil
     );
     assert!(entrance_status(&engine, sub));
     assert_eq!(
-        engine
-            .call_object_function(sub_index, "CloseAirlock", Vec::new())
-            .expect("first CloseAirlock runs"),
+        engine.call_test_object_function(sub_index, "CloseAirlock", Vec::new()),
         Value::Int(1)
     );
     assert!(!entrance_status(&engine, sub));
     assert_eq!(
-        engine
-            .call_object_function(sub_index, "CloseAirlock", Vec::new())
-            .expect("second CloseAirlock runs"),
+        engine.call_test_object_function(sub_index, "CloseAirlock", Vec::new()),
         Value::Nil
     );
     assert!(!entrance_status(&engine, sub));

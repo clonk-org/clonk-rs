@@ -19,6 +19,17 @@ pub fn assert_compiles(source: &str) {
     }
 }
 
+macro_rules! compile_case {
+    ($name:ident, $source:expr $(,)?) => {
+        #[test]
+        fn $name() {
+            $crate::support::assert_compiles($source);
+        }
+    };
+}
+
+pub(crate) use compile_case;
+
 #[cfg(test)]
 mod tests {
     use super::assert_compiles;

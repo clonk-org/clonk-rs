@@ -1,67 +1,52 @@
 // Test for increment/decrement on various lvalue types
 
-#[test]
-fn effectvar_three_args_pre_increment() {
-    // ++EffectVar(0, pTarget, iEffect)
-    let source = r#"func Test() { var pTarget, iEffect; ++EffectVar(0, pTarget, iEffect); }"#;
-    crate::support::assert_compiles(source);
-}
+// ++EffectVar(0, pTarget, iEffect)
+crate::support::compile_case!(
+    effectvar_three_args_pre_increment,
+    r#"func Test() { var pTarget, iEffect; ++EffectVar(0, pTarget, iEffect); }"#
+);
 
-#[test]
-fn effectvar_three_args_pre_decrement() {
-    // --EffectVar(0, pTarget, iEffect)
-    let source = r#"func Test() { var pTarget, iEffect; --EffectVar(0, pTarget, iEffect); }"#;
-    crate::support::assert_compiles(source);
-}
+// --EffectVar(0, pTarget, iEffect)
+crate::support::compile_case!(
+    effectvar_three_args_pre_decrement,
+    r#"func Test() { var pTarget, iEffect; --EffectVar(0, pTarget, iEffect); }"#
+);
 
-#[test]
-fn effectvar_three_args_post_increment() {
-    // EffectVar(0, pTarget, iEffect)++
-    let source = r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)++; }"#;
-    crate::support::assert_compiles(source);
-}
+// EffectVar(0, pTarget, iEffect)++
+crate::support::compile_case!(
+    effectvar_three_args_post_increment,
+    r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)++; }"#
+);
 
-#[test]
-fn effectvar_three_args_post_decrement() {
-    // EffectVar(0, pTarget, iEffect)--
-    let source = r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)--; }"#;
-    crate::support::assert_compiles(source);
-}
+// EffectVar(0, pTarget, iEffect)--
+crate::support::compile_case!(
+    effectvar_three_args_post_decrement,
+    r#"func Test() { var pTarget, iEffect; EffectVar(0, pTarget, iEffect)--; }"#
+);
 
-#[test]
-fn localn_two_args_pre_increment() {
-    // ++LocalN("key", obj)
-    let source = r#"func Test() { var obj; ++LocalN("count", obj); }"#;
-    crate::support::assert_compiles(source);
-}
+// ++LocalN("key", obj)
+crate::support::compile_case!(
+    localn_two_args_pre_increment,
+    r#"func Test() { var obj; ++LocalN("count", obj); }"#
+);
 
-#[test]
-fn localn_two_args_post_decrement() {
-    // LocalN("key", obj)--
-    let source = r#"func Test() { var obj; LocalN("active", obj)--; }"#;
-    crate::support::assert_compiles(source);
-}
+// LocalN("key", obj)--
+crate::support::compile_case!(
+    localn_two_args_post_decrement,
+    r#"func Test() { var obj; LocalN("active", obj)--; }"#
+);
 
-#[test]
-fn localn_one_arg_pre_increment() {
-    // ++LocalN("key")
-    let source = r#"func Test() { ++LocalN("counter"); }"#;
-    crate::support::assert_compiles(source);
-}
+// ++LocalN("key")
+crate::support::compile_case!(
+    localn_one_arg_pre_increment,
+    r#"func Test() { ++LocalN("counter"); }"#
+);
 
-#[test]
-fn var_zero_args_pre_decrement() {
-    // --Var()
-    let source = r#"func Test() { --Var(); }"#;
-    crate::support::assert_compiles(source);
-}
+// --Var()
+crate::support::compile_case!(var_zero_args_pre_decrement, r#"func Test() { --Var(); }"#);
 
-#[test]
-fn var_zero_args_post_increment() {
-    // Var()++
-    let source = r#"func Test() { Var()++; }"#;
-    crate::support::assert_compiles(source);
-}
+// Var()++
+crate::support::compile_case!(var_zero_args_post_increment, r#"func Test() { Var()++; }"#);
 
 #[test]
 fn increment_resolves_side_effectful_var_lvalue_once() {
@@ -178,44 +163,38 @@ fn indexed_effectvar_array_assignment_writes_through_the_returned_reference() {
     );
 }
 
-#[test]
-fn local_zero_args_pre_increment() {
-    // ++Local()
-    let source = r#"func Test() { ++Local(); }"#;
-    crate::support::assert_compiles(source);
-}
+// ++Local()
+crate::support::compile_case!(
+    local_zero_args_pre_increment,
+    r#"func Test() { ++Local(); }"#
+);
 
-#[test]
-fn local_two_args_pre_increment() {
-    // ++Local(0, obj)
-    let source = r#"func Test() { var obj; ++Local(0, obj); }"#;
-    crate::support::assert_compiles(source);
-}
+// ++Local(0, obj)
+crate::support::compile_case!(
+    local_two_args_pre_increment,
+    r#"func Test() { var obj; ++Local(0, obj); }"#
+);
 
-#[test]
-fn var_two_args_post_decrement() {
-    // Var(0, obj)--
-    let source = r#"func Test() { var obj; Var(0, obj)--; }"#;
-    crate::support::assert_compiles(source);
-}
+// Var(0, obj)--
+crate::support::compile_case!(
+    var_two_args_post_decrement,
+    r#"func Test() { var obj; Var(0, obj)--; }"#
+);
 
-#[test]
-fn warp_line_147_exact_pattern() {
-    // Exact pattern from WARP line 147
-    let source = r#"func Test() { var pTarget, iEffect, pObj; EffectVar(++EffectVar(0, pTarget, iEffect), pTarget, iEffect) = pObj; }"#;
-    crate::support::assert_compiles(source);
-}
+// Exact pattern from WARP line 147
+crate::support::compile_case!(
+    warp_line_147_exact_pattern,
+    r#"func Test() { var pTarget, iEffect, pObj; EffectVar(++EffectVar(0, pTarget, iEffect), pTarget, iEffect) = pObj; }"#
+);
 
-#[test]
-fn skyrace_var_decrement_pattern() {
-    // Pattern from Skyrace.c4s: --Var() in if condition
-    let source = r#"func Test() { if (!--Var()) return("Done"); }"#;
-    crate::support::assert_compiles(source);
-}
+// Pattern from Skyrace.c4s: --Var() in if condition
+crate::support::compile_case!(
+    skyrace_var_decrement_pattern,
+    r#"func Test() { if (!--Var()) return("Done"); }"#
+);
 
-#[test]
-fn nested_increment_in_condition() {
-    // Pattern: if((--EffectVar(0, pTarget, iEffectNumber))<=0)
-    let source = r#"func Test() { var pTarget, iEffectNumber; if((--EffectVar(0, pTarget, iEffectNumber))<=0) return(-1); }"#;
-    crate::support::assert_compiles(source);
-}
+// Pattern: if((--EffectVar(0, pTarget, iEffectNumber))<=0)
+crate::support::compile_case!(
+    nested_increment_in_condition,
+    r#"func Test() { var pTarget, iEffectNumber; if((--EffectVar(0, pTarget, iEffectNumber))<=0) return(-1); }"#
+);

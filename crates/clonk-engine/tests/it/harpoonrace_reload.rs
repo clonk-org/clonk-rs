@@ -1,4 +1,5 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::EngineTestExt;
 use clonk_engine::{
     ObjectId, ObjectUpdate, Vector2, CNAT_BOTTOM, COM_DOWN, COM_RELEASE_OFFSET, COM_THROW, COM_UP,
     FULL_CON,
@@ -28,57 +29,31 @@ fn harpoonrace_player_controls_enter_adjust_and_fire_standing_aim() {
         0,
     );
     let owner = join_local_player(&mut engine, "HarpoonRace standing aim parity");
-    let sft = engine
-        .crew_cursor(owner)
-        .expect("HarpoonRace joins with a selected SFT");
+    let sft = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("the first Throw enters standing aim");
-    let aimed = engine.object_snapshot(sft).expect("the SFT remains live");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    let aimed = engine.test_object_snapshot(sft);
     assert_eq!(aimed.action.name, "HarpoonAim");
     assert_eq!(aimed.action.phase, 5);
-    let harpoon = aimed
-        .contents
-        .iter()
-        .copied()
-        .find(|&object| {
+    let harpoon =
+        crate::support::TestValueExt::test_value(aimed.contents.iter().copied().find(|&object| {
             engine
                 .object_snapshot(object)
                 .is_some_and(|snapshot| snapshot.definition_id == "HP5B")
-        })
-        .expect("HarpoonRace equips HP5B");
+        }));
     assert_eq!(local(&engine, harpoon, "ammo"), Value::Int(100));
 
-    engine
-        .player_in_com(owner, COM_UP, 0)
-        .expect("Up adjusts the standing aim");
-    assert_eq!(
-        engine
-            .object_snapshot(sft)
-            .expect("the SFT remains live")
-            .action
-            .phase,
-        4
-    );
-    engine
-        .player_in_com(owner, COM_UP + COM_RELEASE_OFFSET, 0)
-        .expect("Up release completes");
-    engine
-        .player_in_com(owner, COM_DOWN, 0)
-        .expect("Down adjusts the standing aim");
-    assert_eq!(
-        engine
-            .object_snapshot(sft)
-            .expect("the SFT remains live")
-            .action
-            .phase,
-        5
-    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
+    assert_eq!(engine.test_object_snapshot(sft).action.phase, 4);
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_UP + COM_RELEASE_OFFSET,
+        0,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DOWN, 0));
+    assert_eq!(engine.test_object_snapshot(sft).action.phase, 5);
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("the second Throw fires the aimed harpoon");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert_eq!(local(&engine, harpoon, "ammo"), Value::Int(0));
     let launched_object = |name: &str, expected_definition: &str| {
         let Value::Object(raw_id) = local(&engine, harpoon, name) else {
@@ -111,45 +86,37 @@ fn harpoonrace_lethal_fall_damage_kills_and_relaunches_the_sft() {
         0,
     );
     let owner = join_local_player(&mut engine, "HarpoonRace death parity");
-    let original = engine
-        .crew_cursor(owner)
-        .expect("HarpoonRace joins with a selected SFT");
+    let original = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let sft_count_before = engine.object_count_for_definition("SF5B");
-    let vertices = engine
-        .object_snapshot(original)
-        .expect("the original SFT is live")
-        .vertices;
-    let bottom = vertices
-        .iter()
-        .find(|vertex| vertex.cnat & CNAT_BOTTOM != 0)
-        .expect("SF5B has a bottom contact vertex");
+    let vertices = engine.test_object_snapshot(original).vertices;
+    let bottom = crate::support::TestValueExt::test_value(
+        vertices
+            .iter()
+            .find(|vertex| vertex.cnat & CNAT_BOTTOM != 0),
+    );
     let landing = {
-        let landscape = engine
-            .landscape()
-            .expect("HarpoonRace has its real generated landscape");
+        let landscape = crate::support::TestValueExt::test_value(engine.landscape());
         let landscape_width =
-            i32::try_from(landscape.width()).expect("landscape width fits an i32");
-        (8..landscape_width - 8)
-            .find_map(|surface_x| {
-                (12..landscape.estimated_height()).find_map(|surface_y| {
-                    let center = Vector2::new(surface_x - bottom.x, surface_y - bottom.y - 1);
-                    let clear_before = vertices.iter().all(|vertex| {
-                        !landscape.is_solid_at(center.x + vertex.x, center.y + vertex.y)
+            crate::support::TestValueExt::test_value(i32::try_from(landscape.width()));
+        crate::support::TestValueExt::test_value((8..landscape_width - 8).find_map(|surface_x| {
+            (12..landscape.estimated_height()).find_map(|surface_y| {
+                let center = Vector2::new(surface_x - bottom.x, surface_y - bottom.y - 1);
+                let clear_before = vertices
+                    .iter()
+                    .all(|vertex| !landscape.is_solid_at(center.x + vertex.x, center.y + vertex.y));
+                let bottom_hits_after_one_pixel = landscape.is_solid_at(surface_x, surface_y);
+                let other_vertices_clear_after_one_pixel = vertices
+                    .iter()
+                    .filter(|vertex| vertex.cnat & CNAT_BOTTOM == 0)
+                    .all(|vertex| {
+                        !landscape.is_solid_at(center.x + vertex.x, center.y + vertex.y + 1)
                     });
-                    let bottom_hits_after_one_pixel = landscape.is_solid_at(surface_x, surface_y);
-                    let other_vertices_clear_after_one_pixel = vertices
-                        .iter()
-                        .filter(|vertex| vertex.cnat & CNAT_BOTTOM == 0)
-                        .all(|vertex| {
-                            !landscape.is_solid_at(center.x + vertex.x, center.y + vertex.y + 1)
-                        });
-                    (clear_before
-                        && bottom_hits_after_one_pixel
-                        && other_vertices_clear_after_one_pixel)
-                        .then_some(center)
-                })
+                (clear_before
+                    && bottom_hits_after_one_pixel
+                    && other_vertices_clear_after_one_pixel)
+                    .then_some(center)
             })
-            .expect("the real landscape has an open solid landing surface")
+        }))
     };
     let mut lethal_landing = ObjectUpdate::new()
         .with_position(landing)
@@ -157,24 +124,16 @@ fn harpoonrace_lethal_fall_damage_kills_and_relaunches_the_sft() {
         .with_velocity(Vector2::new(0, 100))
         .with_action("HarpoonJump");
     lethal_landing.mobile = Some(true);
-    engine
-        .apply_object_update(original, lethal_landing)
-        .expect("prepare a lethal landing");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(original, lethal_landing));
 
-    engine
-        .tick_without_snapshot()
-        .expect("the moving SFT collides with the real landscape");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
-    let dead = engine
-        .object_snapshot(original)
-        .expect("C++ retains the dead SFT object");
+    let dead = engine.test_object_snapshot(original);
     assert_eq!(dead.energy, 0);
     assert!(!dead.alive, "zero energy must mark the original SFT dead");
     assert_eq!(dead.action.name, "Dead");
 
-    let replacement = engine
-        .crew_cursor(owner)
-        .expect("HarpoonRace immediately selects the relaunched SFT");
+    let replacement = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     assert_ne!(replacement, original);
     assert_eq!(
         engine.object_count_for_definition("SF5B"),
@@ -186,9 +145,7 @@ fn harpoonrace_lethal_fall_damage_kills_and_relaunches_the_sft() {
         vec![replacement],
         "AssignDeath removes the corpse and leaves exactly one crew member"
     );
-    let replacement = engine
-        .object_snapshot(replacement)
-        .expect("the replacement SFT remains live");
+    let replacement = engine.test_object_snapshot(replacement);
     assert_eq!(replacement.definition_id, "SF5B");
     assert!(replacement.alive);
     assert_eq!(replacement.energy, 70_000);
@@ -208,60 +165,40 @@ fn harpoonrace_automatic_rope_break_reloads_for_a_second_shot() {
         0,
     );
     let owner = join_local_player(&mut engine, "HarpoonRace reload parity");
-    let sft = engine
-        .crew_cursor(owner)
-        .expect("HarpoonRace joins with a selected SFT");
-    assert_eq!(
+    let sft = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    assert_eq!(engine.test_object_snapshot(sft).definition_id, "SF5B");
+    let harpoon = crate::support::TestValueExt::test_value(
         engine
-            .object_snapshot(sft)
-            .expect("the SFT is live")
-            .definition_id,
-        "SF5B"
-    );
-    let harpoon = engine
-        .object_snapshot(sft)
-        .expect("the SFT is live")
-        .contents
-        .iter()
-        .copied()
-        .find(|&object| {
-            engine
-                .object_snapshot(object)
-                .is_some_and(|snapshot| snapshot.definition_id == "HP5B")
-        })
-        .expect("HarpoonRace equips the SFT with HP5B");
-    assert_eq!(
-        engine
-            .object_snapshot(sft)
-            .expect("the SFT is live")
+            .test_object_snapshot(sft)
             .contents
-            .first(),
+            .iter()
+            .copied()
+            .find(|&object| {
+                engine
+                    .object_snapshot(object)
+                    .is_some_and(|snapshot| snapshot.definition_id == "HP5B")
+            }),
+    );
+    assert_eq!(
+        engine.test_object_snapshot(sft).contents.first(),
         Some(&harpoon),
         "the shipped HP5B is the selected first content"
     );
 
-    let sft_index = engine.find_object_index(sft).expect("the SFT has an index");
+    let sft_index = engine.test_object_index(sft);
     assert_eq!(
-        engine
-            .call_object_function(sft_index, "ControlThrow", Vec::new())
-            .expect("the first shipped Throw callback completes"),
+        engine.call_test_object_function(sft_index, "ControlThrow", Vec::new()),
         Value::Int(1)
     );
     assert_eq!(
-        engine
-            .object_snapshot(sft)
-            .expect("the SFT remains live")
-            .action
-            .name,
+        engine.test_object_snapshot(sft).action.name,
         "HarpoonAim",
         "the first Throw enters aiming"
     );
 
-    let sft_index = engine.find_object_index(sft).expect("the SFT has an index");
+    let sft_index = engine.test_object_index(sft);
     assert_eq!(
-        engine
-            .call_object_function(sft_index, "ControlThrow", Vec::new())
-            .expect("the firing Throw callback completes"),
+        engine.call_test_object_function(sft_index, "ControlThrow", Vec::new()),
         Value::Int(1)
     );
     assert_eq!(local(&engine, harpoon, "ammo"), Value::Int(0));
@@ -269,15 +206,10 @@ fn harpoonrace_automatic_rope_break_reloads_for_a_second_shot() {
         Value::Object(number) => clonk_engine::ObjectId::new(number),
         value => panic!("firing stores the live RP5B in HP5B.rope, got {value:?}"),
     };
-    let rope_snapshot = engine
-        .object_snapshot(rope)
-        .expect("firing creates the RP5B rope");
+    let rope_snapshot = engine.test_object_snapshot(rope);
     assert_eq!(rope_snapshot.definition_id, "RP5B");
     assert_eq!(rope_snapshot.action.target, Some(harpoon));
-    let arrow = rope_snapshot
-        .action
-        .target2
-        .expect("RP5B targets the fired AW5B");
+    let arrow = crate::support::TestValueExt::test_value(rope_snapshot.action.target2);
     assert_eq!(
         engine.object_count_for_definition_in_container("AW5B", harpoon),
         0,
@@ -291,12 +223,10 @@ fn harpoonrace_automatic_rope_break_reloads_for_a_second_shot() {
     // HP5B::BreakRope; BreakRope
     // creates a fresh AW5B and restores ammo to 100
     // (Rope.c4d/Script.c:20-27; Harpoon.c4d/Script.c:324-336).
-    engine
-        .apply_object_update(arrow, ObjectUpdate::new().with_construction(FULL_CON - 1))
-        .expect("the fired arrow becomes incomplete");
-    engine
-        .tick_without_snapshot()
-        .expect("the broken RP5B executes its CONNECT lifecycle");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(arrow, ObjectUpdate::new().with_construction(FULL_CON - 1)),
+    );
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     assert!(
         engine.object_snapshot(rope).is_none(),
@@ -318,11 +248,9 @@ fn harpoonrace_automatic_rope_break_reloads_for_a_second_shot() {
         "BreakRope creates the replacement arrow"
     );
 
-    let sft_index = engine.find_object_index(sft).expect("the SFT has an index");
+    let sft_index = engine.test_object_index(sft);
     assert_eq!(
-        engine
-            .call_object_function(sft_index, "ControlThrow", Vec::new())
-            .expect("the second firing callback completes"),
+        engine.call_test_object_function(sft_index, "ControlThrow", Vec::new()),
         Value::Int(1)
     );
     assert_eq!(local(&engine, harpoon, "ammo"), Value::Int(0));
@@ -331,20 +259,12 @@ fn harpoonrace_automatic_rope_break_reloads_for_a_second_shot() {
         value => panic!("the reloaded Harpoon stores a second RP5B, got {value:?}"),
     };
     assert_ne!(second_rope, rope, "the second shot creates a fresh rope");
-    let second_rope = engine
-        .object_snapshot(second_rope)
-        .expect("the second shot's RP5B is live");
+    let second_rope = engine.test_object_snapshot(second_rope);
     assert_eq!(second_rope.definition_id, "RP5B");
     assert_eq!(second_rope.action.target, Some(harpoon));
-    let second_arrow = second_rope
-        .action
-        .target2
-        .expect("the second RP5B targets a fresh AW5B");
+    let second_arrow = crate::support::TestValueExt::test_value(second_rope.action.target2);
     assert_eq!(
-        engine
-            .object_snapshot(second_arrow)
-            .expect("the second shot's AW5B is live")
-            .definition_id,
+        engine.test_object_snapshot(second_arrow).definition_id,
         "AW5B"
     );
 }

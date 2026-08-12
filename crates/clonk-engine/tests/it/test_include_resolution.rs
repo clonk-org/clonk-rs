@@ -4,15 +4,14 @@ use clonk_engine::{Definition, Engine, ObjectId, SpawnConfig};
 
 #[allow(dead_code)]
 fn simple_definition(id: &str) -> Definition {
-    Definition::from_script(
+    crate::support::TestValueExt::test_value(Definition::from_script(
         id,
         id,
         r#"
         global func Initialize(state, random) { return 0; }
         global func Step(state, frame, random) { return 0; }
         "#,
-    )
-    .expect("script compiles")
+    ))
 }
 
 #[test]
@@ -23,7 +22,7 @@ fn action_callback_should_resolve_through_include() {
     let mut engine = Engine::new();
 
     // Register parent definition with Still callback
-    let parent = Definition::from_script(
+    let parent = crate::support::TestValueExt::test_value(Definition::from_script(
         "TRE1",
         "Tree",
         r#"
@@ -31,26 +30,24 @@ fn action_callback_should_resolve_through_include() {
         global func Step(state, frame, random) { return 0; }
         private func Still() { return 0; }
         "#,
-    )
-    .unwrap();
-    engine.register_definition(parent).unwrap();
+    ));
+    crate::support::TestValueExt::test_value(engine.register_definition(parent));
 
     // Register child definition that includes parent
-    let child = Definition::from_script(
+    let child = crate::support::TestValueExt::test_value(Definition::from_script(
         "TRE2",
         "Tree2",
         r#"
         #strict
         #include TRE1
         "#,
-    )
-    .unwrap();
-    engine.register_definition(child).unwrap();
+    ));
+    crate::support::TestValueExt::test_value(engine.register_definition(child));
 
     // Now spawn a TRE2 object
-    let obj = engine
-        .spawn_object(SpawnConfig::new("TRE2".to_string()))
-        .unwrap();
+    let obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TRE2".to_string())),
+    );
 
     // The object should exist
     assert_eq!(obj, ObjectId::new(1));

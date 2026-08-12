@@ -2,13 +2,11 @@ use super::*;
 
 fn sound_source_engine() -> (Engine, ObjectId, Vector2) {
     let mut engine = Engine::with_seed(0x4c_30_30_31);
-    engine
-        .register_script_definition("SND1", "Sound source", "")
-        .expect("sound definition registers");
+    crate::TestValueExt::test_value(engine.register_script_definition("SND1", "Sound source", ""));
     let position = Vector2::new(321, 654);
-    let object = engine
-        .spawn_object(SpawnConfig::new("SND1").with_position(position))
-        .expect("sound source spawns");
+    let object = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("SND1").with_position(position)),
+    );
     (engine, object, position)
 }
 
@@ -43,9 +41,9 @@ fn native_destroy_detaches_loop_at_the_objects_final_position() {
     engine.audio_registry.take_events();
     engine.pending_audio.clear();
 
-    let index = engine.find_object_index(object).expect("source remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
-    let snapshot = engine.tick().expect("native removal frame succeeds");
+    let snapshot = crate::TestValueExt::test_value(engine.tick());
 
     assert!(snapshot.object(object).is_none());
     assert_eq!(
@@ -60,10 +58,10 @@ fn native_destroy_detaches_loop_at_the_objects_final_position() {
 #[test]
 fn native_destroy_without_object_audio_emits_no_detach_command() {
     let (mut engine, object, _) = sound_source_engine();
-    let index = engine.find_object_index(object).expect("source remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
 
-    let snapshot = engine.tick().expect("native removal frame succeeds");
+    let snapshot = crate::TestValueExt::test_value(engine.tick());
 
     assert!(snapshot.audio.is_empty());
 }
@@ -73,10 +71,10 @@ fn same_frame_direct_one_shot_detaches_once_in_command_order() {
     let (mut engine, object, position) = sound_source_engine();
     let play = impact_command(object);
     engine.pending_audio.push(play.clone());
-    let index = engine.find_object_index(object).expect("source remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
 
-    let snapshot = engine.tick().expect("native removal frame succeeds");
+    let snapshot = crate::TestValueExt::test_value(engine.tick());
 
     assert_eq!(
         snapshot.audio,
@@ -97,10 +95,10 @@ fn same_frame_direct_loop_detaches_once_in_command_order() {
     let (mut engine, object, position) = sound_source_engine();
     let play = fire_loop_command(object);
     engine.pending_audio.push(play.clone());
-    let index = engine.find_object_index(object).expect("source remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
 
-    let snapshot = engine.tick().expect("native removal frame succeeds");
+    let snapshot = crate::TestValueExt::test_value(engine.tick());
 
     assert_eq!(
         snapshot.audio,
@@ -124,7 +122,7 @@ fn delivered_one_shot_target_is_remembered_until_later_removal() {
         vec![play]
     );
 
-    let index = engine.find_object_index(object).expect("source remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
     assert_eq!(
         engine.tick().expect("removal frame succeeds").audio,
@@ -145,7 +143,7 @@ fn delivered_loop_target_is_remembered_until_later_removal() {
         vec![play]
     );
 
-    let index = engine.find_object_index(object).expect("source remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
     assert_eq!(
         engine.tick().expect("removal frame succeeds").audio,
@@ -167,12 +165,10 @@ fn restore_discards_sound_bindings_from_the_replaced_world() {
         .pending_audio
         .extend(engine.audio_registry.take_events());
 
-    engine.restore_state(&state).expect("state restores");
-    let index = engine
-        .find_object_index(object)
-        .expect("restored source remains");
+    crate::TestValueExt::test_value(engine.restore_state(&state));
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     engine.objects[index].mark_destroyed();
-    let snapshot = engine.tick().expect("restored removal succeeds");
+    let snapshot = crate::TestValueExt::test_value(engine.tick());
 
     assert_eq!(
         snapshot.audio,

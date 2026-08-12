@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::support::EngineTestExt;
 use std::error::Error;
 
 use crate::support::real_scenario::{join_local_player, load_tutorial};
@@ -38,11 +39,9 @@ fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
 fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial02();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial02 joins one selected CLNK");
-    let balloon = object_with_definition(&engine, "BALN").expect("Tutorial02 places BALN");
-    let hut = object_with_definition(&engine, "HUT3").expect("Tutorial02 places HUT3");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let balloon = crate::support::TestValueExt::test_value(object_with_definition(&engine, "BALN"));
+    let hut = crate::support::TestValueExt::test_value(object_with_definition(&engine, "HUT3"));
     assert_eq!(
         engine.debug_definition_has_function("BALN", "ControlDownSingle"),
         Some(true),
@@ -74,14 +73,8 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         })
     })?;
 
-    let boarded_clonk = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("boarded CLNK");
-    let boarded_balloon = player
-        .engine()
-        .object_snapshot(balloon)
-        .expect("boarded BALN");
+    let boarded_clonk = player.engine().test_object_snapshot(clonk);
+    let boarded_balloon = player.engine().test_object_snapshot(balloon);
     let platform_delta_y = boarded_clonk.position.y - boarded_balloon.position.y;
 
     // While pushing, Up is offered to BALN first (src/C4Object.cpp:3520-3537)
@@ -117,8 +110,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     assert_eq!(
         player
             .engine()
-            .object_snapshot(balloon)
-            .expect("BALN survives DownSingle")
+            .test_object_snapshot(balloon)
             .command_direction,
         clonk_engine::CommandDirection::Stop,
         "next natural milestone: BALN::ControlDownSingle currently aborts at the unknown \
@@ -158,8 +150,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     assert_eq!(
         player
             .engine()
-            .object_snapshot(balloon)
-            .expect("BALN survives second DownSingle")
+            .test_object_snapshot(balloon)
             .command_direction,
         clonk_engine::CommandDirection::Down
     );
@@ -259,11 +250,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         )?;
         player.release(COM_RIGHT)?;
         assert_eq!(
-            player
-                .engine()
-                .object_snapshot(clonk)
-                .expect("CLNK faces the island centre before throwing FLAG")
-                .direction,
+            player.engine().test_object_snapshot(clonk).direction,
             clonk_engine::Direction::Right
         );
         // Classic controls intentionally keep walking after a direction key
@@ -384,11 +371,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         .map(|item| item.caption.as_str());
     assert_eq!(selected, Some("Diagonal left"));
 
-    let bridge_start = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK starts the bridge")
-        .position;
+    let bridge_start = player.engine().test_object_snapshot(clonk).position;
     player.menu_enter()?;
     player.wait_until("CLNK enters the real Bridge action", 10, |engine| {
         engine
@@ -396,10 +379,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .is_some_and(|object| object.action.name == "Bridge")
     })?;
     player.ticks(6)?;
-    let first_bridge_step = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK survives the first bridge step");
+    let first_bridge_step = player.engine().test_object_snapshot(clonk);
     assert_eq!(first_bridge_step.action.name, "Bridge");
     assert_eq!(first_bridge_step.action.time, 6);
     assert_eq!(
@@ -421,26 +401,16 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                 .is_some_and(|object| object.action.name == "Walk")
         },
     )?;
-    let bridge_end = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK survives the bridge")
-        .position;
+    let bridge_end = player.engine().test_object_snapshot(clonk).position;
     assert_eq!(
         (bridge_end.x - bridge_start.x, bridge_end.y - bridge_start.y),
         (-16, -16),
         "C++ increments Action.Time before DoBridge and moves at times 6..96 \
          (src/C4Object.cpp:4581-4601,4755-4756)"
     );
-    let earth = player
-        .engine()
-        .materials()
-        .id_of("Earth")
-        .expect("Tutorial02 loads Earth");
-    let landscape = player
-        .engine()
-        .landscape()
-        .expect("Tutorial02 keeps its landscape");
+    let earth =
+        crate::support::TestValueExt::test_value(player.engine().materials().id_of("Earth"));
+    let landscape = crate::support::TestValueExt::test_value(player.engine().landscape());
     let mut earth_pixels_per_step = Vec::new();
     for step in 0..16 {
         let x = bridge_start.x - step - 4;
@@ -493,11 +463,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         })
     })?;
     player.menu_navigate_to_caption("Diagonal left")?;
-    let second_bridge_start = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK starts the second bridge")
-        .position;
+    let second_bridge_start = player.engine().test_object_snapshot(clonk).position;
     assert!(
         (second_bridge_start.x - bridge_end.x).abs() <= 1
             && (second_bridge_start.y - bridge_end.y).abs() <= 1,
@@ -515,11 +481,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
-    let second_bridge_end = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK survives the second bridge")
-        .position;
+    let second_bridge_end = player.engine().test_object_snapshot(clonk).position;
     assert_eq!(
         (
             second_bridge_end.x - second_bridge_start.x,
@@ -570,11 +532,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         })
     })?;
     player.menu_navigate_to_caption("Diagonal left")?;
-    let third_bridge_start = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK starts the third bridge")
-        .position;
+    let third_bridge_start = player.engine().test_object_snapshot(clonk).position;
     assert!(
         (third_bridge_start.x - second_bridge_end.x).abs() <= 1
             && (third_bridge_start.y - second_bridge_end.y).abs() <= 1,
@@ -592,11 +550,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
-    let third_bridge_end = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("CLNK survives the third bridge")
-        .position;
+    let third_bridge_end = player.engine().test_object_snapshot(clonk).position;
     assert_eq!(
         (
             third_bridge_end.x - third_bridge_start.x,
@@ -653,13 +607,9 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                 .is_some_and(|object| object.action.name == "Walk")
         })?;
     }
-    let flag_id = object_with_definition(player.engine(), "FLAG").expect("FLAG remains");
-    let flag_x = player
-        .engine()
-        .object_snapshot(flag_id)
-        .expect("FLAG remains visible")
-        .position
-        .x;
+    let flag_id =
+        crate::support::TestValueExt::test_value(object_with_definition(player.engine(), "FLAG"));
+    let flag_x = player.engine().test_object_snapshot(flag_id).position.x;
     let flag_approach = player.hold_until(
         COM_RIGHT,
         "Clonk walks back into FLAG's collection window",
@@ -775,11 +725,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         },
     )?;
 
-    let hut_position = player
-        .engine()
-        .object_snapshot(hut)
-        .expect("HUT3 survives the return trip")
-        .position;
+    let hut_position = player.engine().test_object_snapshot(hut).position;
     player.wait_until("Clonk reaches HUT3's entrance", 160, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Walk"
@@ -789,11 +735,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     })?;
     player.release(COM_LEFT)?;
     assert_eq!(
-        player
-            .engine()
-            .object_snapshot(hut)
-            .expect("HUT3 before FLAG return")
-            .base,
+        player.engine().test_object_snapshot(hut).base,
         -1,
         "without its FlyBase FLAG, C++ ExecBase must clear HUT3's base \
          (src/C4Object.cpp:1000-1031)"
@@ -825,11 +767,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .is_some_and(|hut| hut.base == owner)
     })?;
     assert_eq!(
-        player
-            .engine()
-            .object_snapshot(hut)
-            .expect("HUT3 after FLAG return")
-            .base,
+        player.engine().test_object_snapshot(hut).base,
         owner,
         "FLAG return must restore HUT3 as player zero's C++ base"
     );

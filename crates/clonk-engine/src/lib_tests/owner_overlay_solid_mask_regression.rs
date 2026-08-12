@@ -12,12 +12,11 @@ fn explicit_owner_overlay_alpha_participates_in_solid_mask_pixels() {
     assert_eq!(pixels[3], 130, "base and overlay opacity saturating-add");
     assert_eq!(pixels[7], 200, "transparent overlay leaves base alpha");
 
-    let solid = solid_mask_pixels_for_checked_bitmap(
+    let solid = crate::TestValueExt::test_value(solid_mask_pixels_for_checked_bitmap(
         DefinitionTargetRect::new(0, 0, 2, 1, 0, 0),
         2,
         1,
         &pixels,
-    )
-    .expect("solid mask pixels");
+    ));
     assert_eq!(solid.as_slice(), &[1, 1]);
 }

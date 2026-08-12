@@ -12,12 +12,9 @@ use crate::support::real_scenario::load_installed_scenario;
 #[test]
 fn fossae_scenario_folder_textures_fill_its_generated_landscape() {
     let engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let earth = engine
-        .materials()
-        .id_of("Earth")
-        .expect("Fossae loads the Earth material");
-    let landscape = engine.landscape().expect("Fossae keeps its landscape");
-    let width = i32::try_from(landscape.width()).expect("landscape width fits an i32");
+    let earth = crate::support::TestValueExt::test_value(engine.materials().id_of("Earth"));
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
+    let width = crate::support::TestValueExt::test_value(i32::try_from(landscape.width()));
     let height = landscape.estimated_height();
 
     let (solid, earth_pixels) = (0..height)

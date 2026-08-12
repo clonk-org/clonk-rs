@@ -4,12 +4,10 @@ use clonk_script::Value;
 fn call_modulate_color(strict_level: u8, first_color: &str) -> Value {
     let mut script = clonk_script::Engine::new();
     compat::register_host_functions(&mut script);
-    script
-        .load_script(&format!(
-            "#strict {strict_level}\nfunc Probe() {{ return ModulateColor({first_color}, -1); }}"
-        ))
-        .expect("ModulateColor probe compiles");
-    script.call("Probe", &[]).expect("ModulateColor probe runs")
+    crate::support::TestValueExt::test_value(script.load_script(&format!(
+        "#strict {strict_level}\nfunc Probe() {{ return ModulateColor({first_color}, -1); }}"
+    )));
+    crate::support::TestValueExt::test_value(script.call("Probe", &[]))
 }
 
 fn custom_message_color(strict_level: u8, color: &str) -> u32 {
@@ -17,13 +15,14 @@ fn custom_message_color(strict_level: u8, color: &str) -> u32 {
         "#strict {strict_level}\nfunc Probe() {{ var unset; return CustomMessage(\"probe\", unset, unset, unset, unset, {color}); }}"
     );
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("CMST", "CustomMessage strictness probe", &script)
-        .expect("CustomMessage probe registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("CMST"))
-        .expect("CustomMessage probe spawns");
-    let index = engine.find_object_index(object).expect("probe index");
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "CMST",
+        "CustomMessage strictness probe",
+        &script,
+    ));
+    let object =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("CMST")));
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
     assert_eq!(
         engine
             .call_object_function(index, "Probe", Vec::new())

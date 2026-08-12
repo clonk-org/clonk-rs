@@ -113,12 +113,11 @@ fn strict2_does_not_enter_the_legacy_multi_parameter_return_path() {
     assert_function_quarantined("#strict 2\nfunc Probe() { return(0, 42); }", "Probe");
 }
 
-#[test]
-fn mgsm_line_24_pattern() {
-    // Exact pattern from MGSM line 24
-    let source = r#"func Test() { if (!SetAction("Wait")) return (0, RemoveObject()); }"#;
-    crate::support::assert_compiles(source);
-}
+// Exact pattern from MGSM line 24
+crate::support::compile_case!(
+    mgsm_line_24_pattern,
+    r#"func Test() { if (!SetAction("Wait")) return (0, RemoveObject()); }"#
+);
 
 #[test]
 fn nonstrict_spaced_return_parentheses_return_the_first_value() {
@@ -134,26 +133,23 @@ fn nonstrict_spaced_return_parentheses_return_the_first_value() {
     );
 }
 
-#[test]
-fn comma_with_three_expressions() {
-    // return (expr1, expr2, expr3)
-    let source = r#"func Test() { return (1, 2, 3); }"#;
-    crate::support::assert_compiles(source);
-}
+// return (expr1, expr2, expr3)
+crate::support::compile_case!(
+    comma_with_three_expressions,
+    r#"func Test() { return (1, 2, 3); }"#
+);
 
-#[test]
-fn comma_with_function_calls() {
-    // return (1, Message(...), Sound(...))
-    let source = r#"func Test() { return (1, Message("test"), Sound("Click")); }"#;
-    crate::support::assert_compiles(source);
-}
+// return (1, Message(...), Sound(...))
+crate::support::compile_case!(
+    comma_with_function_calls,
+    r#"func Test() { return (1, Message("test"), Sound("Click")); }"#
+);
 
-#[test]
-fn comma_with_assignment() {
-    // return (1, var = 0)
-    let source = r#"func Test() { var x; return (1, x = 42); }"#;
-    crate::support::assert_compiles(source);
-}
+// return (1, var = 0)
+crate::support::compile_case!(
+    comma_with_assignment,
+    r#"func Test() { var x; return (1, x = 42); }"#
+);
 
 #[test]
 fn generic_comma_expressions_in_assignments_are_rejected() {
@@ -740,19 +736,17 @@ fn nested_comma_expressions() {
     assert_function_quarantined("func Test() { return (1, (2, 3)); }", "Test");
 }
 
-#[test]
-fn lock_pattern() {
-    // Pattern from Lock.c4d scripts
-    let source = r#"func Test() { return (1, Message("test"), Sound("Error")); }"#;
-    crate::support::assert_compiles(source);
-}
+// Pattern from Lock.c4d scripts
+crate::support::compile_case!(
+    lock_pattern,
+    r#"func Test() { return (1, Message("test"), Sound("Error")); }"#
+);
 
-#[test]
-fn kingdoms_pattern() {
-    // Pattern from Kingdoms scripts
-    let source = r#"func Test() { var clonk; if (!clonk) return (0, RemoveObject()); }"#;
-    crate::support::assert_compiles(source);
-}
+// Pattern from Kingdoms scripts
+crate::support::compile_case!(
+    kingdoms_pattern,
+    r#"func Test() { var clonk; if (!clonk) return (0, RemoveObject()); }"#
+);
 
 #[test]
 fn comma_in_var_decl_without_parens_is_rejected_like_cpp() {
