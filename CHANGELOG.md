@@ -4,6 +4,18 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-12
+
+### Continuous integration
+
+- Shard Rust coverage collection (#309)
+- Install a prebuilt git-cliff so release preparation meets its SLO (#304)
+
+### Features
+
+- Wire the console viewport context menu and developer toolbox (#307)
+- Restart a network round without dropping the session (#305)
+
 ## [0.9.8] - 2026-08-11
 
 ### Bug fixes
