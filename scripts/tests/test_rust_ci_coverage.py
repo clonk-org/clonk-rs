@@ -123,8 +123,15 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertIn("python3 scripts/merge-rust-coverage.py", coverage)
         self.assertIn("COVERAGE_MIN_LINE_PERCENT: '79.45'", coverage)
         self.assertIn('--fail-under-lines "$COVERAGE_MIN_LINE_PERCENT"', coverage)
+        self.assertNotIn("--output", coverage)
+        self.assertIn(
+            '--fail-under-lines "$COVERAGE_MIN_LINE_PERCENT" '
+            "target/coverage-fragments/*.lcov",
+            re.sub(r"\s+", " ", coverage.replace("\\\n", " ")),
+        )
         self.assertNotIn("--check", coverage)
         self.assertNotIn("cargo llvm-cov --no-report nextest", coverage)
+        self.assertNotIn("actions/upload-artifact@", coverage)
         self.assertNotIn("continue-on-error:", coverage)
 
     def test_fragment_handoffs_use_run_scoped_caches_not_release_artifacts(self):
@@ -220,53 +227,35 @@ class RustCoverageGateTests(unittest.TestCase):
         command_text = re.sub(r"\s+", " ", coverage.replace("\\\n", " "))
         html_command_text = re.sub(r"\s+", " ", html.replace("\\\n", " "))
 
-        self.assertIn(
-            "--output target/coverage/lcov.info",
-            command_text,
-        )
+        self.assertNotIn("--output", command_text)
         self.assertNotIn("genhtml", coverage)
         self.assertIn(
             "genhtml target/coverage/lcov.info "
             "--output-directory target/coverage/html ",
             html_command_text,
         )
-        upload_step = coverage[
-            coverage.index("- name: Upload merged Rust coverage") :
-        ]
-        self.assertIn("target/coverage/lcov.info", upload_step)
-        self.assertNotIn("target/coverage/html", upload_step)
-        self.assertNotIn("path: target/coverage\n", upload_step)
-        merge = coverage.index("- name: Merge Rust coverage fragments")
-        floor = coverage.index("- name: Enforce line coverage floor")
-        upload = coverage.index("- name: Upload merged Rust coverage")
-        self.assertLess(merge, floor)
-        self.assertLess(floor, upload)
-        self.assertRegex(
-            coverage,
-            r"(?s)- name: Upload merged Rust coverage\s+"
-            r"if: \$\{\{ always\(\) && inputs\.upload-diagnostics \}\}\s+"
-            r"uses: actions/upload-artifact@"
-            r"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1\s+"
-            r"with:\s+"
-            r"name: rust-coverage-\$\{\{ github\.run_id \}\}-"
-            r"\$\{\{ github\.run_attempt \}\}\s+"
-            r"path: target/coverage/lcov\.info\s+"
-            r"if-no-files-found: warn\s+"
-            r"retention-days: 14",
+        merge = coverage.index("- name: Enforce merged line coverage floor")
+        self.assertEqual(
+            coverage.count("python3 scripts/merge-rust-coverage.py"), 1
         )
+        self.assertIn('--fail-under-lines "$COVERAGE_MIN_LINE_PERCENT"', coverage[merge:])
         self.assertIn("name: Rust coverage HTML report", html)
-        self.assertIn("needs: coverage", html)
-        self.assertIn(
-            "always() && inputs.upload-diagnostics "
-            "&& needs.coverage.result != 'cancelled'",
-            html,
-        )
+        self.assertIn("needs: coverage-fragments", html)
+        self.assertIn("if: inputs.upload-diagnostics", html)
+        self.assertNotIn("needs: coverage\n", html)
         self.assertIn(
             'group: "main-coverage-html-${{ inputs.concurrency-suffix }}"',
             html,
         )
         self.assertIn("actions/download-artifact@", html)
-        self.assertIn("overwrite: true", html)
+        self.assertIn(
+            "pattern: rust-coverage-fragment-${{ github.run_id }}-*", html
+        )
+        self.assertIn("EXPECTED_FRAGMENT_COUNT: '11'", html)
+        self.assertIn("python3 scripts/merge-rust-coverage.py", html)
+        self.assertIn("--output target/coverage/lcov.info", html_command_text)
+        self.assertNotIn("--fail-under-lines", html)
+        self.assertNotIn("overwrite: true", html)
         self.assertIn("target/coverage/lcov.info", html)
         self.assertIn("target/coverage/html", html)
 
