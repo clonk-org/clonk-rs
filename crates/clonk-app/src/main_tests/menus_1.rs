@@ -4631,11 +4631,13 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     };
     let settle_startup_fade = |app: &mut GameApp| {
         assert!(app.startup_dialog_fade_active());
+        app.startup_dialog_fade
+            .as_mut()
+            .expect("active startup dialog fade")
+            .step = STARTUP_DIALOG_FADE_STEPS - 1;
         let mut frame = vec![0_u8; 1280 * 720 * 4];
-        for _ in 0..STARTUP_DIALOG_FADE_STEPS {
-            app.render(&mut frame)
-                .expect("complete startup dialog transition");
-        }
+        app.render(&mut frame)
+            .expect("complete startup dialog transition");
         assert!(!app.startup_dialog_fade_active());
     };
 
