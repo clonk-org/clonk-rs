@@ -204,21 +204,25 @@ impl Engine {
             rotated: None,
         };
         let landscape = self.landscape.as_mut().expect("grid mode checked");
-        for cy in 0..height {
-            for cx in 0..width {
-                if !bake.mask_set(tx + cx, ty + cy) {
-                    continue;
-                }
-                let lx = rect_x + cx;
-                let ly = rect_y + cy;
-                // Regular put stores the pixel even when it is already
-                // MCVehic (C4SolidMask.cpp:92-96) — it just will not be
-                // used for restore.
-                let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                bake.buffer[(cy * width + cx) as usize] = old;
-                landscape.grid_write_mask_byte(lx, ly, vehicle);
-            }
-        }
+        let mut buffer = std::mem::take(&mut bake.buffer);
+        let writes = (0..height).flat_map(|cy| {
+            let bake = &bake;
+            (0..width).filter_map(move |cx| {
+                bake.mask_set(tx + cx, ty + cy)
+                    .then_some(crate::landscape::MaskWrite::set(
+                        rect_x + cx,
+                        rect_y + cy,
+                        vehicle,
+                        (cy * width + cx) as usize,
+                    ))
+            })
+        });
+        landscape.grid_write_mask_bytes(writes, |result, _view| {
+            // Regular put stores the pixel even when it is already MCVehic
+            // (C4SolidMask.cpp:92-96) — it just will not be used for restore.
+            buffer[result.tag] = result.old.unwrap_or(0);
+        });
+        bake.buffer = buffer;
         self.objects[index].solid_mask_bake = Some(bake);
     }
 
@@ -307,6 +311,7 @@ impl Engine {
         let x0 = itofix(tx - mat_buff_pitch / 2);
         let y0 = itofix(ty - mat_buff_pitch / 2);
         let landscape = self.landscape.as_mut().expect("grid mode checked");
+        let mut writes = Vec::new();
         let mut ya = y0 * ma2;
         let mut yb = y0 * mb2;
         for cy in 0..height {
@@ -316,21 +321,18 @@ impl Engine {
                 // Position in the solidmask buffer (C4SolidMask.cpp:147-148).
                 let mask_x = fixtoi(xa + ya) + mask.width / 2;
                 let mask_y = fixtoi(xb + yb) + mask.height / 2;
-                // In bounds and solid (C4SolidMask.cpp:150)?
                 if mask_x >= 0
                     && mask_y >= 0
                     && mask_x < mask.width
                     && mask_y < mask.height
                     && bake.mask_pixel(mask_x, mask_y)
                 {
-                    let lx = rect_x + cx;
-                    let ly = rect_y + cy;
-                    // Regular put stores the pixel even when it is
-                    // already MCVehic (C4SolidMask.cpp:156-160) — it
-                    // just will not be used for restore.
-                    let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                    bake.buffer[(cy * width + cx) as usize] = old;
-                    landscape.grid_write_mask_byte(lx, ly, vehicle);
+                    writes.push(crate::landscape::MaskWrite::set(
+                        rect_x + cx,
+                        rect_y + cy,
+                        vehicle,
+                        (cy * width + cx) as usize,
+                    ));
                 }
                 // Cells the rotated mask misses keep the MCVehic marker
                 // the buffer was initialized with (C4SolidMask.cpp:165-167).
@@ -340,6 +342,11 @@ impl Engine {
             ya += ma2;
             yb += mb2;
         }
+        landscape.grid_write_mask_bytes(writes, |result, _view| {
+            // Rotated put also stores an already-MCVehic pixel
+            // (C4SolidMask.cpp:156-160).
+            bake.buffer[result.tag] = result.old.unwrap_or(0);
+        });
         self.objects[index].solid_mask_bake = Some(bake);
     }
 
@@ -436,26 +443,27 @@ impl Engine {
             });
         };
         let vehicle = landscape.grid_vehicle_byte()?;
-        for cy in 0..bake.height {
-            for cx in 0..bake.width {
+        let writes = (0..bake.height).flat_map(|cy| {
+            let bake = &bake;
+            (0..bake.width).filter_map(move |cx| {
                 let saved = bake.buffer[(cy * bake.width + cx) as usize];
-                if saved == vehicle {
-                    continue;
-                }
-                let lx = bake.x + cx;
-                let ly = bake.y + cy;
-                if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
-                    landscape.grid_write_mask_byte(lx, ly, saved);
-                }
-                // C++ probes every mask-used pixel when requested, whether
-                // or not the restore write happened. Object synchronization
-                // is the exceptional Remove(false, false) caller
-                // (C4SolidMask.cpp:244-257; C4GameObjects.cpp:296-303).
-                if cause_instability {
-                    mass_movers.check_instability_range_for_landscape(landscape, materials, lx, ly);
-                }
+                (saved != vehicle).then_some(crate::landscape::MaskWrite::replace(
+                    bake.x + cx,
+                    bake.y + cy,
+                    vehicle,
+                    saved,
+                    (),
+                ))
+            })
+        });
+        landscape.grid_write_mask_bytes(writes, |result, view| {
+            // C++ probes every mask-used pixel when requested, whether or not
+            // the restore happened (C4SolidMask.cpp:244-257).
+            if cause_instability {
+                mass_movers
+                    .check_instability_range_for_landscape(view, materials, result.x, result.y);
             }
-        }
+        });
         // Re-put overlapping masks: doubled MCVehic pixels were just
         // removed inside the freed rect. C++ walks the live instance list
         // Last->Prev, i.e. newest construction first (C4SolidMask.cpp:
@@ -2884,6 +2892,90 @@ mod tests {
             "the discarded candidate scan must not run at all"
         );
         assert_eq!(SOLID_MASK_MOVEMENT_CANDIDATE_VISITS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn stationary_object_execution_does_not_repaint_its_solid_mask() {
+        // C4Object::Execute only reaches UpdateSolidMask through operations
+        // that actually update mask-relevant state; an immobile object's
+        // ExecMovement performs no mask update (C4Object.cpp:1082-1105;
+        // C4Movement.cpp:558-590).
+        let mut engine = grid_world_engine();
+        engine
+            .landscape
+            .as_mut()
+            .expect("grid landscape")
+            .set_pixel_grid(crate::landscape::PixelGrid::new(
+                8,
+                8,
+                vec![0; 64],
+                vec![0; 128],
+                vec![None; 128],
+                vec![None; 128],
+            ));
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        engine
+            .register_definition(masked)
+            .expect("masked definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
+        let revision = engine
+            .landscape()
+            .and_then(crate::landscape::Landscape::pixel_grid)
+            .expect("grid landscape")
+            .revision();
+
+        engine.advance_tick().expect("stationary frame advances");
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(crate::landscape::Landscape::pixel_grid)
+                .expect("grid landscape")
+                .revision(),
+            revision,
+            "stationary execution leaves the already-current mask untouched"
+        );
+    }
+
+    #[test]
+    fn one_solid_mask_put_acquires_surface8_cow_storage_once() {
+        // C4SolidMask::Put is one uninterrupted row-major Surface8 raster
+        // walk (C4SolidMask.cpp:79-101). Rust may acquire its COW planes once
+        // for that walk; reacquiring them for every pixel is bookkeeping with
+        // no C++ counterpart.
+        let mut engine = grid_world_engine();
+        engine
+            .landscape
+            .as_mut()
+            .expect("grid landscape")
+            .set_pixel_grid(crate::landscape::PixelGrid::new(
+                8,
+                8,
+                vec![0; 64],
+                vec![0; 128],
+                vec![None; 128],
+                vec![None; 128],
+            ));
+        let mut masked =
+            Definition::from_script("Masked", "Masked", "").expect("masked definition compiles");
+        masked.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 2, 2, 0, 0)));
+        engine
+            .register_definition(masked)
+            .expect("masked definition registers");
+        crate::landscape::MASK_WRITE_BATCH_ACTIVATIONS.with(|count| count.set(0));
+
+        engine
+            .spawn_object(SpawnConfig::new("Masked"))
+            .expect("masked object spawns");
+
+        assert_eq!(
+            crate::landscape::MASK_WRITE_BATCH_ACTIVATIONS.with(Cell::get),
+            1
+        );
     }
 
     #[test]

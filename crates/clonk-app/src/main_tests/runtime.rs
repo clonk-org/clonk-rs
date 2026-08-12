@@ -793,6 +793,150 @@
     }
 
     #[test]
+    fn presentation_benchmark_player_team_parser_is_ordered_and_fail_closed() {
+        assert_eq!(
+            parse_presentation_benchmark_player_teams("1,2"),
+            Ok(vec![1, 2])
+        );
+        for rejected in ["", "0", "-1", "1,", ",1", "1, 2", "one,2"] {
+            assert!(
+                parse_presentation_benchmark_player_teams(rejected).is_err(),
+                "`{rejected}` must not silently change the benchmark workload"
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_benchmark_team_controls_preserve_player_order_and_scope() {
+        assert_eq!(
+            presentation_benchmark_team_selection_controls(
+                true,
+                false,
+                &[7, 3],
+                Some("1,2")
+            ),
+            Ok(vec![
+                clonk_engine::InitScenarioPlayerControlData {
+                    team: 1,
+                    player: 7,
+                    by_client: 0,
+                },
+                clonk_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: 3,
+                    by_client: 0,
+                },
+            ])
+        );
+        assert_eq!(
+            presentation_benchmark_team_selection_controls(
+                false,
+                false,
+                &[7, 3],
+                Some("invalid")
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            presentation_benchmark_team_selection_controls(true, true, &[7, 3], Some("invalid")),
+            Ok(Vec::new())
+        );
+        assert!(presentation_benchmark_team_selection_controls(true, false, &[7], Some("1,2"))
+            .is_err());
+    }
+
+    fn join_presentation_benchmark_teamless_player(
+        app: &mut GameApp,
+        name: &str,
+        startup_player_count: i32,
+    ) -> i32 {
+        app.engine
+            .join_player(clonk_engine::JoinPlayerConfig {
+                name: name.to_string(),
+                player_info_id: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count,
+            })
+            .expect("benchmark player waits for a team")
+            .number()
+    }
+
+    #[test]
+    fn presentation_benchmark_team_controls_resume_existing_pending_players() {
+        let mut app = new_running_sandbox_app();
+        app.engine.set_teams(vec![
+            clonk_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
+            clonk_engine::TeamInfo::new(2, "Blue", 0x0000_c800),
+        ]);
+        app.engine.set_runtime_join_team_choice(true);
+        let players = [
+            join_presentation_benchmark_teamless_player(&mut app, "Profiler A", 2),
+            join_presentation_benchmark_teamless_player(&mut app, "Profiler B", 2),
+        ];
+        let controls = presentation_benchmark_team_selection_controls(
+            true,
+            false,
+            &players,
+            Some("1,2"),
+        )
+        .expect("ordered benchmark controls");
+
+        app.execute_presentation_benchmark_team_selection_controls(&controls)
+            .expect("benchmark selections execute");
+
+        assert_eq!(
+            app.engine.player(players[0]).and_then(|player| player.team()),
+            Some(1)
+        );
+        assert_eq!(
+            app.engine.player(players[1]).and_then(|player| player.team()),
+            Some(2)
+        );
+        for player in players {
+            assert!(!matches!(
+                app.engine.player(player).map(|player| player.status()),
+                Some(PlayerStatus::TeamSelection | PlayerStatus::TeamSelectionPending)
+            ));
+        }
+        assert_eq!(app.engine.players().count(), 3);
+    }
+
+    #[test]
+    fn presentation_benchmark_team_controls_reject_an_unavailable_team() {
+        let mut app = new_running_sandbox_app();
+        app.engine
+            .set_teams(vec![clonk_engine::TeamInfo::new(1, "Only", 0x00f4_0000)]);
+        app.engine.set_runtime_join_team_choice(true);
+        let player = join_presentation_benchmark_teamless_player(&mut app, "Profiler", 1);
+        let controls = [clonk_engine::InitScenarioPlayerControlData {
+            team: 9,
+            player,
+            by_client: 0,
+        }];
+
+        let error = app
+            .execute_presentation_benchmark_team_selection_controls(&controls)
+            .expect_err("an unavailable benchmark team must abort activation");
+
+        assert!(error.contains("team 9"), "unexpected error: {error}");
+        assert_eq!(
+            app.engine.player(player).map(|player| player.status()),
+            Some(PlayerStatus::TeamSelection)
+        );
+    }
+
+    #[test]
     fn graphics_pass_percentiles_use_nearest_rank() {
         let samples = (1..=20)
             .rev()
@@ -1062,7 +1206,12 @@
         let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
 
         assert_eq!(benchmark.poll(false, base, 10), None);
-        benchmark.record_successful_presentation(base, Duration::from_millis(100), true);
+        benchmark.record_successful_presentation(
+            base,
+            Duration::from_millis(100),
+            true,
+            PresentationPath::RetainedGpu,
+        );
         benchmark.record_automatic_graphics_skip();
         assert_eq!(benchmark.poll(true, base, 10), None);
         assert_eq!(
@@ -1082,11 +1231,13 @@
             base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(10),
             Duration::from_millis(10),
             true,
+            PresentationPath::RetainedGpu,
         );
         benchmark.record_successful_presentation(
             base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(20),
             Duration::from_millis(20),
             false,
+            PresentationPath::Cpu,
         );
         assert_eq!(
             benchmark.poll(
@@ -1106,6 +1257,8 @@
             .expect("measurement window completes");
         assert_eq!(report.elapsed, Duration::from_secs(3));
         assert_eq!(report.submissions, 2);
+        assert_eq!(report.retained_gpu_submissions, 1);
+        assert_eq!(report.cpu_submissions, 1);
         assert_eq!(report.refreshed_frames, 1);
         assert_eq!(report.simulation_frames, 105);
         assert_eq!(report.automatic_graphics_skips, 1);
@@ -1120,7 +1273,7 @@
         );
         assert_eq!(
                 report.machine_line(),
-                "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]"
+                "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 retained_gpu_present_submissions=1 cpu_present_submissions=1 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]"
             );
         assert_eq!(
             benchmark.poll(true, base + Duration::from_secs(10), 999),
@@ -1167,7 +1320,12 @@
             None
         );
         let deadline = base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3);
-        benchmark.record_successful_presentation(deadline, Duration::from_millis(10), true);
+        benchmark.record_successful_presentation(
+            deadline,
+            Duration::from_millis(10),
+            true,
+            PresentationPath::RetainedGpu,
+        );
         let report = benchmark
             .poll(true, deadline, 70)
             .expect("the running clock completes an occluded client's measurement");

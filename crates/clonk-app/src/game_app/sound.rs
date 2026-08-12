@@ -6,6 +6,19 @@
 
 use super::*;
 
+fn advance_after_releasing_snapshot_landscape<T, E>(
+    snapshot: &mut SimulationSnapshot,
+    advance: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    // Rendering is complete before the next fixed simulation step. Release
+    // the previous presentation landscape before invoking `advance`, even if
+    // that advance later fails, so its Surface8 Arc cannot force the first
+    // terrain write to copy the complete multi-megabyte plane. The renderer
+    // retains a lightweight dirty-lineage anchor of its own.
+    snapshot.landscape = None;
+    advance()
+}
+
 impl GameApp {
     fn prepare_runtime_music_flash(
         &self,
@@ -831,14 +844,26 @@ impl GameApp {
                 let local_viewport_owners_before_tick = self.execute_local_team_selections()?;
                 self.record_network_stats_control_frame();
                 let player_infos_before_tick = self.player_info_ids_by_player();
-                let tick_result = self.engine.tick();
+                let tick_result =
+                    advance_after_releasing_snapshot_landscape(&mut self.snapshot, || {
+                        self.engine.tick()
+                    });
                 // PauseGame is a process-local console request emitted from
                 // scripts during this tick. Native applies it immediately,
                 // then observes HaltCount at the start of the next Execute.
                 // Drain it even when the originating script reports an error.
                 self.apply_engine_pause_game_requests();
                 let target_result = self.apply_engine_network_target_fps_requests();
-                self.snapshot = tick_result?;
+                self.snapshot = match tick_result {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        // Script errors are nonfatal at the application
+                        // boundary. Re-snapshot the live engine so the redraw
+                        // after this failed execute still has a landscape.
+                        self.snapshot = self.engine.snapshot();
+                        return Err(error);
+                    }
+                };
                 target_result?;
                 self.mirror_retired_player_info(&player_infos_before_tick);
                 self.record_network_stats_frame();

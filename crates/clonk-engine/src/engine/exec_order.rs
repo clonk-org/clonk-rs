@@ -642,8 +642,8 @@ impl Engine {
                 self.audio_registry.clone(),
                 self.game_over_triggered,
                 || {
-                    script.call_pinned_with_ref_args(
-                        &order.pinned_function,
+                    script.call_resolved_with_ref_args(
+                        &order.resolution,
                         order.engine_global,
                         &args,
                     )

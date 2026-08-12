@@ -21,6 +21,179 @@ struct CapturedGpuSpriteChunk {
     uv: [[f32; 2]; 4],
     fog_modulation: Option<[u32; 4]>,
     sample_tile: Option<[f32; 3]>,
+    physical_tile: Option<(i32, i32, i32)>,
+}
+
+const CPP_MAX_TEXTURE_SIZE: u32 = 4_096;
+const PHYSICAL_TEXTURE_TILE_CACHE_MAX_ENTRIES: usize = 4_096;
+const PHYSICAL_TEXTURE_TILE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PhysicalTextureTileKey {
+    pub(crate) source: GpuTextureId,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) size: u32,
+}
+
+struct CachedPhysicalTextureTile {
+    resource: GpuTextureResource,
+    last_used: u64,
+}
+
+pub(crate) struct PhysicalTextureTileCache {
+    entries: HashMap<PhysicalTextureTileKey, CachedPhysicalTextureTile>,
+    retained_bytes: usize,
+    clock: u64,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for PhysicalTextureTileCache {
+    fn default() -> Self {
+        Self::with_limits(
+            PHYSICAL_TEXTURE_TILE_CACHE_MAX_ENTRIES,
+            PHYSICAL_TEXTURE_TILE_CACHE_MAX_BYTES,
+        )
+    }
+}
+
+impl PhysicalTextureTileCache {
+    pub(crate) fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            retained_bytes: 0,
+            clock: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    pub(crate) fn get(&mut self, key: &PhysicalTextureTileKey) -> Option<GpuTextureResource> {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        self.entries.get_mut(key).map(|entry| {
+            entry.last_used = self.clock;
+            entry.resource.clone()
+        })
+    }
+
+    pub(crate) fn insert(&mut self, key: PhysicalTextureTileKey, resource: GpuTextureResource) {
+        self.clock = self.clock.wrapping_add(1).max(1);
+        let byte_len = resource.pixels.len();
+        if let Some(replaced) = self.entries.insert(
+            key,
+            CachedPhysicalTextureTile {
+                resource,
+                last_used: self.clock,
+            },
+        ) {
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(replaced.resource.pixels.len());
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
+        while self.entries.len() > self.max_entries || self.retained_bytes > self.max_bytes {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key);
+            let Some(oldest) = oldest else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.retained_bytes = self
+                    .retained_bytes
+                    .saturating_sub(removed.resource.pixels.len());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+}
+
+fn needs_physical_texture_tiles(width: u32, height: u32) -> bool {
+    width > CPP_MAX_TEXTURE_SIZE || height > CPP_MAX_TEXTURE_SIZE
+}
+
+fn physical_texture_tile_resource(
+    source: &GpuTextureResource,
+    tile: (i32, i32, i32),
+) -> Option<GpuTextureResource> {
+    // ImageData and derived owner layers are immutable. Mutable surfaces need
+    // revision-aware dirty-tile publication before they can use this cache.
+    if source.revision != 0 || source.base_revision.is_some() || !source.dirty.is_empty() {
+        return None;
+    }
+    let (x, y, size) = tile;
+    let (x, y, size) = (
+        u32::try_from(x).ok()?,
+        u32::try_from(y).ok()?,
+        u32::try_from(size).ok()?.max(1),
+    );
+    if x >= source.extent[0] || y >= source.extent[1] || !source.is_valid() {
+        return None;
+    }
+    let key = PhysicalTextureTileKey {
+        source: source.id,
+        x,
+        y,
+        size,
+    };
+    static CACHE: OnceLock<std::sync::Mutex<PhysicalTextureTileCache>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| std::sync::Mutex::new(PhysicalTextureTileCache::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(resource) = cache.get(&key) {
+        return Some(resource);
+    }
+
+    let bytes_per_pixel = source.format.bytes_per_pixel();
+    let pixel_count = usize::try_from(size).ok()?.checked_pow(2)?;
+    let byte_len = pixel_count.checked_mul(bytes_per_pixel)?;
+    let mut pixels = match source.format {
+        clonk_graphics::GpuTextureFormat::Rgba8 => [255, 255, 255, 0].repeat(pixel_count),
+        clonk_graphics::GpuTextureFormat::R8 => vec![0; byte_len],
+    };
+    let copy_width = size.min(source.extent[0].saturating_sub(x));
+    let copy_height = size.min(source.extent[1].saturating_sub(y));
+    let copy_bytes = usize::try_from(copy_width)
+        .ok()?
+        .checked_mul(bytes_per_pixel)?;
+    let source_stride = usize::try_from(source.extent[0])
+        .ok()?
+        .checked_mul(bytes_per_pixel)?;
+    let tile_stride = usize::try_from(size).ok()?.checked_mul(bytes_per_pixel)?;
+    let source_x = usize::try_from(x).ok()?.checked_mul(bytes_per_pixel)?;
+    for row in 0..usize::try_from(copy_height).ok()? {
+        let source_start = usize::try_from(y)
+            .ok()?
+            .checked_add(row)?
+            .checked_mul(source_stride)?
+            .checked_add(source_x)?;
+        let source_end = source_start.checked_add(copy_bytes)?;
+        let target_start = row.checked_mul(tile_stride)?;
+        let target_end = target_start.checked_add(copy_bytes)?;
+        pixels
+            .get_mut(target_start..target_end)?
+            .copy_from_slice(source.pixels.get(source_start..source_end)?);
+    }
+
+    let resource = GpuTextureResource {
+        id: GpuTextureId::fresh(),
+        extent: [size, size],
+        revision: 0,
+        base_revision: None,
+        format: source.format,
+        pixels: Arc::from(pixels.into_boxed_slice()),
+        dirty: Vec::new(),
+    };
+    cache.insert(key, resource.clone());
+    Some(resource)
 }
 
 fn normalized_c4_modulation(modulation: u32) -> [f32; 4] {
@@ -130,7 +303,8 @@ fn capture_compact_fogged_object_sprite(
     fog: &FogDrawContext,
     sampler: GpuSampler,
 ) -> bool {
-    if blit.fog_modulation.is_some()
+    if needs_physical_texture_tiles(image.width(), image.height())
+        || blit.fog_modulation.is_some()
         || blit.renderer_config.texture_indent() != 0.0
         || blit.renderer_config.no_box_fades
     {
@@ -420,6 +594,14 @@ fn capture_gpu_sprite_impl(
         return false;
     }
 
+    let physical_texture_tiles = needs_physical_texture_tiles(image.width(), image.height());
+    if physical_texture_tiles && inclusive_source_end {
+        // Inclusive blits scale their sample extent before C++ walks physical
+        // C4TexRefs. Until retained splitting operates in that scaled space,
+        // keep the exact CPU path instead of assigning a chunk to the wrong tile.
+        return false;
+    }
+
     if compact_object
         && mask.is_none()
         && retained_resource.is_none()
@@ -459,6 +641,7 @@ fn capture_gpu_sprite_impl(
         && blit.fog_modulation.is_none()
         && texture_indent == 0.0
         && mask.is_none()
+        && !physical_texture_tiles
     {
         let sample_width = if inclusive_source_end {
             (source.width - 1.0).max(0.0)
@@ -586,7 +769,7 @@ fn capture_gpu_sprite_impl(
             .iter()
             .map(|quad| (quad.x, quad.y, Some(quad.modulation)))
             .collect::<Vec<_>>()
-    } else if texture_indent != 0.0 {
+    } else if texture_indent != 0.0 || physical_texture_tiles {
         // TexIndent restarts at each physical C4TexRef. A single interpolated
         // UV quad cannot express that piecewise transform, so retain one GPU
         // command per native texture tile only while the switch is active.
@@ -631,7 +814,7 @@ fn capture_gpu_sprite_impl(
             source.x + normalized_center_x * sample_width
         };
         let center_y = source.y + normalized_center_y * sample_height;
-        let physical_tile = if texture_indent != 0.0 {
+        let physical_tile = if texture_indent != 0.0 || physical_texture_tiles {
             let Some(tile) = cpp_texture_tile_for_source(
                 image.width(),
                 image.height(),
@@ -737,6 +920,7 @@ fn capture_gpu_sprite_impl(
             uv,
             fog_modulation,
             sample_tile,
+            physical_tile,
         });
     }
 
@@ -756,59 +940,82 @@ fn capture_gpu_sprite_impl(
     };
     let clip = surface.clip();
     let gamma = gamma.is_some_and(|gamma| !gamma.is_passthrough());
-    let commands_for = |texture, modulation, uses_mod2, outer_modulation| {
-        chunks
-            .iter()
-            .flat_map(|chunk| {
-                let outer_modulation = if outer_modulation == GpuOuterModulation::Ignore {
-                    GpuOuterModulation::Ignore
-                } else if chunk.fog_modulation.is_some() {
-                    GpuOuterModulation::Combine
-                } else {
-                    outer_modulation
-                };
-                let (modulation, mod2) = captured_sprite_modulation(
-                    modulation,
-                    chunk.fog_modulation,
-                    uses_mod2,
-                    blit.renderer_config,
-                );
-                let command = |indices: [usize; 4], modulation: [[f32; 4]; 4]| {
-                    let vertices = std::array::from_fn(|slot| {
-                        let index = indices[slot];
-                        let vertex = GpuVertex::new(
-                            chunk.position[index],
-                            chunk.uv[index],
-                            modulation[slot],
-                        )
+    let commands_for = |resource: &GpuTextureResource,
+                        modulation,
+                        uses_mod2,
+                        outer_modulation|
+     -> Option<(Vec<GpuTextureResource>, Vec<GpuCommand>)> {
+        let mut resources = if physical_texture_tiles {
+            Vec::new()
+        } else {
+            vec![resource.clone()]
+        };
+        let mut commands = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let (texture, uv, sample_tile) = if physical_texture_tiles {
+                let tile = chunk.physical_tile?;
+                let tiled = physical_texture_tile_resource(resource, tile)?;
+                let (tile_x, tile_y, tile_size) = tile;
+                let mut uv = chunk.uv;
+                for value in &mut uv {
+                    value[0] = ((value[0] * image.width() as f32 - tile_x as f32)
+                        / tile_size as f32)
+                        .clamp(0.0, 1.0);
+                    value[1] = ((value[1] * image.height() as f32 - tile_y as f32)
+                        / tile_size as f32)
+                        .clamp(0.0, 1.0);
+                }
+                let sample_tile =
+                    (sampler == GpuSampler::Linear).then_some([0.0, 0.0, tile_size as f32]);
+                let texture = tiled.id;
+                resources.push(tiled);
+                (texture, uv, sample_tile)
+            } else {
+                (resource.id, chunk.uv, chunk.sample_tile)
+            };
+            let outer_modulation = if outer_modulation == GpuOuterModulation::Ignore {
+                GpuOuterModulation::Ignore
+            } else if chunk.fog_modulation.is_some() {
+                GpuOuterModulation::Combine
+            } else {
+                outer_modulation
+            };
+            let (modulation, mod2) = captured_sprite_modulation(
+                modulation,
+                chunk.fog_modulation,
+                uses_mod2,
+                blit.renderer_config,
+            );
+            let command = |indices: [usize; 4], modulation: [[f32; 4]; 4]| {
+                let vertices = std::array::from_fn(|slot| {
+                    let index = indices[slot];
+                    let vertex = GpuVertex::new(chunk.position[index], uv[index], modulation[slot])
                         .with_outer_modulation(outer_modulation)
                         .with_owner_outer_modulation(outer_modulation);
-                        chunk
-                            .sample_tile
-                            .map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
-                    });
-                    GpuCommand::Quad {
-                        texture,
-                        owner_mask: None,
-                        vertices,
-                        clip,
-                        blend,
-                        base_mod2: mod2,
-                        owner_mod2: false,
-                        sampler,
-                        gamma,
-                    }
-                };
-                if blit.renderer_config.no_box_fades && chunk.fog_modulation.is_some() {
-                    vec![
-                        command([0, 1, 2, 2], [modulation[2]; 4]),
-                        command([2, 1, 3, 3], [modulation[3]; 4]),
-                    ]
-                } else {
-                    vec![command([0, 1, 2, 3], modulation)]
+                    sample_tile.map_or(vertex, |[x, y, size]| vertex.with_sample_tile(x, y, size))
+                });
+                GpuCommand::Quad {
+                    texture,
+                    owner_mask: None,
+                    vertices,
+                    clip,
+                    blend,
+                    base_mod2: mod2,
+                    owner_mod2: false,
+                    sampler,
+                    gamma,
                 }
-            })
-            .collect::<Vec<_>>()
+            };
+            if blit.renderer_config.no_box_fades && chunk.fog_modulation.is_some() {
+                commands.extend([
+                    command([0, 1, 2, 2], [modulation[2]; 4]),
+                    command([2, 1, 3, 3], [modulation[3]; 4]),
+                ]);
+            } else {
+                commands.push(command([0, 1, 2, 3], modulation));
+            }
+        }
+        Some((resources, commands))
     };
 
     let (base_resource, overlay_resource) = match (mask, owner_modulation) {
@@ -823,8 +1030,8 @@ fn capture_gpu_sprite_impl(
             None,
         ),
     };
-    let base_commands = commands_for(
-        base_resource.id,
+    let Some((base_resources, base_commands)) = commands_for(
+        &base_resource,
         main_modulation,
         blit.mode & C4GFXBLIT_MOD2 != 0,
         if blit.modulation.is_some() {
@@ -832,27 +1039,35 @@ fn capture_gpu_sprite_impl(
         } else {
             GpuOuterModulation::Inherit
         },
-    );
+    ) else {
+        return false;
+    };
     let overlay_commands =
-        overlay_resource
-            .as_ref()
-            .zip(owner_modulation)
-            .map(|(overlay, modulation)| {
-                commands_for(
-                    overlay.id,
-                    modulation,
-                    blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0,
-                    if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR != 0 {
-                        GpuOuterModulation::Ignore
-                    } else {
-                        GpuOuterModulation::Combine
-                    },
-                )
-            });
+        if let Some((overlay, modulation)) = overlay_resource.as_ref().zip(owner_modulation) {
+            let Some(commands) = commands_for(
+                overlay,
+                modulation,
+                blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0,
+                if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR != 0 {
+                    GpuOuterModulation::Ignore
+                } else {
+                    GpuOuterModulation::Combine
+                },
+            ) else {
+                return false;
+            };
+            Some(commands)
+        } else {
+            None
+        };
 
-    let _ = surface.add_gpu_texture(base_resource);
-    if let Some(overlay) = overlay_resource {
-        let _ = surface.add_gpu_texture(overlay);
+    for resource in base_resources {
+        let _ = surface.add_gpu_texture(resource);
+    }
+    if let Some((resources, _)) = overlay_commands.as_ref() {
+        for resource in resources {
+            let _ = surface.add_gpu_texture(resource.clone());
+        }
     }
     // Native C4Surface owner bitmaps are two complete painter-order passes.
     // Keep every base chunk ahead of every owner chunk, rather than
@@ -860,7 +1075,7 @@ fn capture_gpu_sprite_impl(
     for command in base_commands {
         let _ = surface.push_gpu_command(command);
     }
-    if let Some(commands) = overlay_commands {
+    if let Some((_, commands)) = overlay_commands {
         for command in commands {
             let _ = surface.push_gpu_command(command);
         }

@@ -501,6 +501,30 @@
     }
 
     #[test]
+    fn host_raster_preview_reuses_the_landscape_allocation() {
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(Landscape::flat(32, 12)),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let source = world.landscape_shared().expect("source landscape");
+        let preview = world.host_raster_preview();
+        assert!(!preview.inherit_landscape);
+        let preview_landscape = preview.landscape.as_ref().expect("preview landscape");
+        assert!(Arc::ptr_eq(&source, preview_landscape));
+
+        let mut replay = HostWorldContext::default();
+        replay.apply_host_raster_preview(preview);
+        let replayed = replay.landscape_shared().expect("replayed landscape");
+        assert!(Arc::ptr_eq(&source, &replayed));
+    }
+
+    #[test]
     fn pending_solid_mask_negative_source_clamp_keeps_cpp_oob_pixels_solid() {
         // CheckSolidMaskRect rewrites (-1,-1,3,3) to (0,0,3,3) for this
         // 2x2 bitmap because its width/height clamp still uses the OLD -1

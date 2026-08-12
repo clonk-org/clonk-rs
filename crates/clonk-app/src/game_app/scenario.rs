@@ -2269,6 +2269,42 @@ impl GameApp {
                         }
                     }
                 }
+                let benchmark_active = presentation_benchmark_from_env().is_some();
+                let benchmark_player_teams = if benchmark_active {
+                    match std::env::var(PRESENTATION_BENCHMARK_PLAYER_TEAMS_ENV) {
+                        Ok(raw) => Some(raw),
+                        Err(std::env::VarError::NotPresent) => None,
+                        Err(std::env::VarError::NotUnicode(_)) => {
+                            return Err(ScenarioActivationError::Recoverable(format!(
+                                "{PRESENTATION_BENCHMARK_PLAYER_TEAMS_ENV} is not valid Unicode"
+                            )));
+                        }
+                    }
+                } else {
+                    None
+                };
+                let benchmark_team_controls = presentation_benchmark_team_selection_controls(
+                    benchmark_active,
+                    network_game,
+                    &team_selection_players,
+                    benchmark_player_teams.as_deref(),
+                )
+                .map_err(ScenarioActivationError::Recoverable)?;
+                if !benchmark_team_controls.is_empty() {
+                    self.execute_presentation_benchmark_team_selection_controls(
+                        &benchmark_team_controls,
+                    )
+                    .map_err(ScenarioActivationError::Recoverable)?;
+                    team_selection_players.retain(|player| {
+                        self.engine.player(*player).is_some_and(|player| {
+                            matches!(
+                                player.status(),
+                                clonk_engine::PlayerStatus::TeamSelection
+                                    | clonk_engine::PlayerStatus::TeamSelectionPending
+                            )
+                        })
+                    });
+                }
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
                 if let Some(first) = local_players.first().copied() {
                     self.local_owner = first;

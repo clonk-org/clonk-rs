@@ -1,6 +1,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use indexmap::IndexMap;
 
@@ -1217,12 +1217,47 @@ pub enum ScriptFunctionScope {
 /// destination host that owns its named link. Engine-global functions live
 /// in one shared table, but retain their declaring `LinkedTo` host so native
 /// code can pin the exact script used by a deferred callback.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ScriptFunctionResolution {
     pub scope: ScriptFunctionScope,
     pub host_identity: crate::vm::ScriptHostIdentity,
     /// Immutable queue-time function body and overload provenance.
     pub function: Arc<Function>,
+    /// Proves `function` is still the immutable snapshot minted by this
+    /// engine. `Arc::make_mut` dissociates this weak pointer, so a caller that
+    /// mutates the public snapshot automatically falls back to validation.
+    trusted_snapshot: Weak<Function>,
+}
+
+impl ScriptFunctionResolution {
+    fn new(
+        scope: ScriptFunctionScope,
+        host_identity: crate::vm::ScriptHostIdentity,
+        function: &Function,
+    ) -> Self {
+        let function = function.resolved_snapshot();
+        let trusted_snapshot = Arc::downgrade(&function);
+        Self {
+            scope,
+            host_identity,
+            function,
+            trusted_snapshot,
+        }
+    }
+
+    pub(crate) fn has_trusted_snapshot(&self) -> bool {
+        self.trusted_snapshot
+            .upgrade()
+            .is_some_and(|trusted| Arc::ptr_eq(&trusted, &self.function))
+    }
+}
+
+impl PartialEq for ScriptFunctionResolution {
+    fn eq(&self, other: &Self) -> bool {
+        self.scope == other.scope
+            && self.host_identity == other.host_identity
+            && self.function == other.function
+    }
 }
 
 impl Engine {
@@ -2232,6 +2267,34 @@ impl Engine {
         Ok((result, finals))
     }
 
+    /// Execute a function snapshot returned by [`Engine::resolve_function`]
+    /// or [`Engine::resolve_global_function`].
+    #[doc(hidden)]
+    pub fn call_resolved_with_ref_args(
+        &self,
+        resolution: &ScriptFunctionResolution,
+        engine_global: bool,
+        args: &[Value],
+    ) -> Result<(Value, Vec<Value>), ScriptError> {
+        let vm = self.vm();
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let result = vm
+            .call_resolved_args(resolution, call_args)
+            .map_err(ScriptError::from)?;
+        let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
+        Ok((result, finals))
+    }
+
     /// Execute an immutable function captured by a native callback against
     /// shared object-local cells and an explicit `this`. The entry body is
     /// never re-resolved by name; `engine_global` enables exact lookup through
@@ -2253,6 +2316,27 @@ impl Engine {
             vm
         };
         vm.call_pinned_with_cells(function, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Execute a resolved immutable snapshot against shared object-local
+    /// cells and an explicit `this` value.
+    #[doc(hidden)]
+    pub fn call_resolved_with_cells_and_this(
+        &self,
+        resolution: &ScriptFunctionResolution,
+        engine_global: bool,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = self.vm().with_this(this);
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        vm.call_resolved_with_cells(resolution, args, cells)
             .map_err(ScriptError::from)
     }
 
@@ -2278,6 +2362,30 @@ impl Engine {
             vm
         };
         vm.call_pinned_with_cells(function, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Resolved-snapshot counterpart to
+    /// [`Engine::call_pinned_with_cells_and_this_for_effect_callback`].
+    #[doc(hidden)]
+    pub fn call_resolved_with_cells_and_this_for_effect_callback(
+        &self,
+        resolution: &ScriptFunctionResolution,
+        engine_global: bool,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = self
+            .vm()
+            .with_this(this)
+            .with_effect_callback_parameter_conversion();
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        vm.call_resolved_with_cells(resolution, args, cells)
             .map_err(ScriptError::from)
     }
 
@@ -2732,11 +2840,11 @@ impl Engine {
         } else {
             self.host_identity
         };
-        Some(ScriptFunctionResolution {
+        Some(ScriptFunctionResolution::new(
             scope,
             host_identity,
-            function: Arc::new(function.clone()),
-        })
+            function,
+        ))
     }
 
     /// Resolve only the engine-owned global script table. This is the
@@ -2744,11 +2852,11 @@ impl Engine {
     /// is `Game.ScriptEngine`, so declaring-host locals must not shadow it.
     pub fn resolve_global_function(&self, name: &str) -> Option<ScriptFunctionResolution> {
         let function = self.global_functions.as_deref()?.get(name)?;
-        Some(ScriptFunctionResolution {
-            scope: ScriptFunctionScope::Global,
-            host_identity: function.global_link_host.unwrap_or(self.host_identity),
-            function: Arc::new(function.clone()),
-        })
+        Some(ScriptFunctionResolution::new(
+            ScriptFunctionScope::Global,
+            function.global_link_host.unwrap_or(self.host_identity),
+            function,
+        ))
     }
 
     /// Backward-compatible ownership-only view of [`Self::resolve_function`].
@@ -3510,6 +3618,115 @@ mod tests {
     }
 
     #[test]
+    fn repeated_function_resolution_retains_the_same_function_snapshot() {
+        // C4Aul lookup returns the installed C4AulFunc pointer, and deferred
+        // effect dispatch retains that pointer rather than copying its body
+        // on every lookup (C4Aul.cpp:118-127; C4Effect.cpp:42-56).
+        let mut host = Engine::new();
+        host.load_script("func Pulse() { return 1; }")
+            .expect("function compiles");
+
+        let first = host
+            .resolve_function("Pulse", false)
+            .expect("first lookup resolves");
+        let second = host
+            .resolve_function("Pulse", false)
+            .expect("second lookup resolves");
+
+        assert!(Arc::ptr_eq(&first.function, &second.function));
+    }
+
+    #[test]
+    fn resolved_function_call_trusts_its_installed_compiled_plan() {
+        // C4AulScriptFunc::Exec executes the already-resolved function's Code
+        // pointer directly (C4AulExec.cpp:330-363,1629-1635); it does not
+        // compare that code back to the parsed body on every callback.
+        let mut host = Engine::new();
+        host.load_script("func Pulse() { return 1; }")
+            .expect("function compiles");
+        let resolution = host
+            .resolve_function("Pulse", false)
+            .expect("function resolves");
+
+        crate::vm::reset_compiled_source_validations();
+        let value = host
+            .call_resolved_with_ref_args(&resolution, false, &[])
+            .expect("resolved callback executes")
+            .0;
+
+        assert_eq!(value, Value::Int(1));
+        assert_eq!(crate::vm::compiled_source_validations(), 0);
+    }
+
+    #[test]
+    fn mutated_resolved_function_snapshot_falls_back_to_source_validation() {
+        let mut host = Engine::new();
+        host.load_script("func Pulse() { return 1; }")
+            .expect("function compiles");
+        let mut resolution = host
+            .resolve_function("Pulse", false)
+            .expect("function resolves");
+        host.call_resolved_with_ref_args(&resolution, false, &[])
+            .expect("original snapshot warms its plan");
+
+        let replacement = Parser::new("func Pulse() { return 2; }")
+            .parse_script_strict()
+            .expect("replacement parses")
+            .functions
+            .into_iter()
+            .next()
+            .expect("replacement function exists");
+        Arc::make_mut(&mut resolution.function).body = replacement.body;
+
+        crate::vm::reset_compiled_source_validations();
+        let value = host
+            .call_resolved_with_ref_args(&resolution, false, &[])
+            .expect("mutated snapshot executes")
+            .0;
+
+        assert_eq!(value, Value::Int(2));
+        assert_eq!(crate::vm::compiled_source_validations(), 1);
+    }
+
+    #[test]
+    fn include_relink_invalidates_the_resolved_function_snapshot() {
+        // Include linking appends the parent to OwnerOverloaded. A function
+        // pointer retained before that link stays immutable, while later
+        // lookups see the newly linked node (C4AulLink.cpp:113-141;
+        // C4AulParse.cpp:1404-1408).
+        let mut child = Engine::new();
+        child
+            .load_script("#strict 3\nfunc Pulse() { return inherited() + 1; }")
+            .expect("child function compiles");
+        let before = child
+            .resolve_function("Pulse", false)
+            .expect("pre-link lookup resolves");
+
+        let mut parent = Engine::new();
+        parent
+            .load_script("#strict 3\nfunc Pulse() { return 41; }")
+            .expect("parent function compiles");
+        child.merge_from(&parent);
+
+        let after = child
+            .resolve_function("Pulse", false)
+            .expect("post-link lookup resolves");
+        assert!(!Arc::ptr_eq(&before.function, &after.function));
+        crate::vm::reset_compiled_source_validations();
+        assert_eq!(
+            child
+                .call_resolved_with_ref_args(&after, false, &[])
+                .expect("new snapshot carries the inherited target")
+                .0,
+            Value::Int(42)
+        );
+        // The newly resolved entry itself is trusted. Its inherited target is
+        // still an ordinary Function edge and therefore performs the one
+        // validation counted here.
+        assert_eq!(crate::vm::compiled_source_validations(), 1);
+    }
+
+    #[test]
     fn exact_global_ref_entry_skips_a_same_name_local_without_a_shared_table() {
         let mut host = Engine::new();
         host.load_script("global func Pick(&slot) { slot = 7; return 70; }")
@@ -3575,12 +3792,11 @@ mod tests {
         linked_host.set_global_functions(Some(Arc::new(globals)));
         let pinned = linked_host
             .resolve_global_function("Deferred")
-            .expect("global callback resolves")
-            .function;
+            .expect("global callback resolves");
         let cells = crate::vm::LocalCells::default();
 
         let value = linked_host
-            .call_pinned_with_cells_and_this(&pinned, true, &[], &cells, Value::Object(42))
+            .call_resolved_with_cells_and_this(&pinned, true, &[], &cells, Value::Object(42))
             .expect("pinned callback runs");
 
         assert_eq!(
@@ -3608,15 +3824,14 @@ mod tests {
 
         let pinned = host
             .resolve_function("Deferred", false)
-            .expect("definition callback resolves")
-            .function;
+            .expect("definition callback resolves");
         let cells = crate::vm::LocalCells::from_local_vars(&HashMap::from([(
             "Shared".to_string(),
             Value::Int(5),
         )]));
 
         let value = host
-            .call_pinned_with_cells_and_this(&pinned, false, &[], &cells, Value::Object(42))
+            .call_resolved_with_cells_and_this(&pinned, false, &[], &cells, Value::Object(42))
             .expect("pinned callback runs");
 
         assert_eq!(value, Value::Array(vec![Value::Object(42), Value::Int(7)]));

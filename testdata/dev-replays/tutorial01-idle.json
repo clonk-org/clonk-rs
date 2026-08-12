@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "snapshot_hash_version": 2,
   "scenario": "Tutorial.c4f/Tutorial01.c4s",
   "seed": 0,
   "joins": [
@@ -31,11 +32,11 @@
   "checkpoints": [
     {
       "frame": 0,
-      "snapshot_hash": "60b2d5c2bcd39a9e"
+      "snapshot_hash": "8724700bf0fa9578"
     },
     {
       "frame": 2,
-      "snapshot_hash": "1f0141979b6dcf3d"
+      "snapshot_hash": "91fcab7bee5cbdaa"
     }
   ]
 }

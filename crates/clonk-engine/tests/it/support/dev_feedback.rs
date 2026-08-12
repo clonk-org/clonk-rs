@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const REPLAY_SCHEMA_VERSION: u32 = 1;
+/// Version 2 removes Rust-only Surface8 presentation-cache lineage from the
+/// checkpoint projection while retaining every authoritative landscape byte.
+pub const SNAPSHOT_HASH_VERSION: u32 = 2;
+const LEGACY_SNAPSHOT_HASH_VERSION: u32 = 1;
 const DEFAULT_DIFF_LIMIT: usize = 64;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -37,6 +41,10 @@ impl Error for DevFeedbackError {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScenarioReplayV1 {
     pub schema_version: u32,
+    /// Independently versioned because the input tape remains replay schema
+    /// v1 while its deterministic-state projection can be migrated safely.
+    #[serde(default = "legacy_snapshot_hash_version")]
+    pub snapshot_hash_version: u32,
     pub scenario: String,
     pub seed: u64,
     #[serde(default)]
@@ -57,6 +65,7 @@ impl ScenarioReplayV1 {
     ) -> Result<Self, DevFeedbackError> {
         let replay = Self {
             schema_version: REPLAY_SCHEMA_VERSION,
+            snapshot_hash_version: SNAPSHOT_HASH_VERSION,
             scenario: normalize_scenario_path(&scenario.into())?,
             seed,
             joins: Vec::new(),
@@ -125,6 +134,14 @@ impl ScenarioReplayV1 {
             return Err(DevFeedbackError::message(
                 "replay render dimensions must be non-zero",
             ));
+        }
+        if ![LEGACY_SNAPSHOT_HASH_VERSION, SNAPSHOT_HASH_VERSION]
+            .contains(&self.snapshot_hash_version)
+        {
+            return Err(DevFeedbackError::message(format!(
+                "unsupported snapshot hash version {} (expected {} or {})",
+                self.snapshot_hash_version, LEGACY_SNAPSHOT_HASH_VERSION, SNAPSHOT_HASH_VERSION
+            )));
         }
         if let Some(frame) = self
             .render
@@ -519,6 +536,8 @@ pub struct ReplayRunMetricsV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayMetricsFileV1 {
     pub schema_version: u32,
+    #[serde(default = "legacy_snapshot_hash_version")]
+    pub snapshot_hash_version: u32,
     pub runs: Vec<ReplayRunMetricsV1>,
 }
 
@@ -608,6 +627,7 @@ pub fn run_replay_twice_with_policy(
         run_replay_once(replay, &scenario, prepare_elapsed).map_err(ReplayRunError::new)?;
     let metrics = ReplayMetricsFileV1 {
         schema_version: REPLAY_SCHEMA_VERSION,
+        snapshot_hash_version: replay.snapshot_hash_version,
         runs: vec![first.metrics.clone(), second.metrics.clone()],
     };
     let actual_checkpoints = replay
@@ -618,7 +638,10 @@ pub fn run_replay_twice_with_policy(
                 .observations
                 .get(&checkpoint.frame)
                 .expect("checkpoint frame included in observation set");
-            ReplayCheckpointV1::new(checkpoint.frame, snapshot_hash(snapshot))
+            ReplayCheckpointV1::new(
+                checkpoint.frame,
+                snapshot_hash(snapshot, replay.snapshot_hash_version),
+            )
         })
         .collect::<Vec<_>>();
     let same_host_replay =
@@ -828,7 +851,7 @@ fn run_replay_once(
         frames: replay.stop_frame.saturating_add(1),
         observed_frames: observations.len(),
         ticks: replay.stop_frame,
-        final_snapshot_hash: snapshot_hash(final_snapshot),
+        final_snapshot_hash: snapshot_hash(final_snapshot, replay.snapshot_hash_version),
         final_summary: ReplaySnapshotSummaryV1::from_snapshot(final_snapshot),
     };
     Ok(ReplayCapture {
@@ -1034,6 +1057,7 @@ impl DevFeedbackCapture {
         );
         let metrics = ReplayMetricsFileV1 {
             schema_version: REPLAY_SCHEMA_VERSION,
+            snapshot_hash_version: self.replay.snapshot_hash_version,
             runs: vec![ReplayRunMetricsV1 {
                 schema_version: REPLAY_SCHEMA_VERSION,
                 load_micros: 0,
@@ -1050,7 +1074,7 @@ impl DevFeedbackCapture {
                     .saturating_sub(self.first_snapshot.frame)
                     .saturating_add(1) as usize,
                 ticks: failing.frame.saturating_sub(self.first_snapshot.frame),
-                final_snapshot_hash: snapshot_hash(&failing),
+                final_snapshot_hash: snapshot_hash(&failing, self.replay.snapshot_hash_version),
                 final_summary: ReplaySnapshotSummaryV1::from_snapshot(&failing),
             }],
         };
@@ -1171,7 +1195,7 @@ fn write_readme(directory: &Path, scenario: &str) -> Result<(), DevFeedbackError
         .map_err(|error| io_error("write README.txt", error))
 }
 
-fn snapshot_hash(snapshot: &SimulationSnapshot) -> String {
+fn snapshot_hash(snapshot: &SimulationSnapshot, version: u32) -> String {
     // Debug-draw sidecars are frame-local presentation data. Keep them in
     // serialized snapshots and artifacts, but exclude them from deterministic
     // engine replay checkpoints so enabling diagnostics cannot change a run's
@@ -1182,13 +1206,36 @@ fn snapshot_hash(snapshot: &SimulationSnapshot) -> String {
         object.vertex_contacts.clear();
         object.solid_mask_override = None;
     }
-    let value = serde_json::to_value(&deterministic).expect("snapshot serializes");
+    let mut value = serde_json::to_value(&deterministic).expect("snapshot serializes");
+    if version == SNAPSHOT_HASH_VERSION {
+        exclude_surface8_render_cache_lineage(&mut value);
+    }
     let canonical = canonicalize_json(value);
     let bytes = serde_json::to_vec(&canonical).expect("canonical snapshot serializes");
     let hash = bytes.into_iter().fold(FNV_OFFSET, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
     });
     format!("{hash:016x}")
+}
+
+fn exclude_surface8_render_cache_lineage(snapshot: &mut Value) {
+    // These fields are a Rust frontend cache protocol. Native C4Landscape has
+    // Surface8 and bounded Relights, but no persistent revision/token/history
+    // state (C4Landscape.h:48-83); mask writes touch Surface8 only
+    // (C4Landscape.cpp:846-849).
+    let Some(pixels) = snapshot
+        .pointer_mut("/landscape/pixels")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for field in ["revision", "render_token", "dirty_generations"] {
+        pixels.remove(field);
+    }
+}
+
+const fn legacy_snapshot_hash_version() -> u32 {
+    LEGACY_SNAPSHOT_HASH_VERSION
 }
 
 #[cfg(any(not(feature = "engine-it-sharded"), feature = "engine-it-shard-1",))]
@@ -1223,7 +1270,70 @@ fn snapshot_hash_ignores_serialized_debug_draw_sidecars() {
         with_debug.objects[0].solid_mask_override
     );
     assert_eq!(restored.pathfinder_debug, with_debug.pathfinder_debug);
-    assert_eq!(snapshot_hash(&baseline), snapshot_hash(&restored));
+    assert_eq!(
+        snapshot_hash(&baseline, SNAPSHOT_HASH_VERSION),
+        snapshot_hash(&restored, SNAPSHOT_HASH_VERSION)
+    );
+}
+
+#[cfg(any(not(feature = "engine-it-sharded"), feature = "engine-it-shard-1",))]
+#[test]
+fn snapshot_hash_ignores_surface8_render_cache_lineage() {
+    // A C4SolidMask put/remove cycle writes MCVehic and restores the saved
+    // Surface8 byte (C4SolidMask.cpp:323-360; C4Landscape.cpp:846-849). C++
+    // carries no revision/token/dirty-generation history for those writes;
+    // equal final landscape bytes are therefore equal replay state.
+    let mut landscape = clonk_engine::Landscape::new(2, vec![2; 2]).expect("landscape builds");
+    landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
+        2,
+        2,
+        vec![1; 4],
+        vec![0; 128],
+        vec![None; 128],
+        vec![None; 128],
+    ));
+    let mut engine = Engine::with_seed(0);
+    engine.set_landscape(landscape);
+    let baseline = engine.snapshot();
+    let mut after_mask_cycle = baseline.clone();
+    let cycled = after_mask_cycle
+        .landscape
+        .as_mut()
+        .expect("snapshot has landscape");
+    cycled.grid_write_mask_byte(0, 0, 2);
+    cycled.grid_write_mask_byte(0, 0, 1);
+
+    assert_eq!(
+        baseline
+            .landscape
+            .as_ref()
+            .and_then(clonk_engine::Landscape::pixel_grid)
+            .expect("baseline pixel grid")
+            .bytes(),
+        cycled.pixel_grid().expect("cycled pixel grid").bytes(),
+        "the mask cycle restores authoritative Surface8 byte-for-byte"
+    );
+    assert_ne!(
+        snapshot_hash(&baseline, LEGACY_SNAPSHOT_HASH_VERSION),
+        snapshot_hash(&after_mask_cycle, LEGACY_SNAPSHOT_HASH_VERSION),
+        "legacy hashes include the Rust-only cache lineage"
+    );
+    assert_eq!(
+        snapshot_hash(&baseline, SNAPSHOT_HASH_VERSION),
+        snapshot_hash(&after_mask_cycle, SNAPSHOT_HASH_VERSION)
+    );
+
+    let mut changed = baseline.clone();
+    changed
+        .landscape
+        .as_mut()
+        .expect("snapshot has landscape")
+        .grid_write_mask_byte(0, 0, 2);
+    assert_ne!(
+        snapshot_hash(&baseline, SNAPSHOT_HASH_VERSION),
+        snapshot_hash(&changed, SNAPSHOT_HASH_VERSION),
+        "an authoritative Surface8 byte change must remain replay-visible"
+    );
 }
 
 fn canonicalize_json(value: Value) -> Value {

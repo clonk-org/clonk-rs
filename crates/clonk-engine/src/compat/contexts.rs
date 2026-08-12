@@ -1142,24 +1142,19 @@ fn call_scoped_script_function_impl(
         )
     } else if let Some(resolution) = pinned_resolution {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
-        let call =
-            if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
-                script.call_pinned_with_cells_and_this_for_effect_callback(
-                    resolution.function.as_ref(),
-                    false,
-                    args,
-                    &cells,
-                    Value::Nil,
-                )
-            } else {
-                script.call_pinned_with_cells_and_this(
-                    resolution.function.as_ref(),
-                    false,
-                    args,
-                    &cells,
-                    Value::Nil,
-                )
-            };
+        let call = if parameter_conversion
+            == EffectCallbackParameterConversionPolicy::WarnForNonStrict3
+        {
+            script.call_resolved_with_cells_and_this_for_effect_callback(
+                &resolution,
+                false,
+                args,
+                &cells,
+                Value::Nil,
+            )
+        } else {
+            script.call_resolved_with_cells_and_this(&resolution, false, args, &cells, Value::Nil)
+        };
         call.map(|value| (value, args.to_vec()))
     } else if preserve_caller {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
@@ -3139,16 +3134,16 @@ fn call_world_object_function_with_options(
         debug_assert!(!preserve_caller);
         let call =
             if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
-                script.call_pinned_with_cells_and_this_for_effect_callback(
-                    resolution.function.as_ref(),
+                script.call_resolved_with_cells_and_this_for_effect_callback(
+                    &resolution,
                     resolution.scope == clonk_script::ScriptFunctionScope::Global,
                     args,
                     &cells,
                     this,
                 )
             } else {
-                script.call_pinned_with_cells_and_this(
-                    resolution.function.as_ref(),
+                script.call_resolved_with_cells_and_this(
+                    &resolution,
                     resolution.scope == clonk_script::ScriptFunctionScope::Global,
                     args,
                     &cells,
@@ -5631,7 +5626,7 @@ impl EffectHostContext {
     /// here even though ordinary script values are handled separately.
     pub(crate) fn clear_object_action_and_command_pointers(&mut self, target: ObjectId) {
         let target_number = i32::try_from(target.as_u64()).ok();
-        let mut object_ids = self.world.object_ids();
+        let mut object_ids = self.world.object_pointer_referrer_ids(target);
         for id in self.pending_order.iter().copied() {
             if !object_ids.contains(&id) {
                 object_ids.push(id);
@@ -7671,13 +7666,16 @@ impl EffectHostContext {
                 .retain(|spawn| spawn.id.is_none_or(|id| !destroyed.contains(&id)));
         }
 
-        let host_raster_preview =
-            (!self.solid_mask_operations.is_empty()).then(|| HostRasterPreview {
-                landscape: self.world.landscape_ref().cloned(),
+        let host_raster_preview = (!self.solid_mask_operations.is_empty()).then(|| {
+            let (inherit_landscape, landscape) = self.world.host_raster_landscape_preview();
+            HostRasterPreview {
+                inherit_landscape,
+                landscape,
                 solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
                 solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
                 next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
-            });
+            }
+        });
         let audio_events = self.audio.take_events();
         let mut outcome = EffectContextOutcome::new(
             object_effects,

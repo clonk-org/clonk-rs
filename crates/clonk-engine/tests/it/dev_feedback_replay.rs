@@ -1,6 +1,7 @@
 use crate::support::dev_feedback::{
     run_replay_twice, run_replay_twice_with_policy, snapshot_diff, ReplayCheckpointPolicy,
     ReplayCheckpointV1, ReplayInputV1, ReplayJoinV1, ReplayRenderConfigV1, ScenarioReplayV1,
+    SNAPSHOT_HASH_VERSION,
 };
 use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 use clonk_engine::{Definition, Engine, PlayerConfig, SpawnConfig, COM_RIGHT};
@@ -67,6 +68,7 @@ fn synthetic_player_fixture() -> Result<Engine, Box<dyn Error>> {
 fn synthetic_replay() -> ScenarioReplayV1 {
     ScenarioReplayV1 {
         schema_version: 1,
+        snapshot_hash_version: SNAPSHOT_HASH_VERSION,
         scenario: "Tutorial.c4f/Tutorial01.c4s".to_owned(),
         seed: 11,
         joins: vec![ReplayJoinV1::local(0, 0, "Replay probe")],
@@ -78,6 +80,26 @@ fn synthetic_replay() -> ScenarioReplayV1 {
         stop_frame: 3,
         checkpoints: vec![ReplayCheckpointV1::new(0, "0000000000000000")],
     }
+}
+
+#[test]
+fn replay_hash_version_defaults_to_legacy_and_rejects_unknown_versions() {
+    let mut value = serde_json::to_value(synthetic_replay()).expect("replay serializes");
+    value
+        .as_object_mut()
+        .expect("replay is an object")
+        .remove("snapshot_hash_version");
+    let legacy = ScenarioReplayV1::from_json(
+        &serde_json::to_string(&value).expect("legacy replay serializes"),
+    )
+    .expect("legacy replay remains readable");
+    assert_eq!(legacy.snapshot_hash_version, 1);
+
+    value["snapshot_hash_version"] = serde_json::json!(SNAPSHOT_HASH_VERSION + 1);
+    assert!(ScenarioReplayV1::from_json(
+        &serde_json::to_string(&value).expect("unknown-version replay serializes")
+    )
+    .is_err());
 }
 
 #[test]
@@ -285,6 +307,7 @@ fn passing_replay_is_retained_with_metrics_when_requested() -> Result<(), Box<dy
     let metrics: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(bundle.join("replay-metrics.json"))?)?;
     assert_eq!(metrics["schema_version"], 1);
+    assert_eq!(metrics["snapshot_hash_version"], SNAPSHOT_HASH_VERSION);
     assert_eq!(metrics["runs"].as_array().unwrap().len(), 2);
     assert_eq!(metrics["runs"][0]["ticks"], replay.stop_frame);
     let retained_replay = ScenarioReplayV1::from_path(&bundle.join("replay.json"))?;

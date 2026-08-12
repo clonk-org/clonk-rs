@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
+#[cfg(feature = "cpal")]
+use std::time::Instant;
 
 use thiserror::Error;
 
@@ -50,7 +52,11 @@ const CLASSIC_OUTPUT_SAMPLE_RATE: u32 = 44_100;
 #[cfg(feature = "cpal")]
 const CLASSIC_OUTPUT_CHANNELS: u16 = 2;
 #[cfg(feature = "cpal")]
+const CLASSIC_OUTPUT_BUFFER_FRAMES: u32 = 1_024;
+#[cfg(feature = "cpal")]
 const MAX_CONVERTIBLE_OUTPUT_CHANNELS: u16 = 8;
+#[cfg(feature = "cpal")]
+const CPAL_XRUN_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Mixer slot plus allocation generation; stale handles cannot control a
 /// later sound that reuses the same numeric slot.
@@ -365,6 +371,54 @@ struct CpalBackend {
 }
 
 #[cfg(feature = "cpal")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpalStreamErrorReport {
+    RecoveredXrun {
+        total_occurrences: u64,
+        occurrences_since_previous_report: u64,
+    },
+    Immediate,
+}
+
+#[cfg(feature = "cpal")]
+#[derive(Debug, Default)]
+struct CpalStreamErrorReporter {
+    total_xruns: u64,
+    pending_xruns: u64,
+    next_xrun_report: Option<Duration>,
+}
+
+#[cfg(feature = "cpal")]
+impl CpalStreamErrorReporter {
+    fn record(
+        &mut self,
+        kind: cpal::ErrorKind,
+        elapsed: Duration,
+    ) -> Option<CpalStreamErrorReport> {
+        if kind != cpal::ErrorKind::Xrun {
+            return Some(CpalStreamErrorReport::Immediate);
+        }
+
+        self.total_xruns = self.total_xruns.saturating_add(1);
+        self.pending_xruns = self.pending_xruns.saturating_add(1);
+        if self
+            .next_xrun_report
+            .is_some_and(|next_report| elapsed < next_report)
+        {
+            return None;
+        }
+
+        let report = CpalStreamErrorReport::RecoveredXrun {
+            total_occurrences: self.total_xruns,
+            occurrences_since_previous_report: self.pending_xruns,
+        };
+        self.pending_xruns = 0;
+        self.next_xrun_report = Some(elapsed.saturating_add(CPAL_XRUN_REPORT_INTERVAL));
+        Some(report)
+    }
+}
+
+#[cfg(feature = "cpal")]
 fn cpal_output_config_candidates(
     configs: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
 ) -> Vec<cpal::SupportedStreamConfig> {
@@ -445,6 +499,38 @@ fn try_cpal_output_candidates<T, E>(
 }
 
 #[cfg(feature = "cpal")]
+fn cpal_output_stream_config_candidates(
+    config: cpal::SupportedStreamConfig,
+) -> [cpal::StreamConfig; 2] {
+    let requested_buffer_frames = match *config.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } if min <= max => {
+            CLASSIC_OUTPUT_BUFFER_FRAMES.clamp(min, max)
+        }
+        cpal::SupportedBufferSize::Range { .. } | cpal::SupportedBufferSize::Unknown => {
+            CLASSIC_OUTPUT_BUFFER_FRAMES
+        }
+    };
+    let mut requested = config.config();
+    requested.buffer_size = cpal::BufferSize::Fixed(requested_buffer_frames);
+    [requested, config.config()]
+}
+
+#[cfg(feature = "cpal")]
+fn try_cpal_stream_configs<T, E>(
+    candidates: impl IntoIterator<Item = cpal::StreamConfig>,
+    mut open: impl FnMut(cpal::StreamConfig) -> Result<T, E>,
+) -> Result<T, E> {
+    let mut last_error = None;
+    for candidate in candidates {
+        match open(candidate) {
+            Ok(opened) => return Ok(opened),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("at least one CPAL stream configuration was attempted"))
+}
+
+#[cfg(feature = "cpal")]
 fn build_cpal_output_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
@@ -456,14 +542,30 @@ where
     use cpal::traits::DeviceTrait;
 
     let output_channels = usize::from(config.channels);
+    let stream_error_started = Instant::now();
+    let mut stream_error_reporter = CpalStreamErrorReporter::default();
     device
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
                 mixer.mix_into_channels(data, output_channels);
             },
-            |error| {
-                tracing::error!(%error, "cpal stream error");
+            move |error| match stream_error_reporter
+                .record(error.kind(), stream_error_started.elapsed())
+            {
+                Some(CpalStreamErrorReport::RecoveredXrun {
+                    total_occurrences,
+                    occurrences_since_previous_report,
+                }) => tracing::warn!(
+                    %error,
+                    total_occurrences,
+                    occurrences_since_previous_report,
+                    "cpal output stream buffer underrun or overrun"
+                ),
+                Some(CpalStreamErrorReport::Immediate) => {
+                    tracing::error!(%error, "cpal stream error");
+                }
+                None => {}
             },
             None,
         )
@@ -507,7 +609,7 @@ impl CpalBackend {
 
         let sample_rate = config.sample_rate();
         let sample_format = config.sample_format();
-        let stream_config = config.config();
+        let stream_configs = cpal_output_stream_config_candidates(config);
 
         let mixer = Arc::new(AudioMixer::new_with_resampling(
             sample_rate,
@@ -515,53 +617,55 @@ impl CpalBackend {
             resampling_mode,
         ));
 
-        let stream = match sample_format {
-            cpal::SampleFormat::I8 => {
-                build_cpal_output_stream::<i8>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::I16 => {
-                build_cpal_output_stream::<i16>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::I24 => {
-                build_cpal_output_stream::<cpal::I24>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::I32 => {
-                build_cpal_output_stream::<i32>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::I64 => {
-                build_cpal_output_stream::<i64>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::U8 => {
-                build_cpal_output_stream::<u8>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::U16 => {
-                build_cpal_output_stream::<u16>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::U24 => {
-                build_cpal_output_stream::<cpal::U24>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::U32 => {
-                build_cpal_output_stream::<u32>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::U64 => {
-                build_cpal_output_stream::<u64>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::F32 => {
-                build_cpal_output_stream::<f32>(device, stream_config, mixer.clone())?
-            }
-            cpal::SampleFormat::F64 => {
-                build_cpal_output_stream::<f64>(device, stream_config, mixer.clone())?
-            }
-            _ => {
-                return Err(AudioError::Stream(
-                    "unsupported audio sample format".to_string(),
-                ));
-            }
-        };
-
-        stream
-            .play()
-            .map_err(|err| AudioError::Stream(err.to_string()))?;
+        let stream = try_cpal_stream_configs(stream_configs, |stream_config| {
+            let stream = match sample_format {
+                cpal::SampleFormat::I8 => {
+                    build_cpal_output_stream::<i8>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::I16 => {
+                    build_cpal_output_stream::<i16>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::I24 => {
+                    build_cpal_output_stream::<cpal::I24>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::I32 => {
+                    build_cpal_output_stream::<i32>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::I64 => {
+                    build_cpal_output_stream::<i64>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::U8 => {
+                    build_cpal_output_stream::<u8>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::U16 => {
+                    build_cpal_output_stream::<u16>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::U24 => {
+                    build_cpal_output_stream::<cpal::U24>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::U32 => {
+                    build_cpal_output_stream::<u32>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::U64 => {
+                    build_cpal_output_stream::<u64>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::F32 => {
+                    build_cpal_output_stream::<f32>(device, stream_config, mixer.clone())?
+                }
+                cpal::SampleFormat::F64 => {
+                    build_cpal_output_stream::<f64>(device, stream_config, mixer.clone())?
+                }
+                _ => {
+                    return Err(AudioError::Stream(
+                        "unsupported audio sample format".to_string(),
+                    ));
+                }
+            };
+            stream
+                .play()
+                .map_err(|err| AudioError::Stream(err.to_string()))?;
+            Ok(stream)
+        })?;
 
         Ok((mixer, Self { _stream: stream }))
     }
@@ -1129,6 +1233,9 @@ impl AudioMixer {
                 active_music,
                 ..
             } = &mut *state;
+            if active_channel_indices.is_empty() && active_music.is_none() {
+                return;
+            }
             debug_assert!(active_channel_indices
                 .windows(2)
                 .all(|pair| pair[0] < pair[1]));
@@ -1458,7 +1565,7 @@ fn resample_frames_linear(
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn generate_sine_wave(duration_ms: u32, frequency_hz: f32, sample_rate: u32) -> Vec<u8> {
@@ -1667,6 +1774,22 @@ mod tests {
             .sum()
     }
 
+    #[derive(Clone)]
+    struct CountingSample {
+        zero_writes: Arc<AtomicUsize>,
+        sample_writes: Arc<AtomicUsize>,
+    }
+
+    impl SampleWrite for CountingSample {
+        fn write_sample(&mut self, _value: f32) {
+            self.sample_writes.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn write_zero(&mut self) {
+            self.zero_writes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn long_silent_mp3() -> Vec<u8> {
         // One independently decodable MPEG-2.5 Layer III mono frame: 576
         // samples at 8 kHz in 72 compressed bytes. Repetition creates a valid
@@ -1744,6 +1867,118 @@ mod tests {
         sample.write_sample(1.0);
         sample.write_zero();
         assert!(sample == written_zero);
+    }
+
+    #[cfg(feature = "cpal")]
+    #[test]
+    fn recoverable_cpal_xruns_are_coalesced_without_hiding_count() {
+        let mut reporter = CpalStreamErrorReporter::default();
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::ZERO),
+            Some(CpalStreamErrorReport::RecoveredXrun {
+                total_occurrences: 1,
+                occurrences_since_previous_report: 1,
+            })
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::from_millis(4_999)),
+            None
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::from_secs(5)),
+            Some(CpalStreamErrorReport::RecoveredXrun {
+                total_occurrences: 5,
+                occurrences_since_previous_report: 4,
+            })
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::BackendError, Duration::from_millis(5_001)),
+            Some(CpalStreamErrorReport::Immediate)
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::from_secs(6)),
+            None
+        );
+        assert_eq!(
+            reporter.record(cpal::ErrorKind::Xrun, Duration::from_secs(10)),
+            Some(CpalStreamErrorReport::RecoveredXrun {
+                total_occurrences: 7,
+                occurrences_since_previous_report: 2,
+            })
+        );
+    }
+
+    #[cfg(feature = "cpal")]
+    #[test]
+    fn cpal_negotiation_prefers_cpp_buffer_and_retries_device_default() {
+        // C4AudioSystemSdl.cpp:167-168 requests 1,024 sample frames and lets
+        // SDL negotiate a changed device buffer when that request is rejected.
+        let supported = cpal::SupportedStreamConfig::new(
+            2,
+            44_100,
+            cpal::SupportedBufferSize::Range {
+                min: 256,
+                max: 4_096,
+            },
+            cpal::SampleFormat::I16,
+        );
+        let candidates = cpal_output_stream_config_candidates(supported);
+        assert_eq!(candidates[0].buffer_size, cpal::BufferSize::Fixed(1_024));
+        assert_eq!(candidates[1].buffer_size, cpal::BufferSize::Default);
+
+        let clamped = cpal_output_stream_config_candidates(cpal::SupportedStreamConfig::new(
+            2,
+            44_100,
+            cpal::SupportedBufferSize::Range {
+                min: 2_048,
+                max: 8_192,
+            },
+            cpal::SampleFormat::I16,
+        ));
+        assert_eq!(clamped[0].buffer_size, cpal::BufferSize::Fixed(2_048));
+        assert_eq!(clamped[1].buffer_size, cpal::BufferSize::Default);
+
+        let clamped = cpal_output_stream_config_candidates(cpal::SupportedStreamConfig::new(
+            2,
+            44_100,
+            cpal::SupportedBufferSize::Range { min: 256, max: 512 },
+            cpal::SampleFormat::I16,
+        ));
+        assert_eq!(clamped[0].buffer_size, cpal::BufferSize::Fixed(512));
+        assert_eq!(clamped[1].buffer_size, cpal::BufferSize::Default);
+
+        let unknown = cpal_output_stream_config_candidates(cpal::SupportedStreamConfig::new(
+            2,
+            44_100,
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::I16,
+        ));
+        assert_eq!(unknown[0].buffer_size, cpal::BufferSize::Fixed(1_024));
+        assert_eq!(unknown[1].buffer_size, cpal::BufferSize::Default);
+
+        let mut attempts = Vec::new();
+        let opened = try_cpal_stream_configs(candidates, |candidate| {
+            attempts.push(candidate.buffer_size);
+            if candidate.buffer_size == cpal::BufferSize::Default {
+                Ok(candidate)
+            } else {
+                Err("injected fixed-buffer rejection")
+            }
+        })
+        .expect("the device-default fallback should open");
+        assert_eq!(
+            attempts,
+            [cpal::BufferSize::Fixed(1_024), cpal::BufferSize::Default]
+        );
+        assert_eq!(opened.buffer_size, cpal::BufferSize::Default);
     }
 
     #[cfg(feature = "cpal")]
@@ -2034,6 +2269,25 @@ mod tests {
         assert!(mixer.channel_is_playing(channel));
         mixer.halt_channel(channel);
         assert!(!mixer.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn silent_mixer_zero_fills_without_per_frame_sample_conversion() {
+        let mixer = AudioMixer::new(44_100, 32);
+        let zero_writes = Arc::new(AtomicUsize::new(0));
+        let sample_writes = Arc::new(AtomicUsize::new(0));
+        let mut output = vec![
+            CountingSample {
+                zero_writes: Arc::clone(&zero_writes),
+                sample_writes: Arc::clone(&sample_writes),
+            };
+            1_024 * 2
+        ];
+
+        mixer.mix_into_channels(&mut output, 2);
+
+        assert_eq!(zero_writes.load(Ordering::Relaxed), output.len());
+        assert_eq!(sample_writes.load(Ordering::Relaxed), 0);
     }
 
     #[test]

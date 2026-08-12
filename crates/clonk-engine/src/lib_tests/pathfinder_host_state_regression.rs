@@ -1073,6 +1073,121 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
 }
 
 #[test]
+fn script_removal_materializes_only_objects_that_can_reference_the_target() {
+    // C4Game::ClearObjectPtrs visits the live object lists and
+    // C4Object::ClearPointers only changes Action targets, Command targets,
+    // effect command targets and pLayer (C4Game.cpp:1018-1031;
+    // C4Object.cpp:2194-2205). The callback projection may prefilter those
+    // scalar fields, but must still clear the one matching command.
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition("FILL", "Unrelated object", "#strict 2\n")
+        .expect("filler definition registers");
+    engine
+        .register_script_definition("TARG", "Removal target", "#strict 2\n")
+        .expect("target definition registers");
+    engine
+        .register_script_definition(
+            "RMVR",
+            "Removal caller",
+            r#"
+                #strict 2
+                public func RemoveTarget(object target)
+                {
+                    return RemoveObject(target);
+                }
+            "#,
+        )
+        .expect("remover definition registers");
+
+    let target = engine
+        .spawn_object(SpawnConfig::new("TARG"))
+        .expect("target spawns");
+    for _ in 0..128 {
+        engine
+            .spawn_object(SpawnConfig::new("FILL"))
+            .expect("filler spawns");
+    }
+    let action_referrer = engine
+        .spawn_object(SpawnConfig::new("FILL"))
+        .expect("action referrer spawns");
+    let action_referrer_index = engine
+        .find_object_index(action_referrer)
+        .expect("action referrer exists");
+    engine.objects[action_referrer_index].state.action.target = Some(target);
+
+    let command_referrer = engine
+        .spawn_object(SpawnConfig::new("FILL"))
+        .expect("command referrer spawns");
+    let command_referrer_index = engine
+        .find_object_index(command_referrer)
+        .expect("command referrer exists");
+    engine.objects[command_referrer_index]
+        .commands
+        .push_front(CommandRequest::new(CommandId::Transfer).with_target(Some(target)))
+        .expect("targeting command queues");
+
+    let effect_referrer = engine
+        .spawn_object(SpawnConfig::new("FILL"))
+        .expect("effect referrer spawns");
+    let effect_referrer_index = engine
+        .find_object_index(effect_referrer)
+        .expect("effect referrer exists");
+    engine.objects[effect_referrer_index].state.effects.push(
+        EffectState::new("Pointer").with_command_target(Some(
+            i32::try_from(target.as_u64()).expect("test object id fits the native effect field"),
+        )),
+    );
+
+    let layer_referrer = engine
+        .spawn_object(SpawnConfig::new("FILL"))
+        .expect("layer referrer spawns");
+    let layer_referrer_index = engine
+        .find_object_index(layer_referrer)
+        .expect("layer referrer exists");
+    engine.objects[layer_referrer_index].state.layer = Some(target);
+    let remover = engine
+        .spawn_object(SpawnConfig::new("RMVR"))
+        .expect("remover spawns");
+    let remover_index = engine.find_object_index(remover).expect("remover exists");
+
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    engine
+        .call_object_function(
+            remover_index,
+            "RemoveTarget",
+            vec![object_reference_value(target)],
+        )
+        .expect("script removal executes");
+
+    assert_eq!(
+        engine.objects[action_referrer_index].state.action.target, None,
+        "the matching action pointer must still clear"
+    );
+    assert_eq!(
+        engine.objects[command_referrer_index]
+            .commands
+            .command_views()[0]
+            .target,
+        None,
+        "the matching command pointer must still clear"
+    );
+    assert_eq!(
+        engine.objects[effect_referrer_index].state.effects[0].command_target, None,
+        "the matching effect pointer must still clear"
+    );
+    assert_eq!(
+        engine.objects[layer_referrer_index].state.layer, None,
+        "the matching layer pointer must still clear"
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        6,
+        "only the callback caller, removal target and four referrers need full snapshots"
+    );
+}
+
+#[test]
 fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     const WIDTH: u32 = 100;
     const HEIGHT: u32 = 100;

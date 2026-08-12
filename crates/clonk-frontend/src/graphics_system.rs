@@ -3565,6 +3565,9 @@ impl GraphicsSystem {
         self.active_fog_map = None;
         let pending_foreground = if capture_native_text {
             let mut foreground = Surface::new(content_width.max(1), content_height.max(1), format);
+            if capture_gpu_scene {
+                foreground.begin_gpu_scene_capture();
+            }
             foreground.begin_clonk_text_capture();
             let base_surface = std::mem::replace(&mut self.surface, foreground);
             self.draw_prepared_objects_at_frame(
@@ -5505,11 +5508,11 @@ impl GraphicsSystem {
             {
                 CacheUpdate::Rebuild
             }
-            Some(cache) => match grid.render_dirty_rects_since(&cache.grid) {
+            Some(cache) => match grid.render_dirty_rects_since_anchor(&cache.grid) {
                 Some(rects) if rects.is_empty() => CacheUpdate::Reuse,
                 Some(rects) => CacheUpdate::Patch {
                     rects,
-                    surface8_changed: grid.bytes().as_ptr() != cache.grid.bytes().as_ptr(),
+                    surface8_changed: grid.surface8_changed_since(&cache.grid),
                 },
                 None => CacheUpdate::Rebuild,
             },
@@ -5839,14 +5842,11 @@ impl GraphicsSystem {
         let Some(cache) = self.landscape_cache.as_mut() else {
             return false;
         };
-        // Anchor the exact byte-plane generation presented by this snapshot.
-        // The next engine mutation then starts a new COW dirty generation.
-        // A reused or freshly rebuilt cache already holds that generation, so
-        // re-cloning would only deep-copy the grid's texture names, material
-        // names, densities, materials, dirty generations and pending relights
-        // to arrive at the anchor it is already on.
-        if !anchored || cache.grid.bytes().as_ptr() != grid.bytes().as_ptr() {
-            cache.grid = grid.clone();
+        // Anchor the exact generation presented by this snapshot. The small
+        // lineage token makes the next simulation write open a new dirty
+        // generation without retaining (and then COW-copying) Surface8.
+        if !anchored {
+            cache.grid = grid.render_anchor();
         }
         if record_gpu_landscape(
             &mut self.surface,

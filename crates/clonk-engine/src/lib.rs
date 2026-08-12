@@ -350,6 +350,7 @@ std::thread_local! {
     static HOST_WORLD_OBJECT_GET_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
@@ -8164,19 +8165,19 @@ impl SolidMaskBake {
     /// instability, overlap re-put, attachment, or live-object side effects;
     /// capture uses it on a cloned landscape (C4SolidMask.cpp:240-259).
     fn restore_background(&self, landscape: &mut Landscape, vehicle: u8) {
-        for cy in 0..self.height {
-            for cx in 0..self.width {
+        let writes = (0..self.height).flat_map(|cy| {
+            (0..self.width).filter_map(move |cx| {
                 let saved = self.buffer[(cy * self.width + cx) as usize];
-                if saved == vehicle {
-                    continue;
-                }
-                let x = self.x + cx;
-                let y = self.y + cy;
-                if landscape.grid_byte_at(x, y) == Some(vehicle) {
-                    landscape.grid_write_mask_byte(x, y, saved);
-                }
-            }
-        }
+                (saved != vehicle).then_some(landscape::MaskWrite::replace(
+                    self.x + cx,
+                    self.y + cy,
+                    vehicle,
+                    saved,
+                    (),
+                ))
+            })
+        });
+        landscape.grid_write_mask_bytes(writes, |_result, _view| {});
     }
 
     /// The clipped, non-regular `Put` issued for a surviving mask by
@@ -8194,20 +8195,27 @@ impl SolidMaskBake {
         let clip_y0 = removed.y.max(self.y);
         let clip_x1 = (removed.x + removed.width).min(self.x + self.width);
         let clip_y1 = (removed.y + removed.height).min(self.y + self.height);
-        for ly in clip_y0..clip_y1 {
-            for lx in clip_x0..clip_x1 {
-                let mx = self.tx + (lx - self.x);
-                let my = self.ty + (ly - self.y);
-                if !self.mask_set(mx, my) {
-                    continue;
-                }
-                let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                if current != vehicle {
-                    self.buffer[((ly - self.y) * self.width + (lx - self.x)) as usize] = current;
-                }
-                landscape.grid_write_mask_byte(lx, ly, vehicle);
+        let mut buffer = std::mem::take(&mut self.buffer);
+        let writes = (clip_y0..clip_y1).flat_map(|ly| {
+            let this = &*self;
+            (clip_x0..clip_x1).filter_map(move |lx| {
+                let mx = this.tx + (lx - this.x);
+                let my = this.ty + (ly - this.y);
+                this.mask_set(mx, my).then_some(landscape::MaskWrite::set(
+                    lx,
+                    ly,
+                    vehicle,
+                    ((ly - this.y) * this.width + (lx - this.x)) as usize,
+                ))
+            })
+        });
+        landscape.grid_write_mask_bytes(writes, |result, _view| {
+            let current = result.old.unwrap_or(0);
+            if current != vehicle {
+                buffer[result.tag] = current;
             }
-        }
+        });
+        self.buffer = buffer;
     }
 }
 
@@ -8264,20 +8272,25 @@ fn put_solid_mask_raster(
             buffer: vec![vehicle; (width * height) as usize],
             rotated: None,
         };
-        for cy in 0..height {
-            for cx in 0..width {
-                if !bake.mask_set(tx + cx, ty + cy) {
-                    continue;
-                }
-                let lx = rect_x + cx;
-                let ly = rect_y + cy;
-                // A regular put saves MCVehic too; Remove simply never uses
-                // that buffer slot for restoration (C4SolidMask.cpp:92-96).
-                let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                bake.buffer[(cy * width + cx) as usize] = old;
-                landscape.grid_write_mask_byte(lx, ly, vehicle);
-            }
-        }
+        let mut buffer = std::mem::take(&mut bake.buffer);
+        let writes = (0..height).flat_map(|cy| {
+            let bake = &bake;
+            (0..width).filter_map(move |cx| {
+                bake.mask_set(tx + cx, ty + cy)
+                    .then_some(landscape::MaskWrite::set(
+                        rect_x + cx,
+                        rect_y + cy,
+                        vehicle,
+                        (cy * width + cx) as usize,
+                    ))
+            })
+        });
+        landscape.grid_write_mask_bytes(writes, |result, _view| {
+            // A regular put saves MCVehic too; Remove simply never uses that
+            // buffer slot for restoration (C4SolidMask.cpp:92-96).
+            buffer[result.tag] = result.old.unwrap_or(0);
+        });
+        bake.buffer = buffer;
         return Some(bake);
     }
 
@@ -8333,6 +8346,7 @@ fn put_solid_mask_raster(
     let y0 = itofix(ty - mat_buff_pitch / 2);
     let mut ya = y0 * ma2;
     let mut yb = y0 * mb2;
+    let mut writes = Vec::new();
     for cy in 0..height {
         let mut xa = x0 * ma1;
         let mut xb = x0 * mb1;
@@ -8345,11 +8359,12 @@ fn put_solid_mask_raster(
                 && mask_y < mask.height
                 && bake.mask_pixel(mask_x, mask_y)
             {
-                let lx = rect_x + cx;
-                let ly = rect_y + cy;
-                let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                bake.buffer[(cy * width + cx) as usize] = old;
-                landscape.grid_write_mask_byte(lx, ly, vehicle);
+                writes.push(landscape::MaskWrite::set(
+                    rect_x + cx,
+                    rect_y + cy,
+                    vehicle,
+                    (cy * width + cx) as usize,
+                ));
             }
             xa += ma1;
             xb += mb1;
@@ -8357,6 +8372,9 @@ fn put_solid_mask_raster(
         ya += ma2;
         yb += mb2;
     }
+    landscape.grid_write_mask_bytes(writes, |result, _view| {
+        bake.buffer[result.tag] = result.old.unwrap_or(0);
+    });
     Some(bake)
 }
 
@@ -11367,8 +11385,8 @@ fn dispatch_global_effect_callback(
             if callback.engine_global_entry {
                 return callback
                     .script
-                    .call_pinned_with_cells_and_this_for_effect_callback(
-                        &callback.resolution.function,
+                    .call_resolved_with_cells_and_this_for_effect_callback(
+                        &callback.resolution,
                         true,
                         &args,
                         &context_cells,

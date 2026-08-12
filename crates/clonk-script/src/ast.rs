@@ -181,6 +181,10 @@ pub struct Function {
     /// Lazily lowered local-only instruction stream. This is derived state:
     /// function equality remains solely a property of the parsed script.
     pub(crate) compiled: std::sync::OnceLock<crate::vm::CompiledFunctionCache>,
+    /// Immutable C4AulFunc-style pointer retained by native callback queues.
+    /// Resolution reuses this snapshot until a link mutation replaces it, so
+    /// its lazily compiled body is shared across repeated callbacks too.
+    pub(crate) resolved_snapshot: std::sync::OnceLock<std::sync::Arc<Function>>,
 }
 
 impl std::fmt::Debug for Function {
@@ -221,6 +225,7 @@ impl Clone for Function {
             overloaded: self.overloaded.clone(),
             hard_inherited_line: self.hard_inherited_line,
             compiled: std::sync::OnceLock::new(),
+            resolved_snapshot: std::sync::OnceLock::new(),
         }
     }
 }
@@ -246,6 +251,21 @@ impl PartialEq for Function {
 impl Function {
     pub(crate) fn reset_compiled_cache(&mut self) {
         self.compiled = std::sync::OnceLock::new();
+        self.resolved_snapshot = std::sync::OnceLock::new();
+    }
+
+    pub(crate) fn resolved_snapshot(&self) -> std::sync::Arc<Self> {
+        std::sync::Arc::clone(
+            self.resolved_snapshot
+                .get_or_init(|| std::sync::Arc::new(self.clone())),
+        )
+    }
+
+    fn reset_resolved_snapshot_chain(&mut self) {
+        self.resolved_snapshot = std::sync::OnceLock::new();
+        if let Some(overloaded) = self.overloaded.as_mut() {
+            std::sync::Arc::make_mut(overloaded).reset_resolved_snapshot_chain();
+        }
     }
 
     /// First named local candidate in this overload chain. Rust keeps
@@ -298,6 +318,7 @@ impl Function {
     /// `Fn->OwnerOverloaded`). Idempotent for repeat-link callers: a parent
     /// already on the chain is replaced when it has gained its own chain.
     pub fn push_overload(&mut self, parent: Function) {
+        self.reset_resolved_snapshot_chain();
         fn same_definition(a: &Function, b: &Function) -> bool {
             a.name == b.name
                 && a.params == b.params
@@ -336,6 +357,7 @@ impl Function {
     /// distinct C4AulScriptFunc for every include edge, including identical
     /// bodies and diamond paths (C4AulLink.cpp:113-141).
     pub fn append_include_overload(&mut self, parent: Function) {
+        self.reset_resolved_snapshot_chain();
         let mut tail = &mut self.overloaded;
         while let Some(next) = tail {
             tail = &mut std::sync::Arc::make_mut(next).overloaded;
@@ -347,6 +369,7 @@ impl Function {
     /// its declaring script host. `Arc::make_mut` preserves the provenance
     /// when a parsed same-name chain is shared.
     pub(crate) fn bind_global_link_host(&mut self, host: crate::vm::ScriptHostIdentity) {
+        self.resolved_snapshot = std::sync::OnceLock::new();
         if self.access == AccessLevel::Global {
             self.global_link_host = Some(host);
         }
@@ -358,6 +381,7 @@ impl Function {
     /// Stamp the original declaring script on parsed functions. Linked
     /// copies already carrying provenance deliberately retain it.
     pub(crate) fn bind_source_host(&mut self, host: crate::vm::ScriptHostIdentity) {
+        self.resolved_snapshot = std::sync::OnceLock::new();
         if self.source_host.is_none() {
             self.source_host = Some(host);
         }
@@ -369,6 +393,7 @@ impl Function {
     /// Stamp the original script's diagnostic name. Linked copies retain the
     /// name already assigned by their declaring host.
     pub(crate) fn bind_source_name(&mut self, name: &str) {
+        self.resolved_snapshot = std::sync::OnceLock::new();
         if self.source_name.is_none() {
             self.source_name = Some(name.to_owned());
         }
@@ -384,6 +409,7 @@ impl Function {
         host: crate::vm::ScriptHostIdentity,
         name: &str,
     ) {
+        self.resolved_snapshot = std::sync::OnceLock::new();
         if self.source_host == Some(host) {
             self.source_name = Some(name.to_owned());
         }

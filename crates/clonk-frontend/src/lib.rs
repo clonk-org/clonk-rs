@@ -60,7 +60,7 @@ mod viewport;
 pub mod viewport_draw_order;
 pub mod viewport_projection;
 
-use clonk_engine::landscape::PixelGrid;
+use clonk_engine::landscape::{PixelGrid, PixelGridRenderAnchor};
 use clonk_engine::{
     math::{fixtoi, itofix, C4Fixed},
     object_visible_for_player,
@@ -3031,6 +3031,213 @@ mod tests {
     }
 
     #[test]
+    fn oversized_gpu_sprite_uses_native_physical_texture_tiles() {
+        // C4Surface::CreateTextures and CStdDDraw::Blit split an image into
+        // independently padded C4TexRefs before drawing each intersecting tile
+        // (C4Surface.cpp:166-189; StdDDraw2.cpp:695-741).
+        let width = 4_100_u32;
+        let height = 16_u32;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&[(x % 251) as u8, 2, 3, 255]);
+            }
+        }
+        let image = ImageData::new(width, height, pixels);
+        let mut surface = Surface::new(24, 16, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 24.0, 16.0),
+            (0.0, 0.0, 24.0, 16.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 4_088.0,
+                y: 0.0,
+                width: 12.0,
+                height: 16.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Linear,
+            false,
+        ));
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene(
+                [24, 16],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        assert_eq!(scene.textures.len(), 2);
+        assert!(scene
+            .textures
+            .iter()
+            .all(|resource| resource.extent == [16, 16]));
+        assert_eq!(scene.commands.len(), 2);
+        let quads = scene
+            .commands
+            .iter()
+            .map(|command| match command {
+                GpuCommand::Quad {
+                    texture,
+                    vertices,
+                    sampler,
+                    ..
+                } => (*texture, *vertices, *sampler),
+                _ => panic!("native image tile did not lower to a quad"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(quads[0].1[0].position[0], 0.0);
+        assert_eq!(quads[0].1[3].position[0], 16.0);
+        assert_eq!(quads[1].1[0].position[0], 16.0);
+        assert_eq!(quads[1].1[3].position[0], 24.0);
+        assert!(quads.iter().all(|(_, vertices, sampler)| {
+            *sampler == GpuSampler::Linear
+                && vertices.iter().all(|vertex| {
+                    vertex
+                        .uv
+                        .iter()
+                        .all(|coordinate| (0.0..=1.0).contains(coordinate))
+                        && vertex.sample_tile == [0.0, 0.0, 16.0, 1.0]
+                })
+        }));
+        assert!(quads.iter().all(|(texture, _, _)| scene
+            .textures
+            .iter()
+            .any(|resource| resource.id == *texture)));
+
+        let right_tile = scene
+            .textures
+            .iter()
+            .find(|resource| resource.pixels[0] == (4_096 % 251) as u8)
+            .expect("the right physical texture tile is present");
+        assert_eq!(&right_tile.pixels[0..4], &[(4_096 % 251) as u8, 2, 3, 255]);
+        assert_eq!(&right_tile.pixels[4 * 4..5 * 4], &[255, 255, 255, 0]);
+    }
+
+    #[test]
+    fn oversized_gpu_sprite_clamps_roundoff_at_physical_tile_edge() {
+        // C4Surface::CreateTextures and CStdDDraw::Blit hand each C4TexRef
+        // tile-local coordinates at its exact edge (C4Surface.cpp:166-189;
+        // StdDDraw2.cpp:695-741).
+        let image = ImageData::new(22_320, 2, [32, 64, 96, 255].repeat(22_320 * 2));
+        let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 2.0, 2.0),
+            (0.0, 0.0, 2.0, 2.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 511.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Linear,
+            false,
+        ));
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene(
+                [2, 2],
+                Color::transparent(),
+                &clonk_graphics::GammaRamp::standard(),
+            );
+        assert_eq!(scene.commands.len(), 2);
+        assert!(scene.commands.iter().all(|command| match command {
+            GpuCommand::Quad { vertices, .. } => vertices.iter().all(|vertex| {
+                vertex
+                    .uv
+                    .iter()
+                    .all(|coordinate| (0.0..=1.0).contains(coordinate))
+            }),
+            _ => false,
+        }));
+        let GpuCommand::Quad { vertices, .. } = &scene.commands[1] else {
+            panic!("second native image tile did not lower to a quad");
+        };
+        assert_eq!(vertices[0].uv[0], 0.0);
+        assert_eq!(vertices[2].uv[0], 0.0);
+    }
+
+    #[test]
+    fn oversized_inclusive_sprite_uses_cpu_parity_path() {
+        // CStdDDraw::Blit8 scales the inclusive source endpoint before its
+        // per-C4TexRef traversal (StdDDraw2.cpp:695-741). Retained native-tile
+        // splitting must decline until it can split in that scaled space.
+        let image = ImageData::new(4_098, 2, [32, 64, 96, 255].repeat(4_098 * 2));
+        let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+
+        assert!(!capture_gpu_sprite(
+            &mut surface,
+            (0.0, 0.0, 3.0, 2.0),
+            (0.0, 0.0, 3.0, 2.0),
+            &GraphicsTransform::identity(),
+            &image,
+            None,
+            FloatSourceRect {
+                x: 9.0,
+                y: 0.0,
+                width: 3.0,
+                height: 2.0,
+            },
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+            None,
+            GpuSampler::Nearest,
+            true,
+        ));
+    }
+
+    #[test]
+    fn physical_texture_tile_cache_evicts_the_least_recently_used_resource() {
+        let mut cache = PhysicalTextureTileCache::with_limits(2, 8);
+        let source = GpuTextureId::fresh();
+        let keys = [0, 1, 2].map(|x| PhysicalTextureTileKey {
+            source,
+            x,
+            y: 0,
+            size: 1,
+        });
+        let resources = std::array::from_fn::<_, 3, _>(|_| {
+            GpuTextureResource::immutable_rgba(GpuTextureId::fresh(), 1, 1, Arc::from([0, 0, 0, 0]))
+        });
+
+        cache.insert(keys[0], resources[0].clone());
+        cache.insert(keys[1], resources[1].clone());
+        assert!(cache.get(&keys[0]).is_some());
+        cache.insert(keys[2], resources[2].clone());
+
+        assert!(cache.get(&keys[0]).is_some());
+        assert!(cache.get(&keys[1]).is_none());
+        assert!(cache.get(&keys[2]).is_some());
+        assert_eq!(cache.retained_bytes(), 8);
+    }
+
+    #[test]
     fn simple_gpu_sprite_capture_avoids_temporary_batching() {
         let image = ImageData::new(2, 2, [64, 128, 192, 255].repeat(4));
         let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
@@ -5518,6 +5725,62 @@ mod tests {
             "expected at least one full viewport plane deferred per frame, got {} bytes",
             deferred_bytes / FRAMES
         );
+    }
+
+    #[test]
+    fn ordered_gpu_capture_retains_viewport_foreground_commands() {
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = None;
+        snapshot.objects[0].position = Vector2::new(20, 20);
+        snapshot.objects[0].category = CATEGORY_FOREGROUND_FLAG | CATEGORY_PARALLAX_FLAG;
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let sprites = solid_sprite(
+            "TestObject",
+            4,
+            4,
+            Color::opaque(20, 220, 20),
+            Some(DefinitionRect::new(0, 0, 4, 4)),
+            false,
+        );
+        let mut graphics = GraphicsSystem::new(
+            128,
+            120,
+            120,
+            "Retained viewport foreground",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        // The app ends the base capture before drawing C4Viewport's final
+        // foreground-parallax pass into its next ordered layer
+        // (C4Viewport.cpp:1101-1102).
+        graphics.surface_mut().begin_clonk_text_capture();
+        graphics.begin_gpu_scene_capture();
+        let pending = graphics.render_frame_base(&snapshot, &viewports);
+        let _ = graphics.surface_mut().take_clonk_text_capture();
+        let _ = graphics.surface_mut().take_gpu_scene_capture();
+        graphics.surface_mut().begin_clonk_text_capture();
+        graphics.begin_gpu_scene_capture();
+        graphics.render_frame_foreground(&pending);
+        let scene = graphics
+            .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
+            .expect("ordered foreground capture was started");
+
+        assert_eq!(
+            scene
+                .textures
+                .iter()
+                .map(|texture| texture.extent)
+                .collect::<Vec<_>>(),
+            vec![[4, 4]],
+            "foreground sprites must not be flattened into a viewport-sized upload"
+        );
+        assert!(matches!(
+            scene.commands.as_slice(),
+            [GpuCommand::ObjectBatch { .. }]
+        ));
     }
 
     #[test]
@@ -18844,12 +19107,10 @@ mod tests {
         assert_eq!(object_output_reach_evaluations(), 1);
     }
 
-    /// The landscape cache re-anchors to the byte plane the frame presented so
-    /// the engine's next write forks a distinct COW generation
-    /// (clonk-engine landscape.rs:550-554). A frame that changed nothing is
-    /// already anchored to that exact `Arc`, yet re-cloning still deep-copies
-    /// the grid's texture names, material names, densities, materials, dirty
-    /// generations and pending relights (landscape.rs:290-348).
+    /// The landscape cache re-anchors to the lineage the frame presented so
+    /// the engine's next write starts a distinct dirty generation. A frame
+    /// that changed nothing must retain that checkpoint without cloning the
+    /// grid's presentation metadata or authoritative byte plane.
     #[test]
     fn unchanged_landscape_reuses_its_anchored_cache_grid() {
         const WIDTH: u32 = 64;
@@ -18891,50 +19152,109 @@ mod tests {
         )])));
 
         let anchor = |graphics: &GraphicsSystem| {
-            let cache = graphics.landscape_cache.as_ref().expect("cache built");
-            (
-                cache.grid.texture_names().as_ptr(),
-                cache.grid.material_names().as_ptr(),
-                cache.grid.bytes().as_ptr(),
-            )
+            graphics
+                .landscape_cache
+                .as_ref()
+                .expect("cache built")
+                .grid
+                .clone()
         };
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
         let first = anchor(&graphics);
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
         let second = anchor(&graphics);
         assert_eq!(
-            (first.0, first.1),
-            (second.0, second.1),
-            "an unchanged landscape re-cloned its cache grid"
+            landscape
+                .pixel_grid()
+                .expect("grid")
+                .render_dirty_rects_since_anchor(&first),
+            Some(Vec::new()),
+            "first checkpoint no longer identifies the unchanged landscape"
         );
-        // The whole point of the anchor: the cache still shares the presented
-        // byte plane, so the engine's next write cannot mutate it in place.
-        let presented = landscape.pixel_grid().expect("grid").bytes().as_ptr();
-        assert_eq!(second.2, presented, "cache lost the presented byte plane");
+        assert_eq!(
+            landscape
+                .pixel_grid()
+                .expect("grid")
+                .render_dirty_rects_since_anchor(&second),
+            Some(Vec::new()),
+            "an unchanged frame lost its retained checkpoint"
+        );
 
         landscape.grid_write_byte(4, 4, 2);
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
         let third = anchor(&graphics);
-        assert_ne!(
-            (second.0, second.1),
-            (third.0, third.1),
-            "a changed landscape must re-anchor its cache grid"
-        );
         assert_eq!(
-            third.2,
-            landscape.pixel_grid().expect("grid").bytes().as_ptr(),
-            "cache lost the rewritten byte plane"
+            landscape
+                .pixel_grid()
+                .expect("grid")
+                .render_dirty_rects_since_anchor(&third),
+            Some(Vec::new()),
+            "changed landscape did not re-anchor its cache lineage"
         );
 
         let grid = landscape.pixel_grid().expect("grid");
         let start = std::time::Instant::now();
         const CLONES: u32 = 1000;
         for _ in 0..CLONES {
-            std::hint::black_box(grid.clone());
+            std::hint::black_box(grid.render_anchor());
         }
         println!(
-            "PixelGrid::clone with 128 texture and 128 material names: {:.3} us",
+            "PixelGrid::render_anchor with 128 texture and 128 material names: {:.3} us",
             start.elapsed().as_secs_f64() * 1e6 / f64::from(CLONES)
+        );
+    }
+
+    #[test]
+    fn landscape_render_cache_does_not_retain_the_simulation_surface8_plane() {
+        // C++ keeps the authoritative Surface8 in C4Landscape and the
+        // presentation copy in Surface32 (C4Landscape.cpp:2490-2511). A
+        // retained renderer checkpoint must likewise keep lineage metadata,
+        // not force the next simulation write to copy the complete Surface8.
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 64;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50, 50],
+            vec![None, Some("Earth".to_string()), Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
+        ));
+        landscape.set_shade_materials(false);
+        let mut graphics = test_graphics(WIDTH, HEIGHT, HEIGHT as i32, "landscape COW anchor");
+        graphics.set_material_textures(Arc::new(HashMap::from([
+            (
+                "rough".to_string(),
+                ImageData::new(1, 1, vec![255, 0, 0, 255]),
+            ),
+            (
+                "smooth".to_string(),
+                ImageData::new(1, 1, vec![0, 255, 0, 255]),
+            ),
+        ])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let before = landscape.pixel_grid().expect("grid").bytes().as_ptr();
+
+        landscape.grid_write_byte(17, 23, 2);
+
+        let after = landscape.pixel_grid().expect("grid").bytes().as_ptr();
+        assert_eq!(
+            after, before,
+            "renderer lineage metadata retained the full simulation byte plane"
+        );
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        let cache = graphics.landscape_cache.as_ref().expect("cache patched");
+        let slot = (23 * WIDTH as usize + 17) * 4;
+        assert_eq!(
+            &cache.pixels[slot..slot + 4],
+            &[0, 255, 0, 255],
+            "the lightweight checkpoint still identifies the dirty patch"
         );
     }
 

@@ -141,6 +141,7 @@ class BenchmarkLineTests(unittest.TestCase):
         line = (
             "LC_APP_PRESENTATION_BENCHMARK "
             "elapsed_seconds=60.000000 successful_present_submissions=3 "
+            "retained_gpu_present_submissions=3 cpu_present_submissions=0 "
             "presentation_submission_fps=50.000000 refreshed_frames=3 "
             "simulation_frames=2100 simulation_fps=35.000000 "
             "automatic_graphics_skips=0 average_graphics_pass_ms=4.000000 "
@@ -158,6 +159,27 @@ class BenchmarkLineTests(unittest.TestCase):
             [1_000_000, 4_000_000, 7_000_000],
         )
         self.assertEqual(report["simulation_fps"], 35.0)
+        self.assertEqual(report["retained_gpu_present_submissions"], 3)
+        self.assertEqual(report["cpu_present_submissions"], 0)
+
+    def test_rejects_metric_without_presentation_path_counts(self):
+        line = (
+            "LC_APP_PRESENTATION_BENCHMARK "
+            "elapsed_seconds=60.000000 successful_present_submissions=3 "
+            "presentation_submission_fps=50.000000 refreshed_frames=3 "
+            "simulation_frames=2100 simulation_fps=35.000000 "
+            "automatic_graphics_skips=0 average_graphics_pass_ms=4.000000 "
+            "max_graphics_pass_ms=7.000000 graphics_pass_sample_count=3 "
+            "graphics_pass_p50_ms=4.000000 graphics_pass_p95_ms=7.000000 "
+            "graphics_pass_p99_ms=7.000000 "
+            "graphics_pass_samples_ns=[1000000,4000000,7000000]"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "cpu_present_submissions, retained_gpu_present_submissions",
+        ):
+            MODULE.parse_benchmark_machine_line(line)
 
     def test_parses_input_latency_evidence_with_raw_samples(self):
         line = (
@@ -255,7 +277,9 @@ class BenchmarkLineTests(unittest.TestCase):
     def test_rejects_duplicate_machine_results(self):
         metric = (
             "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=1 "
-            "successful_present_submissions=1 presentation_submission_fps=1 "
+            "successful_present_submissions=1 "
+            "retained_gpu_present_submissions=1 cpu_present_submissions=0 "
+            "presentation_submission_fps=1 "
             "refreshed_frames=1 simulation_frames=35 simulation_fps=35 "
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
@@ -300,6 +324,8 @@ class BenchmarkLineTests(unittest.TestCase):
         metric = (
             "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=60 "
             "successful_present_submissions=2100 "
+            "retained_gpu_present_submissions=2100 "
+            "cpu_present_submissions=0 "
             "presentation_submission_fps=35 "
             "refreshed_frames=2100 simulation_frames=2100 "
             "simulation_fps=35 automatic_graphics_skips=0 "
@@ -326,7 +352,9 @@ class BenchmarkLineTests(unittest.TestCase):
     def test_requires_exact_24_player_runtime_context(self):
         metric = (
             "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=60 "
-            "successful_present_submissions=1 presentation_submission_fps=1 "
+            "successful_present_submissions=1 "
+            "retained_gpu_present_submissions=1 cpu_present_submissions=0 "
+            "presentation_submission_fps=1 "
             "refreshed_frames=1 simulation_frames=2100 simulation_fps=35 "
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
@@ -404,6 +432,8 @@ class BenchmarkLineTests(unittest.TestCase):
         passing = {
             "elapsed_seconds": 60.0,
             "successful_present_submissions": 2100,
+            "retained_gpu_present_submissions": 2100,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 35.0,
             "refreshed_frames": 2100,
             "simulation_frames": 2100,
@@ -456,6 +486,7 @@ class BenchmarkLineTests(unittest.TestCase):
 
         sparse = dict(passing)
         sparse["successful_present_submissions"] = 1
+        sparse["retained_gpu_present_submissions"] = 1
         sparse["presentation_submission_fps"] = 1.0 / 60.0
         sparse["refreshed_frames"] = 1
         sparse["graphics_pass_sample_count"] = 1
@@ -473,10 +504,44 @@ class BenchmarkLineTests(unittest.TestCase):
             any("presentation FPS" in failure for failure in failures)
         )
 
+        cpu_fallback = dict(passing)
+        cpu_fallback["retained_gpu_present_submissions"] = 2099
+        cpu_fallback["cpu_present_submissions"] = 1
+        failures = MODULE.benchmark_failures(
+            cpu_fallback,
+            expected_seconds=60,
+            expected_players=24,
+            minimum_simulation_fps=35.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+        )
+        self.assertTrue(any("CPU presentation" in failure for failure in failures))
+        self.assertTrue(
+            any("retained GPU submissions" in failure for failure in failures)
+        )
+
+        unclassified = dict(passing)
+        unclassified["retained_gpu_present_submissions"] = 2099
+        failures = MODULE.benchmark_failures(
+            unclassified,
+            expected_seconds=60,
+            expected_players=24,
+            minimum_simulation_fps=35.0,
+            minimum_presentation_fps=35.0,
+            maximum_graphics_p99_ms=25.0,
+            maximum_network_lag_ms=100.0,
+        )
+        self.assertTrue(
+            any("retained GPU submissions" in failure for failure in failures)
+        )
+
     def test_runtime_only_acceptance_allows_an_occluded_client(self):
         report = {
             "elapsed_seconds": 300.0,
             "successful_present_submissions": 0,
+            "retained_gpu_present_submissions": 0,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 0.0,
             "refreshed_frames": 0,
             "simulation_frames": 11_400,
@@ -550,6 +615,8 @@ class BenchmarkLineTests(unittest.TestCase):
         report = {
             "elapsed_seconds": 60.0,
             "successful_present_submissions": 1,
+            "retained_gpu_present_submissions": 1,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 35.0,
             "refreshed_frames": 1,
             "simulation_frames": 2_100,
@@ -605,6 +672,8 @@ class BenchmarkLineTests(unittest.TestCase):
         report = {
             "elapsed_seconds": 25.0,
             "successful_present_submissions": 0,
+            "retained_gpu_present_submissions": 0,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 0.0,
             "refreshed_frames": 0,
             "simulation_frames": 962,
@@ -692,6 +761,8 @@ class BenchmarkLineTests(unittest.TestCase):
         report = {
             "elapsed_seconds": 25.0,
             "successful_present_submissions": 0,
+            "retained_gpu_present_submissions": 0,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 0.0,
             "refreshed_frames": 0,
             "simulation_frames": 962,
@@ -748,6 +819,8 @@ class BenchmarkLineTests(unittest.TestCase):
         report = {
             "elapsed_seconds": 25.0,
             "successful_present_submissions": 0,
+            "retained_gpu_present_submissions": 0,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 0.0,
             "refreshed_frames": 0,
             "simulation_frames": 962,
@@ -878,6 +951,8 @@ class BenchmarkLineTests(unittest.TestCase):
         report = {
             "elapsed_seconds": 60.0,
             "successful_present_submissions": 2_140,
+            "retained_gpu_present_submissions": 2_140,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 35.666667,
             "refreshed_frames": 2_140,
             "simulation_frames": 2_140,
@@ -921,6 +996,8 @@ class BenchmarkLineTests(unittest.TestCase):
         report = {
             "elapsed_seconds": 60.0,
             "successful_present_submissions": 100,
+            "retained_gpu_present_submissions": 100,
+            "cpu_present_submissions": 0,
             "presentation_submission_fps": 35.0,
             "refreshed_frames": 100,
             "simulation_frames": 2_100,
@@ -1592,6 +1669,8 @@ class ProcessLifecycleTests(unittest.TestCase):
             return {
                 "elapsed_seconds": 1.0,
                 "successful_present_submissions": 0,
+                "retained_gpu_present_submissions": 0,
+                "cpu_present_submissions": 0,
                 "presentation_submission_fps": 0.0,
                 "refreshed_frames": 0,
                 "simulation_frames": 38,
@@ -1891,7 +1970,9 @@ class ProcessLifecycleTests(unittest.TestCase):
     def test_timing_artifact_keeps_unobservable_instants_null(self):
         metric = (
             "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=5 "
-            "successful_present_submissions=1 presentation_submission_fps=1 "
+            "successful_present_submissions=1 "
+            "retained_gpu_present_submissions=1 cpu_present_submissions=0 "
+            "presentation_submission_fps=1 "
             "refreshed_frames=1 simulation_frames=1 simulation_fps=1 "
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "
             "max_graphics_pass_ms=1 graphics_pass_sample_count=1 "
@@ -1984,6 +2065,7 @@ class ProcessLifecycleTests(unittest.TestCase):
         metric = (
             "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=1 "
             "successful_present_submissions=35 "
+            "retained_gpu_present_submissions=35 cpu_present_submissions=0 "
             "presentation_submission_fps=35 refreshed_frames=35 "
             "simulation_frames=35 simulation_fps=35 "
             "automatic_graphics_skips=0 average_graphics_pass_ms=1 "

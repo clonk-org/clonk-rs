@@ -1836,6 +1836,8 @@ pub(crate) struct LazyHostWorldProvider {
     source: *const (),
     object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
     objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
+    pointer_referrers:
+        Option<unsafe fn(*const (), ObjectId, &HashSet<usize>) -> Vec<(usize, ObjectId)>>,
     player: Option<unsafe fn(*const (), i32) -> Option<PlayerState>>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
     master_order: Option<
@@ -1886,6 +1888,7 @@ impl LazyHostWorldProvider {
             source,
             object,
             objects,
+            pointer_referrers: None,
             player: None,
             landscape,
             master_order: None,
@@ -1895,6 +1898,27 @@ impl LazyHostWorldProvider {
             legacy_find_object: None,
             find_condition: None,
         }
+    }
+
+    /// Supply a scalar-only scan for objects whose native pointer fields may
+    /// name a target. Callback-local objects are already in the context and
+    /// their indices arrive in `excluded`; the provider must not dereference
+    /// those potentially exclusively borrowed entries.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`]. Returned pairs must
+    /// carry the source object's stable storage index and id.
+    pub(crate) unsafe fn with_pointer_referrers(
+        mut self,
+        pointer_referrers: unsafe fn(
+            *const (),
+            ObjectId,
+            &HashSet<usize>,
+        ) -> Vec<(usize, ObjectId)>,
+    ) -> Self {
+        self.pointer_referrers = Some(pointer_referrers);
+        self
     }
 
     /// Supply one callback-entry player projection on first value access.
@@ -2016,6 +2040,16 @@ impl LazyHostWorldProvider {
         unsafe { (self.objects)(self.source, excluded) }
     }
 
+    fn pointer_referrers(
+        self,
+        target: ObjectId,
+        excluded: &HashSet<usize>,
+    ) -> Option<Vec<(usize, ObjectId)>> {
+        // SAFETY: see `object`; this reads only callback-entry scalar fields
+        // and skips every callback-local/exclusively borrowed entry.
+        Some(unsafe { (self.pointer_referrers?)(self.source, target, excluded) })
+    }
+
     fn player(self, id: i32) -> Option<PlayerState> {
         // SAFETY: see `object`; player storage obeys the same synchronous
         // source-lifetime contract as object storage.
@@ -2099,7 +2133,7 @@ pub struct HostWorldContext {
     /// the forward master list (C4Game.cpp:3732-3744).
     pub(crate) master_order: OnceCell<Rc<Vec<ObjectId>>>,
     /// Uninitialized until a host API actually reads or mutates terrain.
-    landscape: OnceCell<Option<Rc<Landscape>>>,
+    landscape: OnceCell<Option<Arc<Landscape>>>,
     /// Fully defaulted, post-load `Game.C4S` reflection data. This remains
     /// separate from the evaluated runtime landscape: GetScenarioVal reads
     /// the scenario core, not C4Landscape's mutable state.
@@ -2356,7 +2390,11 @@ pub struct HostWorldContext {
 /// The authoritative engine still replays ordered operations separately.
 #[derive(Debug, Clone)]
 pub(crate) struct HostRasterPreview {
-    pub(crate) landscape: Option<Landscape>,
+    /// An untouched lazy context reads the same paused Engine landscape as
+    /// the next callback and therefore needs no allocation. A materialized
+    /// slot, including explicit `None`, replaces that next context's slot.
+    pub(crate) inherit_landscape: bool,
+    pub(crate) landscape: Option<Arc<Landscape>>,
     pub(crate) solid_mask_bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
     pub(crate) solid_mask_instance_sequences: HashMap<ObjectId, u64>,
     pub(crate) next_solid_mask_instance_sequence: u64,
@@ -2504,7 +2542,7 @@ impl HostWorldContext {
             Some(current) => current.is_none() && landscape.is_some(),
         };
         if replace_landscape {
-            self.landscape = OnceCell::from(landscape.map(Rc::new));
+            self.landscape = OnceCell::from(landscape.map(Arc::new));
         }
         self.sectors = RefCell::new(None);
         self.borrowed_sector_map_valid.set(false);
@@ -2789,7 +2827,7 @@ impl HostWorldContext {
             })),
             lazy_world: None,
             master_order: OnceCell::from(Rc::clone(&order)),
-            landscape: OnceCell::from(landscape.map(Rc::new)),
+            landscape: OnceCell::from(landscape.map(Arc::new)),
             scenario_values,
             scenario_sections: Rc::new(HashSet::new()),
             movement_solid_masks: Rc::new(Vec::new()),
@@ -3992,7 +4030,21 @@ impl HostWorldContext {
     /// must see the same list the event loop holds — including the victim
     /// C4Effect::Kill keeps linked across `Fx*Stop` (C4Effect.cpp:365-405).
     pub(crate) fn preview_object_effects(&mut self, id: ObjectId, effects: &[EffectState]) {
-        let _ = self.get(id);
+        let Some(current) = self.get_shared(id) else {
+            return;
+        };
+        let unchanged = current.full_state().is_some_and(|state| {
+            state.effects.len() == effects.len()
+                && state
+                    .effects
+                    .iter()
+                    .zip(effects)
+                    .all(|(current, next)| current.shares_preview_identity_with(next))
+        });
+        if unchanged {
+            return;
+        }
+        drop(current);
         let store = Rc::make_mut(self.object_store.get_mut());
         let Some(object) = store.objects.get_mut(&id) else {
             return;
@@ -4053,6 +4105,35 @@ impl HostWorldContext {
         self.object_store.borrow().order.clone()
     }
 
+    /// Storage-order candidates for `C4Game::ClearObjectPtrs`. Objects that
+    /// already crossed into this callback stay in the set because their
+    /// scopes may carry pointer writes newer than the paused engine source;
+    /// untouched source objects are selected by the provider's scalar scan.
+    pub(crate) fn object_pointer_referrer_ids(&self, target: ObjectId) -> Vec<ObjectId> {
+        let Some(provider) = self.lazy_world else {
+            return self.object_ids();
+        };
+        let store = self.object_store.borrow();
+        if store.complete {
+            return store.order.clone();
+        }
+        let excluded = store.indices.values().copied().collect::<HashSet<_>>();
+        let mut candidates = store
+            .order
+            .iter()
+            .filter_map(|id| store.indices.get(id).copied().map(|index| (index, *id)))
+            .collect::<Vec<_>>();
+        drop(store);
+
+        let Some(mut source_candidates) = provider.pointer_referrers(target, &excluded) else {
+            return self.object_ids();
+        };
+        candidates.append(&mut source_candidates);
+        candidates.sort_unstable_by_key(|(index, _)| *index);
+        candidates.dedup_by_key(|(_, id)| *id);
+        candidates.into_iter().map(|(_, id)| id).collect()
+    }
+
     pub(crate) fn master_object_ids(&self) -> &[ObjectId] {
         self.master_order
             .get_or_init(|| {
@@ -4091,11 +4172,11 @@ impl HostWorldContext {
         self
     }
 
-    fn landscape_slot(&self) -> &Option<Rc<Landscape>> {
+    fn landscape_slot(&self) -> &Option<Arc<Landscape>> {
         self.landscape.get_or_init(|| {
             self.lazy_world
                 .and_then(LazyHostWorldProvider::landscape)
-                .map(Rc::new)
+                .map(Arc::new)
         })
     }
 
@@ -4104,12 +4185,12 @@ impl HostWorldContext {
             let landscape = self
                 .lazy_world
                 .and_then(LazyHostWorldProvider::landscape)
-                .map(Rc::new);
+                .map(Arc::new);
             let _ = self.landscape.set(landscape);
         }
     }
 
-    fn landscape_slot_mut(&mut self) -> &mut Option<Rc<Landscape>> {
+    fn landscape_slot_mut(&mut self) -> &mut Option<Arc<Landscape>> {
         self.ensure_landscape_initialized();
         self.landscape
             .get_mut()
@@ -4136,12 +4217,18 @@ impl HostWorldContext {
         self.landscape_slot().as_deref()
     }
 
-    pub(crate) fn landscape_shared(&self) -> Option<Rc<Landscape>> {
+    pub(crate) fn landscape_shared(&self) -> Option<Arc<Landscape>> {
         self.landscape_slot().clone()
     }
 
+    pub(crate) fn host_raster_landscape_preview(&self) -> (bool, Option<Arc<Landscape>>) {
+        self.landscape
+            .get()
+            .map_or((true, None), |landscape| (false, landscape.clone()))
+    }
+
     pub(crate) fn landscape_mut(&mut self) -> Option<&mut Landscape> {
-        self.landscape_slot_mut().as_mut().map(Rc::make_mut)
+        self.landscape_slot_mut().as_mut().map(Arc::make_mut)
     }
 
     /// Thread state-bearing landscape operations across effect callbacks
@@ -4162,7 +4249,7 @@ impl HostWorldContext {
                     .landscape
                     .get_mut()
                     .and_then(Option::as_mut)
-                    .map(Rc::make_mut)
+                    .map(Arc::make_mut)
                 else {
                     return;
                 };
@@ -4180,7 +4267,7 @@ impl HostWorldContext {
                 }
             }
             LandscapeOperation::SyncRuntimeTexMap { texmap } => {
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Arc::make_mut) else {
                     return;
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
@@ -4190,7 +4277,7 @@ impl HostWorldContext {
                 old_index,
                 new_index,
             } => {
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Arc::make_mut) else {
                     return;
                 };
                 let _ = landscape.apply_runtime_texture_index_move(
@@ -4200,7 +4287,7 @@ impl HostWorldContext {
                 );
             }
             LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } => {
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Arc::make_mut) else {
                     return;
                 };
                 let _ = landscape.clear_runtime_texmap_entries(cleared_slots);
@@ -4216,7 +4303,7 @@ impl HostWorldContext {
                     .landscape
                     .get_mut()
                     .and_then(Option::as_mut)
-                    .map(Rc::make_mut)
+                    .map(Arc::make_mut)
                 else {
                     return;
                 };
@@ -4249,7 +4336,7 @@ impl HostWorldContext {
                 density,
             } => {
                 let materials = self.materials.clone().unwrap_or_default();
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Arc::make_mut) else {
                     return;
                 };
                 let landscape_height = landscape.estimated_height();
@@ -4275,7 +4362,7 @@ impl HostWorldContext {
                     .landscape
                     .get_mut()
                     .and_then(Option::as_mut)
-                    .map(Rc::make_mut)
+                    .map(Arc::make_mut)
                 else {
                     return;
                 };
@@ -4304,7 +4391,7 @@ impl HostWorldContext {
                     .landscape
                     .get_mut()
                     .and_then(Option::as_mut)
-                    .map(Rc::make_mut)
+                    .map(Arc::make_mut)
                 else {
                     return;
                 };
@@ -4329,7 +4416,7 @@ impl HostWorldContext {
                 size,
                 material_byte,
             } => {
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Arc::make_mut) else {
                     return;
                 };
                 let _ = landscape.draw_volcano_branch(*from, *to, *size, *material_byte);
@@ -4347,7 +4434,7 @@ impl HostWorldContext {
                     .landscape
                     .get_mut()
                     .and_then(Option::as_mut)
-                    .map(Rc::make_mut)
+                    .map(Arc::make_mut)
                 else {
                     return;
                 };
@@ -4430,7 +4517,7 @@ impl HostWorldContext {
                 }
             }
             LandscapeOperation::MatAdjust { modulation } => {
-                if let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) {
+                if let Some(landscape) = self.landscape_slot_mut().as_mut().map(Arc::make_mut) {
                     landscape.set_modulation(*modulation);
                 }
             }
@@ -4539,7 +4626,7 @@ impl HostWorldContext {
                 .landscape
                 .get_mut()
                 .and_then(Option::as_mut)
-                .map(Rc::make_mut)
+                .map(Arc::make_mut)
             else {
                 continue;
             };
@@ -4586,7 +4673,9 @@ impl HostWorldContext {
     }
 
     pub(crate) fn apply_host_raster_preview(&mut self, preview: HostRasterPreview) {
-        self.landscape = OnceCell::from(preview.landscape.map(Rc::new));
+        if !preview.inherit_landscape {
+            self.landscape = OnceCell::from(preview.landscape);
+        }
         self.solid_mask_bakes = Rc::new(preview.solid_mask_bakes);
         self.solid_mask_instance_sequences =
             Rc::new(RefCell::new(preview.solid_mask_instance_sequences));
@@ -4595,8 +4684,10 @@ impl HostWorldContext {
     }
 
     pub(crate) fn host_raster_preview(&self) -> HostRasterPreview {
+        let (inherit_landscape, landscape) = self.host_raster_landscape_preview();
         HostRasterPreview {
-            landscape: self.landscape_ref().cloned(),
+            inherit_landscape,
+            landscape,
             solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
             solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
             next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
@@ -4617,7 +4708,7 @@ impl HostWorldContext {
         // points at this live landscape; preserve laziness instead of cloning
         // it merely because DoMotion advanced.
         if self.landscape.get().is_some() {
-            self.landscape = OnceCell::from(Some(Rc::new(landscape.clone())));
+            self.landscape = OnceCell::from(Some(Arc::new(landscape.clone())));
         }
         Rc::make_mut(&mut self.movement_solid_masks).retain(|mask| mask.object_id != mover);
         self.solid_mask_bakes = Rc::new(bakes);
