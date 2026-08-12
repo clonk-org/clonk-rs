@@ -973,8 +973,7 @@ async fn run_game_search(
     let mut discovery_queries = GameDiscoveryQueryGate::default();
     let mut stopped = false;
     let mut datagram = [0_u8; 512];
-    let mut next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
-    let mut next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+    let mut deadlines = SearchDeadlines::armed_at(Instant::now());
 
     while !stopped {
         while let Ok(command) = commands.try_recv() {
@@ -987,8 +986,7 @@ async fn run_game_search(
                     generation = generation.wrapping_add(1);
                     masterserver_failures = 0;
                     discovery_queries.clear();
-                    next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
-                    next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                    deadlines = SearchDeadlines::armed_at(Instant::now());
                     let _ = events.send(StartupGameSearchEvent::Cleared);
                     if matches!(command, StartupGameSearchCommand::Refresh)
                         && discovery_needs_rebuild(&discovery)
@@ -1017,8 +1015,7 @@ async fn run_game_search(
                     let changed = search.config.internet_enabled != enabled;
                     if changed {
                         masterserver_failures = 0;
-                        next_masterserver_search =
-                            tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                        deadlines.defer_masterserver_query_at(Instant::now());
                     }
                     if let Some(command) = search.set_internet_enabled(enabled) {
                         masterserver_generation = masterserver_generation.wrapping_add(1);
@@ -1097,7 +1094,7 @@ async fn run_game_search(
             };
             if query.source == ReferenceQuerySource::Masterserver {
                 masterserver_query.take();
-                next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                deadlines.defer_masterserver_query_at(Instant::now());
             }
             match query.result {
                 Ok(response) => {
@@ -1210,9 +1207,8 @@ async fn run_game_search(
         if stopped {
             break;
         }
-        let now = tokio::time::Instant::now();
-        if now >= next_periodic_lan_search {
-            next_periodic_lan_search += GAME_SEARCH_INTERVAL;
+        let now = Instant::now();
+        if deadlines.take_due_lan_probe_at(now) {
             execute_search_command(
                 search.periodic_lan_command(),
                 (generation, masterserver_generation),
@@ -1227,9 +1223,8 @@ async fn run_game_search(
         }
         if search.config.internet_enabled
             && masterserver_query.is_none()
-            && now >= next_masterserver_search
+            && deadlines.take_due_masterserver_query_at(now)
         {
-            next_masterserver_search = now + GAME_SEARCH_INTERVAL;
             execute_search_command(
                 search.masterserver_query(),
                 (generation, masterserver_generation),
@@ -1268,6 +1263,47 @@ async fn run_game_search(
         } else {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+}
+
+/// The two periodic deadlines the search worker re-arms by hand.
+///
+/// `C4StartupNetDlg` drives both from `OnSec1Timer`: a per-second countdown
+/// re-sends the discovery probe, while each masterserver row re-queries itself
+/// once its own `iTimeout` passes (pinned oracle src/C4StartupNetDlg.cpp:
+/// 1116-1131,186-210).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchDeadlines {
+    lan_probe_at: Instant,
+    masterserver_query_at: Instant,
+}
+
+impl SearchDeadlines {
+    fn armed_at(now: Instant) -> Self {
+        Self {
+            lan_probe_at: now + GAME_SEARCH_INTERVAL,
+            masterserver_query_at: now + GAME_SEARCH_INTERVAL,
+        }
+    }
+
+    fn take_due_lan_probe_at(&mut self, now: Instant) -> bool {
+        if now < self.lan_probe_at {
+            return false;
+        }
+        self.lan_probe_at += GAME_SEARCH_INTERVAL;
+        true
+    }
+
+    fn take_due_masterserver_query_at(&mut self, now: Instant) -> bool {
+        if now < self.masterserver_query_at {
+            return false;
+        }
+        self.defer_masterserver_query_at(now);
+        true
+    }
+
+    fn defer_masterserver_query_at(&mut self, now: Instant) {
+        self.masterserver_query_at = now + GAME_SEARCH_INTERVAL;
     }
 }
 
