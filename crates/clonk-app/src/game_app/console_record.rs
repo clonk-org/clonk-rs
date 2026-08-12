@@ -56,6 +56,13 @@ impl GameApp {
             // select that teardown path before clearing the round.
             self.startup_view = StartupView::NetworkLobby;
         }
+        // Components belong to the scenario that was open. C++ never has to
+        // clear them — `Game.Script`/`Title`/`Info` are cleared with the whole
+        // `C4Game` — but here they are `GameApp` fields, and an edit left
+        // behind would be written into the *next* scenario's save.
+        self.developer_component_editor = None;
+        self.developer_component_hosts.clear();
+        self.developer_object_list_open = false;
         self.return_to_menu();
         if boot_still_loading {
             self.mode = AppMode::Loading;

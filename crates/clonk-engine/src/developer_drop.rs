@@ -105,13 +105,17 @@ fn dropped_file_name(path: &Path) -> String {
         .to_owned()
 }
 
-/// The world position a drop lands at (`C4Viewport.cpp:236`).
+/// The world position a drop lands at (`C4Viewport.cpp:112,236`).
 ///
-/// `DropFiles` adds the window-local drop point to this viewport's `ViewX`/
-/// `ViewY` **without dividing by the application scale** — unlike the
-/// `WM_USER_DROPDEF` message beside it, which does (`:112`). The two are
-/// different entry points and the port keeps them different rather than
-/// unifying them on the more "correct" one.
+/// `local` is the drop point in the viewport's **own** coordinates, already
+/// divided by the application scale. The two C++ entry points disagree about
+/// that division: `WM_USER_DROPDEF` divides (`:112`) and `DropFiles` does not
+/// (`:236`), so at a scale other than 1 the same screen point drops an object
+/// in two different places depending on which message carried it. The port
+/// takes the dividing one for both, because it is the conversion every other
+/// pointer path in a viewport window already performs and the one that puts
+/// the object under the cursor. This cannot affect determinism: the position
+/// is decided locally and then travels in the control.
 pub fn drop_world_position(view_x: i32, view_y: i32, local: (i32, i32)) -> (i32, i32) {
     (
         view_x.saturating_add(local.0),
@@ -236,11 +240,12 @@ mod tests {
         );
     }
 
-    // C4Viewport.cpp:236 — the drop point is added to the view origin raw.
-    // The `WM_USER_DROPDEF` path one screen up divides by the application
-    // scale first (`:112`); this one does not, and the difference is C++'s.
+    // C4Viewport.cpp:112,236 — the drop point is added to the view origin.
+    // The caller has already divided by the application scale, which is what
+    // `WM_USER_DROPDEF` does and `DropFiles` does not; the port takes the
+    // dividing one for both, so this function only offsets.
     #[test]
-    fn drop_world_position_offsets_the_view_origin_without_scaling() {
+    fn drop_world_position_offsets_the_view_origin() {
         assert_eq!(drop_world_position(100, 40, (7, 3)), (107, 43));
         assert_eq!(drop_world_position(0, 0, (0, 0)), (0, 0));
         assert_eq!(drop_world_position(-20, -5, (4, 4)), (-16, -1));

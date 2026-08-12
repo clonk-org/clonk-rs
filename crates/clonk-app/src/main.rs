@@ -997,6 +997,10 @@ fn run() -> Result<()> {
         // Set when the shell takes a graphics pass; consumed on the next event
         // loop entry, before the shell record is borrowed.
         let mut viewport_redraw_pending = false;
+        // The component editor's own modifier state. Each developer window
+        // sees only its own `ModifiersChanged`, so a shared field would hold
+        // whatever the last *other* window left there.
+        let mut component_editor_modifiers = winit::keyboard::ModifiersState::empty();
 
         let mut dock_tile_attached = false;
         Ok(Box::new(move |event, event_target| {
@@ -1097,6 +1101,7 @@ fn run() -> Result<()> {
                             &event,
                             &mut app,
                             &mut developer_windows,
+                            &mut component_editor_modifiers,
                         );
                         return;
                     }

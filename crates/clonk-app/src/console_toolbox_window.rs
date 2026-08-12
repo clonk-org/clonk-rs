@@ -284,12 +284,9 @@ pub(crate) fn reconcile_developer_component_editor_window(
                     let key = WindowId(*next_key);
                     *next_key += 1;
                     tracing::debug!(%title, "opened the developer component editor");
-                    // The editor is a utility window like the object list, and
-                    // its close destroys it, so it shares that purpose's
-                    // semantics rather than the toolbox's hide-on-close.
                     windows.insert(
                         key,
-                        HostPurpose::ObjectList,
+                        HostPurpose::ComponentEditor,
                         DeveloperHost::ComponentEditor(host),
                     );
                 }
@@ -318,6 +315,7 @@ pub(crate) fn handle_developer_component_editor_event(
     event: &winit::event::Event<crate::NetworkEventWake>,
     app: &mut crate::GameApp,
     windows: &mut DeveloperWindows<DeveloperHost>,
+    editor_modifiers: &mut winit::keyboard::ModifiersState,
 ) {
     use crate::developer_component_editor::ComponentEditorKey;
     use crate::developer_windows::DeveloperWindowPresenter;
@@ -325,6 +323,10 @@ pub(crate) fn handle_developer_component_editor_event(
     use winit::keyboard::{Key, NamedKey};
 
     match event {
+        Event::WindowEvent {
+            event: WindowEvent::ModifiersChanged(modifiers),
+            ..
+        } => *editor_modifiers = modifiers.state(),
         // Closing the window is Cancel, which mutates nothing.
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,
@@ -352,9 +354,18 @@ pub(crate) fn handle_developer_component_editor_event(
             },
             ..
         } if key_event.state == winit::event::ElementState::Pressed => {
+            // This window's own modifier state. The shell never sees these
+            // messages and neither does a viewport, so a handler that read the
+            // shared field would find whatever the last *other* window left
+            // there — which is what made the newline unreachable.
+            let commit = editor_modifiers.control_key() || editor_modifiers.super_key();
             let Some(edit) = app.developer_component_editor.as_mut() else {
                 return;
             };
+            // Enter is a **newline**, not OK. The Win32 dialog's edit
+            // control is multi-line and its OK is a button; a script editor
+            // whose most common key closed it would be unusable, so the
+            // commit takes the modifier instead.
             let editing = match &key_event.logical_key {
                 Key::Named(NamedKey::ArrowLeft) => Some(ComponentEditorKey::Left),
                 Key::Named(NamedKey::ArrowRight) => Some(ComponentEditorKey::Right),
@@ -364,11 +375,7 @@ pub(crate) fn handle_developer_component_editor_event(
                 Key::Named(NamedKey::End) => Some(ComponentEditorKey::End),
                 Key::Named(NamedKey::Backspace) => Some(ComponentEditorKey::Backspace),
                 Key::Named(NamedKey::Delete) => Some(ComponentEditorKey::Delete),
-                // Shift-Enter is the newline; plain Enter is OK, the way the
-                // dialog's default button is.
-                Key::Named(NamedKey::Enter) if app.keyboard_modifiers.shift_key() => {
-                    Some(ComponentEditorKey::Enter)
-                }
+                Key::Named(NamedKey::Enter) if !commit => Some(ComponentEditorKey::Enter),
                 _ => None,
             };
             if let Some(editing) = editing {
@@ -389,7 +396,9 @@ pub(crate) fn handle_developer_component_editor_event(
                     edit.text.insert(' ');
                     windows.request_redraw(key);
                 }
-                Key::Character(text) => {
+                // A modified character is a shortcut, not text: without this
+                // Ctrl-S would type an `s` into the component.
+                Key::Character(text) if !commit => {
                     for character in text.chars() {
                         edit.text.insert(character);
                     }

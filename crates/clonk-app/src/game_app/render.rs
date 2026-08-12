@@ -3167,6 +3167,11 @@ impl GameApp {
     ) {
         use clonk_engine::developer_components::component_editor_available;
 
+        // `ShowDialog` is modal, so a second editor cannot open over the
+        // first — and letting one would discard whatever was being typed.
+        if self.developer_component_editor.is_some() {
+            return;
+        }
         if !component_editor_available(self.network.is_some()) {
             let message = self.runtime_resource_text(
                 "IDS_CNS_NONETEDIT",
@@ -3203,8 +3208,25 @@ impl GameApp {
     ) -> Option<crate::DeveloperComponentEdit> {
         use clonk_engine::developer_components::ComponentHost;
 
-        let scenario = self.developer_component_scenario_path()?;
         let filename = developer_component_filename(component);
+        // A component edited earlier this round reopens on **its** bytes.
+        // C++ never has to think about this: `Game.Script` and friends are
+        // live hosts held for the whole round, so a second `ShowDialog` sees
+        // the first edit. Re-reading the group here would show the stale
+        // on-disk text and the second commit would overwrite the first.
+        if let Some(host) = self
+            .developer_component_hosts
+            .iter()
+            .rev()
+            .find(|host| host.filename() == filename)
+        {
+            return Some(crate::DeveloperComponentEdit {
+                component,
+                text: crate::developer_component_editor::ComponentEditorText::opened(host.data()),
+                host: host.clone(),
+            });
+        }
+        let scenario = self.developer_component_scenario_path()?;
         let group = clonk_resources::Group::open(&scenario).ok()?;
         // A component that does not exist yet opens empty rather than
         // refusing: that is how a scenario grows one.
@@ -3255,6 +3277,10 @@ impl GameApp {
                 tracing::error!(%error, "the edited scenario script did not link");
             }
         }
+        // One host per component: a second commit replaces the first rather
+        // than queueing a second write of the same filename at save time.
+        self.developer_component_hosts
+            .retain(|host| host.filename() != edit.host.filename());
         self.developer_component_hosts.push(edit.host);
     }
 

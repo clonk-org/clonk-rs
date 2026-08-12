@@ -6126,6 +6126,62 @@
             }
         );
 
+        // Reopening a component edited earlier this round shows **its** bytes,
+        // not the stale ones still on disk — C++ never has to think about
+        // this because its hosts are live for the whole round. And the second
+        // commit replaces the first rather than queueing a second write of
+        // the same filename.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console reopened the info editor");
+        let edit = app
+            .developer_component_editor
+            .as_mut()
+            .expect("the info editor is open");
+        assert_eq!(edit.text.lines(), ["hello"], "the committed bytes reopen");
+        edit.text.key(crate::developer_component_editor::ComponentEditorKey::End);
+        edit.text.insert('!');
+        app.commit_developer_component_editor();
+        assert_eq!(
+            app.developer_component_hosts
+                .iter()
+                .filter(|host| host.filename() == "Info.txt")
+                .count(),
+            1,
+            "one host per component, however many times it was edited"
+        );
+        assert_eq!(
+            app.developer_component_hosts
+                .iter()
+                .find(|host| host.filename() == "Info.txt")
+                .expect("the info host")
+                .save_action(),
+            ComponentSaveAction::Write {
+                filename: "Info.txt".to_owned(),
+                data: b"hello!".to_vec(),
+            }
+        );
+
+        // A second editor cannot open over the first: `ShowDialog` is modal,
+        // and letting one would discard whatever was being typed.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
+            .expect("the console opened the title editor");
+        let open = app
+            .developer_component_editor
+            .as_ref()
+            .expect("an editor is open")
+            .component;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console refused a second editor");
+        assert_eq!(
+            app.developer_component_editor
+                .as_ref()
+                .expect("the first editor survives")
+                .component,
+            open,
+            "the open editor is not replaced"
+        );
+        app.cancel_developer_component_editor();
+
         // A network game refuses all three outright.
         let (_events, _commands) = install_running_network_stub(&mut app, 7, 0, 2);
         app.developer_console.clear_log();
@@ -6142,6 +6198,20 @@
             );
         }
         assert!(!app.developer_console.log().text().is_empty());
+
+        // Closing the round drops both the open editor and every committed
+        // host: they belong to the scenario that was open, and carrying them
+        // over would write one scenario's edit into the *next* one's save.
+        app.network = None;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console opened the info editor");
+        assert!(app.developer_component_editor.is_some());
+        app.open_developer_object_list();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::CloseGame])
+            .expect("the console closed the round");
+        assert!(app.developer_component_editor.is_none());
+        assert!(app.developer_component_hosts.is_empty());
+        assert!(!app.developer_object_list_open);
     }
 
     // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
@@ -6255,8 +6325,7 @@
             );
         };
         assert_eq!(drop.id, definition.as_bytes());
-        // `DropFiles` adds the drop point to the view origin *unscaled* — the
-        // `WM_USER_DROPDEF` path beside it is the one that divides by scale.
+        // The drop point is the viewport's own, added to the view origin.
         assert_eq!(
             (drop.x, drop.y),
             (projection.target_x + local.0, projection.target_y + local.1)
