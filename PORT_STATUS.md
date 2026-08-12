@@ -424,31 +424,38 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
 ## Open
 
-- Open: **Hazard's in-round rule chooser has no automated coverage, so
-  clonk-org/clonk-rs#318 ("friendly fire is not honored") is unreproduced
-  rather than refuted.** `NOFF` (`Hazard.c4d/Rules.c4d/NoFriendlyFire.c4d`)
-  appears in no scenario's `[Game] Rules=`, and DefCore `MaxUserSelect` is
-  parsed but never read by either engine (`C4Def.cpp:169,297`), so the rule only
-  ever exists because `Hazard.c4d/Rules.c4d/Chooser.c4d` (`CHOS`, which the CTF
-  and melee scenarios *do* list) created it: the host walks a script menu keyed
-  by `GetDefinition(i, Chooser_Cat)` index, and `ConfigurationFinished2`
-  `CreateObject`s the definitions whose index it recorded. Hazard's default is
-  therefore friendly-fire ON, which is upstream behaviour, not a port defect.
+- Closed 2026-08-12: **Hazard friendly fire (clonk-org/clonk-rs#318, reported
+  against `AH_Predator`) is content behaviour, not a port defect.** `NOFF`
+  (`Hazard.c4d/Rules.c4d/NoFriendlyFire.c4d`) appears in no scenario's
+  `[Game] Rules=`, and DefCore `MaxUserSelect` is parsed but never read by
+  either engine (`C4Def.cpp:169,297`), so the rule only ever exists because
+  `Hazard.c4d/Rules.c4d/Chooser.c4d` (`CHOS`, which `AH_Predator` and the CTF
+  and melee scenarios *do* list) created it. `AH_Predator` additionally declares
+  no `[Teams]` at all and its `GAH_` goal sets no hostility, so every player is
+  team 0 and non-hostile: `CheckEnemy` skips the ownerless/team block for two
+  owned crew and lands on `if(FriendlyFire() && !findEnemy)`, which allows the
+  hit whenever `NOFF` is absent — and only the alien definitions answer
+  `~IgnoreFriendlyFire`, never `HZCK`. Hazard therefore ships friendly-fire ON
+  and teammate damage is upstream behaviour unless the host ticks the rule.
 
-  The engine halves of `CheckEnemy` (`Hazard.c4d/System.c4g/EnemyChecks.c`) are
-  pinned and correct: `allied_teammates_let_the_no_friendly_fire_rule_decline_a_hit`
-  covers team alliance plus the `ObjectCount(NOFF)` gate, and
-  `callbackless_effect_carries_its_var_on_an_ownerless_object` covers the
-  `OwnerlessTeam` effect var that carries an ownerless projectile's team.
-  `CreateMenu`'s command-object default, `AddMenuItem`'s old/new-style command
-  composition and typed-parameter source encoding, `IsIdentifier` and the
-  `C4MN_Add_*` masks all match the pin (`C4Script.cpp:1420-1597`,
-  `C4Strings.cpp:36-45`). What is *not* covered anywhere is the chooser
-  end-to-end — menu build, item activation, `DirectExec` of the composed
-  command, then rule creation — because no gate executes content script and the
-  flow needs a host player driving a menu. Until that is exercised in a live
-  round, a defect between item activation and `CreateObject` cannot be ruled
-  out.
+  Three tests pin the whole path. `allied_teammates_let_the_no_friendly_fire_rule_decline_a_hit`
+  covers team alliance (`C4Player::SetTeamHostility`, `C4Player.cpp:757,1022-1034`)
+  plus the `ObjectCount(NOFF)` gate; `callbackless_effect_carries_its_var_on_an_ownerless_object`
+  covers the `OwnerlessTeam` effect var that carries an ownerless projectile's
+  team; and `rule_chooser_creates_the_rule_whose_menu_index_was_toggled` drives
+  the chooser end to end — menu build, the index encoded into the command's
+  source text, `SelectMenuItem`, `menu_user_enter`'s `DirectExec` on the menu's
+  *command* object rather than the clonk holding the menu, then
+  `ConfigurationFinished2` creating exactly the toggled rule. Two chooseable
+  rules are registered so a reordered or off-by-one enumeration resolves to the
+  wrong one rather than to nothing. Note `C4MN_Add_ImgObject` rejects a row
+  whose `XPar` is not a live object (`C4Script.cpp:1670-1678`), which is why the
+  chooser draws each rule from a throwaway instance.
+
+  Still uncovered, and the reason the issue itself stays open pending the
+  reporter's round log: nothing executes real Hazard content, so this pins the
+  engine contract the chooser depends on rather than the shipped scripts
+  themselves.
 
 - Open: **Malformed and duplicate direct-recreation player sources still have
   edge semantics beyond the savegame-resume path.** Ordinary network, replay

@@ -6456,3 +6456,156 @@ func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
             .expect("energy change succeeds");
         assert_eq!(engine.objects[crate_idx].state.energy, 0);
     }
+
+    // Hazard's in-round rule chooser is the ONLY way its NoFriendlyFire rule
+    // ever exists: no scenario lists `NOFF` in `[Game] Rules=`, and DefCore
+    // MaxUserSelect is parsed but never read (C4Def.cpp:169,297). The chooser
+    // (Hazard.c4d/Rules.c4d/Chooser.c4d) identifies each rule purely by its
+    // GetDefinition(i, Chooser_Cat) index: OpenRuleMenu hands that index to
+    // AddMenuItem as the command Parameter, ChangeRuleConf records it in
+    // aRules, and ConfigurationFinished2 re-resolves the same index to
+    // CreateObject. So the index has to survive being encoded into the
+    // command's source text (C4Script.cpp:1513-1546,1556-1597) and re-parsed
+    // by the DirectExec that a menu Enter performs on the menu's COMMAND
+    // object rather than on the clonk holding the menu (C4Menu.cpp:498-523;
+    // C4ObjectMenu.cpp:505-527). A break anywhere along that chain creates
+    // the wrong rule or none, which presents exactly as the reported
+    // "Hazard ignores the no-friendly-fire setting".
+    #[test]
+    fn rule_chooser_creates_the_rule_whose_menu_index_was_toggled() {
+        let chooseable = "#strict\npublic func IsChooseable() { return(1); }\n";
+        let chooser_script = r#"#strict 2
+static const Chooser_Cat = 524384;
+local aRules;
+
+func Boot() { aRules = CreateArray(); return 1; }
+
+func OpenRuleMenu(object pClonk)
+{
+  CreateMenu(GetID(), pClonk);
+  for(var i=0, idR, def ; idR = GetDefinition(i, Chooser_Cat) ; i++)
+    if(DefinitionCall(idR, "IsChooseable") && !GetLength(FindObjects(Find_ID(idR))))
+      {
+      // C4MN_Add_ImgObject REJECTS the row unless XPar is a real object
+      // (C4Script.cpp:1670-1678), so the chooser draws each rule from a
+      // throwaway instance and removes it again.
+      def = CreateObject(idR, 0,0, -1);
+      AddMenuItem("%s", "ChangeRuleConf", idR, pClonk, 0, i, 0, 4, def);
+      RemoveObject(def);
+      }
+  return 1;
+}
+
+func ChangeRuleConf(id dummy, int i)
+{
+  if(!aRules[i])
+    aRules[i] = true;
+  else
+    aRules[i] = false;
+  return 1;
+}
+
+func ConfigurationFinished2()
+{
+  var i = 0;
+  for(var check in aRules)
+  {
+    if(check)
+      CreateObject(GetDefinition(i, Chooser_Cat), 10, 10, -1);
+    i++;
+  }
+  return 1;
+}
+
+func IndexOfNoff()
+{
+  for(var i=0 ; i < 20 ; i++)
+    if(GetDefinition(i, Chooser_Cat) == NOFF)
+      return i;
+  return -1;
+}
+
+func Pick(object pClonk, int item) { return SelectMenuItem(item, pClonk); }
+func RuleCounts() { return [ObjectCount(NOFF), ObjectCount(IGIB)]; }
+"#;
+        let mut engine = Engine::with_seed(5);
+        // Two chooseable rules, so an off-by-one or reordered enumeration
+        // resolves to the WRONG rule instead of merely to nothing. Category
+        // mirrors NoFriendlyFire.c4d/DefCore.txt: C4D_StaticBack|C4D_Rule.
+        for id in ["IGIB", "NOFF"] {
+            let mut rule = Definition::from_script(id, id, chooseable).expect("rule compiles");
+            rule.set_category(1 | 524_288);
+            engine.register_definition(rule).expect("rule registers");
+        }
+        engine
+            .register_script_definition("CHOS", "Chooser", chooser_script)
+            .expect("chooser registers");
+        engine
+            .register_script_definition("CLNK", "Clonk", "#strict\n")
+            .expect("clonk registers");
+
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        let chooser = engine
+            .spawn_object(SpawnConfig::new("CHOS").with_owner(-1))
+            .expect("chooser spawns");
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let index = engine.find_object_index(chooser).expect("chooser exists");
+            engine
+                .call_object_function(index, name, args)
+                .expect("call succeeds")
+        };
+        call(&mut engine, "Boot", Vec::new());
+        let noff_index = call(&mut engine, "IndexOfNoff", Vec::new());
+        assert!(
+            matches!(noff_index, Value::Int(index) if index >= 0),
+            "NOFF is enumerated under Chooser_Cat, got {noff_index:?}"
+        );
+        let Value::Int(noff_index) = noff_index else {
+            unreachable!("checked above")
+        };
+
+        call(
+            &mut engine,
+            "OpenRuleMenu",
+            vec![object_reference_value(clonk)],
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("the rule menu opened on the clonk, not on the chooser");
+        assert_eq!(
+            menu.command_object,
+            Some(chooser),
+            "CreateMenu's omitted command object defaults to cthr->Obj — the \
+             chooser — so ChangeRuleConf resolves there (C4Script.cpp:1431)"
+        );
+        let item = menu
+            .items
+            .iter()
+            .position(|item| item.item_id == "NOFF")
+            .expect("NOFF has a menu item");
+        assert_eq!(
+            menu.items[item].command,
+            format!("ChangeRuleConf(NOFF,{noff_index})"),
+            "the item command carries the definition index as source text"
+        );
+
+        call(
+            &mut engine,
+            "Pick",
+            vec![object_reference_value(clonk), Value::Int(item as i32)],
+        );
+        assert!(engine
+            .menu_user_enter(clonk, false)
+            .expect("menu enter runs"));
+        call(&mut engine, "ConfigurationFinished2", Vec::new());
+
+        assert_eq!(
+            call(&mut engine, "RuleCounts", Vec::new()),
+            Value::Array(vec![Value::Int(1), Value::Int(0)]),
+            "only the toggled rule is created, and ObjectCount sees it the \
+             way Hazard's NoFriendlyFire() reads it"
+        );
+    }
