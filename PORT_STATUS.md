@@ -3134,13 +3134,11 @@ an ordered-map model gap.
   data and never reaches one. Both Menu2 clients are covered — ClonkMars' Base
   order page (`Base.c4d/Script.c:115-131`) and the viewport size chooser, whose
   ranges use a string key and no item id (`Viewport.c4d/Script.c:61-62`).
-  Pinned by `mars_order_page_collapses_each_product_to_a_single_row`,
-  `mars_order_row_offers_both_steps_on_the_product_row`,
-  `mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one`,
-  `mars_order_row_stops_offering_a_step_it_cannot_take`,
-  `mars_order_row_moves_only_its_own_product_and_keeps_the_selection`,
-  `menu2_range_rows_collapse_for_a_string_key_without_a_symbol_too`,
-  `a_range_whose_condition_fails_collapses_to_one_inert_row`,
+  Pinned by
+  `mars_order_initial_page_exposes_compact_priced_quantities_and_undo`,
+  `mars_order_adjustment_controls_preserve_counts_costs_and_limits`,
+  `mars_order_selection_and_navigation_keep_the_active_product`,
+  `mars_viewport_ranges_keep_compact_rows_conditions_and_footer`,
   `collapsing_the_rows_spends_no_synchronized_draw`,
   `colour_markup_in_a_context_caption_costs_no_row_width` and
   `the_row_hint_is_localized_from_the_system_group`.
@@ -3183,15 +3181,12 @@ an ordered-map model gap.
   owner whether the close is denied (`C4Script.cpp:1525`), and Menu2 answers by
   aborting the template — row commands never hit it because `C4Menu::Enter`
   closes a non-permanent menu first (`C4Menu.cpp:517`), but a step control does.
-  Also pinned by `mars_order_row_steps_with_the_left_and_right_controls`,
-  `mars_order_arrows_still_navigate_off_a_product_row`,
-  `the_order_page_offers_undo_only_once_there_is_something_to_undo`,
-  `the_undo_row_stays_on_the_page_its_change_belongs_to`,
-  `every_product_shows_its_quantity_even_at_zero`,
-  `the_closing_row_says_which_of_its_two_jobs_it_is_doing`,
-  `escape_abandons_the_order_from_the_order_page`,
-  `an_unchosen_mode_row_is_blank_rather_than_crossed_out` and, through the real
-  app input layer,
+  Also pinned by
+  `mars_order_initial_page_exposes_compact_priced_quantities_and_undo`,
+  `mars_order_adjustment_controls_preserve_counts_costs_and_limits`,
+  `mars_order_selection_and_navigation_keep_the_active_product`,
+  `mars_order_exit_routes_keep_root_labels_and_escape_reachable` and, through
+  the real app input layer,
   `context_style_script_menu_reaches_command2_by_right_click_and_special2`.
   **Extended again 2026-08-04** with the running total that was left open.
   `ShowMenu` asks the menu's owner for a figure through
@@ -3221,9 +3216,9 @@ an ordered-map model gap.
   its widest row carries a quantity — and sizing the row from the count instead
   would change `ItemWidth` for every Context menu in every pack, which is why
   it is worked around in content. Pinned by
-  `the_order_page_shows_what_it_will_cost`,
-  `a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer` and
-  `a_product_row_reserves_the_column_its_quantity_is_drawn_in`.
+  `mars_order_initial_page_exposes_compact_priced_quantities_and_undo`,
+  `mars_order_adjustment_controls_preserve_counts_costs_and_limits` and
+  `mars_viewport_ranges_keep_compact_rows_conditions_and_footer`.
 
 - **A refused default-interface multicast join falls back to per-interface
   joins** (`join_discovery_multicast`, `multicast_targets`,

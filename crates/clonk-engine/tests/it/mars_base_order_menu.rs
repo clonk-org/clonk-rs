@@ -97,15 +97,24 @@ fn open_order_page(engine: &mut Engine) -> (i32, ObjectId) {
     (player, clonk)
 }
 
-#[test]
-fn mars_order_page_collapses_each_product_to_a_single_row() {
+fn reopen_order_page(engine: &mut Engine, clonk: ObjectId) {
+    let index = engine.find_object_index(clonk).expect("clonk remains live");
+    engine.objects[index]
+        .state
+        .menu
+        .as_mut()
+        .expect("the Call Capsule page is open")
+        .selection = ORDER_SUBMENU_ROW;
+    engine
+        .menu_user_enter(clonk, false)
+        .expect("selecting Order reopens the submenu");
+}
+
+fn mars_order_page_collapses_each_product_to_a_single_row(engine: &Engine, clonk: ObjectId) {
     // Fossae sells five products (01_Fossae.c4s Scenario.txt [Player1]
     // HomeBaseMaterial=CNKT=6;PIKT=3;METL=10;PSTC=10;WIRO=3), so the shipped
     // three-rows-per-product expansion produced 16 rows for them.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
-    let captions: Vec<String> = items(&engine, clonk)
+    let captions: Vec<String> = items(engine, clonk)
         .into_iter()
         .map(|item| item.caption)
         .collect();
@@ -116,16 +125,12 @@ fn mars_order_page_collapses_each_product_to_a_single_row() {
     );
 }
 
-#[test]
-fn mars_order_row_offers_both_steps_on_the_product_row() {
+fn mars_order_row_offers_both_steps_on_the_product_row(engine: &Engine, clonk: ObjectId) {
     // The surviving row is the product row: it keeps the definition symbol and
     // the ordered quantity the engine draws as "Nx" (C4Menu.cpp:198-207), and
     // carries both activations — Command on a left enter, Command2 on a right
     // one (C4Menu.cpp:512-514).
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
-    let row = items(&engine, clonk).swap_remove(0);
+    let row = items(engine, clonk).swap_remove(0);
     assert_eq!(
         row.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)      ",
         "the row advertises both steps from the first frame, the one its limits \
@@ -141,15 +146,14 @@ fn mars_order_row_offers_both_steps_on_the_product_row() {
     assert_eq!(row.item_id, "CNKT", "the product keeps its own symbol");
 }
 
-#[test]
-fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
+fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one(
+    engine: &mut Engine,
+    clonk: ObjectId,
+) {
     engine
         .menu_user_enter(clonk, false)
         .expect("a left enter on the first product runs its command");
-    let ordered = items(&engine, clonk).swap_remove(0);
+    let ordered = items(engine, clonk).swap_remove(0);
     assert_eq!(ordered.count, 1, "one construction kit is on the order");
     assert_eq!(
         ordered.caption, "Construction kit - 10{{GOLD}} (+1/-1)      ",
@@ -163,7 +167,7 @@ fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
     engine
         .menu_user_enter(clonk, true)
         .expect("a right enter runs Command2");
-    let cleared = items(&engine, clonk).swap_remove(0);
+    let cleared = items(engine, clonk).swap_remove(0);
     assert_eq!(cleared.count, 0, "the order is empty again");
     assert_eq!(
         cleared.caption, "Construction kit - 10{{GOLD}} (+1/<c 888888>-1</c>)      ",
@@ -171,15 +175,15 @@ fn mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one() {
     );
 }
 
-#[test]
-fn mars_order_row_steps_with_the_left_and_right_controls() {
+fn mars_order_row_steps_with_the_left_and_right_controls(
+    engine: &mut Engine,
+    player: i32,
+    clonk: ObjectId,
+) {
     // The reporter could only ever increase, because -1 lives on an
     // activation nothing on screen names. Left/Right are dead keys in a
     // one-column menu (C4Menu.cpp:433-457), so the override claims them for
     // the selected product — the horizontal-axis-adjusts-a-value convention.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (player, clonk) = open_order_page(&mut engine);
-
     for _ in 0..3 {
         engine
             .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
@@ -200,12 +204,13 @@ fn mars_order_row_steps_with_the_left_and_right_controls() {
     );
 }
 
-#[test]
-fn mars_order_arrows_still_navigate_off_a_product_row() {
+fn mars_order_arrows_still_navigate_off_a_product_row(
+    engine: &mut Engine,
+    player: i32,
+    clonk: ObjectId,
+) {
     // The closing row is not a range, so the arrows must fall back to the
     // shipped selection move there rather than swallowing the input.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (player, clonk) = open_order_page(&mut engine);
     let closing_row = 5;
     let index = engine.find_object_index(clonk).expect("clonk remains live");
     engine.objects[index]
@@ -321,16 +326,13 @@ fn an_affordable_order_is_delivered() {
     );
 }
 
-#[test]
-fn a_product_row_reserves_the_column_its_quantity_is_drawn_in() {
+fn a_product_row_reserves_the_column_its_quantity_is_drawn_in(engine: &Engine, clonk: ObjectId) {
     // C4Menu sizes a Context row from its caption and symbol only
     // (C4Menu.cpp:648-662) but draws the count right-aligned at the row's
     // right edge anyway (C4Menu.cpp:198-207), so the widest caption on the
     // page ends exactly where its own count starts and the two overprint.
     // Only the caption is measured, so only the caption can reserve the room.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-    let rows = items(&engine, clonk);
+    let rows = items(engine, clonk);
 
     // Construction kits stock 6 — one digit — and metal 10, which is two.
     assert!(
@@ -345,17 +347,13 @@ fn a_product_row_reserves_the_column_its_quantity_is_drawn_in() {
     );
 }
 
-#[test]
-fn the_order_page_shows_what_it_will_cost() {
+fn the_order_page_shows_what_it_will_cost(engine: &mut Engine, player: i32, clonk: ObjectId) {
     // Menu2 passes iExtra = 0 to CreateMenu, opting out of the one footer the
     // engine has for money: C4MN_Extra_Value draws a figure beside the wealth
     // symbol and arms the player's wealth HUD for the duration
     // (C4Menu.cpp:898-906). Without it the player composes an order with no
     // idea what it costs or what they can afford — and Fossae's stock is worth
     // six times its starting clunkers.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (player, clonk) = open_order_page(&mut engine);
-
     let menu = engine
         .debug_object_menu(clonk.as_u64())
         .flatten()
@@ -392,13 +390,9 @@ fn the_order_page_shows_what_it_will_cost() {
     );
 }
 
-#[test]
-fn a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer() {
+fn a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer(engine: &Engine, cursor: ObjectId) {
     // ShowRange is Menu2's generic widget and its other client is a viewport
     // size chooser, which has no money in it. The footer must stay off there.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let cursor = open_viewport_menu(&mut engine);
-
     let menu = engine
         .debug_object_menu(cursor.as_u64())
         .flatten()
@@ -414,15 +408,11 @@ fn a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer() {
     );
 }
 
-#[test]
-fn every_product_shows_its_quantity_even_at_zero() {
+fn every_product_shows_its_quantity_even_at_zero(engine: &Engine, clonk: ObjectId) {
     // C4Script.cpp:1726 turns a zero count into C4MN_Item_NoCount, so an
     // untouched order page showed no quantities at all and gave the player no
     // hint that the right-hand column is one. C4MN_Add_ForceCount keeps it.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
-    let counts: Vec<i32> = items(&engine, clonk)
+    let counts: Vec<i32> = items(engine, clonk)
         .iter()
         .take(5)
         .map(|item| item.count)
@@ -434,16 +424,16 @@ fn every_product_shows_its_quantity_even_at_zero() {
     );
 }
 
-#[test]
-fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
+fn the_order_page_offers_undo_only_once_there_is_something_to_undo(
+    engine: &mut Engine,
+    player: i32,
+    clonk: ObjectId,
+) {
     // Arrows cover the keyboard, but a mouse row is a single click target, so
     // -1 is still only on the right button there. One visible row that walks
     // the last change back means no part of composing an order is reachable
     // *only* through an input nothing on screen names.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (player, clonk) = open_order_page(&mut engine);
-
-    let untouched = items(&engine, clonk);
+    let untouched = items(engine, clonk);
     assert!(
         !untouched
             .iter()
@@ -455,7 +445,7 @@ fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
         .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
         .expect("ordering one construction kit");
 
-    let with_history = items(&engine, clonk);
+    let with_history = items(engine, clonk);
     assert_eq!(
         with_history.len(),
         untouched.len() + 1,
@@ -476,7 +466,7 @@ fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
         .selection = i32::try_from(undo_row).expect("row index fits");
     engine.menu_user_enter(clonk, false).expect("undo runs");
 
-    let undone = items(&engine, clonk);
+    let undone = items(engine, clonk);
     assert_eq!(
         undone[0].count, 0,
         "the construction kit is off the order again"
@@ -488,15 +478,16 @@ fn the_order_page_offers_undo_only_once_there_is_something_to_undo() {
     );
 }
 
-#[test]
-fn the_undo_row_stays_on_the_page_its_change_belongs_to() {
+fn the_undo_row_stays_on_the_page_its_change_belongs_to(
+    engine: &mut Engine,
+    player: i32,
+    clonk: ObjectId,
+) {
     // It names a product row, so it would be meaningless on the page above.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (player, clonk) = open_order_page(&mut engine);
     engine
         .player_in_com(player, clonk_engine::COM_MENU_RIGHT, 0)
         .expect("ordering one construction kit");
-    assert_eq!(items(&engine, clonk).len(), 7, "products, undo, Back");
+    assert_eq!(items(engine, clonk).len(), 7, "products, undo, Back");
 
     let index = engine.find_object_index(clonk).expect("clonk remains live");
     engine.objects[index]
@@ -508,22 +499,19 @@ fn the_undo_row_stays_on_the_page_its_change_belongs_to() {
     engine.menu_user_enter(clonk, false).expect("Back");
 
     assert_eq!(
-        items(&engine, clonk).len(),
+        items(engine, clonk).len(),
         4,
         "the Call Capsule page is unchanged by an order-page undo"
     );
 }
 
-#[test]
-fn an_unchosen_mode_row_is_blank_rather_than_crossed_out() {
+fn an_unchosen_mode_row_is_blank_rather_than_crossed_out(engine: &mut Engine, clonk: ObjectId) {
     // Menu2 renders an iconless enum item with the whole 64px cell from its
     // sheet: cell 3 is a green check for the chosen one and cell 4 a red cross
     // for the rest (Menu.c4d/Script.c:255-261). They are radio markers, but a
     // red cross beside "Only Sell" reads as forbidden, not as unselected. A
     // blank symbol says the same thing without the false warning.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-    let last = i32::try_from(items(&engine, clonk).len()).expect("fits") - 1;
+    let last = i32::try_from(items(engine, clonk).len()).expect("fits") - 1;
     let index = engine.find_object_index(clonk).expect("clonk remains live");
     engine.objects[index]
         .state
@@ -533,7 +521,7 @@ fn an_unchosen_mode_row_is_blank_rather_than_crossed_out() {
         .selection = last;
     engine.menu_user_enter(clonk, false).expect("Back");
 
-    let rows = items(&engine, clonk);
+    let rows = items(engine, clonk);
     assert_eq!(rows[0].caption, "Only Sell");
     assert_eq!(
         rows[0].image,
@@ -548,16 +536,12 @@ fn an_unchosen_mode_row_is_blank_rather_than_crossed_out() {
     );
 }
 
-#[test]
-fn the_closing_row_says_which_of_its_two_jobs_it_is_doing() {
+fn the_closing_row_says_which_of_its_two_jobs_it_is_doing(engine: &mut Engine, clonk: ObjectId) {
     // Shipped Menu2 captions the last row "Finished" on every page, but it
     // steps back out of a submenu and commits the whole template at the root
     // (Menu.c4d/Script.c:54,206-228) — two very different outcomes behind one
     // word and one green check.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
-    let order_page = items(&engine, clonk);
+    let order_page = items(engine, clonk);
     assert_eq!(
         order_page[order_page.len() - 1].caption,
         "Back",
@@ -575,7 +559,7 @@ fn the_closing_row_says_which_of_its_two_jobs_it_is_doing() {
     engine
         .menu_user_enter(clonk, false)
         .expect("Back returns to the Call Capsule page");
-    let root_page = items(&engine, clonk);
+    let root_page = items(engine, clonk);
     assert_eq!(root_page.len(), 4, "the Call Capsule page is back");
     assert_eq!(
         root_page[root_page.len() - 1].caption,
@@ -584,14 +568,14 @@ fn the_closing_row_says_which_of_its_two_jobs_it_is_doing() {
     );
 }
 
-#[test]
-fn escape_abandons_the_order_from_the_order_page() {
+fn escape_abandons_the_order_from_the_order_page(
+    engine: &mut Engine,
+    player: i32,
+    clonk: ObjectId,
+) {
     // Shipped MenuQueryCancel pops one path level, so closing from a submenu
     // reopened the page above and the ordering UI could not be dismissed
     // there at all (Menu.c4d/Script.c:208-212,230-235).
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (player, clonk) = open_order_page(&mut engine);
-
     engine
         .player_in_com(player, clonk_engine::COM_MENU_CLOSE, 0)
         .expect("closing the menu runs");
@@ -605,20 +589,16 @@ fn escape_abandons_the_order_from_the_order_page() {
     );
 }
 
-#[test]
-fn mars_order_row_stops_offering_a_step_it_cannot_take() {
+fn mars_order_row_stops_offering_a_step_it_cannot_take(engine: &mut Engine, clonk: ObjectId) {
     // Fossae stocks six construction kits, which is the range maximum
     // AddRangeChoice was given (Base.c4d/Script.c:125). Increase clamps there
     // (Menu.c4d/Script.c:184-187), so the row must stop advertising it.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
     for _ in 0..6 {
         engine
             .menu_user_enter(clonk, false)
             .expect("a left enter on the first product runs its command");
     }
-    let full = items(&engine, clonk).swap_remove(0);
+    let full = items(engine, clonk).swap_remove(0);
     assert_eq!(full.count, 6, "the whole stock is on the order");
     assert_eq!(
         full.caption, "Construction kit - 10{{GOLD}} (<c 888888>+1</c>/-1)      ",
@@ -633,20 +613,19 @@ fn mars_order_row_stops_offering_a_step_it_cannot_take() {
         .menu_user_enter(clonk, false)
         .expect("a left enter on a maxed row still runs its command");
     assert_eq!(
-        items(&engine, clonk).swap_remove(0).count,
+        items(engine, clonk).swap_remove(0).count,
         6,
         "the shipped BoundBy clamp is untouched"
     );
 }
 
-#[test]
-fn mars_order_row_moves_only_its_own_product_and_keeps_the_selection() {
+fn mars_order_row_moves_only_its_own_product_and_keeps_the_selection(
+    engine: &mut Engine,
+    clonk: ObjectId,
+) {
     // Both halves of the command matter: the typed parameter picks the range
     // to change and the row number is what ShowMenu re-selects afterwards
     // (Menu.c4d/Script.c:55,178-182).
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let (_player, clonk) = open_order_page(&mut engine);
-
     let metal_row = 2;
     let index = engine.find_object_index(clonk).expect("clonk remains live");
     engine.objects[index]
@@ -676,6 +655,62 @@ fn mars_order_row_moves_only_its_own_product_and_keeps_the_selection() {
     );
 }
 
+#[test]
+fn mars_order_initial_page_exposes_compact_priced_quantities_and_undo() {
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    mars_order_page_collapses_each_product_to_a_single_row(&engine, clonk);
+    mars_order_row_offers_both_steps_on_the_product_row(&engine, clonk);
+    a_product_row_reserves_the_column_its_quantity_is_drawn_in(&engine, clonk);
+    every_product_shows_its_quantity_even_at_zero(&engine, clonk);
+    the_order_page_offers_undo_only_once_there_is_something_to_undo(&mut engine, player, clonk);
+}
+
+#[test]
+fn mars_order_adjustment_controls_preserve_counts_costs_and_limits() {
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    mars_order_row_adds_on_a_left_enter_and_takes_back_on_a_right_one(&mut engine, clonk);
+    the_order_page_shows_what_it_will_cost(&mut engine, player, clonk);
+    for _ in 0..2 {
+        engine
+            .player_in_com(player, clonk_engine::COM_MENU_LEFT, 0)
+            .expect("resetting the first product after checking its price");
+    }
+    mars_order_row_steps_with_the_left_and_right_controls(&mut engine, player, clonk);
+    for _ in 0..2 {
+        engine
+            .player_in_com(player, clonk_engine::COM_MENU_LEFT, 0)
+            .expect("resetting the first product after checking arrow controls");
+    }
+    mars_order_row_stops_offering_a_step_it_cannot_take(&mut engine, clonk);
+}
+
+#[test]
+fn mars_order_selection_and_navigation_keep_the_active_product() {
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    mars_order_arrows_still_navigate_off_a_product_row(&mut engine, player, clonk);
+    mars_order_row_moves_only_its_own_product_and_keeps_the_selection(&mut engine, clonk);
+}
+
+#[test]
+fn mars_order_exit_routes_keep_root_labels_and_escape_reachable() {
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let (player, clonk) = open_order_page(&mut engine);
+
+    the_undo_row_stays_on_the_page_its_change_belongs_to(&mut engine, player, clonk);
+    reopen_order_page(&mut engine, clonk);
+    an_unchosen_mode_row_is_blank_rather_than_crossed_out(&mut engine, clonk);
+    reopen_order_page(&mut engine, clonk);
+    the_closing_row_says_which_of_its_two_jobs_it_is_doing(&mut engine, clonk);
+    reopen_order_page(&mut engine, clonk);
+    escape_abandons_the_order_from_the_order_page(&mut engine, player, clonk);
+}
+
 /// ClonkMars' other Menu2 client: a resolution chooser whose two ranges use a
 /// string key, carry no item id, and are switched off by picking a preset
 /// (Viewport.c4d/Script.c:50-66).
@@ -692,13 +727,12 @@ fn open_viewport_menu(engine: &mut Engine) -> ObjectId {
     cursor
 }
 
-#[test]
-fn menu2_range_rows_collapse_for_a_string_key_without_a_symbol_too() {
+fn menu2_range_rows_collapse_for_a_string_key_without_a_symbol_too(
+    engine: &Engine,
+    cursor: ObjectId,
+) {
     // The case whose composed command has to survive quoting.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let cursor = open_viewport_menu(&mut engine);
-
-    let rows = items(&engine, cursor);
+    let rows = items(engine, cursor);
     let captions: Vec<&str> = rows.iter().map(|item| item.caption.as_str()).collect();
     assert_eq!(
         captions.len(),
@@ -718,20 +752,16 @@ fn menu2_range_rows_collapse_for_a_string_key_without_a_symbol_too() {
     assert_eq!(axis.command2, "Adjust(\"X\",8,1)");
 }
 
-#[test]
-fn a_range_whose_condition_fails_collapses_to_one_inert_row() {
+fn a_range_whose_condition_fails_collapses_to_one_inert_row(engine: &mut Engine, cursor: ObjectId) {
     // Picking a preset resolution turns the two custom axes off
     // (Viewport.c4d/Script.c:61-62 guards them with MenuCond_Chosen). The
     // greyed branch keeps the shipped inert ShowMenu command and its greyed
     // symbol, but costs one row instead of three.
-    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
-    let cursor = open_viewport_menu(&mut engine);
-
     engine
         .menu_user_enter(cursor, false)
         .expect("choosing the first preset resolution runs its command");
 
-    let rows = items(&engine, cursor);
+    let rows = items(engine, cursor);
     assert_eq!(rows.len(), 11, "still one row per range, now inert");
     let axis = &rows[8];
     assert_eq!(
@@ -742,6 +772,16 @@ fn a_range_whose_condition_fails_collapses_to_one_inert_row() {
         axis.command, "ShowMenu(8)",
         "and keeps the shipped do-nothing command"
     );
+}
+
+#[test]
+fn mars_viewport_ranges_keep_compact_rows_conditions_and_footer() {
+    let mut engine = load_installed_scenario("ClonkMars.c4f/01_Fossae.c4s", 0);
+    let cursor = open_viewport_menu(&mut engine);
+
+    a_menu_whose_owner_prices_nothing_keeps_the_shipped_footer(&engine, cursor);
+    menu2_range_rows_collapse_for_a_string_key_without_a_symbol_too(&engine, cursor);
+    a_range_whose_condition_fails_collapses_to_one_inert_row(&mut engine, cursor);
 }
 
 #[test]
