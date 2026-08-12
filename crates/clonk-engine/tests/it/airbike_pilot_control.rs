@@ -15,6 +15,10 @@ use clonk_engine::{
 };
 
 const SCENARIO: &str = "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/AirbikeFight.c4s";
+/// `planet/System.c4g/EkeAirbikeSteering.c` replaces the shipped steering
+/// policy. These tests pin the oracle-exact chain, so they run without it; the
+/// divergence has its own tests in `airbike_hold_to_steer`.
+const STEERING_APPEND: &str = "EkeAirbikeSteering.c";
 
 /// One whole pixel per frame in `C4Fixed` raw units.
 const FIXED_ONE: i32 = 1 << 16;
@@ -123,7 +127,7 @@ fn seated(engine: &mut Engine, auto_stop: bool) -> (i32, ObjectId, ObjectId) {
 fn airbike_steering_accelerates_at_float_accel_up_to_the_float_physical() {
     let prepared = prepare_installed_scenario(SCENARIO, 0);
     for auto_stop in [false, true] {
-        let mut engine = prepared.instantiate();
+        let mut engine = prepared.instantiate_without_system_script(STEERING_APPEND);
         let (owner, _sft, airbike) = seated(&mut engine, auto_stop);
         assert_eq!(
             float_physical(&engine, airbike),
@@ -195,7 +199,7 @@ fn airbike_steering_accelerates_at_float_accel_up_to_the_float_physical() {
 fn airbike_hyperfly_boost_decays_one_float_step_every_three_frames() {
     let prepared = prepare_installed_scenario(SCENARIO, 0);
     for auto_stop in [false, true] {
-        let mut engine = prepared.instantiate();
+        let mut engine = prepared.instantiate_without_system_script(STEERING_APPEND);
         let (owner, _sft, airbike) = seated(&mut engine, auto_stop);
         tick(&mut engine, 3);
 
@@ -264,7 +268,7 @@ fn airbike_steering_is_identical_under_both_control_styles() {
     let prepared = prepare_installed_scenario(SCENARIO, 0);
     let mut traces = Vec::new();
     for auto_stop in [false, true] {
-        let mut engine = prepared.instantiate();
+        let mut engine = prepared.instantiate_without_system_script(STEERING_APPEND);
         let (owner, sft, airbike) = seated(&mut engine, auto_stop);
         let mut trace = Vec::new();
         for com in [COM_LEFT, COM_UP, COM_RIGHT, COM_LEFT | COM_DOUBLE] {

@@ -1,11 +1,15 @@
 /*-- Eke Reloaded: forward turn-key releases to the carried item --*/
 
 // clonk-rs divergence from LegacyClonk. The Eke SFT forwards ControlLeft and
-// ControlRight to its selected item (EkeReloaded.c4d/Creatures.c4d/SFT.c4d/
-// Script.c:40-104) but has no release counterpart, so an item that latches a
-// steering command never learns that the key went up. These appends complete
-// the pair; every item without a *Released callback is unaffected, because
-// ObjectCall on a missing function is a no-op.
+// ControlRight to its selected item and to the airbike it is sitting on
+// (EkeReloaded.c4d/Creatures.c4d/SFT.c4d/Script.c:40-104,279-295) but has no
+// release counterpart, so neither can learn that the key went up. These
+// appends complete the pair; every target without a *Released callback is
+// unaffected, because ObjectCall on a missing function is a no-op.
+//
+// The airbike is asked first and the selected item second, matching the order
+// the press handlers already use. See EkeAirbikeSteering.c for what the
+// airbike does with them.
 
 #strict
 
@@ -15,12 +19,40 @@
 
 func ControlLeftReleased()
 {
+  if (Control2Airbike("ControlLeftReleased"))  return(1);
   if (Control2Contents("ControlLeftReleased")) return(1);
   return(_inherited());
 }
 
 func ControlRightReleased()
 {
+  if (Control2Airbike("ControlRightReleased"))  return(1);
   if (Control2Contents("ControlRightReleased")) return(1);
   return(_inherited());
+}
+
+func ControlUpReleased()
+{
+  if (Control2Airbike("ControlUpReleased"))  return(1);
+  if (Control2Contents("ControlUpReleased")) return(1);
+  return(_inherited());
+}
+
+func ControlDownReleased()
+{
+  if (Control2Airbike("ControlDownReleased"))  return(1);
+  if (Control2Contents("ControlDownReleased")) return(1);
+  return(_inherited());
+}
+
+// `C4Object::CallControl` hands the crew member the live
+// `Coms2ComDir(PressedComs)` after every com it dispatches, but only for
+// AutoStopControl players (oracle C4Object.cpp:3321-3339). Forward it to the
+// airbike, which uses it to re-sync its held-direction state; Control2Airbike
+// cannot carry the second parameter.
+func ControlUpdate(object byObject, int comdir, bool dig, bool throw, bool special, bool special2)
+{
+  if (GetAction() eq "AirbikeFly")
+    ObjectCall(GetActionTarget(), "ControlUpdate", this(), comdir);
+  return(_inherited(byObject, comdir, dig, throw, special, special2));
 }
