@@ -1312,6 +1312,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unassociated_admission_failure_is_not_a_route_diagnostic() {
+        // OnConnectFail looks up the connection's client ID. A socket that
+        // never reached PID_Conn has none, so C++ only logs at info
+        // (src/C4Network2.cpp:1745-1755; src/C4Network2IO.cpp:395-431).
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        state.event_tx = event_tx;
+
+        handle_admission_failed(
+            99,
+            "connection admission from [2603:6011:c800:6644:e446:ea8c:39da:237f]:11113 failed: \
+             connection transport failed: I/O error: unexpected end of file"
+                .to_string(),
+            &mut state,
+        )
+        .await;
+
+        assert!(state.clients.contains_key(&7));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an unassociated peer close must not become a lobby route diagnostic"
+        );
+    }
+
+    #[tokio::test]
     async fn host_outbound_queue_is_lossless_beyond_the_udp_retransmit_window() {
         const PACKET_COUNT: i32 = 10_001;
 
@@ -15571,6 +15597,44 @@ mod tests {
         }
 
         canonical.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pre_admission_peer_close_does_not_emit_a_route_diagnostic() {
+        // Incoming TCP that closes before PID_Conn never associates a client.
+        // C4NetIOTCP reports recv()==0 as "connection closed"; OnDisconn and
+        // OnConnectFail log that at Network2IO/Network info. Those GUI sinks
+        // default to warn, so MainDlg::OnLog never sees it
+        // (src/C4NetIO.cpp recv==0 → "connection closed";
+        // src/C4Network2IO.cpp:395-431; src/C4Network2.cpp:1745-1755;
+        // src/C4Log.cpp GuiSink default).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut probe = crate::ControlTransport::new(stream);
+        assert!(matches!(
+            probe.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        drop(probe);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        while let Ok(Some(event)) = timeout_at(deadline, host_events.recv()).await {
+            match event {
+                HostEvent::RecoverableRouteDiagnostic { error, .. } => {
+                    panic!("pre-admission peer close reached the lobby diagnostic: {error}");
+                }
+                HostEvent::ClientConnectionFailed { client_id } => {
+                    panic!("pre-admission peer close created a logical client {client_id}");
+                }
+                _ => {}
+            }
+        }
+
         host.shutdown().await.unwrap();
     }
 

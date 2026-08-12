@@ -800,10 +800,19 @@ pub(crate) async fn handle_admission_failed(
         );
         apply_barrier_effects(retry_effects, state).await;
     }
+    let Some(client_id) = provisional_client_id
+        .map(|(_, client_id)| client_id)
+        .or(route_client_id)
+    else {
+        // A socket that never associated a client is C4Network2IO::OnDisconn /
+        // C4Network2::OnConnectFail at info. Those GUI sinks default to warn,
+        // so MainDlg::OnLog does not receive it (src/C4NetIO.cpp recv()==0;
+        // src/C4Network2IO.cpp:395-431; src/C4Network2.cpp:1745-1755;
+        // src/C4Log.cpp GuiSink default).
+        return;
+    };
     let event = HostEvent::RecoverableRouteDiagnostic {
-        client_id: provisional_client_id
-            .map(|(_, client_id)| client_id)
-            .or(route_client_id),
+        client_id: Some(client_id),
         error,
     };
     let _ = state.event_tx.send(event).await;
