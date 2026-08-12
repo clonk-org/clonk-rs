@@ -216,7 +216,7 @@ class CiLatencyTests(unittest.TestCase):
             "main-developer-feedback-rolling": "engine integration 1/2",
             "main-coverage-engine-and-frontend-units-rolling": "workspace quality",
             "main-coverage-report-rolling": "engine contracts",
-            "main-coverage-html-rolling": "app 10/12",
+            "main-coverage-html-rolling": "workspace unit and parity",
             "windows-landing-cache-rolling": "windows-smoke",
         }
         for group, claimant in claims.items():
@@ -229,8 +229,13 @@ class CiLatencyTests(unittest.TestCase):
             for group, claimant in claims.items()
             if group != "windows-landing-cache-rolling"
         }
+        linux_job = landing[
+            landing.index("  linux:") : landing.index("  windows-smoke:")
+        ]
+        linux_rows = set(re.findall(r"(?m)^          - name: (.+)$", linux_job))
         for group, claimant in linux_claims.items():
             with self.subTest(claimant=claimant):
+                self.assertIn(claimant, linux_rows)
                 self.assertIn(
                     f"matrix.name == '{claimant}' && '{group}'", landing
                 )
