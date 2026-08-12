@@ -1531,13 +1531,18 @@ impl Engine {
                 None
             };
             let walk_landscape = self.landscape.as_ref();
+            // `lLimit = FIXED100(pPhysical->Float)` comes off the LIVE
+            // physical with no zero special case, so Eke's airbike parks dead
+            // still when `SetPhysical("Float", 0, 2)` dismounts its pilot
+            // (EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:78-83,452-461).
+            let native_float_bounds = self.uses_native_float_bounds(idx, physical.float);
             let object = &mut self.objects[idx];
             // DFA_SWIM and DFA_FLOAT never apply gravity (no DoGravity call,
             // C4Object.cpp:4920-4970/:5268-5287); the legacy halved-gravity
             // paths keep it for physical-less fixtures.
             let physical_skips_gravity = match procedure {
                 ActionProcedure::Swim => physical.swim != 0,
-                ActionProcedure::Float => physical.float != 0,
+                ActionProcedure::Float => native_float_bounds,
                 _ => false,
             };
             // The C++ ExecAction default case (custom/DFA_NONE procedures,
@@ -1638,7 +1643,7 @@ impl Engine {
             }
             let mut pending_direction = None;
             match procedure {
-                ActionProcedure::Float if physical.float != 0 => {
+                ActionProcedure::Float if native_float_bounds => {
                     apply_float_physical_movement(
                         &mut object.fixed_velocity,
                         command_direction,
@@ -1820,7 +1825,7 @@ impl Engine {
             // synthetic PhysicsSettings terminal-speed bounds. Keep those
             // bounds for physical-less FLOAT fixtures that use the additive
             // MovementProfile convenience path.
-            let native_float = matches!(procedure, ActionProcedure::Float) && physical.float != 0;
+            let native_float = matches!(procedure, ActionProcedure::Float) && native_float_bounds;
             if !matches!(procedure, ActionProcedure::Flight | ActionProcedure::Lift)
                 && !native_float
             {

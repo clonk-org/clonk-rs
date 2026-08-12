@@ -1431,6 +1431,27 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Whether DFA_FLOAT movement for this object follows C++'s
+    /// `lLimit = FIXED100(pPhysical->Float)` bound (C4Object.cpp:5291-5309).
+    ///
+    /// C++ has no zero special case and no second path: `SetPhysical("Float",
+    /// 0, ...)` simply makes `lLimit` zero, which clamps both dirs to a dead
+    /// stop, and no DFA_FLOAT object ever takes gravity or a terminal-speed
+    /// bound. The port keeps an additive `MovementProfile` convenience for
+    /// fixture definitions that carry no Float physical at all, so the live
+    /// value alone cannot select the path: a definition that ships
+    /// `[Physical] Float` has to stay on the native path through every
+    /// runtime value a script gives it, zero included. Eke's airbike parks
+    /// itself exactly that way when its pilot dismounts
+    /// (EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:78-83,452-461).
+    pub(crate) fn uses_native_float_bounds(&self, idx: usize, live_float: i32) -> bool {
+        live_float != 0
+            || self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .is_some_and(|definition| definition.physical().float != 0)
+    }
+
     /// The definition retained by `C4ObjectInfo::pDef`. Unlike the object's
     /// current `Def`, this source survives `ChangeDef`.
     pub(crate) fn info_definition_physical(&self, idx: usize) -> Option<PhysicalInfo> {

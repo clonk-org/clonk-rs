@@ -1365,7 +1365,10 @@ impl Engine {
                             container_change,
                         )
                     };
-                    let physical_float = self.object_physical_without_fair_fill(idx).float;
+                    let native_float_bounds = self.uses_native_float_bounds(
+                        idx,
+                        self.object_physical_without_fair_fill(idx).float,
+                    );
                     let (new_owner, new_crew, new_status) = {
                         let object = &mut self.objects[idx];
                         let procedure = action_library.procedure_for_entry(
@@ -1373,7 +1376,7 @@ impl Engine {
                             object.state.action.act_map_index,
                         );
                         let native_float =
-                            matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+                            matches!(procedure, ActionProcedure::Float) && native_float_bounds;
                         if !matches!(procedure, ActionProcedure::Flight) && !native_float {
                             object.clamp_velocity(&self.physics);
                         }
@@ -1565,14 +1568,17 @@ impl Engine {
                 // returns a CommandBatch, so do not manufacture and fold an
                 // empty one for every real-content object. Preserve the one
                 // native tail operation that used to ride in that fold.
-                let physical_float = self.object_physical_without_fair_fill(idx).float;
+                let native_float_bounds = self.uses_native_float_bounds(
+                    idx,
+                    self.object_physical_without_fair_fill(idx).float,
+                );
                 let object = &mut self.objects[idx];
                 let procedure = action_library.procedure_for_entry(
                     &object.state.action.name,
                     object.state.action.act_map_index,
                 );
                 let native_float =
-                    matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+                    matches!(procedure, ActionProcedure::Float) && native_float_bounds;
                 if !matches!(procedure, ActionProcedure::Flight) && !native_float {
                     object.clamp_velocity(&self.physics);
                 }
@@ -3117,7 +3123,8 @@ impl Engine {
             }
         }
 
-        let physical_float = self.object_physical_without_fair_fill(index).float;
+        let native_float_bounds = self
+            .uses_native_float_bounds(index, self.object_physical_without_fair_fill(index).float);
         {
             let object = &mut self.objects[index];
             // Exact AssignRemoval callbacks have already stopped effects
@@ -3131,7 +3138,7 @@ impl Engine {
 
             let procedure = action_library
                 .procedure_for_entry(&object.state.action.name, object.state.action.act_map_index);
-            let native_float = matches!(procedure, ActionProcedure::Float) && physical_float != 0;
+            let native_float = matches!(procedure, ActionProcedure::Float) && native_float_bounds;
             if clamp_velocity && !matches!(procedure, ActionProcedure::Flight) && !native_float {
                 object.clamp_velocity(&self.physics);
             }

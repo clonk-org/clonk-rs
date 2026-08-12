@@ -29,6 +29,8 @@ shard_modules!(
     "engine-it-shard-1",
     action_attach,
     action_build,
+    airbike_pilot_control,
+    airbike_pilot_dismount,
     action_procedure,
     activate_entrance_native,
     bird_flight,
