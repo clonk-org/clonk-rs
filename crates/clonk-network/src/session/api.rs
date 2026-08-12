@@ -765,6 +765,14 @@ pub enum HostEvent {
         client_id: Option<ClientId>,
         error: String,
     },
+    /// A connection that failed before it named a client: a probe, a cancelled
+    /// join, or an admission the host refused. C++ logs each of these at info,
+    /// under the `warn` its GUI sink defaults to, so the lobby stays quiet
+    /// while the log still records why nobody joined
+    /// (src/C4Network2.cpp:1361,1745-1747; src/C4Log.cpp:307).
+    UnassociatedConnectionFailed {
+        error: String,
+    },
     /// A transport, protocol, or resource diagnostic while the host loop
     /// remains available. Terminal authoritative failures use `FatalError`.
     TransportError {

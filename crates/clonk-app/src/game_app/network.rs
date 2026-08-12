@@ -3741,6 +3741,16 @@ impl GameApp {
                     )?;
                     break;
                 }
+                if let NetworkEvent::UnassociatedConnectionFailed { error } = &event {
+                    // A probe, a cancelled join or a refused admission never
+                    // names a client. C++ logs all three at info, under the
+                    // warn its GUI sink defaults to, so this reaches the log
+                    // and not MainDlg::OnLog — the host can still read why a
+                    // join failed (src/C4Network2.cpp:1361,1745-1747;
+                    // src/C4Log.cpp:307).
+                    tracing::info!(message = %error, "unassociated network connection failed");
+                    continue;
+                }
                 let lobby_diagnostic_active =
                     self.classic_host_lobby_active() || self.joined_network_lobby_active();
                 if lobby_diagnostic_active {
@@ -3857,6 +3867,9 @@ impl GameApp {
                         NetworkEvent::ResourceDeriveUnsupported { .. } => None,
                         NetworkEvent::RecoverableRouteDiagnostic { .. } => unreachable!(
                             "recoverable route diagnostics are logged before the classic-lobby boundary"
+                        ),
+                        NetworkEvent::UnassociatedConnectionFailed { .. } => unreachable!(
+                            "unassociated connection failures are logged before the classic-lobby boundary"
                         ),
                         NetworkEvent::TransportDiagnostic { .. } => unreachable!(
                             "transport diagnostics are logged before the classic-lobby boundary"
@@ -4722,6 +4735,9 @@ impl GameApp {
                             "recoverable network route diagnostic"
                         );
                     }
+                    NetworkEvent::UnassociatedConnectionFailed { .. } => unreachable!(
+                        "unassociated connection failures are logged before this match"
+                    ),
                     NetworkEvent::TransportDiagnostic { client_id, error } => {
                         tracing::error!(
                             ?client_id,

@@ -1034,6 +1034,52 @@ fn recoverable_route_diagnostic_keeps_the_classic_host_lobby_open() {
 }
 
 #[test]
+fn an_unassociated_connection_failure_stays_out_of_the_classic_host_lobby() {
+    // A probe, a cancelled join or a refused admission never names a client.
+    // C4Network2 logs those at info — HandleConn's "connection by X blocked"
+    // and OnConnectFail's "connection to X failed" — which is under the warn
+    // C4LogSystem::GuiSink defaults to, so MainDlg::OnLog never receives them
+    // (src/C4Network2.cpp:1361,1745-1747; src/C4Log.cpp:307). The warn-level
+    // route diagnostic above is the contrast: it does reach the lobby.
+    let mut app = new_menu_app(320, 200);
+    install_test_classic_host_lobby(&mut app);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        player_name: "Host".to_string(),
+        prepared: None,
+    }));
+    let (manager, events) = NetworkManager::test_stub();
+    app.network = Some(manager);
+    let before = app
+        .classic_host_lobby
+        .as_ref()
+        .expect("classic lobby is installed")
+        .controller
+        .logs()
+        .len();
+    events
+        .send(NetworkEvent::UnassociatedConnectionFailed {
+            error: "connection admission from 127.0.0.1:11113 failed: wrong password".to_string(),
+        })
+        .test_value();
+
+    app.test_network_events();
+
+    assert!(app.classic_host_lobby_active());
+    assert!(app.network.is_some());
+    assert_eq!(
+        app.classic_host_lobby
+            .as_ref()
+            .expect("classic lobby remains")
+            .controller
+            .logs()
+            .len(),
+        before,
+        "an unassociated connection failure must not reach the lobby log"
+    );
+}
+
+#[test]
 fn peer_protocol_error_logs_and_keeps_the_classic_lobby_open() {
     // A malformed packet is logged and closes the offending connection,
     // but packet handling returns to the network loop; it does not abort

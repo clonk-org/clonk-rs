@@ -804,11 +804,17 @@ pub(crate) async fn handle_admission_failed(
         .map(|(_, client_id)| client_id)
         .or(route_client_id)
     else {
-        // A socket that never associated a client is C4Network2IO::OnDisconn /
-        // C4Network2::OnConnectFail at info. Those GUI sinks default to warn,
-        // so MainDlg::OnLog does not receive it (src/C4NetIO.cpp recv()==0;
-        // src/C4Network2IO.cpp:395-431; src/C4Network2.cpp:1745-1755;
-        // src/C4Log.cpp GuiSink default).
+        // A socket that never named a client is C4Network2IO::OnDisconn /
+        // C4Network2::OnConnectFail, and a refusal is HandleConn's "connection
+        // by X blocked" — all at info, under the warn its GUI sink defaults to.
+        // MainDlg::OnLog does not receive it; the log file still does, which is
+        // where a host reads why a join failed (src/C4NetIO.cpp:749;
+        // src/C4Network2IO.cpp:533-566; src/C4Network2.cpp:1361,1745-1747;
+        // src/C4Log.cpp:307).
+        let _ = state
+            .event_tx
+            .send(HostEvent::UnassociatedConnectionFailed { error })
+            .await;
         return;
     };
     let event = HostEvent::RecoverableRouteDiagnostic {

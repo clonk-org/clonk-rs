@@ -1382,10 +1382,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unassociated_admission_failure_is_not_a_route_diagnostic() {
+    async fn unassociated_admission_failure_is_logged_below_the_lobby() {
         // OnConnectFail looks up the connection's client ID. A socket that
-        // never reached PID_Conn has none, so C++ only logs at info
-        // (src/C4Network2.cpp:1745-1755; src/C4Network2IO.cpp:395-431).
+        // never reached PID_Conn has none, so C++ logs at info rather than the
+        // warn its GUI sink shows — it still records the failure
+        // (src/C4Network2.cpp:1745-1747; src/C4Network2IO.cpp:533-566;
+        // src/C4Log.cpp:307).
         let (outbound, _outbound_rx) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(7, outbound);
         let (event_tx, mut event_rx) = mpsc::channel(8);
@@ -1401,10 +1403,39 @@ mod tests {
         .await;
 
         assert!(state.clients.contains_key(&7));
-        assert!(
-            event_rx.try_recv().is_err(),
-            "an unassociated peer close must not become a lobby route diagnostic"
-        );
+        match event_rx.try_recv() {
+            Ok(HostEvent::UnassociatedConnectionFailed { error }) => {
+                assert!(error.contains("unexpected end of file"));
+            }
+            other => panic!("an unassociated peer close must still be recorded: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_admission_is_logged_below_the_lobby() {
+        // HandleConn logs every refusal — wrong engine, wrong password, a
+        // duplicate core — as `connection by X blocked: <reason>` at info. The
+        // socket never named a client, so the reason would otherwise be the
+        // only record a host has of why a join failed
+        // (src/C4Network2.cpp:1292-1330,1361).
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        state.event_tx = event_tx;
+
+        handle_admission_failed(
+            99,
+            "connection admission from 127.0.0.1:11113 failed: wrong password".to_string(),
+            &mut state,
+        )
+        .await;
+
+        match event_rx.try_recv() {
+            Ok(HostEvent::UnassociatedConnectionFailed { error }) => {
+                assert!(error.contains("wrong password"));
+            }
+            other => panic!("a refused admission must still be recorded: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -15180,14 +15211,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pre_admission_peer_close_does_not_emit_a_route_diagnostic() {
+    async fn pre_admission_peer_close_is_recorded_without_a_route_diagnostic() {
         // Incoming TCP that closes before PID_Conn never associates a client.
         // C4NetIOTCP reports recv()==0 as "connection closed"; OnDisconn and
-        // OnConnectFail log that at Network2IO/Network info. Those GUI sinks
-        // default to warn, so MainDlg::OnLog never sees it
-        // (src/C4NetIO.cpp recv==0 → "connection closed";
-        // src/C4Network2IO.cpp:395-431; src/C4Network2.cpp:1745-1755;
-        // src/C4Log.cpp GuiSink default).
+        // OnConnectFail log that at info. The GUI sink defaults to warn, so
+        // MainDlg::OnLog never sees it while the log file still does
+        // (src/C4NetIO.cpp:749; src/C4Network2IO.cpp:533-566;
+        // src/C4Network2.cpp:1745-1747; src/C4Log.cpp:307).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
@@ -15201,6 +15231,7 @@ mod tests {
         ));
         drop(probe);
 
+        let mut recorded = false;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
         while let Ok(Some(event)) = timeout_at(deadline, host_events.recv()).await {
             match event {
@@ -15210,9 +15241,11 @@ mod tests {
                 HostEvent::ClientConnectionFailed { client_id } => {
                     panic!("pre-admission peer close created a logical client {client_id}");
                 }
+                HostEvent::UnassociatedConnectionFailed { .. } => recorded = true,
                 _ => {}
             }
         }
+        assert!(recorded, "the closed socket left no record at all");
 
         host.shutdown().await.unwrap();
     }
@@ -17526,6 +17559,7 @@ mod tests {
                 Ok(Some(HostEvent::ClientLeft { .. }))
                 | Ok(Some(HostEvent::ClientConnectionFailed { .. }))
                 | Ok(Some(HostEvent::RecoverableRouteDiagnostic { .. }))
+                | Ok(Some(HostEvent::UnassociatedConnectionFailed { .. }))
                 | Ok(Some(HostEvent::UnhandledPacket { .. }))
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
                 Ok(Some(HostEvent::Direct { .. }))
