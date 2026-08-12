@@ -133,6 +133,11 @@ class CiLatencyTests(unittest.TestCase):
         ]
         coverage_report = qualification[
             qualification.index("  coverage:") : qualification.index(
+                "  coverage-html:"
+            )
+        ]
+        coverage_html = qualification[
+            qualification.index("  coverage-html:") : qualification.index(
                 "  developer-feedback:"
             )
         ]
@@ -151,6 +156,7 @@ class CiLatencyTests(unittest.TestCase):
         for diagnostic in (
             coverage_fragments,
             coverage_report,
+            coverage_html,
             developer_feedback,
             recording_host,
         ):
@@ -210,6 +216,7 @@ class CiLatencyTests(unittest.TestCase):
             "main-developer-feedback-rolling": "engine integration 1/2",
             "main-coverage-engine-and-frontend-units-rolling": "workspace quality",
             "main-coverage-report-rolling": "engine contracts",
+            "main-coverage-html-rolling": "app 10/12",
             "windows-landing-cache-rolling": "windows-smoke",
         }
         for group, claimant in claims.items():
@@ -236,7 +243,11 @@ class CiLatencyTests(unittest.TestCase):
                 group
                 for group in claims
                 if group.startswith("main-coverage-")
-                and group != "main-coverage-report-rolling"
+                and group
+                not in {
+                    "main-coverage-report-rolling",
+                    "main-coverage-html-rolling",
+                }
             },
             {f"main-coverage-{artifact}-rolling" for artifact in artifacts},
         )

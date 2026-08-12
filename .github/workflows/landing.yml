@@ -173,6 +173,7 @@ jobs:
           || github.event_name == 'merge_group' && matrix.name == 'app 7/12' && 'main-coverage-app-4-9-rolling'
           || github.event_name == 'merge_group' && matrix.name == 'app 8/12' && 'main-coverage-app-5-11-rolling'
           || github.event_name == 'merge_group' && matrix.name == 'app 9/12' && 'main-coverage-app-6-8-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 10/12' && 'main-coverage-html-rolling'
           || github.event_name == 'merge_group' && matrix.name == 'app 11/12' && 'main-coverage-engine-1-rolling'
           || github.event_name == 'merge_group' && matrix.name == 'app 12/12' && 'main-coverage-engine-2-rolling'
           || github.event_name == 'merge_group' && matrix.name == 'app netplay 1/2' && 'main-coverage-remaining-1-rolling'

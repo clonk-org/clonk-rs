@@ -216,43 +216,59 @@ class RustCoverageGateTests(unittest.TestCase):
 
     def test_coverage_reports_are_retained_when_the_floor_fails(self):
         coverage = job_block("coverage")
+        html = job_block("coverage-html")
         command_text = re.sub(r"\s+", " ", coverage.replace("\\\n", " "))
+        html_command_text = re.sub(r"\s+", " ", html.replace("\\\n", " "))
 
         self.assertIn(
             "--output target/coverage/lcov.info",
             command_text,
         )
+        self.assertNotIn("genhtml", coverage)
         self.assertIn(
             "genhtml target/coverage/lcov.info "
             "--output-directory target/coverage/html ",
-            command_text,
+            html_command_text,
         )
-        upload_step = coverage[coverage.index("- name: Upload Rust coverage reports") :]
+        upload_step = coverage[
+            coverage.index("- name: Upload merged Rust coverage") :
+        ]
         self.assertIn("target/coverage/lcov.info", upload_step)
-        self.assertIn("target/coverage/html", upload_step)
+        self.assertNotIn("target/coverage/html", upload_step)
         self.assertNotIn("path: target/coverage\n", upload_step)
         merge = coverage.index("- name: Merge Rust coverage fragments")
-        report = coverage.index("- name: Generate Rust coverage report")
         floor = coverage.index("- name: Enforce line coverage floor")
-        upload = coverage.index("- name: Upload Rust coverage reports")
-        self.assertLess(merge, report)
-        self.assertLess(report, floor)
+        upload = coverage.index("- name: Upload merged Rust coverage")
+        self.assertLess(merge, floor)
         self.assertLess(floor, upload)
         self.assertRegex(
             coverage,
-            r"(?s)- name: Upload Rust coverage reports\s+"
+            r"(?s)- name: Upload merged Rust coverage\s+"
             r"if: \$\{\{ always\(\) && inputs\.upload-diagnostics \}\}\s+"
             r"uses: actions/upload-artifact@"
             r"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1\s+"
             r"with:\s+"
             r"name: rust-coverage-\$\{\{ github\.run_id \}\}-"
             r"\$\{\{ github\.run_attempt \}\}\s+"
-            r"path: \|\s+"
-            r"target/coverage/lcov\.info\s+"
-            r"target/coverage/html\s+"
+            r"path: target/coverage/lcov\.info\s+"
             r"if-no-files-found: warn\s+"
             r"retention-days: 14",
         )
+        self.assertIn("name: Rust coverage HTML report", html)
+        self.assertIn("needs: coverage", html)
+        self.assertIn(
+            "always() && inputs.upload-diagnostics "
+            "&& needs.coverage.result != 'cancelled'",
+            html,
+        )
+        self.assertIn(
+            'group: "main-coverage-html-${{ inputs.concurrency-suffix }}"',
+            html,
+        )
+        self.assertIn("actions/download-artifact@", html)
+        self.assertIn("overwrite: true", html)
+        self.assertIn("target/coverage/lcov.info", html)
+        self.assertIn("target/coverage/html", html)
 
 
 if __name__ == "__main__":
