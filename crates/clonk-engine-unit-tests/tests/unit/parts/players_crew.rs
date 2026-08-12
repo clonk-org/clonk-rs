@@ -5797,3 +5797,163 @@ func Gates(object shot, object victim)
     );
     Ok(())
 }
+
+// The shape of Hazard's AH_Predator, which declares no [Teams] and whose co-op
+// GAH_ goal sets no hostility: every player is team 0 and nobody is hostile.
+// Two things have to stay true together, and they pull opposite ways, so both
+// are pinned here.
+//
+// A bullet is arbitrated by CheckEnemy (Hazard.c4d/System.c4g/EnemyChecks.c:101),
+// so an active NOFF makes FriendlyFire() false and the hit is declined.
+//
+// A blast is NOT. `C4Game::BlastObjects` (C4Game.cpp:1243-1296) filters on
+// Status, Contained, pLayer, the direct-hit box, Category, NoHorizontalMove,
+// range and the Grab/Vehicle/DFA_FLOAT exclusions — and on NOTHING else. There
+// is no owner, controller, team or hostility test anywhere in it, so a living
+// target takes DoEnergy(-level/2) + DoDamage(level/2) with the causing player
+// attached no matter who fired (C4Game.cpp:1281-1284). That is why the rule
+// cannot stop grenade damage in Hazard, where every relaunching player is
+// handed a Pistol plus grenade ammo (System.c4g/Arena.c:59-65) whose default
+// secondary fire creates GREN, and GREN's HitObject calls BlastObjects+Explode
+// with no CheckEnemy at all (GrenadeLauncher.c4d/Grenade.c4d/Script.c:62-67).
+//
+// Reported as clonk-org/clonk-rs#318. The blast leg is upstream behaviour,
+// identical in C++ — do NOT "fix" it by adding a hostility filter to the engine
+// blast, which would diverge from the oracle and desync.
+#[test]
+fn the_no_friendly_fire_rule_declines_a_bullet_but_never_a_blast() -> Result<(), EngineError> {
+    let hazard_check_enemy = r#"#strict 2
+global func NoFriendlyFire() { return(ObjectCount(NOFF)); }
+global func FriendlyFire() { return(!NoFriendlyFire()); }
+
+global func GetTeam(object pObject)
+{
+	if(!pObject)
+		if(!(pObject = this))
+			return 0;
+	if(GetOwner(pObject) == NO_OWNER) {
+		return EffectVar(0, pObject, GetEffect("OwnerlessTeam", pObject));
+	} else {
+		return GetPlayerTeam(GetOwner(pObject));
+	}
+}
+
+global func CheckEnemy(object pObj, object pObj2, bool findEnemy) {
+  if(!pObj) return false;
+  if(!pObj2)
+    pObj2 = this;
+  if(!pObj2) return false;
+  var own1 = GetOwner(pObj);
+  var own2 = GetOwner(pObj2);
+  if(Hostile(own1, own2)) {
+    return true;
+  }
+  var noown1 = (own1 == NO_OWNER);
+  var noown2 = (own2 == NO_OWNER);
+  var team1 = GetTeam(pObj);
+  var team2 = GetTeam(pObj2);
+  if(noown1 || noown2) {
+    if( (team1 == team2) && (team1 || team2)) { }
+	else if( !(team1 || team2) && noown1 && noown2) { }
+	else {
+	  if(!findEnemy)
+        return true;
+      if(pObj->~IsThreat()) {
+        return true;
+      }
+	}
+  }
+  if(FriendlyFire() && !findEnemy) {
+    if(!(pObj->~IgnoreFriendlyFire())
+	&& !(pObj2->~IgnoreFriendlyFire()) ) {
+		return true;
+	}
+  }
+  return false;
+}
+
+func Bullet(object shot, object victim)
+{
+    return [ObjectCount(NOFF), FriendlyFire(),
+            Hostile(GetOwner(shot), GetOwner(victim)),
+            GetPlayerTeam(GetOwner(shot)), GetPlayerTeam(GetOwner(victim)),
+            CheckEnemy(shot, victim)];
+}
+
+// GREN's HitObject, minus the Explode: BlastObjects with the shooter's
+// controller as the cause, exactly as Grenade.c4d/Script.c:66 issues it.
+func Grenade(object victim) { return BlastObjects(GetX(victim), GetY(victim), 20); }
+"#;
+    let mut engine = Engine::with_seed(0);
+    let mut rule =
+        Definition::from_script("NOFF", "No Friendly Fire", "#strict\n").expect("rule compiles");
+    rule.set_category(1 | 524_288);
+    engine.register_definition(rule)?;
+    let mut crew = Definition::from_script("HZCK", "Clonk", hazard_check_enemy)
+        .expect("check-enemy library compiles");
+    crew.set_category(CATEGORY_LIVING);
+    engine.register_definition(crew)?;
+
+    // No set_teams and no team on either join: AH_Predator's exact shape.
+    let first = engine
+        .join_player(lifecycle_join_config("Alice", Vec::new()))?
+        .number();
+    let mut second_config = lifecycle_join_config("Bob", Vec::new());
+    second_config.player_info_id = 2;
+    let second = engine.join_player(second_config)?.number();
+
+    engine.spawn_object(SpawnConfig::new("NOFF").with_owner(-1))?;
+    let shot = engine.spawn_object(
+        SpawnConfig::new("HZCK")
+            .with_owner(first)
+            .with_position(Vector2::new(100, 100)),
+    )?;
+    let victim = engine.spawn_object(
+        SpawnConfig::new("HZCK")
+            .with_owner(second)
+            .with_position(Vector2::new(104, 100))
+            .with_energy(50_000),
+    )?;
+
+    let index = engine.find_object_index(shot).expect("shooter remains");
+    let bullet = engine.call_object_function(
+        index,
+        "Bullet",
+        vec![
+            Value::Object(shot.as_u64()),
+            Value::Object(victim.as_u64()),
+        ],
+    )?;
+    assert_eq!(
+        bullet,
+        Value::Array(vec![
+            Value::Int(1),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Int(0),
+            Value::Int(0),
+            // `return false` folds to the nil stack slot below STRICT3
+            // (C4AulParse.cpp:1112) — falsy either way: no hit.
+            Value::Nil,
+        ]),
+        "with no teams and nobody hostile, the active rule declines the bullet"
+    );
+
+    let energy_before = engine.objects[engine.find_object_index(victim).expect("victim remains")]
+        .state
+        .energy;
+    let index = engine.find_object_index(shot).expect("shooter remains");
+    engine.call_object_function(index, "Grenade", vec![Value::Object(victim.as_u64())])?;
+    let victim_index = engine.find_object_index(victim).expect("victim remains");
+    assert!(
+        engine.objects[victim_index].state.energy < energy_before,
+        "the blast ignores the rule entirely and damages the teammate \
+         (C4Game.cpp:1281-1284 has no hostility test); energy stayed {}",
+        engine.objects[victim_index].state.energy
+    );
+    assert_eq!(
+        engine.objects[victim_index].state.controller, first,
+        "the causing player rides along on the blast damage"
+    );
+    Ok(())
+}
