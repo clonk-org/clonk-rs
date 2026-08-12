@@ -165,26 +165,41 @@ fn current_wgpu_vulkan_warnings_reach_stderr() {
 
 const CALLOOP_STALE_SOURCE_MARKER: &str =
     "[calloop] Received an event for non-existence source: TokenInner { id: 3, version: 4419, sub_id: 0 }";
+const CALLOOP_UNREGISTER_MARKER: &str =
+    "[calloop] Failed to unregister source from the polling system: Io(Os { code: 2 })";
 const CALLOOP_PING_MARKER: &str = "[calloop] Failed to write a ping";
 
-/// The Wayland key-repeat timer is reused rather than torn down, so this
-/// warning should no longer fire in a real session. If it does, it is a
-/// genuine calloop fault and must stay visible — same rule as the rest of
-/// the windowing stack.
+/// winit's Wayland backend re-inserts the key-repeat timer on every key event,
+/// so calloop discards the cancelled timer's already-due timeout and warns for
+/// a token it no longer knows. That is upstream's own reuse of a slab slot, it
+/// fires during ordinary play, and nothing here can act on it
+/// (clonk-org/clonk-rs#311).
+///
+/// Only that one message goes: `calloop::loop_logic` emits real faults too, and
+/// muting the module would take them with it.
 #[test]
-fn calloop_loop_logic_warnings_reach_stderr() {
+fn only_the_calloop_stale_source_line_stays_off_stderr() {
     if env::var_os(CHILD_MODE).is_some() {
         clonk_logging::init();
         tracing::warn!(target: "calloop::loop_logic", "{CALLOOP_STALE_SOURCE_MARKER}");
+        tracing::warn!(target: "calloop::loop_logic", "{CALLOOP_UNREGISTER_MARKER}");
         tracing::warn!(target: "calloop::sources::ping", "{CALLOOP_PING_MARKER}");
         return;
     }
 
-    let output = run_child("calloop_loop_logic_warnings_reach_stderr", None, None);
+    let output = run_child(
+        "only_the_calloop_stale_source_line_stays_off_stderr",
+        None,
+        None,
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(CALLOOP_STALE_SOURCE_MARKER),
-        "a loop_logic warning was suppressed: {stderr}"
+        !stderr.contains(CALLOOP_STALE_SOURCE_MARKER),
+        "a stale-source warning reached stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(CALLOOP_UNREGISTER_MARKER),
+        "the module's other warnings must stay visible: {stderr}"
     );
     assert!(
         stderr.contains(CALLOOP_PING_MARKER),

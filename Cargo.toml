@@ -47,7 +47,6 @@ publish = false
 
 [patch.crates-io]
 pixels = { path = "third_party/pixels" }
-winit = { path = "third_party/winit" }
 
 # The shipped profile. Thin LTO retains cross-crate optimization for the
 # simulation loop and C4Script tree-walk. One codegen unit keeps library runtime
