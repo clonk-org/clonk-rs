@@ -6,7 +6,7 @@ use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clonk_engine::LegacyCString;
 use socket2::{Protocol, Type};
@@ -48,6 +48,41 @@ fn canonical_legacy_charset_name(configured: &str) -> &'static str {
         "EASTEUROPE" => "CP1250",
         "UTF-8" => "UTF-8",
         _ => "CP1252",
+    }
+}
+
+/// How often a host repeats the announce it sends as it opens.
+const HOST_ANNOUNCE_REPEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// How long a host keeps repeating that announce before falling silent.
+const HOST_ANNOUNCE_REPEAT_WINDOW: Duration = Duration::from_secs(10);
+
+/// The bounded repeat that follows a host's one oracle-exact opening announce.
+///
+/// It exists so a browser already on screen sees a game the moment it opens
+/// rather than on its next probe, and so a single lost multicast datagram does
+/// not hide the game entirely. It stops: the probe reply path answers forever,
+/// exactly as C++ does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AnnounceSchedule {
+    next_announce_at: Instant,
+    quiet_after: Instant,
+}
+
+impl AnnounceSchedule {
+    /// `started_at` is when the advertiser sent its single opening announce.
+    fn started_at(started_at: Instant) -> Self {
+        Self {
+            next_announce_at: started_at + HOST_ANNOUNCE_REPEAT_INTERVAL,
+            quiet_after: started_at + HOST_ANNOUNCE_REPEAT_WINDOW,
+        }
+    }
+
+    fn take_due_announce_at(&mut self, now: Instant) -> bool {
+        if now >= self.quiet_after || now < self.next_announce_at {
+            return false;
+        }
+        self.next_announce_at = now + HOST_ANNOUNCE_REPEAT_INTERVAL;
+        true
     }
 }
 
@@ -492,6 +527,7 @@ async fn run_advertiser(
     if let Some(discovery) = discovery.as_ref() {
         announce(&discovery.0, &discovery.1, discovery_port, reference_port).await;
     }
+    let mut announces = AnnounceSchedule::started_at(Instant::now());
     let mut datagram = [0_u8; 64];
     loop {
         match stop.try_recv() {
@@ -513,6 +549,9 @@ async fn run_advertiser(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         if let Some(discovery) = discovery.as_ref() {
+            if announces.take_due_announce_at(Instant::now()) {
+                announce(&discovery.0, &discovery.1, discovery_port, reference_port).await;
+            }
             loop {
                 match discovery.0.try_recv_from(&mut datagram) {
                     Ok((size, _)) => {
@@ -628,4 +667,49 @@ fn create_discovery_socket(port: u16) -> io::Result<(std::net::UdpSocket, Vec<u3
     };
     socket.set_nonblocking(true)?;
     Ok((socket.into(), multicast_interfaces))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_started_host_repeats_its_discovery_announce_on_the_burst_interval() {
+        // Deliberate divergence. C4Network2IO::SetAcceptMode announces exactly
+        // once as the host opens (pinned oracle src/C4Network2IO.cpp:268-278;
+        // src/C4Network2Discover.cpp:67-72) and the host is silent afterwards
+        // until something probes it, so a single lost multicast datagram - UDP
+        // does not retransmit, and Wi-Fi carries multicast unacknowledged -
+        // hides the new game until the browser's own next probe. The repeat
+        // gives that announce more than one chance to land.
+        let started_at = Instant::now();
+        let mut schedule = AnnounceSchedule::started_at(started_at);
+
+        assert!(
+            !schedule.take_due_announce_at(started_at),
+            "the announce the advertiser already sent is not owed again"
+        );
+        assert!(!schedule.take_due_announce_at(
+            started_at + HOST_ANNOUNCE_REPEAT_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(schedule.take_due_announce_at(started_at + HOST_ANNOUNCE_REPEAT_INTERVAL));
+        assert!(schedule.take_due_announce_at(started_at + HOST_ANNOUNCE_REPEAT_INTERVAL * 2));
+    }
+
+    #[test]
+    fn a_host_falls_silent_after_its_announce_burst_window() {
+        // The burst covers the moment a game opens while browsers are already
+        // watching; a browser opened later is covered by its own first probe.
+        // It must not become a heartbeat: a C++ client opens a fresh query row
+        // and re-fetches the reference for every announce it sees, because
+        // AddReferenceQuery dedupes unretrieved rows only (pinned oracle
+        // src/C4StartupNetDlg.cpp:1133-1154,590-600), so a host that never
+        // stopped announcing would blink a query row on every C++ client on the
+        // group for as long as it hosted.
+        let started_at = Instant::now();
+        let mut schedule = AnnounceSchedule::started_at(started_at);
+
+        assert!(!schedule.take_due_announce_at(started_at + HOST_ANNOUNCE_REPEAT_WINDOW));
+        assert!(!schedule.take_due_announce_at(started_at + Duration::from_secs(3600)));
+    }
 }
