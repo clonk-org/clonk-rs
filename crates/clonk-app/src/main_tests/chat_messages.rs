@@ -1496,7 +1496,12 @@ fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
 
     app.test_key(VirtualKeyCode::KeyA, ElementState::Released);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
+    // `C4Game::DoKeyboardInput` clears its `PressedKeys` entry on every
+    // key-up ahead of the scope decision (C4Game.cpp:2143-2155), so a release
+    // the chat modal swallows still drops the physical latch. Only
+    // `scoreboard_tab_raw_pressed`, which has no oracle counterpart and is
+    // maintained inside the scoreboard route, survives to the close below.
+    assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     assert!(app.scoreboard_tab_raw_pressed);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);

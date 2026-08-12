@@ -2315,6 +2315,7 @@ impl GameApp {
             gamepad_bindings,
             local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
+            engine_key_repeated: false,
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),

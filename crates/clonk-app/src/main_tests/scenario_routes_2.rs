@@ -2342,3 +2342,92 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
         Some("Theme*")
     );
 }
+
+/// A modal that consumes a key-up must not leave the held-key latch set.
+///
+/// `C4Game::DoKeyboardInput` writes its `PressedKeys` map as its very first
+/// statement, before keyboard scope and before any dialog claim
+/// (`C4Game.cpp:2143-2155`), so the release always clears the latch. If the
+/// port only cleared it at the end of the key chain, the next genuine press
+/// would carry `fRepeated` and `C4Game::LocalControlKey`'s AutoStopControl arm
+/// (`C4Game.cpp:3566-3570`) would swallow it before `C4Player::InCom` ever ran
+/// — one steering input lost per modal.
+///
+/// Jump'n'Run is the style a new player is created with, and the seated Eke
+/// pilot is `Procedure=ATTACH`, which neither `C4Object::DirectCom` switch
+/// handles, so the script override is the airbike's only input.
+#[test]
+fn running_modal_key_up_does_not_swallow_the_next_airbike_steering_press() {
+    let mut app = real_installed_scenario_app(
+        "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/AirbikeFight.c4s",
+        "Airbike modal pilot",
+    );
+    wait_for_running(&mut app);
+    let owner = app.local_owner;
+    app.engine
+        .player_mut(owner)
+        .expect("local player")
+        .control
+        .control_style = true;
+    let bike = app
+        .engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "AB5B" && object.owner == owner)
+        .map(|object| object.id)
+        .expect("InitializeClonk creates one airbike per player");
+    let bike_action = |app: &GameApp| {
+        app.engine
+            .object_snapshot(bike)
+            .expect("the airbike remains live")
+            .action
+            .name
+    };
+
+    // Steer left, then let the `LastCom` single-com timeout expire so the
+    // double-tap below starts from a clean buffer (`C4Player::ExecuteControl`,
+    // C4Player.cpp:1213-1229, C4DoubleClick = 10 frames).
+    app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
+    assert_eq!(
+        app.engine
+            .object_snapshot(bike)
+            .expect("the airbike remains live")
+            .command_direction,
+        CommandDirection::Left,
+        "the shipped Airbike::ControlLeft sets COMD_Left"
+    );
+    for _ in 0..15 {
+        app.test_update();
+    }
+
+    // Open the running abort dialog, release the steering key while that modal
+    // holds keyboard focus, then dismiss it.
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    assert!(
+        !app.message_dialogs.is_empty(),
+        "Escape opens a modal over the running game"
+    );
+    app.test_key(VirtualKeyCode::KeyZ, ElementState::Released);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    assert!(
+        app.message_dialogs.is_empty(),
+        "the abort dialog is dismissed again"
+    );
+
+    // Double-tap Left. Both presses have to arrive for `C4Player::InCom` to
+    // raise the second to `COM_Left | COM_Double` (C4Player.cpp:1532-1533) and
+    // reach `Airbike::ControlLeftDouble`, which is the boost
+    // (Airbike.c4d/Script.c:33-42). Losing the first press to a stale repeat
+    // latch leaves an ordinary `COM_Left`.
+    app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::KeyZ, ElementState::Released);
+    app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
+    assert_eq!(
+        bike_action(&app),
+        "Hyperfly",
+        "the first press after a modal must not be discarded as a repeat"
+    );
+}

@@ -2200,8 +2200,9 @@ impl GameApp {
                 // scoped bindings run. An exact in-scope control route below
                 // may still emit its release callback; a newly exclusive
                 // dialog suppresses that callback without a stuck latch.
+                // `handle_key` has already folded the edge into
+                // `pressed_engine_keys`.
                 self.scoreboard_tab_raw_pressed = false;
-                self.pressed_engine_keys.remove(&key);
                 false
             }
         };
@@ -2229,9 +2230,6 @@ impl GameApp {
             // Run this directly: the app's context-menu release barrier is an
             // input-safety latch, but C++ PRIO_PlrControl precedes PRIO_Context
             // and must still receive a rebound Tab on both edges.
-            if state == ElementState::Pressed {
-                self.pressed_engine_keys.insert(key);
-            }
             self.dispatch_engine_key_binding(key, state, raw_repeated)?;
             return Ok(true);
         }
@@ -2562,20 +2560,11 @@ impl GameApp {
             key == VirtualKeyCode::NumpadSubtract && c4_modifiers == ModifiersState::SHIFT,
         );
         // X11/SDL update C4KeyboardInput::PressedKeys from the raw physical
-        // edge before scope/priority dispatch. Keep the latch even when the
-        // first down belongs to a global or modified route, so a later
-        // in-scope AutoStop player binding sees the held-key repeat.
-        let raw_repeated = (help_binding
-            || music_binding
-            || (!c4_modifiers.is_empty()
-                && matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3)))
-            && match state {
-                ElementState::Pressed => !self.pressed_engine_keys.insert(key),
-                ElementState::Released => {
-                    self.pressed_engine_keys.remove(&key);
-                    false
-                }
-            };
+        // edge before scope/priority dispatch, which `handle_key` now does for
+        // every route, so a later in-scope AutoStop player binding sees the
+        // held-key repeat even when the first down belonged to a global or
+        // modified route.
+        let raw_repeated = self.engine_key_repeated;
         let screenshot = self.runtime_keyboard_binding_matches(
             "Screenshot",
             key,
@@ -2636,7 +2625,6 @@ impl GameApp {
                     .player(owner)
                     .is_some_and(|player| player.control_style());
                 if state == ElementState::Released && !control_style {
-                    self.pressed_engine_keys.remove(&key);
                     return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
                 }
                 self.dispatch_engine_key_binding(key, state, raw_repeated)?;
@@ -2666,7 +2654,6 @@ impl GameApp {
                     .player(owner)
                     .is_some_and(|player| player.control_style());
                 if state == ElementState::Released && !control_style {
-                    self.pressed_engine_keys.remove(&key);
                     return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
                 }
                 self.dispatch_engine_key_binding(key, state, raw_repeated)?;
@@ -3290,6 +3277,16 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        // `C4Game::DoKeyboardInput` updates its `PressedKeys` map as its very
+        // first statement, ahead of the keyboard-scope computation and of any
+        // dialog claim (`C4Game.cpp:2143-2155`), so a key-up always clears the
+        // latch whichever handler ends up consuming it. Resolve it here for
+        // the same reason: a modal that swallows the release must not leave a
+        // held-key latch behind, or the next genuine press looks like an
+        // auto-repeat and `C4Game::LocalControlKey`'s AutoStopControl arm
+        // (`C4Game.cpp:3566-3570`) drops it without ever reaching
+        // `C4Player::InCom`.
+        self.engine_key_repeated = self.note_physical_engine_key(key, state);
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
         self.note_classic_lobby_non_pointer_input();
@@ -4489,11 +4486,10 @@ impl GameApp {
         }
     }
 
-    fn handle_engine_key(
-        &mut self,
-        key: VirtualKeyCode,
-        state: ElementState,
-    ) -> Result<bool, EngineError> {
+    /// Fold one physical key edge into the held-key set and answer C++'s
+    /// `fRepeated` for it. Call once per event, at the entry of the key
+    /// chain, mirroring where `C4Game::DoKeyboardInput` writes `PressedKeys`.
+    fn note_physical_engine_key(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
         let already_pressed = match state {
             ElementState::Pressed => !self.pressed_engine_keys.insert(key),
             ElementState::Released => {
@@ -4501,8 +4497,15 @@ impl GameApp {
                 false
             }
         };
-        let repeated = engine_key_repeated(already_pressed, BACKEND_SYNTHESIZES_KEY_REPEAT);
-        self.dispatch_engine_key_binding(key, state, repeated)
+        engine_key_repeated(already_pressed, BACKEND_SYNTHESIZES_KEY_REPEAT)
+    }
+
+    fn handle_engine_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        self.dispatch_engine_key_binding(key, state, self.engine_key_repeated)
     }
 
     pub(crate) fn dispatch_engine_key_binding(

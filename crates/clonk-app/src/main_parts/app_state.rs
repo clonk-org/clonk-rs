@@ -104,6 +104,14 @@ pub(crate) struct GameApp {
     /// `fRepeated` semantics into `LocalControlKey` rather than looking like
     /// deliberate double presses.
     pub(crate) pressed_engine_keys: HashSet<VirtualKeyCode>,
+    /// `fRepeated` for the physical key event currently being routed.
+    ///
+    /// `C4Game::DoKeyboardInput` derives it from `PressedKeys` as its very
+    /// first statement — before keyboard scope is computed and before any
+    /// dialog can claim the event (`C4Game.cpp:2143-2155`) — then carries it
+    /// down as a parameter. `GameApp::handle_key` resolves it once at the same
+    /// point so every early-returning handler leaves the same latch behind.
+    pub(crate) engine_key_repeated: bool,
     /// Raw Tab state is tracked before modifier/dialog scope lookup because a
     /// held key can cross into or out of a PRIO_PlrControl binding.
     pub(crate) scoreboard_tab_raw_pressed: bool,

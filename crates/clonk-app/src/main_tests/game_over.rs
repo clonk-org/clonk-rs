@@ -3798,7 +3798,10 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         Some(GameOverFocus::Close)
     );
     assert!(dialog_press.scoreboard_tab_raw_pressed);
-    assert!(!dialog_press
+    // `C4Game::DoKeyboardInput` records the raw physical edge before the
+    // exclusive dialog can claim it (C4Game.cpp:2143-2155), which is what
+    // makes the bare repeat below a repeat rather than a fresh press.
+    assert!(dialog_press
         .pressed_engine_keys
         .contains(&VirtualKeyCode::Tab));
     dialog_press.dismiss_game_over_dialog();
@@ -5638,13 +5641,26 @@ fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
     let mut game_over = new_game_over_keyboard_app();
     game_over.test_modifiers(ModifiersState::SUPER);
     let before_game_over = runtime_global_ui_snapshot(&game_over);
-    for state in [
-        ElementState::Pressed,
-        ElementState::Pressed,
-        ElementState::Released,
+    for (state, held) in [
+        (ElementState::Pressed, true),
+        (ElementState::Pressed, true),
+        (ElementState::Released, false),
     ] {
         game_over.test_key(VirtualKeyCode::Pause, state);
-        assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
+        // `C4Game::DoKeyboardInput` records the raw physical edge for every
+        // key ahead of any scope decision (C4Game.cpp:2143-2155), including
+        // the keys the round-evaluation gate then discards. That latch is
+        // the only state this sequence may move.
+        let mut after = runtime_global_ui_snapshot(&game_over);
+        assert_eq!(
+            after.pressed_engine_keys.contains(&VirtualKeyCode::Pause),
+            held,
+            "the discarded Pause edge still updates the held-key latch"
+        );
+        after
+            .pressed_engine_keys
+            .clone_from(&before_game_over.pressed_engine_keys);
+        assert_eq!(after, before_game_over);
         assert_eq!(
             game_over.offline_halt_count, 1,
             "the Pause key cannot release OnShown's evaluation halt"
