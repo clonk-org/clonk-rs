@@ -4,6 +4,38 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-08-12
+
+### Bug fixes
+
+- Restore two diagnostics that log filters were swallowing (#332)
+- Quiet the calloop stale-source line without a winit fork (#329)
+- Reuse the Wayland key-repeat timer (#327)
+- Keep unassociated admission failures out of the lobby log (#326)
+- Mute calloop stale-source warnings on Wayland (#325)
+- Discover FluidSynth on Linux like libxmp (#324)
+
+### Features
+
+- Fly the Eke airbike hold-to-steer and fix two control-chain parity defects (#335)
+- Find new network games without a manual refresh (#323)
+- Wire object placement, the object list and the component editors (#313)
+
+### Performance
+
+- Improve Raspberry Pi frame throughput (#320)
+
+### Refactoring
+
+- Consolidate repeated test infrastructure (#331)
+- Consolidate repeated test infrastructure (#328)
+
+### Testing
+
+- Pin that the no-friendly-fire rule cannot stop blast damage (#333)
+- Pin the rule chooser that creates Hazard's no-friendly-fire rule (#322)
+- Pin the team alliance and rule gates Hazard hit checks read (#321)
+
 ## [0.10.0] - 2026-08-12
 
 ### Continuous integration
