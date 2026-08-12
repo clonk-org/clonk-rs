@@ -3565,6 +3565,9 @@ impl GraphicsSystem {
         self.active_fog_map = None;
         let pending_foreground = if capture_native_text {
             let mut foreground = Surface::new(content_width.max(1), content_height.max(1), format);
+            if capture_gpu_scene {
+                foreground.begin_gpu_scene_capture();
+            }
             foreground.begin_clonk_text_capture();
             let base_surface = std::mem::replace(&mut self.surface, foreground);
             self.draw_prepared_objects_at_frame(

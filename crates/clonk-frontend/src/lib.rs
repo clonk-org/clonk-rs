@@ -5728,6 +5728,62 @@ mod tests {
     }
 
     #[test]
+    fn ordered_gpu_capture_retains_viewport_foreground_commands() {
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = None;
+        snapshot.objects[0].position = Vector2::new(20, 20);
+        snapshot.objects[0].category = CATEGORY_FOREGROUND_FLAG | CATEGORY_PARALLAX_FLAG;
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let sprites = solid_sprite(
+            "TestObject",
+            4,
+            4,
+            Color::opaque(20, 220, 20),
+            Some(DefinitionRect::new(0, 0, 4, 4)),
+            false,
+        );
+        let mut graphics = GraphicsSystem::new(
+            128,
+            120,
+            120,
+            "Retained viewport foreground",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        // The app ends the base capture before drawing C4Viewport's final
+        // foreground-parallax pass into its next ordered layer
+        // (C4Viewport.cpp:1101-1102).
+        graphics.surface_mut().begin_clonk_text_capture();
+        graphics.begin_gpu_scene_capture();
+        let pending = graphics.render_frame_base(&snapshot, &viewports);
+        let _ = graphics.surface_mut().take_clonk_text_capture();
+        let _ = graphics.surface_mut().take_gpu_scene_capture();
+        graphics.surface_mut().begin_clonk_text_capture();
+        graphics.begin_gpu_scene_capture();
+        graphics.render_frame_foreground(&pending);
+        let scene = graphics
+            .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
+            .expect("ordered foreground capture was started");
+
+        assert_eq!(
+            scene
+                .textures
+                .iter()
+                .map(|texture| texture.extent)
+                .collect::<Vec<_>>(),
+            vec![[4, 4]],
+            "foreground sprites must not be flattened into a viewport-sized upload"
+        );
+        assert!(matches!(
+            scene.commands.as_slice(),
+            [GpuCommand::ObjectBatch { .. }]
+        ));
+    }
+
+    #[test]
     fn no_atlas_completions_match_snapshot_render_state() {
         let snapshot = make_snapshot();
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
