@@ -8,6 +8,7 @@ use crate::support::real_scenario::{
     join_local_player, join_local_player_on_team, load_installed_scenario, load_tutorial,
     prepare_installed_scenario, PreparedInstalledScenario,
 };
+use crate::support::EngineTestExt;
 use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{
     math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, Engine, EngineError,
@@ -78,37 +79,30 @@ fn wipfrace_get_scenario_val_uses_loaded_map_zoom_and_player_id_lists() {
 
     // Probe the same applied Game.C4S snapshot directly. C4ValueGetCompiler
     // flattens HomeBaseMaterial as ID,count pairs in file order.
-    engine
-        .register_definition(
-            Definition::from_script(
-                "SCVP",
-                "Scenario value probe",
-                r#"#strict
-public func Read(string entry, string section, int index)
-{
-    return GetScenarioVal(entry, section, index);
-}
-"#,
-            )
-            .expect("scenario-value probe compiles"),
-        )
-        .expect("scenario-value probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("SCVP"))
-        .expect("scenario-value probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe index");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "SCVP",
+            "Scenario value probe",
+            r#"#strict
+        public func Read(string entry, string section, int index)
+        {
+            return GetScenarioVal(entry, section, index);
+        }
+        "#,
+        ),
+    ));
+    let probe = engine.spawn_test_object(SpawnConfig::new("SCVP"));
+    let probe_index = engine.test_object_index(probe);
     let mut read = |entry: &str, section: &str, index: i32| {
-        engine
-            .call_object_function(
-                probe_index,
-                "Read",
-                vec![
-                    Value::String(entry.to_string().into()),
-                    Value::String(section.to_string().into()),
-                    Value::Int(index),
-                ],
-            )
-            .expect("GetScenarioVal probe succeeds")
+        engine.call_test_object_function(
+            probe_index,
+            "Read",
+            vec![
+                Value::String(entry.to_string().into()),
+                Value::String(section.to_string().into()),
+                Value::Int(index),
+            ],
+        )
     };
     assert_eq!(read("MapZoom", "Landscape", 0), Value::Int(9));
     assert_eq!(
@@ -133,14 +127,9 @@ fn arctic_lightning_spell_launches_three_creatorless_native_bolts() {
     // Objects.../Effects.../Lightning.c4d/Script.c:16-57).
     let mut engine = load_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
     let owner = join_local_player(&mut engine, "Arctic lightning parity");
-    let caster = engine
-        .crew_cursor(owner)
-        .expect("Arctic joins with an Inuit selected");
-    let caster_state = engine.object_snapshot(caster).expect("caster exists");
-    let caster_vertex = caster_state
-        .vertices
-        .first()
-        .expect("the shipped Inuit has vertex zero");
+    let caster = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let caster_state = engine.test_object_snapshot(caster);
+    let caster_vertex = crate::support::TestValueExt::test_value(caster_state.vertices.first());
     let origin = Vector2::new(
         caster_state.position.x + caster_vertex.x,
         caster_state.position.y + caster_vertex.y,
@@ -153,24 +142,20 @@ fn arctic_lightning_spell_launches_three_creatorless_native_bolts() {
         .filter(|object| object.definition_id == "FXL1")
         .map(|object| object.id)
         .collect::<Vec<_>>();
-    let spell = engine
-        .spawn_object(
-            SpawnConfig::new("LGT2")
-                .with_owner(owner)
-                .with_layer(caster),
-        )
-        .expect("the shipped Arctic spell spawns");
+    let spell = engine.spawn_test_object(
+        SpawnConfig::new("LGT2")
+            .with_owner(owner)
+            .with_layer(caster),
+    );
     let rng_before = engine.debug_rng_clone().count;
-    let spell_index = engine.find_object_index(spell).expect("spell exists");
+    let spell_index = engine.test_object_index(spell);
 
     assert_eq!(
-        engine
-            .call_object_function(
-                spell_index,
-                "Activate",
-                vec![Value::Object(caster.as_u64()), Value::Nil, Value::Nil],
-            )
-            .expect("the shipped LGT2 callback completes"),
+        engine.call_test_object_function(
+            spell_index,
+            "Activate",
+            vec![Value::Object(caster.as_u64()), Value::Nil, Value::Nil],
+        ),
         Value::Int(1)
     );
     assert!(
@@ -225,31 +210,24 @@ fn sky_race_team_generation_branch_uses_get_team_config() {
     // Skyrace has no Teams.txt but carries RVLR. C4TeamList::Load therefore
     // derives the exact live config [custom, active, hostility, dist,
     // switch, autogen, colors] = [0,1,1,0,0,1,0].
-    engine
-        .register_definition(
-            Definition::from_script(
-                "TCFG",
-                "Team configuration probe",
-                r#"#strict 2
-public func Read()
-{
-    return [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3),
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "TCFG",
+            "Team configuration probe",
+            r#"#strict 2
+        public func Read()
+        {
+            return [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3),
             GetTeamConfig(4), GetTeamConfig(5), GetTeamConfig(6),
             GetTeamConfig(7)];
-}
-"#,
-            )
-            .expect("team config probe compiles"),
-        )
-        .expect("team config probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("TCFG"))
-        .expect("team config probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe exists");
+        }
+        "#,
+        ),
+    ));
+    let probe = engine.spawn_test_object(SpawnConfig::new("TCFG"));
+    let probe_index = engine.test_object_index(probe);
     assert_eq!(
-        engine
-            .call_object_function(probe_index, "Read", Vec::new())
-            .expect("all seven team configuration values are callable"),
+        engine.call_test_object_function(probe_index, "Read", Vec::new()),
         Value::Array(vec![
             Value::Int(0),
             Value::Int(1),
@@ -266,39 +244,38 @@ public func Read()
     engine.set_teams(vec![TeamInfo::new(1, "Team 1", 0x00f4_0000)]);
     let player_name = "Sky Race generated-team member";
     let player = join_local_player_on_team(&mut engine, player_name, 1);
-    let race = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "RACE")
-        .map(|object| object.id)
-        .expect("Skyrace creates the shipped RACE goal");
-    let race_index = engine.find_object_index(race).expect("RACE remains live");
-    assert_eq!(
+    let race = crate::support::TestValueExt::test_value(
         engine
-            .call_object_function(
-                race_index,
-                "InitializePlayer",
-                vec![
-                    Value::Int(player),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Nil,
-                    Value::Int(1),
-                ],
-            )
-            .expect("the shipped Race team-generation branch completes"),
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "RACE")
+            .map(|object| object.id),
+    );
+    let race_index = engine.test_object_index(race);
+    assert_eq!(
+        engine.call_test_object_function(
+            race_index,
+            "InitializePlayer",
+            vec![
+                Value::Int(player),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Nil,
+                Value::Int(1),
+            ],
+        ),
         Value::Bool(true)
     );
 
     let scoreboard = engine.snapshot().hud.scoreboard;
-    let team_row = (1..scoreboard.row_count())
-        .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(1))
-        .expect("Race creates the team scoreboard row");
-    let caption = scoreboard
-        .cell(team_row, 0)
-        .and_then(|cell| cell.text())
-        .expect("the team row has a caption");
+    let team_row = crate::support::TestValueExt::test_value(
+        (1..scoreboard.row_count())
+            .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(1)),
+    );
+    let caption = crate::support::TestValueExt::test_value(
+        scoreboard.cell(team_row, 0).and_then(|cell| cell.text()),
+    );
     assert!(
         caption.contains(player_name),
         "autogenerated Race team caption should name its member: {caption:?}"
@@ -309,9 +286,7 @@ public func Read()
 fn sky_race_death_announces_before_the_shipped_relaunch_path() {
     let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
     let owner = join_local_player(&mut engine, "Sky Race death parity");
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Sky Race joins its Scenario.txt CLNK");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let carried_loam = engine
         .snapshot()
         .objects
@@ -328,30 +303,27 @@ fn sky_race_death_announces_before_the_shipped_relaunch_path() {
     // same real-content object dead. C++ FnDeathAnnounce emits exactly one
     // object message and returns true (C4Script.cpp:291-319); it never aborts
     // CLNK::Death before Skyrace's RelaunchPlayer callback can run.
-    engine
-        .register_definition(
-            Definition::from_script(
-                "DTHP",
-                "Death path probe",
-                r#"#strict
-public func Trigger(object target)
-{
-    target->SetAlive(false);
-    return target->Death(-1);
-}
-"#,
-            )
-            .expect("death-path probe compiles"),
-        )
-        .expect("death-path probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("DTHP"))
-        .expect("death-path probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe index");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "DTHP",
+            "Death path probe",
+            r#"#strict
+        public func Trigger(object target)
+        {
+            target->SetAlive(false);
+            return target->Death(-1);
+        }
+        "#,
+        ),
+    ));
+    let probe = engine.spawn_test_object(SpawnConfig::new("DTHP"));
+    let probe_index = engine.test_object_index(probe);
     assert_eq!(
-        engine
-            .call_object_function(probe_index, "Trigger", vec![Value::Object(clonk.as_u64())],)
-            .expect("the shipped Sky Race CLNK death callback completes"),
+        engine.call_test_object_function(
+            probe_index,
+            "Trigger",
+            vec![Value::Object(clonk.as_u64())],
+        ),
         Value::Int(1)
     );
 
@@ -380,9 +352,7 @@ public func Trigger(object target)
 fn sky_race_relaunch_selects_and_positions_the_new_loam_carrier() {
     let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
     let owner = join_local_player(&mut engine, "Sky Race relaunch parity");
-    let original = engine
-        .crew_cursor(owner)
-        .expect("Sky Race joins its initial CLNK");
+    let original = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // CLNK::Death reaches this real scenario callback after a BottomOpen
     // fall. Invoke that shipped callback synchronously so the assertions
@@ -390,50 +360,38 @@ fn sky_race_relaunch_selects_and_positions_the_new_loam_carrier() {
     // the replacement to the live C4Player::Crew inside MakeCrewMember;
     // SelectCrew and JoinPlayer(GetCrew(owner)) immediately see it
     // (C4Player.cpp:1194-1209; Skyrace.c4s/Script.c:75-91).
-    engine
-        .register_definition(
-            Definition::from_script(
-                "RLHP",
-                "Relaunch probe",
-                r#"#strict
-public func Trigger(int owner)
-{
-    return GameCallEx("RelaunchPlayer", owner);
-}
-"#,
-            )
-            .expect("relaunch probe compiles"),
-        )
-        .expect("relaunch probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("RLHP"))
-        .expect("relaunch probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe index");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "RLHP",
+            "Relaunch probe",
+            r#"#strict
+        public func Trigger(int owner)
+        {
+            return GameCallEx("RelaunchPlayer", owner);
+        }
+        "#,
+        ),
+    ));
+    let probe = engine.spawn_test_object(SpawnConfig::new("RLHP"));
+    let probe_index = engine.test_object_index(probe);
     assert_eq!(
-        engine
-            .call_object_function(probe_index, "Trigger", vec![Value::Int(owner)])
-            .expect("the shipped Sky Race RelaunchPlayer callback completes"),
+        engine.call_test_object_function(probe_index, "Trigger", vec![Value::Int(owner)]),
         Value::Int(1)
     );
-    let replacement = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.id != original && object.definition_id == "CLNK" && object.status.is_active()
-        })
-        .map(|object| object.id)
-        .expect("RelaunchPlayer creates a replacement CLNK");
+    let replacement = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.id != original && object.definition_id == "CLNK" && object.status.is_active()
+            })
+            .map(|object| object.id),
+    );
 
-    let replacement_snapshot = engine
-        .object_snapshot(replacement)
-        .expect("the replacement CLNK remains live");
-    let start_y = engine
-        .landscape()
-        .expect("Sky Race keeps its generated landscape")
-        .estimated_height()
-        / 2
-        - 15;
+    let replacement_snapshot = engine.test_object_snapshot(replacement);
+    let start_y =
+        crate::support::TestValueExt::test_value(engine.landscape()).estimated_height() / 2 - 15;
     assert!(
         (10..110).contains(&replacement_snapshot.position.x)
             && replacement_snapshot.position.y == start_y,
@@ -462,36 +420,33 @@ public func Trigger(int owner)
 fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
     let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
     let winner = join_local_player(&mut engine, "Sky Race winner");
-    let loser = engine
-        .join_player(JoinPlayerConfig {
-            name: "Sky Race loser".to_string(),
-            player_info_id: 2,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0x00_00_ff,
-            pref_color: 1,
-            pref_position: 1,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 2,
-        })
-        .expect("the second real Sky Race player joins")
-        .number();
-    let winner_clonk = engine
-        .crew_cursor(winner)
-        .expect("the winning player has a selected CLNK");
-    let race = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "RACE")
-        .map(|object| object.id)
-        .expect("Skyrace's Scenario.txt creates the RACE goal");
+    let loser = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Sky Race loser".to_string(),
+        player_info_id: 2,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0x00_00_ff,
+        pref_color: 1,
+        pref_position: 1,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 2,
+    }))
+    .number();
+    let winner_clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(winner));
+    let race = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "RACE")
+            .map(|object| object.id),
+    );
     assert!(
         engine
             .snapshot()
@@ -505,53 +460,44 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
     // the end offset to 100 pixels, so x=width-99 is the first winning pixel
     // (Objects.c4d/Goals.c4d/Race.c4d/Script.c:19-27;
     // Races.c4f/Skyrace.c4s/Script.c:61-62).
-    let landscape_width = engine
-        .landscape()
-        .expect("Sky Race keeps its generated landscape")
-        .width() as i32;
-    let y = engine
-        .object_snapshot(winner_clonk)
-        .expect("winner CLNK remains live")
-        .position
-        .y;
-    engine
-        .apply_object_update(
+    let landscape_width =
+        crate::support::TestValueExt::test_value(engine.landscape()).width() as i32;
+    let y = engine.test_object_snapshot(winner_clonk).position.y;
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             winner_clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(landscape_width - 99, y))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk"),
-        )
-        .expect("place the winner on the real finish pixel");
+        ),
+    );
 
-    let race_index = engine.find_object_index(race).expect("RACE remains live");
+    let race_index = engine.test_object_index(race);
     assert_eq!(
-        engine
-            .call_object_function(race_index, "GetWayPercent", vec![Value::Int(winner)])
-            .expect("the shipped race computes winner progress"),
+        engine.call_test_object_function(race_index, "GetWayPercent", vec![Value::Int(winner)]),
         Value::Int(100)
     );
-    engine
-        .tick_without_snapshot()
-        .expect("the shipped one-tick RACE timer accepts the finisher");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     let after_finish = engine.snapshot();
-    let winner_info_id = after_finish
-        .players
-        .iter()
-        .find(|player| player.id == winner)
-        .map(|player| player.player_info_id)
-        .expect("winner state remains present");
+    let winner_info_id = crate::support::TestValueExt::test_value(
+        after_finish
+            .players
+            .iter()
+            .find(|player| player.id == winner)
+            .map(|player| player.player_info_id),
+    );
     let scoreboard = &after_finish.hud.scoreboard;
-    let race_column = (0..scoreboard.column_count())
-        .find(|column| {
+    let race_column =
+        crate::support::TestValueExt::test_value((0..scoreboard.column_count()).find(|column| {
             scoreboard.cell(0, *column).map(|cell| cell.value())
                 == Some(i32::from_le_bytes(*b"RACE"))
-        })
-        .expect("RACE::Initialize creates its progress column");
-    let winner_row = (1..scoreboard.row_count())
-        .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(winner_info_id))
-        .expect("RACE::InitializePlayer creates the winner row by player-info ID");
+        }));
+    let winner_row = crate::support::TestValueExt::test_value(
+        (1..scoreboard.row_count())
+            .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(winner_info_id)),
+    );
     assert_eq!(
         scoreboard
             .cell(winner_row, race_column)
@@ -559,16 +505,18 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         Some((Some("100%"), 100)),
         "UpdateScoreboard writes the C++ finish percentage before sorting"
     );
-    let winner_state = after_finish
-        .players
-        .iter()
-        .find(|player| player.id == winner)
-        .expect("winner state remains present");
-    let loser_state = after_finish
-        .players
-        .iter()
-        .find(|player| player.id == loser)
-        .expect("loser state remains present");
+    let winner_state = crate::support::TestValueExt::test_value(
+        after_finish
+            .players
+            .iter()
+            .find(|player| player.id == winner),
+    );
+    let loser_state = crate::support::TestValueExt::test_value(
+        after_finish
+            .players
+            .iter()
+            .find(|player| player.id == loser),
+    );
     let loser_info_id = loser_state.player_info_id;
     assert_eq!(winner_state.status, PlayerStatus::Active);
     assert_eq!(loser_state.status, PlayerStatus::Eliminated);
@@ -578,9 +526,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         if engine.snapshot().game_over {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("advance the normal GOAL controller");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     let completed = engine.snapshot();
     assert!(
@@ -613,48 +559,26 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
 fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     let mut engine = load_installed_scenario("Races.c4f/MonsterRescue.c4s", 0);
     let owner = join_local_player(&mut engine, "Monster Rescue magic parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Monster Rescue joins its Scenario.txt MAGE");
-    assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("joined mage remains live")
-            .definition_id,
-        "MAGE"
-    );
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    assert_eq!(engine.test_object_snapshot(mage).definition_id, "MAGE");
 
-    let monster = engine
-        .object_snapshot(mage)
-        .expect("joined mage remains live")
-        .container
-        .expect("Monster Rescue puts MAGE inside its controlled monster");
-    assert_eq!(
-        engine
-            .object_snapshot(monster)
-            .expect("controlled monster remains live")
-            .definition_id,
-        "MONS"
-    );
+    let monster =
+        crate::support::TestValueExt::test_value(engine.test_object_snapshot(mage).container);
+    assert_eq!(engine.test_object_snapshot(monster).definition_id, "MONS");
 
     // Monster Rescue's shipped JoinPlayer gives the Magus 30 energy and then
     // caps its temporary Magic physical at the matching 30000 before putting
     // it into MONS (Script.c:55-70). This is already enough for its sole MBRG
     // spell (Scenario.txt:18-20; MBRG DefCore Value=10).
-    let energy_before = engine
-        .object_snapshot(mage)
-        .expect("mage snapshot after real scenario initialization")
-        .magic_energy;
+    let energy_before = engine.test_object_snapshot(mage).magic_energy;
     assert_eq!(energy_before, 30_000);
-    let mage_index = engine.find_object_index(mage).expect("mage index");
+    let mage_index = engine.test_object_index(mage);
     assert_eq!(
-        engine
-            .call_object_function(
-                mage_index,
-                "CheckMagicRequirements",
-                vec![Value::C4Id("MBRG".to_string()), Value::Bool(true)],
-            )
-            .expect("the real spell requirement check runs"),
+        engine.call_test_object_function(
+            mage_index,
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MBRG".to_string()), Value::Bool(true)],
+        ),
         Value::Int(3),
         "30 energy permits exactly three Value=10 MBRG casts"
     );
@@ -667,12 +591,8 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     assert!(engine
         .player_context_command(owner, monster)
         .expect("right-click queues the monster context command"));
-    engine
-        .tick_without_snapshot()
-        .expect("the mouse context command opens the monster menu");
-    let monster_menu = engine
-        .cursor_object_menu(owner)
-        .expect("the controlled monster opens its C++ context menu")
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    let monster_menu = crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
         .1
         .clone();
     let mage_submenu_index = monster_menu
@@ -689,31 +609,28 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
                 engine.object_snapshot(mage)
             )
         });
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, mage_submenu_index as i32)
-        .expect("select the MAGE submenu");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("enter the MAGE submenu");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        mage_submenu_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
-    let magic_index = engine
-        .cursor_object_menu(owner)
-        .expect("the submenu opens MAGE's own context")
-        .1
-        .items
-        .iter()
-        .position(|item| item.command.contains("ContextMagic"))
-        .expect("MAGE's own context exposes ContextMagic");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, magic_index as i32)
-        .expect("select ContextMagic");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("ContextMagic opens the spell menu");
+    let magic_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.command.contains("ContextMagic")),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        magic_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
-    let (_, menu) = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens the real script-created spell menu");
+    let (_, menu) = crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner));
     assert_eq!(
         menu.items
             .iter()
@@ -724,24 +641,15 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     );
     let spell_command = menu.items[0].command.clone();
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw enters the selected MBRG menu item");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("mage begins casting")
-            .action
-            .name,
+        engine.test_object_snapshot(mage).action.name,
         "Magic",
         "the real menu command `{spell_command}` starts DoMagic; menu now {:?}, locals {:?}",
         engine
             .cursor_object_menu(owner)
             .map(|(_, menu)| menu.clone()),
-        engine
-            .object_snapshot(mage)
-            .expect("mage snapshot for failed cast diagnostics")
-            .local_vars
+        engine.test_object_snapshot(mage).local_vars
     );
 
     // Magic's Delay=1 PhaseCall invokes CheckMagic after each phase advance;
@@ -749,9 +657,7 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     // Initialize immediately expands into four persistent FBRS segments and
     // removes both temporary bridge/spell objects.
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("the real magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     let snapshot = engine.snapshot();
     let magic_objects = snapshot
@@ -930,52 +836,42 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     // stMain ordering puts the newest equal-rank crew first, so C4Player's
     // initial cursor is the mage (C4ObjectList.cpp:110-195;
     // C4Player.cpp:1003-1020; Alchemy.c4s/Scenario.txt:17-19).
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with a crew cursor");
-    assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("Alchemy's selected mage remains live")
-            .definition_id,
-        "MCLK"
-    );
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    assert_eq!(engine.test_object_snapshot(mage).definition_id, "MCLK");
 
     // InitializePlayer places one seeded alchemy bag beside AHUT. Its Activate
     // callback delegates the ingredient move to the already attached MCLK
     // bag's Transfer callback (Bag.c4d/Script.c:5-14,148-160). Invoke that
     // shipped delegation target directly so this test isolates spell-system
     // parity from loose-item collection/activation.
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy InitializePlayer creates its seeded ingredient bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    let attached_bag_index = engine
-        .find_object_index(attached_bag)
-        .expect("attached bag index");
-    engine
-        .call_object_function(
-            attached_bag_index,
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped attached-bag callback transfers its ingredients");
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    engine.call_test_object_function(
+        attached_bag_index,
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
@@ -996,9 +892,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     // spell list is opened through ContextMagic (MagiClonk.c4d/Script.c:88-111,
     // 190-200), which C4ObjectMenu exposes as a selectable context action
     // (C4ObjectMenu.cpp:670-682).
-    engine
-        .player_in_com(owner, COM_SPECIAL, 0)
-        .expect("Special dispatches to the selected MCLK");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_SPECIAL, 0));
     assert!(
         engine.cursor_object_menu(owner).is_none(),
         "Special must not silently substitute for the full ContextMagic menu"
@@ -1018,18 +912,15 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         "ContextMagic reports that it opened the full spell menu"
     );
 
-    let raise_gravity_index = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens Alchemy's spell menu")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MGUP")
-        .expect("Alchemy's Scenario.txt magic list contains MGUP");
+    let raise_gravity_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MGUP"),
+    );
     for _ in 0..raise_gravity_index {
-        engine
-            .player_in_com(owner, COM_RIGHT, 0)
-            .expect("Right navigates the spell menu");
+        crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
     }
     assert_eq!(
         engine
@@ -1042,21 +933,10 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     );
 
     let gravity_before = engine.physics().gravity;
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw enters the selected spell item");
-    assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("MCLK begins its cast")
-            .action
-            .name,
-        "Magic"
-    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    assert_eq!(engine.test_object_snapshot(mage).action.name, "Magic");
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("the shipped Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
         engine.physics().gravity,
@@ -1079,24 +959,21 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("reopening Alchemy's shipped magic menu succeeds"));
-    let lower_gravity_index = engine
-        .cursor_object_menu(owner)
-        .expect("the lower-gravity spell menu opens")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MGDW")
-        .expect("Alchemy's Scenario.txt magic list contains MGDW");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, lower_gravity_index as i32)
-        .expect("the pointer selects MGDW by its menu index");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts the selected MGDW cast");
+    let lower_gravity_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MGDW"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        lower_gravity_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("the shipped Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
         engine.physics().gravity,
@@ -1131,20 +1008,20 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("reopening Alchemy's shipped magic menu succeeds"));
-    let airblast_index = engine
-        .cursor_object_menu(owner)
-        .expect("the second spell menu opens")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "ABLA")
-        .expect("Alchemy's Scenario.txt magic list contains ABLA");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, airblast_index as i32)
-        .expect("the pointer selects ABLA by its menu index");
-    let (_, airblast_menu) = engine
-        .cursor_object_menu(owner)
-        .expect("ABLA spell menu remains open");
+    let airblast_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "ABLA"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        airblast_index as i32,
+    ));
+    let (_, airblast_menu) =
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner));
     assert_eq!(
         airblast_menu
             .items
@@ -1153,9 +1030,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         Some("ABLA"),
         "menu selection targets ABLA before casting"
     );
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts the selected ABLA cast");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
     let aimer = (0..12)
         .find_map(|_| {
@@ -1163,15 +1038,14 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
             // pass. On the activation pass AIMR::Create must clear the two
             // C++ latches before Players.Execute observes them.
             {
-                let control = &mut engine
-                    .player_mut(owner)
-                    .expect("Alchemy player remains live")
+                let control = &mut crate::support::TestValueExt::test_value(engine
+                    .player_mut(owner))
                     .control;
                 control.last_com = i32::from(COM_RIGHT);
                 control.last_com_delay = 17;
                 control.last_com_down_double = 4;
             }
-            engine.tick_without_snapshot().expect("the ABLA Magic action advances");
+            crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
             engine
                 .snapshot()
                 .objects
@@ -1202,12 +1076,13 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         Some(aimer),
         "AIMR::Create transfers keyboard control to the aiming object"
     );
-    let player = engine
-        .snapshot()
-        .players
-        .into_iter()
-        .find(|player| player.id == owner)
-        .expect("Alchemy player snapshot remains present");
+    let player = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == owner),
+    );
     assert_eq!(
         player.viewports.first().and_then(|viewport| viewport.focus),
         Some(mage),
@@ -1226,31 +1101,19 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
     // DoEnter restores the mage cursor/view before MCLK::OnAimerEnter calls
     // ABLA::ActivateAngle (Aimer.c4d/Script.c:184-270;
     // Clonk.c4d/Script.c:1002-1013; Airblast.c4d/Script.c:30-48).
-    engine
-        .player_in_com(owner, COM_UP, 0)
-        .expect("Up steers the shipped AIMR");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
     assert_eq!(
-        engine
-            .object_snapshot(aimer)
-            .expect("AIMR remains live while steering")
-            .local_vars
-            .get("iAngle"),
+        engine.test_object_snapshot(aimer).local_vars.get("iAngle"),
         Some(&Value::Int(70)),
         "left-facing ABLA starts at 90 degrees and Up steps toward zero"
     );
     assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("mage remains live while aiming")
-            .action
-            .name,
+        engine.test_object_snapshot(mage).action.name,
         "AimMagic",
         "AimingAngle switches the mage into the shipped aiming action"
     );
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw accepts the shipped AIMR angle");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert_eq!(
         engine.crew_cursor(owner),
         Some(mage),
@@ -1263,12 +1126,13 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         "accepting the aim deactivates the AIMR controller: {:?}",
         engine.object_snapshot(aimer)
     );
-    let player = engine
-        .snapshot()
-        .players
-        .into_iter()
-        .find(|player| player.id == owner)
-        .expect("Alchemy player remains present after the cast");
+    let player = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == owner),
+    );
     assert_eq!(
         player.view_cursor, None,
         "AIMR::Close resets the temporary C4Player::ViewCursor"
@@ -1297,26 +1161,20 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy warp parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // ExecBase runs on Tick10 and claims AHUT for this player once its FLAG
     // has settled. MWP2 deliberately fails before that claim; wait for the
     // same C++ base lifecycle rather than manufacturing a shortcut.
-    let home = (0..20)
-        .find_map(|_| {
-            engine
-                .tick_without_snapshot()
-                .expect("Alchemy base lifecycle advances");
-            engine
-                .snapshot()
-                .objects
-                .iter()
-                .find(|object| object.definition_id == "AHUT" && object.base == owner)
-                .map(|object| object.id)
-        })
-        .expect("Alchemy's FLAG claims its AHUT on the C++ Tick10 cadence");
+    let home = crate::support::TestValueExt::test_value((0..20).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AHUT" && object.base == owner)
+            .map(|object| object.id)
+    }));
     for _ in 0..160 {
         if engine
             .object_snapshot(mage)
@@ -1324,9 +1182,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("Alchemy ready-crew Exit advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert!(
         engine
@@ -1338,59 +1194,52 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     // The starter bag has IMUS=4 and IGOL=3; MWP2 costs IMUS=3, IGOL=4.
     // Transfer it plus one harvested gold ingredient through the real ALC_
     // callback (Alchemy.c4s/Script.c:21-37; WarpToBase.c4d/DefCore.txt).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IMUS").copied() == Some(4)
-                && object.components.get("IGOL").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded warp ingredients");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    let harvested_gold = engine
-        .spawn_object(
-            SpawnConfig::new("ALC_").with_ordered_components(vec![("IGOL".to_owned(), 1)]),
-        )
-        .expect("a harvested gold ingredient bag spawns");
-    let attached_bag_index = engine
-        .find_object_index(attached_bag)
-        .expect("attached bag index");
-    for source in [seeded_bag, harvested_gold] {
+    let seeded_bag = crate::support::TestValueExt::test_value(
         engine
-            .call_object_function(
-                attached_bag_index,
-                "Transfer",
-                vec![Value::Object(source.as_u64())],
-            )
-            .expect("the shipped bag callback transfers warp ingredients");
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("IMUS").copied() == Some(4)
+                    && object.components.get("IGOL").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let harvested_gold = engine.spawn_test_object(
+        SpawnConfig::new("ALC_").with_ordered_components(vec![("IGOL".to_owned(), 1)]),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    for source in [seeded_bag, harvested_gold] {
+        engine.call_test_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(source.as_u64())],
+        );
     }
-    let bag = engine
-        .object_snapshot(attached_bag)
-        .expect("attached bag remains live");
+    let bag = engine.test_object_snapshot(attached_bag);
     assert_eq!(bag.components.get("IMUS"), Some(&4));
     assert_eq!(bag.components.get("IGOL"), Some(&4));
-    let mage_index = engine.find_object_index(mage).expect("mage index");
+    let mage_index = engine.test_object_index(mage);
     assert!(
         engine
-            .call_object_function(
+            .call_test_object_function(
                 mage_index,
                 "CheckMagicRequirements",
                 vec![Value::C4Id("MWP2".to_owned()), Value::Bool(true)],
             )
-            .expect("the shipped requirement callback runs")
             .as_bool(),
         "the attached bag satisfies MWP2 before the player casts"
     );
@@ -1398,29 +1247,24 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens its shipped magic menu"));
-    let warp_index = engine
-        .cursor_object_menu(owner)
-        .expect("Alchemy's spell menu opens")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MWP2")
-        .expect("Alchemy's Scenario.txt magic list contains MWP2");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, warp_index as i32)
-        .expect("the pointer selects MWP2 by menu index");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts MWP2's Magic action");
+    let warp_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MWP2"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        warp_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("MWP2's Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
-    let bag_after_cast = engine
-        .object_snapshot(attached_bag)
-        .expect("attached bag survives the cast");
+    let bag_after_cast = engine.test_object_snapshot(attached_bag);
     assert_eq!(
         (
             bag_after_cast.components.get("IMUS").copied(),
@@ -1445,38 +1289,28 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
             .any(|portal| portal.action.target2 == Some(home)),
         "the destination portal retains AHUT as its entrance target: {portals:?}"
     );
-    let start_portal = portals
-        .iter()
-        .find(|portal| portal.action.target.is_some())
-        .expect("the source WARP targets its paired destination");
+    let start_portal = crate::support::TestValueExt::test_value(
+        portals.iter().find(|portal| portal.action.target.is_some()),
+    );
 
     // Fast-forward the source aperture's purely visual 7×64-tick growth and
     // put the mage inside it. This keeps the suite fast while still exercising
     // WARP::FxWarpUSpellTimer,
     // WarpUSpellData, vertex removal/restoration, and TransferWarpObject's
     // entrance path rather than replacing them with a direct Enter call here.
-    engine
-        .apply_object_update(
-            start_portal.id,
-            ObjectUpdate::new().with_construction(FULL_CON),
-        )
-        .expect("fast-forward the source portal's visual growth");
-    let start_portal_index = engine
-        .find_object_index(start_portal.id)
-        .expect("source portal index");
-    engine
-        .call_object_function(start_portal_index, "Shrink", vec![])
-        .expect("the source portal's real final growth step activates it");
-    let original_vertices = engine
-        .object_snapshot(mage)
-        .expect("the mage remains live before entering the warp")
-        .vertices;
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        start_portal.id,
+        ObjectUpdate::new().with_construction(FULL_CON),
+    ));
+    let start_portal_index = engine.test_object_index(start_portal.id);
+    engine.call_test_object_function(start_portal_index, "Shrink", vec![]);
+    let original_vertices = engine.test_object_snapshot(mage).vertices;
     assert!(
         !original_vertices.is_empty(),
         "the real MCLK shape supplies vertices for WarpUSpellData to remove"
     );
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             mage,
             ObjectUpdate::new()
                 // Keep enough distance for WarpUSpellData to remain observable
@@ -1489,16 +1323,12 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
                 ))
                 .with_velocity(Vector2::ZERO)
                 .clear_container(),
-        )
-        .expect("place the mage inside the source warp aperture");
+        ),
+    );
 
     let warp_data_observed = (0..30).any(|_| {
-        engine
-            .tick_without_snapshot()
-            .expect("the real WARP pair advances");
-        let mage = engine
-            .object_snapshot(mage)
-            .expect("the mage remains live while the source warp pulls it");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let mage = engine.test_object_snapshot(mage);
         let active = mage
             .effects
             .iter()
@@ -1510,14 +1340,12 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         "the source portal must install WarpUSpellData before transferring the mage: mage={:?}; portal={start_portal:?}",
         engine.object_snapshot(mage),
     );
-    let live_warp_effect = engine
-        .object_snapshot(mage)
-        .and_then(|mage| {
+    let live_warp_effect =
+        crate::support::TestValueExt::test_value(engine.object_snapshot(mage).and_then(|mage| {
             mage.effects
                 .into_iter()
                 .find(|effect| effect.name == "WarpUSpellData" && effect.priority != 0)
-        })
-        .expect("WarpUSpellData remains live at the observed zero-vertex point");
+        }));
     assert_eq!(
         live_warp_effect.vars.len(),
         16,
@@ -1527,18 +1355,13 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     // C4Shape::CompileFunc persists the fixed vertex arrays independently
     // of VtxNum. A save while WARP has reduced VtxNum to zero must therefore
     // retain the dormant CNAT/friction slots that AddVertex restores later.
-    let saved_json = engine
-        .capture_state()
-        .to_json_string()
-        .expect("mid-warp engine state serializes");
-    let saved = clonk_engine::EngineState::from_json_str(&saved_json)
-        .expect("mid-warp engine state deserializes");
-    engine
-        .restore_state(&saved)
-        .expect("mid-warp engine state restores");
-    let restored_warping_mage = engine
-        .object_snapshot(mage)
-        .expect("the mage survives the mid-warp restore");
+    let saved_json =
+        crate::support::TestValueExt::test_value(engine.capture_state().to_json_string());
+    let saved = crate::support::TestValueExt::test_value(clonk_engine::EngineState::from_json_str(
+        &saved_json,
+    ));
+    crate::support::TestValueExt::test_value(engine.restore_state(&saved));
+    let restored_warping_mage = engine.test_object_snapshot(mage);
     assert!(
         restored_warping_mage
             .effects
@@ -1552,9 +1375,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     );
 
     let transferred = (0..80).any(|_| {
-        engine
-            .tick_without_snapshot()
-            .expect("the restored real WARP pair advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         engine
             .object_snapshot(mage)
             .is_some_and(|object| object.container == Some(home))
@@ -1571,9 +1392,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
             .cloned()
             .collect::<Vec<_>>()
     );
-    let warped_mage = engine
-        .object_snapshot(mage)
-        .expect("the warped mage remains live");
+    let warped_mage = engine.test_object_snapshot(mage);
     // TransferWarpObject enters AHUT before the zero return removes
     // WarpUSpellData. C4Object::Enter calls UpdateFace(true), restoring the
     // seven definition vertices; FxWarpUSpellDataStop then AddVertex-appends
@@ -1600,12 +1419,9 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .effects
         .iter()
         .any(|effect| effect.name == "WarpUSpellData" && effect.priority == 0));
-    engine
-        .tick_without_snapshot()
-        .expect("the mage's next effect Execute cleans WarpUSpellData");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(engine
-        .object_snapshot(mage)
-        .expect("the warped mage remains live")
+        .test_object_snapshot(mage)
         .effects
         .iter()
         .all(|effect| effect.name != "WarpUSpellData"));
@@ -1616,90 +1432,79 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy reincarnation parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
-    engine
-        .apply_object_update(
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             mage,
             ObjectUpdate::new()
                 .with_position(Vector2::new(500, 200))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk")
                 .clear_container(),
-        )
-        .expect("place MCLK safely in open sky before the death transition");
+        ),
+    );
 
     // Alchemy seeds INEC=1 and IASH=3, while XCRS consumes INEC=2 and
     // IASH=4. Transfer the real starter bag plus one harvested unit of each
     // through ALC_::Transfer (Alchemy.c4s/Script.c:21-37;
     // Reincarnation.c4d/DefCore.txt:7; Bag.c4d/Script.c:148-160).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("INEC").copied() == Some(1)
-                && object.components.get("IASH").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded reincarnation ingredients");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    let extra_ingredients = engine
-        .spawn_object(
-            SpawnConfig::new("ALC_")
-                .with_ordered_components(vec![("INEC".to_owned(), 1), ("IASH".to_owned(), 1)]),
-        )
-        .expect("a harvested ingredient bag spawns");
-    let attached_bag_index = engine
-        .find_object_index(attached_bag)
-        .expect("attached bag index");
-    for source in [seeded_bag, extra_ingredients] {
+    let seeded_bag = crate::support::TestValueExt::test_value(
         engine
-            .call_object_function(
-                attached_bag_index,
-                "Transfer",
-                vec![Value::Object(source.as_u64())],
-            )
-            .expect("the shipped bag callback transfers XCRS's ingredients");
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("INEC").copied() == Some(1)
+                    && object.components.get("IASH").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let extra_ingredients = engine.spawn_test_object(
+        SpawnConfig::new("ALC_")
+            .with_ordered_components(vec![("INEC".to_owned(), 1), ("IASH".to_owned(), 1)]),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    for source in [seeded_bag, extra_ingredients] {
+        engine.call_test_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(source.as_u64())],
+        );
     }
 
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens its shipped magic menu"));
-    let reincarnation_index = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens Alchemy's spell menu")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "XCRS")
-        .expect("Alchemy's Scenario.txt magic list contains XCRS");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, reincarnation_index as i32)
-        .expect("the menu selects XCRS");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts XCRS's Magic action");
+    let reincarnation_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "XCRS"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        reincarnation_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("XCRS's Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let protected = engine
-        .object_snapshot(mage)
-        .expect("the protected mage remains live");
+    let protected = engine.test_object_snapshot(mage);
     assert_eq!(protected.energy, 45_000, "XCRS sacrifices ten energy");
     assert!(protected
         .effects
@@ -1725,13 +1530,9 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
     // the object (C4Object.cpp:1162-1180). XCRS's Stop callback restores
     // Alive, denies removal, and installs IntReincDelay
     // (Reincarnation.c4d/Script.c:34-58).
-    let mage_index = engine.find_object_index(mage).expect("live mage index");
-    engine
-        .change_object_energy(mage_index, -100, 0, -1)
-        .expect("apply lethal reincarnation damage");
-    let reincarnating = engine
-        .object_snapshot(mage)
-        .expect("the reincarnating mage remains present");
+    let mage_index = engine.test_object_index(mage);
+    crate::support::TestValueExt::test_value(engine.change_object_energy(mage_index, -100, 0, -1));
+    let reincarnating = engine.test_object_snapshot(mage);
     assert!(reincarnating.alive, "XCRS revives MCLK during AssignDeath");
     assert_eq!(
         reincarnating.action.name, "Dead",
@@ -1752,116 +1553,99 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy group-heal parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
-    let patient = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "CLNK" && object.owner == owner && object.status.is_active()
-        })
-        .map(|object| object.id)
-        .expect("Alchemy also joins with a regular CLNK");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let patient = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "CLNK" && object.owner == owner && object.status.is_active()
+            })
+            .map(|object| object.id),
+    );
     for (object, position) in [
         (mage, Vector2::new(500, 200)),
         (patient, Vector2::new(530, 200)),
     ] {
-        engine
-            .apply_object_update(
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
                 object,
                 ObjectUpdate::new()
                     .with_position(position)
                     .with_velocity(Vector2::ZERO)
                     .with_action("Walk")
                     .clear_container(),
-            )
-            .expect("place both crew outdoors inside GGHG's range");
+            ),
+        );
     }
-    engine
-        .change_object_energy(
-            engine.find_object_index(patient).expect("patient index"),
-            -20,
-            0,
-            -1,
-        )
-        .expect("injure the group-heal patient");
-    let energy_before = engine
-        .object_snapshot(patient)
-        .expect("the injured CLNK remains live")
-        .energy;
+    crate::support::TestValueExt::test_value(engine.change_object_energy(
+        engine.test_object_index(patient),
+        -20,
+        0,
+        -1,
+    ));
+    let energy_before = engine.test_object_snapshot(patient).energy;
     assert_eq!(energy_before, 35_000);
 
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IMUS").copied() == Some(4)
-                && object.components.get("IGOL").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates GGHG's seeded ingredients");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    engine
-        .call_object_function(
-            engine
-                .find_object_index(attached_bag)
-                .expect("attached bag index"),
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped bag callback transfers GGHG's ingredients");
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("IMUS").copied() == Some(4)
+                    && object.components.get("IGOL").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
 
-    engine
-        .grant_player_magic(owner, "GGHG")
-        .expect("the Alchemy player learns GGHG from a scroll");
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "GGHG"));
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens its shipped magic menu"));
-    let heal_index = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens Alchemy's spell menu")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "GGHG")
-        .expect("the learned GGHG spell is selectable");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, heal_index as i32)
-        .expect("the menu selects GGHG");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts GGHG's Magic action");
+    let heal_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "GGHG"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        heal_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..50 {
-        engine
-            .tick_without_snapshot()
-            .expect("GGHG's healing effect advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
-    let caster = engine
-        .object_snapshot(mage)
-        .expect("the healing mage remains live");
+    let caster = engine.test_object_snapshot(mage);
     assert_eq!(caster.action.name, "Magic");
     assert!(caster
         .effects
         .iter()
         .any(|effect| effect.name == "GroupHealPSpell"));
-    let healed = engine
-        .object_snapshot(patient)
-        .expect("the patient remains live");
+    let healed = engine.test_object_snapshot(patient);
     assert!(
         healed.energy > energy_before,
         "GGHG repeatedly heals friendly crew within 80 pixels: caster={caster:?}; patient={healed:?}"
@@ -1887,94 +1671,82 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy artefact parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK cursor");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // The shipped loose bag contains three IGOL; transfer it through the
     // attached ALC_ callback so the real NMGE rule can pay MART's one-gold
     // recipe (Alchemy.c4s/Script.c:18-30; Artefact.c4d/DefCore.txt:7-9).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded ingredient bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK owns its attached ingredient bag");
-    engine
-        .call_object_function(
-            engine
-                .find_object_index(attached_bag)
-                .expect("attached bag index"),
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped bag callback transfers MART's ingredients");
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
 
     // MART enchants Contents(0, mage); use a real carried FLNT and teach the
     // scroll-discoverable spell, as the scenario's random scrolls do during
     // normal play (Alchemy.c4s/Script.c:5-16; C4Player.cpp:1052-1058).
-    let carried = engine
-        .spawn_object(
-            SpawnConfig::new("FLNT")
-                .with_owner(owner)
-                .with_container(mage),
-        )
-        .expect("real FLNT enters the mage inventory");
-    engine
-        .grant_player_magic(owner, "MART")
-        .expect("the Alchemy player learns MART");
+    let carried = engine.spawn_test_object(
+        SpawnConfig::new("FLNT")
+            .with_owner(owner)
+            .with_container(mage),
+    );
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MART"));
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens the shipped spell menu"));
-    let mart_index = engine
-        .cursor_object_menu(owner)
-        .expect("Alchemy spell menu remains open")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MART")
-        .expect("the learned MART spell is selectable");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, mart_index as i32)
-        .expect("the pointer selects MART");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts the selected MART cast");
+    let mart_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MART"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        mart_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("MART's Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
-    let (_, menu) = engine
-        .cursor_object_menu(owner)
-        .expect("MART::Activate opens its real enchantment-class menu");
+    let (_, menu) = crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner));
     assert_eq!(menu.identification, Value::C4Id("MCMS".into()));
     assert!(
         !menu.items.is_empty(),
         "MagicMenu enumerates the installed spell classes"
     );
-    let artefact_spell = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "MART" && object.status.is_active())
-        .cloned()
-        .expect("MART remains live while its menu is open");
+    let artefact_spell = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "MART" && object.status.is_active())
+            .cloned(),
+    );
     assert_eq!(
         artefact_spell.local_vars.get("iMagicAmount"),
         Some(&Value::Int(5)),
@@ -2001,77 +1773,66 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy artefact activation parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK cursor");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // MART consumes its own IGOL recipe before Activate. LGCN then consumes
     // IMUS+IASH while SetMagic enchants Contents(0, mage), exactly as the
     // shipped ALC_/NMGE callbacks do (Alchemy.c4s/Script.c:18-30;
     // Artefact.c4d/Script.c:211-264).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded ingredient bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK owns its attached ingredient bag");
-    engine
-        .call_object_function(
-            engine
-                .find_object_index(attached_bag)
-                .expect("attached bag index"),
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped bag callback transfers the artefact ingredients");
-    let carried = engine
-        .spawn_object(
-            SpawnConfig::new("ROCK")
-                .with_owner(owner)
-                .with_container(mage),
-        )
-        .expect("a real ROCK enters the mage inventory");
-    for spell in ["MART", "LGCN"] {
+    let seeded_bag = crate::support::TestValueExt::test_value(
         engine
-            .grant_player_magic(owner, spell)
-            .expect("the Alchemy player learns the tested spell");
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
+    let carried = engine.spawn_test_object(
+        SpawnConfig::new("ROCK")
+            .with_owner(owner)
+            .with_container(mage),
+    );
+    for spell in ["MART", "LGCN"] {
+        crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, spell));
     }
 
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens the shipped spell menu"));
-    let mart_index = engine
-        .cursor_object_menu(owner)
-        .expect("Alchemy spell menu remains open")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MART")
-        .expect("the learned MART spell is selectable");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, mart_index as i32)
-        .expect("the pointer selects MART");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts the selected MART cast");
+    let mart_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MART"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        mart_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("MART's Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
     // C4Menu::Enter executes AddMenuItem's command on MART's command object
@@ -2096,33 +1857,31 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
             .player_in_com(owner, COM_THROW, 0)
             .unwrap_or_else(|error| panic!("Throw enters {item_id}: {error}"));
     }
-    let combo_index = engine
-        .cursor_object_menu(owner)
-        .expect("MART offers the callback-rejected attached bag as a combo")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "ALC_")
-        .expect("MART's combo menu exposes the shipped alchemy bag");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, combo_index as i32)
-        .expect("the pointer selects the alchemy bag");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw commits the selected combo object");
+    let combo_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "ALC_"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        combo_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert!(
         engine.cursor_object_menu(owner).is_none(),
         "the target choice finishes MART's configuration menus"
     );
 
-    let enchanted = engine
-        .object_snapshot(carried)
-        .expect("the configured ROCK remains live");
-    let artefact = enchanted
-        .effects
-        .iter()
-        .find(|effect| effect.name == "ArtefactNSpell")
-        .expect("SetSpell installs MART's shipped object effect");
+    let enchanted = engine.test_object_snapshot(carried);
+    let artefact = crate::support::TestValueExt::test_value(
+        enchanted
+            .effects
+            .iter()
+            .find(|effect| effect.name == "ArtefactNSpell"),
+    );
     assert_eq!(
         artefact.vars.first(),
         Some(&EffectVarValue::C4Id("LGCN".into())),
@@ -2153,17 +1912,11 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
     // normal CLNK Throw control and simulation callback, rather than calling
     // Mode0/CastSpell directly.
     for _ in 0..20 {
-        engine
-            .tick_without_snapshot()
-            .expect("the mage leaves its Magic action");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("MCLK throws the configured ROCK");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     for _ in 0..240 {
-        engine
-            .tick_without_snapshot()
-            .expect("the artefact throw advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         if engine.snapshot().objects.iter().any(|object| {
             object.definition_id == "LGCN"
                 && object
@@ -2185,37 +1938,35 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy ingredient pickup parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK cursor");
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("InitializePlayer creates the filled loose bag by AHUT");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("Recruitment attaches an empty alchemy bag to MCLK");
-    assert_eq!(
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let seeded_bag = crate::support::TestValueExt::test_value(
         engine
-            .call_object_function(
-                engine.find_object_index(mage).expect("live MCLK index"),
-                "CheckMagicRequirements",
-                vec![Value::C4Id("MGUP".into()), Value::Bool(true)],
-            )
-            .expect("silent pre-pickup requirement check runs"),
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    assert_eq!(
+        engine.call_test_object_function(
+            engine.test_object_index(mage),
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MGUP".into()), Value::Bool(true)],
+        ),
         Value::Nil,
         "the empty attached bag cannot pay MGUP's one-IROC recipe"
     );
@@ -2226,9 +1977,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
     // object, so ALC_::Activate transfers the loose bag into the hidden bag
     // (C4Object.cpp:3267-3272; C4GameObjects.cpp:140-197;
     // C4ObjectCom.cpp:531-540; Bag.c4d/Script.c:5-25,157-169).
-    engine
-        .player_in_com(owner, COM_DOWN, 0)
-        .expect("Down queues the normal structure exit");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DOWN, 0));
     for _ in 0..20 {
         if engine
             .object_snapshot(mage)
@@ -2236,9 +1985,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("execute the normal exit command");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert!(
         engine
@@ -2247,39 +1994,27 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         "MCLK exits AHUT through its ordinary Down control"
     );
 
-    let bag_position = engine
-        .object_snapshot(seeded_bag)
-        .expect("seeded bag remains beside AHUT")
-        .position;
-    engine
-        .apply_object_update(
+    let bag_position = engine.test_object_snapshot(seeded_bag).position;
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             mage,
             ObjectUpdate::new()
                 .with_position(bag_position)
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk"),
-        )
-        .expect("put MCLK's collection rectangle over the loose bag");
+        ),
+    );
     for _ in 0..3 {
-        engine
-            .tick_without_snapshot()
-            .expect("run through the Tick3 collection pass");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
-        engine
-            .object_snapshot(seeded_bag)
-            .expect("collected bag remains live")
-            .container,
+        engine.test_object_snapshot(seeded_bag).container,
         Some(mage),
         "the loose scenario bag enters MCLK through automatic collection"
     );
 
-    engine
-        .player_in_com(owner, COM_DIG, 0)
-        .expect("first Dig arms the double-click buffer");
-    engine
-        .player_in_com(owner, COM_DIG, 0)
-        .expect("second Dig activates the first inventory object");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG, 0));
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
@@ -2295,13 +2030,11 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         "the player route moves rather than duplicates the seeded ingredients"
     );
     assert_eq!(
-        engine
-            .call_object_function(
-                engine.find_object_index(mage).expect("live MCLK index"),
-                "CheckMagicRequirements",
-                vec![Value::C4Id("MGUP".into()), Value::Bool(true)],
-            )
-            .expect("silent post-transfer requirement check runs"),
+        engine.call_test_object_function(
+            engine.test_object_index(mage),
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MGUP".into()), Value::Bool(true)],
+        ),
         Value::Int(3),
         "the spell system finds all three IROC in MCLK's attached bag"
     );
@@ -2310,60 +2043,45 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
 fn alchemy_possession_uses_the_shipped_selector_control(prepared: &PreparedInstalledScenario) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy selector parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
-    let mage_position = engine
-        .object_snapshot(mage)
-        .expect("Alchemy mage remains live")
-        .position;
-    let possession = engine
-        .spawn_object(
-            clonk_engine::SpawnConfig::new("POSE")
-                .with_position(mage_position)
-                .with_owner(owner),
-        )
-        .expect("shipped POSE spell spawns");
-    let mage_index = engine.find_object_index(mage).expect("mage index");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_position = engine.test_object_snapshot(mage).position;
+    let possession = engine.spawn_test_object(
+        clonk_engine::SpawnConfig::new("POSE")
+            .with_position(mage_position)
+            .with_owner(owner),
+    );
+    let mage_index = engine.test_object_index(mage);
 
     // C4Object::Call routes the spell's DoSpellSelect into SLCR creation;
     // C4Player::InCom then sends Right/Throw to SLCR's Control* callbacks
     // (C4Object.cpp:3229-3325; C4Player.cpp:1490-1554;
     // Selector.c4d/Script.c:6-43,128-174).
-    let selector_value = engine
-        .call_object_function(
-            mage_index,
-            "DoSpellSelect",
-            vec![
-                Value::Object(possession.as_u64()),
-                Value::Int(400),
-                Value::Object(mage.as_u64()),
-            ],
-        )
-        .expect("MCLK starts the shipped selector");
+    let selector_value = engine.call_test_object_function(
+        mage_index,
+        "DoSpellSelect",
+        vec![
+            Value::Object(possession.as_u64()),
+            Value::Int(400),
+            Value::Object(mage.as_u64()),
+        ],
+    );
     let selector = match selector_value {
         Value::Object(raw) => ObjectId::new(raw),
         other => panic!("DoSpellSelect returns SLCR, got {other:?}"),
     };
     assert_eq!(engine.crew_cursor(owner), Some(selector));
-    let target_count = engine
-        .call_object_function(
-            engine.find_object_index(selector).expect("selector index"),
-            "CountTargets",
-            Vec::new(),
-        )
-        .expect("SLCR counts its shipped target list");
+    let target_count = engine.call_test_object_function(
+        engine.test_object_index(selector),
+        "CountTargets",
+        Vec::new(),
+    );
     assert!(
         matches!(target_count, Value::Int(2..=8)),
         "Alchemy has multiple nearby possessible animals within SLCR's eight-target cap: {target_count:?}"
     );
 
-    engine
-        .player_in_com(owner, COM_RIGHT, 0)
-        .expect("Right cycles the shipped selector");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw accepts the shipped selector target");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert_eq!(engine.crew_cursor(owner), Some(mage));
     assert!(
         engine
@@ -2387,48 +2105,42 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy combo parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
-    let mage_index = engine.find_object_index(mage).expect("mage index");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let mage_index = engine.test_object_index(mage);
 
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded ingredient bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    engine
-        .call_object_function(
-            engine
-                .find_object_index(attached_bag)
-                .expect("attached bag index"),
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped bag callback transfers MGUP's IROC ingredient");
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
 
-    engine
-        .call_object_function(
-            mage_index,
-            "ContextCombo",
-            vec![Value::Object(mage.as_u64())],
-        )
-        .expect("the shipped context action enables combo mode");
+    engine.call_test_object_function(
+        mage_index,
+        "ContextCombo",
+        vec![Value::Object(mage.as_u64())],
+    );
     assert_eq!(
         engine
             .object_snapshot(mage)
@@ -2443,24 +2155,23 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
     // MagiClonk.c4d/Script.c:87-95,482-495;
     // ComboMenu.c4d/Script.c:33-50,138-174,336-390;
     // GravitationUp.c4d/Script.c:50-51).
-    engine
-        .player_in_com(owner, COM_SPECIAL, 0)
-        .expect("Special opens the shipped combo selector");
-    let combo = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "CBMU" && object.status.is_active())
-        .map(|object| object.id)
-        .expect("combo mode creates live CBMU");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_SPECIAL, 0));
+    let combo = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CBMU" && object.status.is_active())
+            .map(|object| object.id),
+    );
     assert_eq!(engine.crew_cursor(owner), Some(combo));
 
-    engine
-        .player_in_com(owner, clonk_engine::COM_DOWN, 0)
-        .expect("Down chooses the Earth element");
-    let combo_snapshot = engine
-        .object_snapshot(combo)
-        .expect("CBMU remains live after its first key");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        clonk_engine::COM_DOWN,
+        0,
+    ));
+    let combo_snapshot = engine.test_object_snapshot(combo);
     assert_eq!(
         combo_snapshot.local_vars.get("szCastKeys"),
         Some(&Value::String("2".into()))
@@ -2470,22 +2181,21 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
         Some(&Value::Int(1))
     );
 
-    engine
-        .player_in_com(owner, clonk_engine::COM_DOWN, 0)
-        .expect("Down chooses MGUP's first spell key");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        clonk_engine::COM_DOWN,
+        0,
+    ));
     assert_eq!(
         engine
-            .object_snapshot(combo)
-            .expect("CBMU remains live after the second key")
+            .test_object_snapshot(combo)
             .local_vars
             .get("szCastKeys"),
         Some(&Value::String("22".into()))
     );
 
     let gravity_before = engine.physics().gravity;
-    engine
-        .player_in_com(owner, COM_UP, 0)
-        .expect("Up uniquely completes the shipped MGUP combo");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
     assert_eq!(
         engine.crew_cursor(owner),
         Some(mage),
@@ -2504,19 +2214,10 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
         Some(Value::Nil),
         "C4Object::AssignRemoval clears the mage's live reference to CBMU"
     );
-    assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("mage starts the combo-selected spell")
-            .action
-            .name,
-        "Magic"
-    );
+    assert_eq!(engine.test_object_snapshot(mage).action.name, "Magic");
 
     for _ in 0..8 {
-        engine
-            .tick_without_snapshot()
-            .expect("the shipped Magic action advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
         engine.physics().gravity,
@@ -2537,99 +2238,87 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy lightning parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // Alchemy's InitializePlayer puts MLGT's IBON=2 recipe into the seeded
     // loose bag. Move that recipe into MCLK's attached bag through the same
     // ALC_::Transfer callback used by gameplay (Alchemy.c4s/Script.c:21-37;
     // Lightning.c4d/DefCore.txt:11; Bag.c4d/Script.c:148-160).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IBON").copied() == Some(2)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded IBON bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    engine
-        .call_object_function(
-            engine
-                .find_object_index(attached_bag)
-                .expect("attached bag index"),
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped bag callback transfers MLGT's bones");
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IBON").copied() == Some(2)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
 
     // Alchemy omits MLGT from its initial Scenario.txt list and teaches
     // random C4D_Magic definitions through SCRL. Granting that learned entry
     // here starts at the same C4Player magic-list state reached after reading
     // an MLGT scroll (Alchemy.c4s/Script.c:5-16; C4Player.cpp:1052-1058).
-    engine
-        .grant_player_magic(owner, "MLGT")
-        .expect("the Alchemy player learns MLGT");
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MLGT"));
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens its shipped magic menu"));
-    let lightning_index = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens Alchemy's spell menu")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MLGT")
-        .expect("the learned lightning spell is selectable");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, lightning_index as i32)
-        .expect("the menu selects MLGT");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts MLGT's Magic action");
+    let lightning_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MLGT"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        lightning_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
-    let aimer = (0..12)
-        .find_map(|_| {
-            engine
-                .tick_without_snapshot()
-                .expect("MLGT's Magic action advances");
-            engine
-                .snapshot()
-                .objects
-                .iter()
-                .find(|object| object.definition_id == "AIMR" && object.status.is_active())
-                .map(|object| object.id)
-        })
-        .expect("MLGT::Activate delegates to MCLK::DoSpellAim");
+    let aimer = crate::support::TestValueExt::test_value((0..12).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+            .map(|object| object.id)
+    }));
     assert_eq!(engine.crew_cursor(owner), Some(aimer));
 
     // AIMR::DoEnter calls MLGT::ActivateAngle. C++ creates LGTS, calls
     // Launch, and LGTS::Activate seeds the first vertex and Advance action
     // (Aimer.c4d/Script.c:242-270; Lightning.c4d/Script.c:22-35;
     // LightningShot.c4d/Script.c:12-34).
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw accepts MLGT's aimed angle");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert_eq!(engine.crew_cursor(owner), Some(mage));
-    let lightning = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "LGTS" && object.status.is_active())
-        .cloned()
-        .expect("MLGT launches a live LGTS line object");
+    let lightning = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "LGTS" && object.status.is_active())
+            .cloned(),
+    );
     assert_eq!(lightning.action.name, "Advance");
     assert!(
         !lightning.vertices.is_empty(),
@@ -2638,13 +2327,9 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
 
     let vertex_count = lightning.vertices.len();
     for _ in 0..3 {
-        engine
-            .tick_without_snapshot()
-            .expect("LGTS advances without a script error");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let advanced = engine
-        .object_snapshot(lightning.id)
-        .expect("LGTS remains live in open space while advancing");
+    let advanced = engine.test_object_snapshot(lightning.id);
     assert!(
         advanced.vertices.len() > vertex_count,
         "LGTS::Advance extends the lightning line: before={vertex_count}, after={:?}",
@@ -2664,199 +2349,171 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy icestrike parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
-    engine
-        .apply_object_update(
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             mage,
             ObjectUpdate::new()
                 .with_position(Vector2::new(500, 200))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk")
                 .clear_container(),
-        )
-        .expect("place MCLK in open sky for the aimed flight");
+        ),
+    );
 
     // Alchemy seeds ISPH=1 and IGOL=3, while MICS consumes ISPH=2 and
     // IGOL=1. Transfer the shipped bag plus one harvested sphere through
     // ALC_::Transfer, the same path used by ordinary play
     // (Alchemy.c4s/Script.c:21-37; Icestrike.c4d/DefCore.txt:7;
     // Bag.c4d/Script.c:148-160).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("ISPH").copied() == Some(1)
-                && object.components.get("IGOL").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded ingredient bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    let extra_sphere = engine
-        .spawn_object(
-            SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
-        )
-        .expect("a harvested sphere bag spawns");
-    let attached_bag_index = engine
-        .find_object_index(attached_bag)
-        .expect("attached bag index");
-    for source in [seeded_bag, extra_sphere] {
+    let seeded_bag = crate::support::TestValueExt::test_value(
         engine
-            .call_object_function(
-                attached_bag_index,
-                "Transfer",
-                vec![Value::Object(source.as_u64())],
-            )
-            .expect("the shipped bag callback transfers MICS ingredients");
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.components.get("ISPH").copied() == Some(1)
+                    && object.components.get("IGOL").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    let extra_sphere = engine.spawn_test_object(
+        SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+    );
+    let attached_bag_index = engine.test_object_index(attached_bag);
+    for source in [seeded_bag, extra_sphere] {
+        engine.call_test_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(source.as_u64())],
+        );
     }
     assert_eq!(
-        engine
-            .call_object_function(
-                engine.find_object_index(mage).expect("live MCLK index"),
-                "CheckMagicRequirements",
-                vec![Value::C4Id("MICS".into()), Value::Bool(true)],
-            )
-            .expect("MICS ingredient requirements run"),
+        engine.call_test_object_function(
+            engine.test_object_index(mage),
+            "CheckMagicRequirements",
+            vec![Value::C4Id("MICS".into()), Value::Bool(true)],
+        ),
         Value::Int(1)
     );
 
     // Reading a shipped SCRL grants its spell to C4Player::Magic; granting
     // that same entry directly isolates MICS after the scroll has been read
     // (Alchemy.c4s/Script.c:5-16; C4Player.cpp:1052-1058).
-    engine
-        .grant_player_magic(owner, "MICS")
-        .expect("the Alchemy player learns MICS");
+    crate::support::TestValueExt::test_value(engine.grant_player_magic(owner, "MICS"));
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens its shipped magic menu"));
-    let icestrike_index = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens Alchemy's spell menu")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MICS")
-        .expect("the learned icestrike is selectable");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, icestrike_index as i32)
-        .expect("the menu selects MICS");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts MICS's Magic action");
+    let icestrike_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MICS"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        icestrike_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
-    let (aimer, iceball) = (0..12)
-        .find_map(|_| {
-            engine
-                .tick_without_snapshot()
-                .expect("MICS's Magic action advances");
-            let snapshot = engine.snapshot();
-            let aimer = snapshot
-                .objects
-                .iter()
-                .find(|object| object.definition_id == "AIMR" && object.status.is_active())
-                .map(|object| object.id)?;
-            let iceball = snapshot
-                .objects
-                .iter()
-                .find(|object| object.definition_id == "ICEB" && object.status.is_active())
-                .map(|object| object.id)?;
-            Some((aimer, iceball))
-        })
-        .expect("MICS creates both its shipped aimer and ICEB");
+    let (aimer, iceball) = crate::support::TestValueExt::test_value((0..12).find_map(|_| {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let snapshot = engine.snapshot();
+        let aimer = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+            .map(|object| object.id)?;
+        let iceball = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "ICEB" && object.status.is_active())
+            .map(|object| object.id)?;
+        Some((aimer, iceball))
+    }));
     assert_eq!(engine.crew_cursor(owner), Some(aimer));
 
-    engine
-        .player_in_com(owner, COM_UP, 0)
-        .expect("Up changes the shipped AIMR angle");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw releases the aimed ICEB");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert_eq!(
         engine.crew_cursor(owner),
         Some(iceball),
         "MICS::ActivateAngle hands direct control to the launched ICEB"
     );
-    let launched_angle = engine
-        .object_snapshot(iceball)
-        .and_then(|iceball| {
+    let launched_angle = crate::support::TestValueExt::test_value(
+        engine.object_snapshot(iceball).and_then(|iceball| {
             iceball
                 .effects
                 .iter()
                 .find(|effect| effect.name == "IceStrikeFlight")
                 .map(|effect| effect.var(2))
-        })
-        .expect("ICEB keeps its flight effect angle");
+        }),
+    );
     assert_eq!(launched_angle, EffectVarValue::Int(70));
-    engine
-        .player_in_com(owner, COM_THROW + COM_RELEASE_OFFSET, 0)
-        .expect("release the aim-accept key on the ICEB cursor");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_THROW + COM_RELEASE_OFFSET,
+        0,
+    ));
 
     // C4Player::InCom forwards Right and RightReleased to the ICEB cursor;
     // its effect applies the steering speed on the following timer tick
     // (C4Player.cpp:1490-1554; C4Object.cpp:3307-3325;
     // Iceball.c4d/Script.c:47-74,94-101,166-218).
-    engine
-        .player_in_com(owner, COM_RIGHT, 0)
-        .expect("Right steers the launched ICEB");
-    engine
-        .tick_without_snapshot()
-        .expect("ICEB applies its steering speed");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
         engine.crew_cursor(owner),
         Some(iceball),
         "an active non-crew cursor survives ICEB's ordinary effect update"
     );
-    let steered_angle = engine
-        .object_snapshot(iceball)
-        .and_then(|iceball| {
+    let steered_angle = crate::support::TestValueExt::test_value(
+        engine.object_snapshot(iceball).and_then(|iceball| {
             iceball
                 .effects
                 .iter()
                 .find(|effect| effect.name == "IceStrikeFlight")
                 .map(|effect| effect.var(2))
-        })
-        .expect("steered ICEB keeps its flight effect");
+        }),
+    );
     assert_ne!(steered_angle, launched_angle);
-    engine
-        .player_in_com(owner, COM_RIGHT + COM_RELEASE_OFFSET, 0)
-        .expect("Right release stops ICEB steering");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_RIGHT + COM_RELEASE_OFFSET,
+        0,
+    ));
 
-    let impact_position = engine
-        .object_snapshot(iceball)
-        .expect("ICEB remains live before manual impact")
-        .position;
-    let target = engine
-        .spawn_object(
-            SpawnConfig::new("CLNK")
-                .with_owner(OWNER_NONE)
-                .with_position(Vector2::new(impact_position.x + 5, impact_position.y))
-                .with_action(ActionState::new("Walk")),
-        )
-        .expect("a living frostwave target spawns");
-    engine
-        .apply_object_update(
+    let impact_position = engine.test_object_snapshot(iceball).position;
+    let target = engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(OWNER_NONE)
+            .with_position(Vector2::new(impact_position.x + 5, impact_position.y))
+            .with_action(ActionState::new("Walk")),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             target,
             ObjectUpdate::new()
                 .with_position(Vector2::new(impact_position.x + 5, impact_position.y))
                 .with_velocity(Vector2::ZERO),
-        )
-        .expect("place the frostwave target on the first radius");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw triggers ICEB's shipped impact");
+        ),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert!(
         engine
             .object_snapshot(iceball)
@@ -2870,13 +2527,10 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
             .any(|effect| effect.name == "FrostwaveNSpell"),
         "ICEB impact installs the shipped global frostwave"
     );
-    engine
-        .tick_without_snapshot()
-        .expect("the first frostwave radius executes");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(
         engine
-            .object_snapshot(target)
-            .expect("frostwave target remains live")
+            .test_object_snapshot(target)
             .effects
             .iter()
             .any(|effect| effect.name == "Freeze"),
@@ -2887,77 +2541,66 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
 fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedInstalledScenario) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy earthquake parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK selected");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // Alchemy's loose starter bag contains exactly MQKE's IROC=3 recipe.
     // Transfer it through the shipped attached-bag callback, then choose
     // Earthquake from MCLK's real ContextMagic menu and let the Magic action
     // reach phase five (Alchemy.c4s/Script.c:21-37; Magic.c:65-92,132-162;
     // Earthquake.c4d/DefCore.txt:9; MagiClonk.c4d/Script.c:219-261,430-445).
-    let seeded_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
-        })
-        .map(|object| object.id)
-        .expect("Alchemy creates its seeded rock bag");
-    let attached_bag = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "ALC_"
-                && object.action.name == "Belongs"
-                && object.action.target == Some(mage)
-        })
-        .map(|object| object.id)
-        .expect("MCLK keeps its attached alchemy bag");
-    engine
-        .call_object_function(
-            engine
-                .find_object_index(attached_bag)
-                .expect("attached bag index"),
-            "Transfer",
-            vec![Value::Object(seeded_bag.as_u64())],
-        )
-        .expect("the shipped bag callback transfers MQKE's rocks");
-    engine
-        .apply_object_update(mage, ObjectUpdate::new().with_direction(Direction::Right))
-        .expect("face the contained mage right without disturbing its cast-ready action");
-    let cast_origin = engine
-        .object_snapshot(mage)
-        .expect("MCLK remains live before MQKE")
-        .position;
-    let landscape_before = engine
-        .landscape()
-        .cloned()
-        .expect("Alchemy keeps its generated landscape");
+    let seeded_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
+            })
+            .map(|object| object.id),
+    );
+    let attached_bag = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "ALC_"
+                    && object.action.name == "Belongs"
+                    && object.action.target == Some(mage)
+            })
+            .map(|object| object.id),
+    );
+    engine.call_test_object_function(
+        engine.test_object_index(attached_bag),
+        "Transfer",
+        vec![Value::Object(seeded_bag.as_u64())],
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(mage, ObjectUpdate::new().with_direction(Direction::Right)),
+    );
+    let cast_origin = engine.test_object_snapshot(mage).position;
+    let landscape_before = crate::support::TestValueExt::test_value(engine.landscape().cloned());
 
     assert!(engine
         .execute_context_menu(mage, "ContextMagic")
         .expect("MCLK opens its shipped magic menu"));
-    let earthquake_index = engine
-        .cursor_object_menu(owner)
-        .expect("ContextMagic opens Alchemy's spell menu")
-        .1
-        .items
-        .iter()
-        .position(|item| item.item_id == "MQKE")
-        .expect("Alchemy's Scenario.txt magic list contains MQKE");
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, earthquake_index as i32)
-        .expect("the menu selects MQKE");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw starts MQKE's Magic action");
+    let earthquake_index = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == "MQKE"),
+    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_MENU_SELECT,
+        earthquake_index as i32,
+    ));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
     let quake = (0..12)
         .find_map(|_| {
-            engine.tick_without_snapshot().expect("MQKE's Magic action advances");
+            crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
             engine
                 .snapshot()
                 .objects
@@ -2981,9 +2624,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
                 snapshot.players.iter().find(|player| player.id == owner),
             )
         });
-    let quake_snapshot = engine
-        .object_snapshot(quake)
-        .expect("FXQ1 remains live immediately after activation");
+    let quake_snapshot = engine.test_object_snapshot(quake);
     assert_eq!(quake_snapshot.action.name, "Quake");
     assert!(
         (100..=120).contains(&(quake_snapshot.position.x - cast_origin.x)),
@@ -3000,11 +2641,12 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     };
     assert!((100..=200).contains(&level));
     assert_eq!(lifetime, level / 2);
-    let quake_effect = quake_snapshot
-        .effects
-        .iter()
-        .find(|effect| effect.name == "QuakeEffect")
-        .expect("FXQ1 installs its interval-one view effect");
+    let quake_effect = crate::support::TestValueExt::test_value(
+        quake_snapshot
+            .effects
+            .iter()
+            .find(|effect| effect.name == "QuakeEffect"),
+    );
     assert_eq!(quake_effect.priority, 200);
     assert_eq!(quake_effect.interval, 1);
     assert_eq!(quake_effect.var(0), EffectVarValue::Int(level));
@@ -3022,13 +2664,12 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
         "a successful MQKE cast consumes its three-rock recipe"
     );
     let changed_landscape_pixels = {
-        let before_grid = landscape_before
-            .pixel_grid()
-            .expect("pre-cast Alchemy raster");
-        let after_grid = engine
-            .landscape()
-            .and_then(|landscape| landscape.pixel_grid())
-            .expect("post-cast Alchemy raster");
+        let before_grid = crate::support::TestValueExt::test_value(landscape_before.pixel_grid());
+        let after_grid = crate::support::TestValueExt::test_value(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.pixel_grid()),
+        );
         let center = quake_snapshot.position;
         (center.y - 50..=center.y + 50)
             .flat_map(|y| (center.x - 50..=center.x + 50).map(move |x| (x, y)))
@@ -3047,9 +2688,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     // (C4Script.cpp:5676-5687).
     engine.set_film_viewport_available(true);
     let view_offset = (0..8).find_map(|_| {
-        engine
-            .tick_without_snapshot()
-            .expect("FXQ1's quake effect advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         engine
             .take_viewport_presentation_requests()
             .into_iter()
@@ -3071,9 +2710,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     // iLifeTime, the next successful Random(3) gate removes FXQ1
     // (Earthquake effect Script.c:7-19,31-45; ActMap.txt:3-10).
     let removed = (0..lifetime as usize + 64).any(|_| {
-        engine
-            .tick_without_snapshot()
-            .expect("FXQ1 lifecycle advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         engine
             .object_snapshot(quake)
             .is_none_or(|quake| !quake.status.is_active())
@@ -3085,35 +2722,25 @@ fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags(
     prepared: &PreparedInstalledScenario,
 ) {
     let mut engine = prepared.instantiate();
-    let protege = engine
-        .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(500, 200)))
-        .expect("force-field protege spawns in open sky");
-    let rock = engine
-        .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(545, 200)))
-        .expect("test rock spawns beside the protege");
+    let protege =
+        engine.spawn_test_object(SpawnConfig::new("ROCK").with_position(Vector2::new(500, 200)));
+    let rock =
+        engine.spawn_test_object(SpawnConfig::new("ROCK").with_position(Vector2::new(545, 200)));
     let mut field_action = ActionState::new("Field");
     field_action.target = Some(protege);
-    let field = engine
-        .spawn_object(
-            SpawnConfig::new("FRCS")
-                .with_owner(OWNER_NONE)
-                .with_position(Vector2::new(500, 200))
-                .with_action(field_action),
-        )
-        .expect("shipped small force field spawns");
+    let field = engine.spawn_test_object(
+        SpawnConfig::new("FRCS")
+            .with_owner(OWNER_NONE)
+            .with_position(Vector2::new(500, 200))
+            .with_action(field_action),
+    );
 
     // FRCS::Timer flings the nearby ROCK and calls
     // Sound(..., false, obj, 50, 0, false, true, 300). Its loop slot is a
     // C4ValueInt, and C++ accepts Bool->Int unchanged (ForceFieldSmall.c4d/
     // Script.c:112; C4Script.cpp:2297; C4Value.cpp:509-520).
-    engine
-        .call_object_function(
-            engine.find_object_index(field).expect("field index"),
-            "Timer",
-            Vec::new(),
-        )
-        .expect("the shipped FRCS timer accepts its boolean loop flag");
-    let snapshot = engine.tick().expect("audio events drain on the next frame");
+    engine.call_test_object_function(engine.test_object_index(field), "Timer", Vec::new());
+    let snapshot = crate::support::TestValueExt::test_value(engine.tick());
     assert!(snapshot.audio.contains(&AudioCommand::PlaySound {
         name: "MgWind*".into(),
         target: Some(rock),
@@ -3134,25 +2761,21 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
     let (wall_x, spell_y) = (990, 1370);
     let spell_position = Vector2::new(wall_x - 25, spell_y);
 
-    let caster = engine
-        .spawn_object(
-            SpawnConfig::new("CLNK")
-                .with_owner(owner)
-                .with_position(spell_position)
-                .with_direction(Direction::Right),
-        )
-        .expect("right-facing force-field caster spawns in open sky");
+    let caster = engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(owner)
+            .with_position(spell_position)
+            .with_direction(Direction::Right),
+    );
     let victim_position = Vector2::new(wall_x, spell_position.y - 100);
-    let victim = engine
-        .spawn_object(
-            SpawnConfig::new("CLNK")
-                .with_owner(owner)
-                .with_position(victim_position),
-        )
-        .expect("crew overlapping the future first wall segment spawns");
-    engine
-        .apply_object_update(victim, ObjectUpdate::new().with_position(victim_position))
-        .expect("place the full-grown crew exactly on the future segment center");
+    let victim = engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(owner)
+            .with_position(victim_position),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(victim, ObjectUpdate::new().with_position(victim_position)),
+    );
     assert!(
         (victim_position.y - 7..=victim_position.y + 9).all(|y| {
             (wall_x - 4..=wall_x + 11).all(|x| {
@@ -3181,16 +2804,14 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
             .is_solid_at(x, y)),
         "the sampled mask boundaries start as open sky"
     );
-    let spell = engine
-        .spawn_object(
-            SpawnConfig::new("MFFW")
-                .with_owner(owner)
-                .with_position(spell_position),
-        )
-        .expect("the shipped MFFW spell object spawns");
-    engine
-        .apply_object_update(spell, ObjectUpdate::new().with_position(spell_position))
-        .expect("pin the full-grown spell object at the controlled cast origin");
+    let spell = engine.spawn_test_object(
+        SpawnConfig::new("MFFW")
+            .with_owner(owner)
+            .with_position(spell_position),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(spell, ObjectUpdate::new().with_position(spell_position)),
+    );
 
     // C4Game::NewObject performs initial DoCon (and therefore puts the
     // definition SolidMask) before Initialize. FCWS::Initialize inherits
@@ -3199,18 +2820,14 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
     // to the segment and CLNK's leftmost vertex is -4; +7 is the first free
     // center (C4Object.cpp:1428-1511; C4SolidMask.cpp:61-107).
     assert_eq!(
-        engine
-            .call_object_function(
-                engine.find_object_index(spell).expect("MFFW index"),
-                "Activate",
-                vec![Value::Object(caster.as_u64())],
-            )
-            .expect("the shipped MFFW activation runs"),
+        engine.call_test_object_function(
+            engine.test_object_index(spell),
+            "Activate",
+            vec![Value::Object(caster.as_u64())],
+        ),
         Value::Int(1)
     );
-    let ejected_victim = engine
-        .object_snapshot(victim)
-        .expect("ejected crew remains live");
+    let ejected_victim = engine.test_object_snapshot(victim);
     assert_eq!(
         ejected_victim.position,
         Vector2::new(wall_x + 7, victim_position.y),
@@ -3305,15 +2922,13 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
     // FCWS Graphics.png has opaque columns 1..=6. Before UpdatePhase all
     // seven definitions use the phase-two source mask (16,0,8,20), yielding
     // one continuous 6x140 strip at x=wall-3..=wall+2.
-    let landscape = engine.landscape().expect("Alchemy keeps its landscape");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
     assert!(landscape.is_solid_at(wall_x - 3, spell_position.y - 110));
     assert!(landscape.is_solid_at(wall_x + 2, spell_position.y + 29));
     assert!(!landscape.is_solid_at(wall_x - 4, spell_position.y - 110));
     assert!(!landscape.is_solid_at(wall_x + 3, spell_position.y + 29));
 
-    engine
-        .tick_without_snapshot()
-        .expect("the seven scheduled phase updates execute");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     let expected_phases = [1, 2, 2, 2, 2, 2, 3];
     for (index, id) in segment_ids.iter().copied().enumerate() {
         let segment = engine
@@ -3337,7 +2952,7 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
 
     // Phase one drops the top alpha row and phase three drops the bottom;
     // the joined post-schedule mask is a continuous 6x138 strip.
-    let landscape = engine.landscape().expect("wall masks remain baked");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
     assert_eq!(
         [
             landscape.is_solid_at(wall_x - 3, spell_position.y - 110),
@@ -3364,9 +2979,7 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
             .unwrap_or_else(|error| panic!("FCWS segment {index} accepts Damage: {error}"));
     }
     for _ in 0..4 {
-        engine
-            .tick_without_snapshot()
-            .expect("the next interval-five force-field timer approaches");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert!(
         segment_ids
@@ -3374,9 +2987,7 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
             .all(|id| engine.object_snapshot(*id).is_none()),
         "the seven expired FCWS segments are removed together"
     );
-    let landscape = engine
-        .landscape()
-        .expect("expired wall restores the landscape");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
     assert!(
         [
             (wall_x - 3, spell_position.y - 109),
@@ -3394,16 +3005,8 @@ fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy firelump parity");
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Alchemy joins with its MCLK cursor");
-    assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("Alchemy mage remains live")
-            .definition_id,
-        "MCLK"
-    );
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    assert_eq!(engine.test_object_snapshot(mage).definition_id, "MCLK");
 
     // The shipped MFBL Activate creates FRBL and immediately calls
     // Collect(pFireball,pClonk). C++ makes that same-call object live,
@@ -3411,26 +3014,19 @@ fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage(
     // inventory when the Collection gate accepts it
     // (Firelump.c4d/Script.c:20-31; C4Script.cpp:391-415;
     // C4Object.cpp:5693-5714).
-    let mage_position = engine
-        .object_snapshot(mage)
-        .expect("mage snapshot")
-        .position;
-    let spell = engine
-        .spawn_object(
-            SpawnConfig::new("MFBL")
-                .with_owner(owner)
-                .with_position(mage_position),
-        )
-        .expect("the shipped MFBL spell object spawns");
-    let spell_index = engine.find_object_index(spell).expect("MFBL index");
+    let mage_position = engine.test_object_snapshot(mage).position;
+    let spell = engine.spawn_test_object(
+        SpawnConfig::new("MFBL")
+            .with_owner(owner)
+            .with_position(mage_position),
+    );
+    let spell_index = engine.test_object_index(spell);
     assert_eq!(
-        engine
-            .call_object_function(
-                spell_index,
-                "Activate",
-                vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64()),],
-            )
-            .expect("the shipped MFBL Activate callback runs"),
+        engine.call_test_object_function(
+            spell_index,
+            "Activate",
+            vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64()),],
+        ),
         Value::Int(1)
     );
 
@@ -3543,16 +3139,15 @@ fn dragon_rock_enabling_fog_rebuilds_every_saved_repeller_into_the_view_list(
 
     // InitializePlayer schedules SetFoW one tick out (Drachenfels.c4s/
     // Script.c:70; planet/System.c4g/Helpers.c:110-132).
-    engine
-        .tick_without_snapshot()
-        .expect("the real IntSchedule callback evaluates SetFoW");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
-    let view_objects = engine
-        .snapshot()
-        .fow_players
-        .get(&owner)
-        .map(|frame| frame.view_objects.clone())
-        .expect("a fog-of-war player projects its runtime FoWViewObjs");
+    let view_objects = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .fow_players
+            .get(&owner)
+            .map(|frame| frame.view_objects.clone()),
+    );
 
     for (number, definition) in [(1758, "MAGE"), (5129, "KING")] {
         let object = ObjectId::new(number);
@@ -3622,21 +3217,13 @@ fn dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in(
 
     // Choose normal difficulty and the initially selected KNIG so ordinary
     // crew control resumes (Drachenfels.c4s/Script.c:86-128,150-178).
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("choose normal difficulty");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("choose KNIG");
-    let knight = engine
-        .crew_cursor(owner)
-        .expect("Dragon Rock character choice leaves a cursor");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    let knight = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // InitializePlayer schedules SetFoW one tick out (Drachenfels.c4s/
     // Script.c:70; planet/System.c4g/Helpers.c:110-132).
-    engine
-        .tick_without_snapshot()
-        .expect("the real IntSchedule callback evaluates SetFoW");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(engine
         .player(owner)
         .expect("joined player remains live")
@@ -3665,11 +3252,12 @@ fn dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in(
 
     // `Initialize` calls `SetOwner(-1)`, so `C4Object::PlrFoWActualize` adds
     // each generator to *every* player's FoW list (C4Object.cpp:5546-5567).
-    let view_objects = snapshot
-        .fow_players
-        .get(&owner)
-        .map(|frame| frame.view_objects.clone())
-        .expect("a fog-of-war player projects its runtime FoWViewObjs");
+    let view_objects = crate::support::TestValueExt::test_value(
+        snapshot
+            .fow_players
+            .get(&owner)
+            .map(|frame| frame.view_objects.clone()),
+    );
     for (number, ..) in DRACHENFELS_SHADOWS {
         assert!(
             view_objects.contains(&ObjectId::new(number)),
@@ -3693,11 +3281,7 @@ fn dragon_rock_shadow_generators_darken_the_mountain_until_a_clonk_walks_in(
     // i.e. world rect [1152,1752] x [1143,1423] once `Find_InRect` adds
     // `GetX()/GetY()` (planet/System.c4g/FindObject.c:37).
     let shadow = ObjectId::new(2779);
-    let hidden = drachenfels_hidden_objects(
-        &engine
-            .object_snapshot(shadow)
-            .expect("generator #2779 loads"),
-    );
+    let hidden = drachenfels_hidden_objects(&engine.test_object_snapshot(shadow));
     assert_eq!(hidden.len(), 24, "generator #2779 saved iHiddenObjCnt=24");
 
     // 343px above the centre: outside the authored rect and outside the
@@ -3794,18 +3378,16 @@ fn drachenfels_ticks_until_dispelled(
     ticks: u32,
 ) -> Option<u32> {
     (1..=ticks).find(|_| {
-        engine
-            .apply_object_update(
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(
                 crew,
                 ObjectUpdate::new()
                     .with_position(position)
                     .with_action("Walk")
                     .clear_container(),
-            )
-            .expect("hold the crew member at the probe position");
-        engine
-            .tick_without_snapshot()
-            .expect("the generator keeps polling CheckClonk");
+            ),
+        );
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         engine.object_snapshot(shadow).is_none()
     })
 }
@@ -3815,29 +3397,22 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player_on_team(&mut engine, "Dragon Rock character parity", 1);
-    let knight = engine
-        .crew_cursor(owner)
-        .expect("Dragon Rock joins the Scenario.txt KNIG");
+    let knight = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     // Choose normal difficulty through the real KNIG object menu. The shipped
     // InitializePlayer2 then creates FLAG in that KNIG and opens the shipped
     // KNIG/MAGE selection menu (Drachenfels.c4s/Script.c:86-103,112-128).
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("choose normal difficulty");
-    let flag = engine
-        .object_snapshot(knight)
-        .and_then(|knight| {
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    let flag = crate::support::TestValueExt::test_value(engine.object_snapshot(knight).and_then(
+        |knight| {
             knight.contents.into_iter().find(|item| {
                 engine
                     .object_snapshot(*item)
                     .is_some_and(|item| item.definition_id == "FLAG")
             })
-        })
-        .expect("normal difficulty gives the real KNIG a FLAG");
-    let (_, choice) = engine
-        .cursor_object_menu(owner)
-        .expect("normal difficulty opens the real character menu");
+        },
+    ));
+    let (_, choice) = crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner));
     assert_eq!(
         choice
             .items
@@ -3847,9 +3422,7 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag(
         ["KNIG", "MAGE"]
     );
 
-    engine
-        .player_in_com(owner, COM_RIGHT, 0)
-        .expect("select MAGE");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_RIGHT, 0));
     assert_eq!(
         engine
             .cursor_object_menu(owner)
@@ -3859,9 +3432,7 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag(
         1,
         "the physical Right control selects MAGE"
     );
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("execute Redefine3(MAGE)");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
     // Redefine3 creates MAGE, immediately calls pNew->GrabContents(this()),
     // copies the live state, installs it as crew/cursor, then removes KNIG
@@ -3869,29 +3440,14 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag(
     // function found after MAGE's own script and transfers a copied contents
     // list through ordinary Enter calls (C4Aul.cpp:130-148;
     // C4Script.cpp:320-327; C4Object.cpp:6162-6171).
-    let mage = engine
-        .crew_cursor(owner)
-        .expect("Redefine3 leaves a live crew cursor");
-    assert_eq!(
-        engine
-            .object_snapshot(mage)
-            .expect("replacement crew remains live")
-            .definition_id,
-        "MAGE"
-    );
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    assert_eq!(engine.test_object_snapshot(mage).definition_id, "MAGE");
     assert!(
-        !engine
-            .object_snapshot(knight)
-            .expect("the removal stays observable until cleanup")
-            .status
-            .is_active(),
+        !engine.test_object_snapshot(knight).status.is_active(),
         "Redefine3 marks the old KNIG deleted immediately"
     );
     assert_eq!(
-        engine
-            .object_snapshot(flag)
-            .expect("FLAG survives the character replacement")
-            .container,
+        engine.test_object_snapshot(flag).container,
         Some(mage),
         "MAGE receives KNIG's contents through the real GrabContents call"
     );
@@ -3904,35 +3460,24 @@ fn dragon_rock_walk_up_enters_the_shipped_tent(prepared: &PreparedInstalledScena
     // Choose normal difficulty and the initially selected KNIG. Both choices
     // use the real shipped menus before ordinary crew control resumes
     // (Drachenfels.c4s/Script.c:86-128,150-178).
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("choose normal difficulty");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("choose KNIG");
-    let knight = engine
-        .crew_cursor(owner)
-        .expect("Dragon Rock character choice leaves a cursor");
-    assert_eq!(
-        engine
-            .object_snapshot(knight)
-            .expect("chosen crew remains live")
-            .definition_id,
-        "KNIG"
-    );
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    let knight = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    assert_eq!(engine.test_object_snapshot(knight).definition_id, "KNIG");
 
-    let tent = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "TENT"
-                && object.status.is_active()
-                && object.position.x == 222
-                && object.position.y == 1240
-        })
-        .cloned()
-        .expect("Dragon Rock ships its first camp tent");
+    let tent = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "TENT"
+                    && object.status.is_active()
+                    && object.position.x == 222
+                    && object.position.y == 1240
+            })
+            .cloned(),
+    );
     assert_ne!(
         tent.ocf & clonk_engine::ocf::ENTRANCE,
         0,
@@ -3940,33 +3485,26 @@ fn dragon_rock_walk_up_enters_the_shipped_tent(prepared: &PreparedInstalledScena
     );
     // TENT DefCore.txt:17 is Entrance=-10,4,19,20.
     let entrance_center = Vector2::new(tent.position.x - 10 + 19 / 2, tent.position.y + 4 + 20 / 2);
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             knight,
             ObjectUpdate::new()
                 .with_position(entrance_center)
                 .with_action("Walk")
                 .clear_container(),
-        )
-        .expect("place KNIG at the real TENT entrance");
+        ),
+    );
 
     // C++ WALK+Up first probes AtObject with OCF_Entrance and queues Enter;
     // C4Command::Enter then checks Target->At with the same entrance OCF and
     // calls C4Object::Enter when EntranceStatus is open
     // (C4ObjectCom.cpp:335-350; C4Command.cpp:545-615).
-    engine
-        .player_in_com(owner, COM_UP, 0)
-        .expect("Up dispatches through the real KNIG control path");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_UP, 0));
     for _ in 0..3 {
-        engine
-            .tick_without_snapshot()
-            .expect("queued Enter command advances");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(
-        engine
-            .object_snapshot(knight)
-            .expect("KNIG remains live")
-            .container,
+        engine.test_object_snapshot(knight).container,
         Some(tent.id),
         "pressing Up at an open TENT entrance enters it like C++"
     );
@@ -4003,7 +3541,7 @@ fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets(
         "SLBT", "SPER", "SPRC", "STFN", "SWOR", "SWRC", "TABL", "TENP", "TFLN", "THRN", "TWR2",
         "WDBR", "WGTW", "WMIL", "WODC", "WRKS", "WTWR", "WZKP", "XARP", "XBOW",
     ];
-    let player = engine.player(owner).expect("joined player remains live");
+    let player = crate::support::TestValueExt::test_value(engine.player(owner));
     let mut actual = player
         .knowledge()
         .map(|definition| definition.as_str())
@@ -4014,9 +3552,7 @@ fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets(
     // The difficulty menu is created after both definition calls. Its
     // presence proves InitializePlayer ran past every omitted remove flag
     // instead of aborting at the original argument-count warning.
-    let (_, menu) = engine
-        .cursor_object_menu(owner)
-        .expect("InitializePlayer continues into the difficulty menu");
+    let (_, menu) = crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner));
     assert_eq!(
         menu.items
             .iter()
@@ -4031,7 +3567,7 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player_on_team(&mut engine, "Dragon Rock fog parity", 1);
-    let player = engine.player(owner).expect("joined player remains live");
+    let player = crate::support::TestValueExt::test_value(engine.player(owner));
     assert!(!player.fog_of_war());
     assert!(!player.force_fog_of_war());
 
@@ -4053,9 +3589,7 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war(
     );
     assert_eq!(schedules[0].var(1), EffectVarValue::Int(1));
 
-    engine
-        .tick_without_snapshot()
-        .expect("the real IntSchedule callback evaluates SetFoW");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     // FnSetFoW accepts the live player and calls C4Player::SetFoW
     // (C4Script.cpp:3671-3678), which enables both the active FoW flag and
@@ -4069,7 +3603,7 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war(
             .all(|effect| effect.name != "IntSchedule" || effect.priority == 0),
         "successful eval reaches Helpers.c's one-shot kill return"
     );
-    let player = engine.player(owner).expect("joined player remains live");
+    let player = crate::support::TestValueExt::test_value(engine.player(owner));
     assert!(player.fog_of_war());
     assert!(player.force_fog_of_war());
     let persisted = player.to_state();
@@ -4139,11 +3673,9 @@ fn dragon_rock_setdir_folds_the_flipdir_mirror_into_the_draw_transform(
     // (C4Facet.h:79-88), and the post-load sweep re-runs UpdateFlipDir
     // (C4GameObjects.cpp:670-673): Dir 1 >= FlipDir 1 keeps SetFlipDir(-1),
     // so the saved mirror survives the load unchanged.
-    let loaded = engine.object_snapshot(dragon).expect("dragon loads");
+    let loaded = engine.test_object_snapshot(dragon);
     assert_eq!(loaded.direction.to_script_value(), 1);
-    let transform = loaded
-        .draw_transform
-        .expect("the saved FlipDir mirror survives loading");
+    let transform = crate::support::TestValueExt::test_value(loaded.draw_transform);
     assert_eq!(transform.flip_dir(), -1);
     assert_eq!(transform.matrix()[0], -1.0);
 
@@ -4152,12 +3684,10 @@ fn dragon_rock_setdir_folds_the_flipdir_mirror_into_the_draw_transform(
     // non-zero (C4Object.cpp:4276-4279); Dir 0 < FlipDir 1 then takes the
     // "no flipdir necessary" branch, so SetFlipDir(1) unfolds mat[0] and the
     // now-identity transform is deleted (C4Object.cpp:431-442).
-    let index = engine.find_object_index(dragon).expect("dragon index");
-    engine
-        .call_object_function(index, "ReverseDir", Vec::new())
-        .expect("ReverseDir is callable");
+    let index = engine.test_object_index(dragon);
+    engine.call_test_object_function(index, "ReverseDir", Vec::new());
 
-    let turned = engine.object_snapshot(dragon).expect("dragon stays live");
+    let turned = engine.test_object_snapshot(dragon);
     assert_eq!(turned.direction.to_script_value(), 0);
     assert_eq!(
         turned.draw_transform, None,
@@ -4171,15 +3701,11 @@ fn dragon_rock_setdir_folds_the_flipdir_mirror_into_the_draw_transform(
     // (C4Object.cpp:425-427, C4Facet.h:63-70,79-81). The renderer consumes
     // that matrix directly, so the mirror has to survive here or a
     // right-facing dragon silently draws unmirrored.
-    engine
-        .call_object_function(index, "ReverseDir", Vec::new())
-        .expect("ReverseDir is callable");
+    engine.call_test_object_function(index, "ReverseDir", Vec::new());
 
-    let returned = engine.object_snapshot(dragon).expect("dragon stays live");
+    let returned = engine.test_object_snapshot(dragon);
     assert_eq!(returned.direction.to_script_value(), 1);
-    let transform = returned
-        .draw_transform
-        .expect("re-entering the mirrored range re-creates the draw transform");
+    let transform = crate::support::TestValueExt::test_value(returned.draw_transform);
     assert_eq!(transform.flip_dir(), -1);
     assert_eq!(transform.matrix()[0], -1.0);
 }
@@ -4331,9 +3857,7 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3(
     // every-tenth-frame Execute post-increments Counter before calling
     // Script%d (C4ScriptHost.cpp:222-230), so Script1 runs on frame 20.
     for _ in 0..20 {
-        engine
-            .tick_without_snapshot()
-            .expect("Dragon Rock reaches shipped Script1");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
     // GetEndboss calls Object(EVIL_MAGE_OBJ), where EVIL_MAGE_OBJ is the
@@ -4370,9 +3894,7 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3(
     // (Drachenfels.c4s/System.c4g/Dragon.c:17,26-32). If Script1 aborted at
     // Object(), this is the original "target is zero" failure instead.
     for _ in 0..20 {
-        engine
-            .tick_without_snapshot()
-            .expect("Dragon Rock reaches shipped Script3");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     let globals = &engine.snapshot().script_globals.named;
     assert_eq!(globals.get("DRGN_ctrl_tx"), Some(&Value::Int(400)));
@@ -4392,26 +3914,18 @@ fn dragon_rock_endboss_death_kills_the_shipped_dragon(prepared: &PreparedInstall
     // (Drachenfels.c4s/Script.c:438-454). C++ routes that native through
     // AssignDeath, including the Dead action and Death callback.
     for _ in 0..20 {
-        engine
-            .tick_without_snapshot()
-            .expect("Dragon Rock reaches shipped Script1");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     let dragon_id = ObjectId::new(202);
-    let dragon_before = engine
-        .object_snapshot(dragon_id)
-        .expect("Dragon Rock ships object #202 as its dragon");
+    let dragon_before = engine.test_object_snapshot(dragon_id);
     assert!(dragon_before.alive, "the dragon starts alive");
 
-    engine
-        .call_scenario_script_function(
-            "OnClonkDeath",
-            vec![Value::Object(ObjectId::new(1758).as_u64())],
-        )
-        .expect("the real endboss-death callback completes");
+    engine.call_test_scenario_script_function(
+        "OnClonkDeath",
+        vec![Value::Object(ObjectId::new(1758).as_u64())],
+    );
 
-    let dragon_after = engine
-        .object_snapshot(dragon_id)
-        .expect("AssignDeath retains the dead dragon object");
+    let dragon_after = engine.test_object_snapshot(dragon_id);
     assert!(!dragon_after.alive, "Kill marks the dragon dead");
     assert_eq!(
         dragon_after.action.name, "Dead",
@@ -4430,23 +3944,15 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
     // Counter 20 is intentionally empty; Script21 runs at frame 180 and
     // Script25 naturally runs at frame 220.
     for _ in 0..160 {
-        engine
-            .tick_without_snapshot()
-            .expect("Dragon Rock reaches Script15 pause");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    engine
-        .call_scenario_script_function("OnDragonReachTarget", Vec::new())
-        .expect("real dragon arrival resumes the intro counter");
+    engine.call_test_scenario_script_function("OnDragonReachTarget", Vec::new());
     for _ in 0..59 {
-        engine
-            .tick_without_snapshot()
-            .expect("Dragon Rock approaches Script25");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert_eq!(engine.snapshot().frame, 219);
 
-    let princess_before = engine
-        .object_snapshot(ObjectId::new(1777))
-        .expect("Dragon Rock princess remains live before Script25");
+    let princess_before = engine.test_object_snapshot(ObjectId::new(1777));
     let old_sparks = engine
         .snapshot()
         .objects
@@ -4455,7 +3961,7 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
         .map(|object| object.id)
         .collect::<Vec<_>>();
 
-    let frame = engine.tick().expect("natural Script25 callback succeeds");
+    let frame = crate::support::TestValueExt::test_value(engine.tick());
     assert_eq!(frame.frame, 220);
     let sparks = frame
         .objects
@@ -4478,9 +3984,8 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
         assert_eq!(spark.owner, OWNER_NONE);
         assert_eq!(spark.controller, OWNER_NONE);
         assert_eq!(spark.position.x, princess_before.position.x);
-        let shape = engine
-            .object_current_shape_rect(spark.id)
-            .expect("SPRK keeps its definition-derived shape");
+        let shape =
+            crate::support::TestValueExt::test_value(engine.object_current_shape_rect(spark.id));
         assert_eq!(
             spark.position.y + shape.y + shape.height,
             princess_before.position.y,
@@ -4504,15 +4009,11 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
     // These statements follow Sparkle in Script25. They prove CastObjects
     // returned normally instead of aborting the callback at the old unknown
     // function warning.
-    let princess = engine
-        .object_snapshot(ObjectId::new(1777))
-        .expect("princess survives Script25");
+    let princess = engine.test_object_snapshot(ObjectId::new(1777));
     assert_eq!((princess.position.x, princess.position.y), (2145, 485));
     assert_eq!(princess.action.name, "Walk");
     assert_eq!(princess.direction.to_script_value(), 0);
-    let endboss = engine
-        .object_snapshot(ObjectId::new(1758))
-        .expect("endboss survives Script25");
+    let endboss = engine.test_object_snapshot(ObjectId::new(1758));
     assert_eq!(endboss.action.name, "RideMagic");
     assert_eq!(endboss.action.target, Some(ObjectId::new(202)));
 }
@@ -4522,62 +4023,49 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
 ) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy tunnel parity");
-    let mage = engine.crew_cursor(owner).expect("Alchemy MCLK cursor");
-    let earth = engine
-        .materials()
-        .id_of("Earth")
-        .expect("Alchemy loads Earth");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let earth = crate::support::TestValueExt::test_value(engine.materials().id_of("Earth"));
     let (target_x, target_y) = {
-        let landscape = engine.landscape().expect("Alchemy keeps its landscape");
-        let grid = landscape
-            .pixel_grid()
-            .expect("Alchemy has a raster landscape");
-        (20..grid.height() as i32 - 20)
-            .find_map(|y| {
-                (20..grid.width() as i32 - 20)
-                    .find(|&x| {
-                        landscape.material_at(x, y) == Some(earth) && landscape.is_solid_at(x, y)
-                    })
-                    .map(|x| (x, y))
-            })
-            .expect("Alchemy contains an interior solid Earth pixel")
+        let landscape = crate::support::TestValueExt::test_value(engine.landscape());
+        let grid = crate::support::TestValueExt::test_value(landscape.pixel_grid());
+        crate::support::TestValueExt::test_value((20..grid.height() as i32 - 20).find_map(|y| {
+            (20..grid.width() as i32 - 20)
+                .find(|&x| {
+                    landscape.material_at(x, y) == Some(earth) && landscape.is_solid_at(x, y)
+                })
+                .map(|x| (x, y))
+        }))
     };
     let solid_pixels_before = {
-        let landscape = engine.landscape().expect("landscape before tunnel");
-        let grid = landscape
-            .pixel_grid()
-            .expect("Alchemy raster before tunnel");
+        let landscape = crate::support::TestValueExt::test_value(engine.landscape());
+        let grid = crate::support::TestValueExt::test_value(landscape.pixel_grid());
         (target_y - 2..=target_y + 2)
             .flat_map(|y| (target_x - 17..=target_x + 17).map(move |x| (x, y)))
             .filter(|&(x, y)| landscape.is_solid_at(x, y))
             .filter_map(|(x, y)| grid.byte_at(x, y).map(|byte| (x, y, byte)))
             .collect::<Vec<_>>()
     };
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             mage,
             ObjectUpdate::new()
                 .with_position(Vector2::new(target_x, target_y - 10))
                 .clear_container(),
-        )
-        .expect("place MCLK ten pixels above the tunnel origin");
-    let spell = engine
-        .spawn_object(
-            SpawnConfig::new("MTNL")
-                .with_owner(owner)
-                .with_position(Vector2::new(target_x, target_y - 10)),
-        )
-        .expect("the shipped MTNL spell spawns");
-    let spell_index = engine.find_object_index(spell).expect("MTNL index");
+        ),
+    );
+    let spell = engine.spawn_test_object(
+        SpawnConfig::new("MTNL")
+            .with_owner(owner)
+            .with_position(Vector2::new(target_x, target_y - 10)),
+    );
+    let spell_index = engine.test_object_index(spell);
 
     assert_eq!(
-        engine
-            .call_object_function(
-                spell_index,
-                "ActivateAngle",
-                vec![Value::Object(mage.as_u64()), Value::Int(0)],
-            )
-            .expect("the shipped aimed activation starts its global effect"),
+        engine.call_test_object_function(
+            spell_index,
+            "ActivateAngle",
+            vec![Value::Object(mage.as_u64()), Value::Int(0)],
+        ),
         Value::Int(1)
     );
     assert_eq!(
@@ -4588,15 +4076,11 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
         Some(earth)
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("the tunnel effect reaches time zero");
-    engine
-        .tick_without_snapshot()
-        .expect("the first tunnel row timer executes");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     let opened_pixels = {
-        let landscape = engine.landscape().expect("landscape after tunnel timer");
-        let grid = landscape.pixel_grid().expect("Alchemy raster after tunnel");
+        let landscape = crate::support::TestValueExt::test_value(engine.landscape());
+        let grid = crate::support::TestValueExt::test_value(landscape.pixel_grid());
         solid_pixels_before
             .iter()
             .filter(|&&(x, y, before)| {
@@ -4616,8 +4100,8 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
 fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInstalledScenario) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy firefist parity");
-    let mage = engine.crew_cursor(owner).expect("Alchemy MCLK cursor");
-    let fuel = engine.materials().id_of("Oil").expect("Alchemy loads Oil");
+    let mage = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let fuel = crate::support::TestValueExt::test_value(engine.materials().id_of("Oil"));
     assert_ne!(
         engine
             .materials()
@@ -4628,12 +4112,10 @@ fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInst
         "Oil is C++-inflammable"
     );
     let ((fuel_x, fuel_y), (air_x, air_y)) = {
-        let landscape = engine.landscape().expect("Alchemy keeps its landscape");
-        let grid = landscape
-            .pixel_grid()
-            .expect("Alchemy has a raster landscape");
-        let air_position = (30..grid.height() as i32 - 30)
-            .find_map(|y| {
+        let landscape = crate::support::TestValueExt::test_value(engine.landscape());
+        let grid = crate::support::TestValueExt::test_value(landscape.pixel_grid());
+        let air_position = crate::support::TestValueExt::test_value(
+            (30..grid.height() as i32 - 30).find_map(|y| {
                 (30..grid.width() as i32 - 30)
                     .find(|&x| {
                         landscape.material_at(x, y).is_none()
@@ -4643,8 +4125,8 @@ fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInst
                             && landscape.material_at(x, y + 10).is_none()
                     })
                     .map(|x| (x, y))
-            })
-            .expect("Alchemy contains open air for the fire shower");
+            }),
+        );
         (
             (grid.width() as i32 / 2, grid.height() as i32 / 2),
             air_position,
@@ -4654,33 +4136,26 @@ fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInst
     // The fixed seed has no naturally placed inflammable pixel. Draw a small
     // Oil-Smooth patch through the shipped engine API so the flame path has a
     // controlled C++-valid precondition.
-    engine
-        .register_definition(
-            Definition::from_script(
-                "FUEL",
-                "Fuel painter",
-                r#"#strict
-public func Paint(int x, int y)
-{
-    return DrawMaterialQuad("Oil-Smooth", x-1,y-1, x+1,y-1, x+1,y+1, x-1,y+1, false);
-}
-"#,
-            )
-            .expect("fuel painter compiles"),
-        )
-        .expect("fuel painter registers");
-    let painter = engine
-        .spawn_object(SpawnConfig::new("FUEL"))
-        .expect("fuel painter spawns");
-    let painter_index = engine.find_object_index(painter).expect("FUEL index");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "FUEL",
+            "Fuel painter",
+            r#"#strict
+        public func Paint(int x, int y)
+        {
+            return DrawMaterialQuad("Oil-Smooth", x-1,y-1, x+1,y-1, x+1,y+1, x-1,y+1, false);
+        }
+        "#,
+        ),
+    ));
+    let painter = engine.spawn_test_object(SpawnConfig::new("FUEL"));
+    let painter_index = engine.test_object_index(painter);
     assert_eq!(
-        engine
-            .call_object_function(
-                painter_index,
-                "Paint",
-                vec![Value::Int(fuel_x), Value::Int(fuel_y)],
-            )
-            .expect("DrawMaterialQuad paints the controlled fuel patch"),
+        engine.call_test_object_function(
+            painter_index,
+            "Paint",
+            vec![Value::Int(fuel_x), Value::Int(fuel_y)],
+        ),
         Value::Bool(true)
     );
     assert_eq!(
@@ -4696,80 +4171,63 @@ public func Paint(int x, int y)
     // left one through its ordinary Hit -> Jumpada path in open air so it
     // creates the same FLAM child as live gameplay
     // (Firefist.c4d/Script.c:15-55; Firetail.c4d/Script.c:19-40).
-    let spell = engine
-        .spawn_object(
-            SpawnConfig::new("FRFS")
-                .with_owner(owner)
-                .with_position(Vector2::new(air_x + 15, air_y)),
-        )
-        .expect("the shipped FRFS spell spawns");
-    let spell_index = engine.find_object_index(spell).expect("FRFS index");
+    let spell = engine.spawn_test_object(
+        SpawnConfig::new("FRFS")
+            .with_owner(owner)
+            .with_position(Vector2::new(air_x + 15, air_y)),
+    );
+    let spell_index = engine.test_object_index(spell);
     assert_eq!(
-        engine
-            .call_object_function(
-                spell_index,
-                "Activate",
-                vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64())],
-            )
-            .expect("the shipped Firefist activates"),
+        engine.call_test_object_function(
+            spell_index,
+            "Activate",
+            vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64())],
+        ),
         Value::Bool(true)
     );
-    let fire_shower = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| {
-            object.definition_id == "FSHW"
-                && object.status.is_active()
-                && object.action.name == "Left"
-        })
-        .map(|object| object.id)
-        .expect("Firefist creates its left fire shower");
-    engine
-        .apply_object_update(
-            fire_shower,
-            ObjectUpdate::new().with_position(Vector2::new(air_x, air_y)),
-        )
-        .expect("place the fire shower in open air");
-    let shower_index = engine.find_object_index(fire_shower).expect("FSHW index");
-    engine
-        .call_object_function(shower_index, "Hit", Vec::new())
-        .expect("the shipped Hit callback creates FLAM");
-    let flame = engine
-        .snapshot()
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "FLAM" && object.status.is_active())
-        .map(|object| object.id)
-        .expect("FSHW::Jumpada creates a live FLAM child");
-    assert!(
+    let fire_shower = crate::support::TestValueExt::test_value(
         engine
-            .object_snapshot(flame)
-            .expect("FLAM snapshot")
-            .on_fire,
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "FSHW"
+                    && object.status.is_active()
+                    && object.action.name == "Left"
+            })
+            .map(|object| object.id),
+    );
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        fire_shower,
+        ObjectUpdate::new().with_position(Vector2::new(air_x, air_y)),
+    ));
+    let shower_index = engine.test_object_index(fire_shower);
+    engine.call_test_object_function(shower_index, "Hit", Vec::new());
+    let flame = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FLAM" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    assert!(
+        engine.test_object_snapshot(flame).on_fire,
         "FLAM Completion incinerates the flame before BurnProcess"
     );
-    engine
-        .apply_object_update(
-            flame,
-            ObjectUpdate::new().with_position(Vector2::new(fuel_x, fuel_y)),
-        )
-        .expect("place FLAM on the inflammable material pixel");
-    let fuel_before = engine
-        .landscape()
-        .expect("landscape before flame consumption")
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        flame,
+        ObjectUpdate::new().with_position(Vector2::new(fuel_x, fuel_y)),
+    ));
+    let fuel_before = crate::support::TestValueExt::test_value(engine.landscape())
         .material_pixel_count(fuel, None);
 
-    let flame_index = engine.find_object_index(flame).expect("FLAM index");
+    let flame_index = engine.test_object_index(flame);
     assert_eq!(
-        engine
-            .call_object_function(flame_index, "BurnProcess", Vec::new())
-            .expect("the shipped FLAM BurnProcess executes"),
+        engine.call_test_object_function(flame_index, "BurnProcess", Vec::new()),
         Value::Int(1)
     );
-    let fuel_after = engine
-        .landscape()
-        .expect("landscape after flame consumption")
+    let fuel_after = crate::support::TestValueExt::test_value(engine.landscape())
         .material_pixel_count(fuel, None);
     assert!(
         fuel_after < fuel_before,
@@ -4832,7 +4290,7 @@ fn gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset(prepared: &PreparedIn
         .unwrap_or(0)
         .saturating_add(1_000);
     engine.set_landscape(Landscape::flat(
-        u32::try_from(base_x.saturating_add(100)).expect("isolated trap fixture width"),
+        crate::support::TestValueExt::test_value(u32::try_from(base_x.saturating_add(100))),
         60,
     ));
 
@@ -4840,32 +4298,26 @@ fn gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset(prepared: &PreparedIn
     // (Dir*2-1)*(TGIN Width 8 + Offset.x -4 + TRPR Width 16 +
     // Offset.x -8 + 3) = +15. At y=50 over the flat y=60 surface, its
     // first upward probe leaves solid at i=1 and returns local y=9.
-    let trapper = engine
-        .spawn_object(
-            SpawnConfig::new("TRPR")
-                .with_position(Vector2::new(base_x, 50))
-                .with_direction(Direction::Right)
-                .with_alive(true)
-                .with_loaded(true),
-        )
-        .expect("the real Western trapper spawns");
-    let trap = engine
-        .spawn_object(
-            SpawnConfig::new("TGIN")
-                .with_position(Vector2::new(base_x, 50))
-                .with_loaded(true),
-        )
-        .expect("the real Western gin trap spawns");
-    let trap_index = engine.find_object_index(trap).expect("gin trap index");
+    let trapper = engine.spawn_test_object(
+        SpawnConfig::new("TRPR")
+            .with_position(Vector2::new(base_x, 50))
+            .with_direction(Direction::Right)
+            .with_alive(true)
+            .with_loaded(true),
+    );
+    let trap = engine.spawn_test_object(
+        SpawnConfig::new("TGIN")
+            .with_position(Vector2::new(base_x, 50))
+            .with_loaded(true),
+    );
+    let trap_index = engine.test_object_index(trap);
 
     assert_eq!(
-        engine
-            .call_object_function(
-                trap_index,
-                "ArmCheck",
-                vec![Value::Object(trapper.as_u64())],
-            )
-            .expect("the shipped inherited TRAP::ArmCheck runs"),
+        engine.call_test_object_function(
+            trap_index,
+            "ArmCheck",
+            vec![Value::Object(trapper.as_u64())],
+        ),
         Value::Array(vec![Value::Int(15), Value::Int(9)])
     );
 }
@@ -4883,12 +4335,8 @@ fn gold_rush_stalactite_hit_spins_same_call_created_fragments(
         .map(|object| object.id)
         .collect::<Vec<_>>();
 
-    let stalactite_index = engine
-        .find_object_index(stalactite)
-        .expect("GoldRush Objects.txt stalactite #450 is live");
-    engine
-        .call_object_function(stalactite_index, "Hit", Vec::new())
-        .expect("the shipped _STA::Hit callback completes");
+    let stalactite_index = engine.test_object_index(stalactite);
+    engine.call_test_object_function(stalactite_index, "Hit", Vec::new());
 
     assert!(
         engine
@@ -4934,45 +4382,31 @@ fn gold_rush_fade_out_retimes_its_existing_effect_through_change_effect(
         engine.debug_global_has_function("FadeOut"),
         "GoldRush Helpers.c supplies FadeOut to the global script layer"
     );
-    engine
-        .register_definition(
-            Definition::from_script(
-                "FDRV",
-                "Fade driver",
-                r#"#strict
-func StartFade() { return FadeOut(4, 2, this()); }
-func RetargetFade() { return FadeOut(10, 5, this()); }
-"#,
-            )
-            .expect("fade driver compiles"),
-        )
-        .expect("fade driver registers against the installed global table");
-    let target = engine
-        .spawn_object(SpawnConfig::new("FDRV").with_position(Vector2::new(320, 120)))
-        .expect("the fade driver spawns");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "FDRV",
+            "Fade driver",
+            r#"#strict
+        func StartFade() { return FadeOut(4, 2, this()); }
+        func RetargetFade() { return FadeOut(10, 5, this()); }
+        "#,
+        ),
+    ));
+    let target =
+        engine.spawn_test_object(SpawnConfig::new("FDRV").with_position(Vector2::new(320, 120)));
 
-    let index = engine
-        .find_object_index(target)
-        .expect("fade driver exists");
+    let index = engine.test_object_index(target);
     assert_eq!(
-        engine
-            .call_object_function(index, "StartFade", Vec::new())
-            .expect("the shipped FadeOut starts"),
+        engine.call_test_object_function(index, "StartFade", Vec::new()),
         Value::Int(1)
     );
-    let index = engine
-        .find_object_index(target)
-        .expect("fade driver remains");
+    let index = engine.test_object_index(target);
     assert_eq!(
-        engine
-            .call_object_function(index, "RetargetFade", Vec::new())
-            .expect("the shipped FxIntFadeAdd path completes"),
+        engine.call_test_object_function(index, "RetargetFade", Vec::new()),
         Value::Int(1)
     );
 
-    let object = engine
-        .object_snapshot(target)
-        .expect("fade driver remains active");
+    let object = engine.test_object_snapshot(target);
     let fades = object
         .effects
         .iter()
@@ -4998,27 +4432,20 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound(
     let mut engine = prepared.instantiate();
     assert!(engine.debug_global_has_function("SetScorching"));
     assert!(engine.debug_global_has_function("FxIntScorchingTimer"));
-    let mut driver = Definition::from_script(
+    let mut driver = crate::support::TestValueExt::test_value(Definition::from_script(
         "SCRH",
         "Scorching driver",
         "#strict\nfunc StartScorching() { return SetScorching(this()); }",
-    )
-    .expect("scorching driver compiles");
+    ));
     driver.set_c4_callback_convention(true);
-    engine
-        .register_definition(driver)
-        .expect("scorching driver registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("SCRH").with_position(Vector2::new(320, 120)))
-        .expect("scorching driver spawns");
-    let index = engine.find_object_index(target).expect("driver exists");
-    engine
-        .call_object_function(index, "StartScorching", Vec::new())
-        .expect("the shipped SetScorching helper runs");
+    engine.register_test_definition(driver);
+    let target =
+        engine.spawn_test_object(SpawnConfig::new("SCRH").with_position(Vector2::new(320, 120)));
+    let index = engine.test_object_index(target);
+    engine.call_test_object_function(index, "StartScorching", Vec::new());
     assert!(
         engine
-            .object_snapshot(target)
-            .expect("driver remains active")
+            .test_object_snapshot(target)
             .effects
             .iter()
             .any(|effect| effect.name == "IntScorching"),
@@ -5026,14 +4453,11 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound(
     );
 
     for _ in 0..10 {
-        engine
-            .tick_without_snapshot()
-            .expect("the scorching timer approaches");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
     assert!(
         engine
-            .object_snapshot(target)
-            .expect("driver remains active")
+            .test_object_snapshot(target)
             .effects
             .iter()
             .all(|effect| effect.name != "IntScorching" || effect.priority == 0),
@@ -5045,16 +4469,12 @@ fn gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding(
     prepared: &PreparedInstalledScenario,
 ) {
     let mut engine = prepared.instantiate();
-    let dynamite_box = engine
-        .spawn_object(
-            SpawnConfig::new("DYNB")
-                .with_position(Vector2::new(320, 120))
-                .with_construction(FULL_CON / 2),
-        )
-        .expect("the incomplete shipped dynamite box spawns");
-    let index = engine
-        .find_object_index(dynamite_box)
-        .expect("dynamite box index");
+    let dynamite_box = engine.spawn_test_object(
+        SpawnConfig::new("DYNB")
+            .with_position(Vector2::new(320, 120))
+            .with_construction(FULL_CON / 2),
+    );
+    let index = engine.test_object_index(dynamite_box);
     let error = engine
         .call_object_function(index, "Ignition", Vec::new())
         .expect_err("assigning through `!iCount` must fail like C++");
@@ -5067,9 +4487,7 @@ fn gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding(
         "unexpected script error: {source}"
     );
 
-    let box_after = engine
-        .object_snapshot(dynamite_box)
-        .expect("the failed ignition must not remove or explode the box");
+    let box_after = engine.test_object_snapshot(dynamite_box);
     assert!(box_after.status.is_active());
     assert_eq!(box_after.construction, FULL_CON / 2);
 }
@@ -5084,41 +4502,36 @@ fn gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes(
         "M_5AshCity_DlgSheriff.c appends the callback to the shipped talker"
     );
     let owner = join_local_player(&mut engine, "GoldRush sheriff parity");
-    let target = engine
-        .crew_cursor(owner)
-        .expect("GoldRush joins a selected info-bearing crew member");
+    let target = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     assert!(
         engine.crew_object_info(target).is_some(),
         "the removal path must exercise this player's real CrewInfoList"
     );
-    engine
-        .apply_object_update(target, ObjectUpdate::new().with_energy(1))
-        .expect("seed the sheriff damage-stop path");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(target, ObjectUpdate::new().with_energy(1)),
+    );
 
-    let talker = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "_TLK" && object.status.is_active())
-        .map(|object| object.id)
-        .expect("GoldRush Objects.txt contains a live talker");
-    let talker_index = engine.find_object_index(talker).expect("talker index");
-    engine
-        .call_object_function(
-            talker_index,
-            "FxWatchEnergyStop",
-            vec![
-                Value::Object(target.as_u64()),
-                Value::Int(99_999),
-                Value::Int(0),
-                Value::Bool(false),
-            ],
-        )
-        .expect("the shipped sheriff stop callback reaches its tail");
+    let talker = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "_TLK" && object.status.is_active())
+            .map(|object| object.id),
+    );
+    let talker_index = engine.test_object_index(talker);
+    engine.call_test_object_function(
+        talker_index,
+        "FxWatchEnergyStop",
+        vec![
+            Value::Object(target.as_u64()),
+            Value::Int(99_999),
+            Value::Int(0),
+            Value::Bool(false),
+        ],
+    );
 
-    let sheriff = engine
-        .object_snapshot(target)
-        .expect("the transformed sheriff remains live");
+    let sheriff = engine.test_object_snapshot(target);
     assert_eq!(sheriff.definition_id, "SHRF");
     assert!(!sheriff.crew_member);
     assert!(!sheriff.selected);
@@ -5128,11 +4541,12 @@ fn gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes(
     assert!(sheriff.alive);
     assert_eq!(sheriff.action.name, "Walk");
     assert_eq!(sheriff.owner, OWNER_NONE);
-    let stay_there = sheriff
-        .effects
-        .iter()
-        .find(|effect| effect.name == "StayThere")
-        .expect("the callback tail installs the StayThere effect");
+    let stay_there = crate::support::TestValueExt::test_value(
+        sheriff
+            .effects
+            .iter()
+            .find(|effect| effect.name == "StayThere"),
+    );
     assert_eq!(stay_there.priority, 1);
     assert_eq!(stay_there.interval, 35);
 }
@@ -5143,22 +4557,18 @@ fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents(
     let mut engine = prepared.instantiate();
     let mut forge_action = ActionState::new("Forge");
     forge_action.time = 150;
-    let anvil = engine
-        .spawn_object(
-            SpawnConfig::new("ANVL")
-                .with_action(forge_action)
-                // Loaded objects restore Action/Time without replaying the
-                // Forge StartCall before this fixture can add its METL.
-                .with_loaded(true)
-                .with_local_vars(std::collections::HashMap::from([(
-                    "product".to_owned(),
-                    Value::C4Id("WIRR".to_owned()),
-                )])),
-        )
-        .expect("the real Western anvil spawns");
-    let metal = engine
-        .spawn_object(SpawnConfig::new("METL").with_container(anvil))
-        .expect("one real METL component enters the anvil");
+    let anvil = engine.spawn_test_object(
+        SpawnConfig::new("ANVL")
+            .with_action(forge_action)
+            // Loaded objects restore Action/Time without replaying the
+            // Forge StartCall before this fixture can add its METL.
+            .with_loaded(true)
+            .with_local_vars(std::collections::HashMap::from([(
+                "product".to_owned(),
+                Value::C4Id("WIRR".to_owned()),
+            )])),
+    );
+    let metal = engine.spawn_test_object(SpawnConfig::new("METL").with_container(anvil));
     let old_wire_rolls = engine
         .snapshot()
         .objects
@@ -5171,11 +4581,9 @@ fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents(
     // METL. C++ removes that first matching content, creates WIRR as anvil
     // contents, and returns it; Forging immediately exits the product
     // (C4Object.cpp:3764-3806; Anvil.c4d/Script.c:179-188).
-    let anvil_index = engine.find_object_index(anvil).expect("anvil index");
+    let anvil_index = engine.test_object_index(anvil);
     assert_eq!(
-        engine
-            .call_object_function(anvil_index, "Forging", Vec::new())
-            .expect("the shipped ANVL::Forging callback completes"),
+        engine.call_test_object_function(anvil_index, "Forging", Vec::new()),
         Value::Int(1)
     );
 
@@ -5209,23 +4617,19 @@ fn knights_bow_trajectory_runs_through_shipped_arc_cos_calls() {
     // and then fail the shipped +/-120 aiming gate, before bow/equipment
     // callbacks can affect this registration probe.
     let mut engine = load_installed_scenario("Knights.c4f/Camp.c4s", 0);
-    let knight = engine
-        .spawn_object(
-            SpawnConfig::new("KNIG")
-                .with_position(Vector2::new(100, 100))
-                .with_loaded(true),
-        )
-        .expect("shipped KNIG spawns");
-    let index = engine.find_object_index(knight).expect("KNIG index");
+    let knight = engine.spawn_test_object(
+        SpawnConfig::new("KNIG")
+            .with_position(Vector2::new(100, 100))
+            .with_loaded(true),
+    );
+    let index = engine.test_object_index(knight);
 
     assert_eq!(
-        engine
-            .call_object_function(
-                index,
-                "FireBowAt",
-                vec![Value::Int(150), Value::Int(150), Value::Bool(false)],
-            )
-            .expect("shipped Knight bow trajectory completes"),
+        engine.call_test_object_function(
+            index,
+            "FireBowAt",
+            vec![Value::Int(150), Value::Int(150), Value::Bool(false)],
+        ),
         Value::Nil
     );
 }
@@ -5247,8 +4651,8 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             ..Default::default()
         })
         .collect();
-    let owner = engine
-        .join_player(JoinPlayerConfig {
+    let owner = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
             name: "Lance parity".to_owned(),
             player_info_id: 0,
             score: 0,
@@ -5264,11 +4668,10 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             control_style: false,
             auto_context_menu: false,
             startup_player_count: 1,
-        })
-        .expect("rank-five Knights player joins")
-        .initialized()
-        .expect("team one initializes immediately")
-        .number;
+        }))
+        .initialized(),
+    )
+    .number;
 
     let mut knights = engine
         .snapshot()
@@ -5290,58 +4693,49 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
     }
     let rider = knights[0];
     let victim = knights[1];
-    engine
-        .apply_object_update(
-            rider,
-            ObjectUpdate::new().with_position(Vector2::new(9_000, 9_000)),
-        )
-        .expect("move the rider away from the collision point");
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        rider,
+        ObjectUpdate::new().with_position(Vector2::new(9_000, 9_000)),
+    ));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             victim,
             ObjectUpdate::new()
                 .with_position(Vector2::new(10_000, 9_973))
                 .with_action("Walk"),
-        )
-        .expect("place the victim at attached-lance vertex one");
+        ),
+    );
     assert_eq!(
-        engine
-            .object_snapshot(victim)
-            .expect("rank-five victim exists")
-            .energy,
+        engine.test_object_snapshot(victim).energy,
         55_000,
         "fair-crew promotion raises the real KNIG energy before the hit"
     );
 
     let mut lance_action = ActionState::new("Lance");
     lance_action.target = Some(rider);
-    let lance = engine
-        .spawn_object(
-            SpawnConfig::new("LNCA")
-                .with_position(Vector2::new(10_000, 10_000))
-                .with_owner(owner)
-                .with_action(lance_action)
-                .with_local_vars(std::collections::HashMap::from([
-                    ("high_target".to_owned(), Value::Int(0)),
-                    ("last_x".to_owned(), Value::Int(9_969)),
-                ]))
-                .with_loaded(true),
-        )
-        .expect("the real attached lance spawns");
+    let lance = engine.spawn_test_object(
+        SpawnConfig::new("LNCA")
+            .with_position(Vector2::new(10_000, 10_000))
+            .with_owner(owner)
+            .with_action(lance_action)
+            .with_local_vars(std::collections::HashMap::from([
+                ("high_target".to_owned(), Value::Int(0)),
+                ("last_x".to_owned(), Value::Int(9_969)),
+            ]))
+            .with_loaded(true),
+    );
 
     // Lancing computes speed_x=31, draws Random(16), reads GetRank(rider)
     // as 5, and uses divisor BoundBy((5-3)/2,1,6)=1. The resulting angle
     // always clamps to SetRDir(12) at this speed.
     let mut expected_rng = engine.debug_rng_clone();
     expected_rng.random(16);
-    let lance_index = engine.find_object_index(lance).expect("lance index");
+    let lance_index = engine.test_object_index(lance);
     assert_eq!(
-        engine
-            .call_object_function(lance_index, "Lancing", Vec::new())
-            .expect("the shipped Lancing callback completes"),
+        engine.call_test_object_function(lance_index, "Lancing", Vec::new()),
         Value::Int(1)
     );
-    let aimed_lance = engine.object_snapshot(lance).expect("aimed lance exists");
+    let aimed_lance = engine.test_object_snapshot(lance);
     assert_eq!(
         aimed_lance.rotation_velocity,
         Some(math::itofix_prec(12, 10)),
@@ -5358,22 +4752,14 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
     expected_rng.random(50_000);
     expected_rng.random(5);
     assert_eq!(
-        engine
-            .call_object_function(lance_index, "Targeting", Vec::new())
-            .expect("the shipped Targeting callback completes"),
+        engine.call_test_object_function(lance_index, "Targeting", Vec::new()),
         Value::Int(1)
     );
-    let hit_victim = engine
-        .object_snapshot(victim)
-        .expect("punched victim exists");
+    let hit_victim = engine.test_object_snapshot(victim);
     assert_eq!(hit_victim.energy, 40_000);
     assert_eq!(hit_victim.action.name, "Tumble");
     assert_eq!(
-        engine
-            .object_snapshot(lance)
-            .expect("lance survives its hit")
-            .local_vars
-            .get("speed_x"),
+        engine.test_object_snapshot(lance).local_vars.get("speed_x"),
         Some(&Value::Nil)
     );
     assert_eq!(engine.debug_rng_clone(), expected_rng);
@@ -5381,35 +4767,24 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
     // C4Object::GrabInfo moves the same live Info pointer. Verify the
     // nonzero rank, not merely the fresh-rank-zero case, is visible on the
     // recipient immediately and remains there after the callback folds.
-    let rank_probe = Definition::from_script(
+    let rank_probe = crate::support::TestValueExt::test_value(Definition::from_script(
         "RKPR",
         "Rank transfer probe",
         "#strict 2\nfunc Take(obj) { return [GrabObjectInfo(obj), GetRank(), GetRank(obj)]; }\nfunc Read() { return GetRank(); }",
-    )
-    .expect("rank transfer probe compiles");
-    engine
-        .register_definition(rank_probe)
-        .expect("rank transfer probe registers");
-    let rank_probe = engine
-        .spawn_object(SpawnConfig::new("RKPR").with_owner(owner))
-        .expect("rank transfer probe spawns");
-    let rank_probe_index = engine
-        .find_object_index(rank_probe)
-        .expect("rank transfer probe index");
+    ));
+    engine.register_test_definition(rank_probe);
+    let rank_probe = engine.spawn_test_object(SpawnConfig::new("RKPR").with_owner(owner));
+    let rank_probe_index = engine.test_object_index(rank_probe);
     assert_eq!(
-        engine
-            .call_object_function(
-                rank_probe_index,
-                "Take",
-                vec![Value::Object(victim.as_u64())],
-            )
-            .expect("rank-five info transfer completes"),
+        engine.call_test_object_function(
+            rank_probe_index,
+            "Take",
+            vec![Value::Object(victim.as_u64())],
+        ),
         Value::Array(vec![Value::Bool(true), Value::Int(5), Value::Nil])
     );
     assert_eq!(
-        engine
-            .call_object_function(rank_probe_index, "Read", Vec::new())
-            .expect("transferred rank remains linked"),
+        engine.call_test_object_function(rank_probe_index, "Read", Vec::new()),
         Value::Int(5)
     );
 }

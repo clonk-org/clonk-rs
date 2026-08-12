@@ -37,38 +37,38 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
     let resolver = ContentResolver {
         root: content.clone(),
     };
-    let scenario =
-        Scenario::load_from_path_with(content.join("Tutorial.c4f/Tutorial03.c4s"), &resolver)
-            .expect("Tutorial03 and its real Objects.c4d load");
+    let scenario = crate::support::TestValueExt::test_value(Scenario::load_from_path_with(
+        content.join("Tutorial.c4f/Tutorial03.c4s"),
+        &resolver,
+    ));
     let mut engine = Engine::with_seed(0);
-    scenario.apply(&mut engine).expect("Tutorial03 applies");
-    engine
-        .join_player(JoinPlayerConfig {
-            name: "Sawmill production tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
-        .expect("Tutorial03 player joins and places ready buildings");
+    crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
+    crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Sawmill production tester".to_string(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }));
 
     let snapshot = engine.snapshot();
-    let sawmill = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "SAWM")
-        .expect("Tutorial03 places its ready SAWM")
-        .id;
+    let sawmill = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "SAWM"),
+    )
+    .id;
     let tree = snapshot
         .objects
         .iter()
@@ -96,9 +96,9 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
         .filter(|object| object.definition_id == "WOOD")
         .count();
 
-    engine
-        .apply_object_update(tree, ObjectUpdate::new().with_container(sawmill))
-        .expect("put the real chopped-tree milestone into SAWM");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(tree, ObjectUpdate::new().with_container(sawmill)),
+    );
     assert!(
         engine
             .object_snapshot(sawmill)
@@ -109,9 +109,7 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
     );
 
     for _ in 0..80 {
-        engine
-            .tick_without_snapshot()
-            .expect("real SAWM production frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         if engine.object_snapshot(tree).is_none() {
             break;
         }

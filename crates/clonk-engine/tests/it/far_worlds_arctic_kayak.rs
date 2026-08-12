@@ -1,6 +1,7 @@
 use crate::support::real_scenario::{
     join_local_player, prepare_installed_scenario, PreparedInstalledScenario,
 };
+use crate::support::EngineTestExt;
 use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{
     CommandDirection, Direction, ObjectId, ObjectUpdate, SpawnConfig, COM_LEFT, COM_RELEASE_OFFSET,
@@ -14,11 +15,7 @@ fn fill_kayak(
     cargo_count: usize,
 ) -> Vec<ObjectId> {
     (0..cargo_count)
-        .map(|_| {
-            engine
-                .spawn_object(SpawnConfig::new("BONE").with_container(kayak))
-                .expect("the shipped Arctic bone cargo spawns in KAJO")
-        })
+        .map(|_| engine.spawn_test_object(SpawnConfig::new("BONE").with_container(kayak)))
         .collect()
 }
 
@@ -64,51 +61,41 @@ fn arctic_occupied_kayak_rows_with_jump_and_run_direction_updates_subcase(
     // (Occupied.c4d/Script.c:25-52,54-100).
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Arctic kayak rowing parity");
-    engine
-        .player_mut(owner)
-        .expect("Arctic player remains joined")
+    crate::support::TestValueExt::test_value(engine.player_mut(owner))
         .control
         .control_style = true;
-    let crew = engine
-        .crew_cursor(owner)
-        .expect("Arctic joins with a selected Inuit");
-    let kayak = engine
-        .spawn_object(
-            SpawnConfig::new("KAJO")
-                .with_owner(owner)
-                .with_in_liquid(true),
-        )
-        .expect("the shipped occupied kayak spawns in liquid");
-    engine
-        .apply_object_update(crew, ObjectUpdate::new().with_container(kayak))
-        .expect("the Inuit enters the occupied kayak");
-    engine
-        .apply_object_update(
+    let crew = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let kayak = engine.spawn_test_object(
+        SpawnConfig::new("KAJO")
+            .with_owner(owner)
+            .with_in_liquid(true),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(crew, ObjectUpdate::new().with_container(kayak)),
+    );
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             kayak,
             ObjectUpdate::new()
                 .with_action("Stop")
                 .with_direction(Direction::Left)
                 .with_command_direction(CommandDirection::Stop),
-        )
-        .expect("the occupied kayak starts stopped and facing left");
+        ),
+    );
     engine.debug_set_in_liquid(kayak, true);
 
-    engine
-        .player_in_com(owner, COM_LEFT, 0)
-        .expect("held-left control reaches the occupied kayak");
-    let rowing = engine
-        .object_snapshot(kayak)
-        .expect("the occupied kayak survives held-left control");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_LEFT, 0));
+    let rowing = engine.test_object_snapshot(kayak);
     assert_eq!(rowing.action.name, "Paddle");
     assert_eq!(rowing.command_direction, CommandDirection::Left);
     assert_eq!(rowing.direction, Direction::Left);
 
-    engine
-        .player_in_com(owner, COM_LEFT + COM_RELEASE_OFFSET, 0)
-        .expect("left release reaches the occupied kayak");
-    let stopped = engine
-        .object_snapshot(kayak)
-        .expect("the occupied kayak survives left release");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_LEFT + COM_RELEASE_OFFSET,
+        0,
+    ));
+    let stopped = engine.test_object_snapshot(kayak);
     assert_eq!(stopped.action.name, "Stop");
     assert_eq!(stopped.command_direction, CommandDirection::Stop);
 }
@@ -125,30 +112,19 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit(
     // contents, so three cargo objects remain below the limit and four hit it.
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Arctic kayak cargo parity");
-    let crew = engine
-        .crew_cursor(owner)
-        .expect("Arctic joins with a selected Inuit");
+    let crew = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
-    let below_limit = engine
-        .spawn_object(SpawnConfig::new("KAJO").with_owner(owner))
-        .expect("the shipped occupied kayak spawns");
+    let below_limit = engine.spawn_test_object(SpawnConfig::new("KAJO").with_owner(owner));
     let _below_limit_cargo = fill_kayak(&mut engine, below_limit, 3);
-    engine
-        .apply_object_update(crew, ObjectUpdate::new().with_container(below_limit))
-        .expect("the Inuit enters the below-limit occupied kayak");
-    let carried_bone = engine
-        .spawn_object(SpawnConfig::new("BONE").with_container(crew))
-        .expect("the Inuit carries one ordinary throwable bone");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(crew, ObjectUpdate::new().with_container(below_limit)),
+    );
+    let carried_bone = engine.spawn_test_object(SpawnConfig::new("BONE").with_container(crew));
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("the below-limit throw control completes");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
 
     assert_eq!(
-        engine
-            .object_snapshot(carried_bone)
-            .expect("the ordinary cargo survives")
-            .container,
+        engine.test_object_snapshot(carried_bone).container,
         Some(below_limit),
         "below CollectionLimit hardcoded Throw puts carried cargo into KAJO"
     );
@@ -157,34 +133,29 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit(
         Some(None),
         "below CollectionLimit KAJO must not open its cargo menu"
     );
-    engine
-        .player_in_com(owner, COM_THROW + COM_RELEASE_OFFSET, 0)
-        .expect("release the first Throw before probing a second press");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_THROW + COM_RELEASE_OFFSET,
+        0,
+    ));
     {
         // These are independent route probes. Advancing 11 whole scenario
         // frames would also execute Arctic's initial crew Exit command, so
         // expire only C4Player's double-click ledger between them.
-        let control = &mut engine
-            .player_mut(owner)
-            .expect("the Arctic player remains joined")
-            .control;
+        let control =
+            &mut crate::support::TestValueExt::test_value(engine.player_mut(owner)).control;
         control.last_com = 0;
         control.last_com_delay = 0;
         control.last_com_down_double = 0;
         control.pressed_coms = 0;
     }
 
-    let full = engine
-        .spawn_object(SpawnConfig::new("KAJO").with_owner(owner))
-        .expect("a second shipped occupied kayak spawns");
+    let full = engine.spawn_test_object(SpawnConfig::new("KAJO").with_owner(owner));
     let full_cargo = fill_kayak(&mut engine, full, 4);
-    engine
-        .apply_object_update(crew, ObjectUpdate::new().with_container(full))
-        .expect("the Inuit enters the full occupied kayak");
-    let full_contents = engine
-        .object_snapshot(full)
-        .expect("the full occupied kayak survives")
-        .contents;
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(crew, ObjectUpdate::new().with_container(full)),
+    );
+    let full_contents = engine.test_object_snapshot(full).contents;
     assert_eq!(
         full_contents.len(),
         5,
@@ -193,12 +164,9 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit(
     assert!(full_contents.contains(&crew));
     assert!(full_cargo.iter().all(|cargo| full_contents.contains(cargo)));
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("the full-kayak throw control completes");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     let commands = engine
-        .object_snapshot(crew)
-        .expect("the Inuit survives the cargo-menu control")
+        .test_object_snapshot(crew)
         .command_stack
         .command_names();
     assert_eq!(
@@ -207,18 +175,15 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit(
         "KAJO queues its explicit Activate command at exactly five contents"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("the queued Activate command opens the internal cargo menu");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
     assert!(
         engine.pending_menu_requests.is_empty(),
         "C4MN_Activate is owned by the engine, not deferred to the frontend"
     );
-    let menu = engine
-        .debug_object_menu(crew.as_u64())
-        .expect("the Inuit remains live")
-        .expect("the full kayak opens an Activate menu");
+    let menu = crate::support::TestValueExt::test_value(crate::support::TestValueExt::test_value(
+        engine.debug_object_menu(crew.as_u64()),
+    ));
     assert_eq!(menu.identification, Value::Int(6));
     assert!(!menu.user_menu, "the cargo menu is an internal object menu");
     assert_eq!(menu.refill_object, Some(full));

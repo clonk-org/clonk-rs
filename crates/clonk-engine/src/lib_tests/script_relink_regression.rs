@@ -1,21 +1,28 @@
 use super::*;
 
+trait TestEngineExt {
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
+}
+
+impl TestEngineExt for Engine {
+    #[track_caller]
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
+        crate::TestValueExt::test_value(self.spawn_object(config))
+    }
+}
+
 fn register(engine: &mut Engine, id: &str, source: &str) {
-    engine
-        .register_script_definition(id, id, source)
-        .expect("fixture definition registers");
+    crate::TestValueExt::test_value(engine.register_script_definition(id, id, source));
 }
 
 fn call(engine: &mut Engine, object: ObjectId, function: &str) -> Value {
-    let index = engine.find_object_index(object).expect("object exists");
-    engine
-        .call_object_function(index, function, Vec::new())
-        .expect("fixture function runs")
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
+    crate::TestValueExt::test_value(engine.call_object_function(index, function, Vec::new()))
 }
 
 fn link_initial_scripts(engine: &mut Engine) {
     engine.resolve_appends();
-    engine.resolve_includes().expect("initial scripts link");
+    crate::TestValueExt::test_value(engine.resolve_includes());
 }
 
 #[test]
@@ -38,13 +45,10 @@ fn link_surfaces_an_unresolvable_hard_inherited_per_definition() {
          global func Hop() { return 1; }\n\
          func Hop() { return inherited() + 10; }",
     );
-    engine.relink_scripts().expect("scripts relink");
+    crate::TestValueExt::test_value(engine.relink_scripts());
 
     let reported = |id: &str| {
-        engine
-            .definitions
-            .get(id)
-            .expect("definition remains")
+        crate::TestValueExt::test_value(engine.definitions.get(id))
             .script
             .unresolved_inherited_diagnostics()
     };
@@ -105,29 +109,27 @@ fn initial_literal_hold_reuses_later_static_constant_identity() {
         "LATE",
         "static const Shared = \"shared\";\nfunc Constant() { return Shared; }",
     );
-    let constant = engine
-        .script_global_consts
-        .borrow()
-        .get("Shared")
-        .expect("constant was preparsed")
-        .borrow()
-        .clone();
+    let constant =
+        crate::TestValueExt::test_value(engine.script_global_consts.borrow().get("Shared"))
+            .borrow()
+            .clone();
     let Value::String(constant) = constant else {
         panic!("Shared is a string constant");
     };
 
     link_initial_scripts(&mut engine);
-    let source = engine
-        .script_link_sources
-        .iter()
-        .find_map(|source| match source {
-            ScriptLinkSource::Script { name, script, .. } if name == "System/A.c" => {
-                Some(Arc::clone(script))
+    let source =
+        crate::TestValueExt::test_value(engine.script_link_sources.iter().find_map(|source| {
+            match source {
+                ScriptLinkSource::Script { name, script, .. } if name == "System/A.c" => {
+                    Some(Arc::clone(script))
+                }
+                _ => None,
             }
-            _ => None,
-        })
-        .expect("system host remains installed");
-    let Value::String(initial_literal) = source.call("Literal", &[]).expect("literal runs") else {
+        }));
+    let Value::String(initial_literal) =
+        crate::TestValueExt::test_value(source.call("Literal", &[]))
+    else {
         panic!("Literal returns a string");
     };
     assert!(
@@ -135,20 +137,19 @@ fn initial_literal_hold_reuses_later_static_constant_identity() {
         "Parse must set Hold on the constant's preparsed identity"
     );
 
-    engine
-        .relink_scripts()
-        .expect("native Clear/reparse succeeds");
-    let source = engine
-        .script_link_sources
-        .iter()
-        .find_map(|source| match source {
-            ScriptLinkSource::Script { name, script, .. } if name == "System/A.c" => {
-                Some(Arc::clone(script))
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let source =
+        crate::TestValueExt::test_value(engine.script_link_sources.iter().find_map(|source| {
+            match source {
+                ScriptLinkSource::Script { name, script, .. } if name == "System/A.c" => {
+                    Some(Arc::clone(script))
+                }
+                _ => None,
             }
-            _ => None,
-        })
-        .expect("system host remains installed");
-    let Value::String(relinked_literal) = source.call("Literal", &[]).expect("literal runs") else {
+        }));
+    let Value::String(relinked_literal) =
+        crate::TestValueExt::test_value(source.call("Literal", &[]))
+    else {
         panic!("Literal returns a string");
     };
     assert!(
@@ -190,13 +191,9 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
     );
     register(&mut engine, "CHLD", "#include BASE");
 
-    engine.relink_scripts().expect("initial scripts link");
-    let base = engine
-        .spawn_object(SpawnConfig::new("BASE"))
-        .expect("base object spawns");
-    let child = engine
-        .spawn_object(SpawnConfig::new("CHLD"))
-        .expect("child object spawns");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let base = engine.spawn_test_object(SpawnConfig::new("BASE"));
+    let child = engine.spawn_test_object(SpawnConfig::new("CHLD"));
     assert_eq!(call(&mut engine, base, "Layer"), Value::Int(11_111));
     assert_eq!(call(&mut engine, child, "Layer"), Value::Int(11_111));
     assert_eq!(call(&mut engine, base, "Seed"), Value::Int(41));
@@ -231,14 +228,14 @@ fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
     );
 
     let (function_count, linked_function_count) = {
-        let definition = engine.definitions.get("BASE").expect("base definition");
+        let definition = crate::TestValueExt::test_value(engine.definitions.get("BASE"));
         (
             definition.function_count(),
             definition.linked_function_count(),
         )
     };
-    engine.relink_scripts().expect("second relink succeeds");
-    let definition = engine.definitions.get("BASE").expect("base definition");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let definition = crate::TestValueExt::test_value(engine.definitions.get("BASE"));
     assert_eq!(definition.function_count(), function_count);
     assert_eq!(definition.linked_function_count(), linked_function_count);
     assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_211));
@@ -273,15 +270,13 @@ fn relink_replays_interleaved_global_hosts_and_declaring_links() {
         "CALL",
         "func Probe() { return GlobalLayer(); }",
     );
-    engine
-        .load_scenario_script_with_convention(
-            "Scenario/Script.c",
-            "#strict\n\
+    crate::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "Scenario/Script.c",
+        "#strict\n\
                  global func GlobalLayer() { return inherited() * 10 + 3; }\n\
                  func Probe() { return GlobalLayer(); }",
-            true,
-        )
-        .expect("scenario script loads");
+        true,
+    ));
     assert_eq!(
         engine.install_scenario_global_scripts(&[(
             "Scenario/System/Last.c".into(),
@@ -289,14 +284,10 @@ fn relink_replays_interleaved_global_hosts_and_declaring_links() {
         )]),
         1
     );
-    engine.relink_scripts().expect("scripts relink");
+    crate::TestValueExt::test_value(engine.relink_scripts());
 
-    let owner = engine
-        .spawn_object(SpawnConfig::new("OWNR"))
-        .expect("owner object spawns");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("CALL"))
-        .expect("caller object spawns");
+    let owner = engine.spawn_test_object(SpawnConfig::new("OWNR"));
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
     assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(1_234));
     assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
     assert_eq!(
@@ -315,7 +306,7 @@ fn relink_replays_interleaved_global_hosts_and_declaring_links() {
         .iter()
         .map(|(id, definition)| (id.clone(), definition.linked_function_count()))
         .collect::<HashMap<_, _>>();
-    engine.relink_scripts().expect("repeat relink succeeds");
+    crate::TestValueExt::test_value(engine.relink_scripts());
     for (id, count) in counts {
         assert_eq!(
             engine
@@ -345,10 +336,8 @@ fn declaring_definition_calls_use_the_latest_engine_global_chain() {
                  func CallF() { return F(); }",
         );
         register(&mut engine, "GFB1", later_source);
-        engine.relink_scripts().expect("global functions relink");
-        let declaring = engine
-            .spawn_object(SpawnConfig::new("GFA1"))
-            .expect("declaring object spawns");
+        crate::TestValueExt::test_value(engine.relink_scripts());
+        let declaring = engine.spawn_test_object(SpawnConfig::new("GFA1"));
         assert_eq!(
             call(&mut engine, declaring, "CallF"),
             Value::Int(expected),
@@ -360,15 +349,13 @@ fn declaring_definition_calls_use_the_latest_engine_global_chain() {
 #[test]
 fn scenario_script_calls_use_the_later_scenario_system_global() {
     let mut engine = Engine::new();
-    engine
-        .load_scenario_script_with_convention(
-            "Scenario/Script.c",
-            "#strict 2\n\
+    crate::TestValueExt::test_value(engine.load_scenario_script_with_convention(
+        "Scenario/Script.c",
+        "#strict 2\n\
                  global func F() { return 1; }\n\
                  func CallF() { return F(); }",
-            true,
-        )
-        .expect("scenario script loads first");
+        true,
+    ));
     assert_eq!(
         engine.install_scenario_global_scripts(&[(
             "Scenario/System/Override.c".into(),
@@ -376,7 +363,7 @@ fn scenario_script_calls_use_the_later_scenario_system_global() {
         )]),
         1,
     );
-    engine.relink_scripts().expect("scenario scripts relink");
+    crate::TestValueExt::test_value(engine.relink_scripts());
 
     assert_eq!(
         engine
@@ -405,20 +392,12 @@ fn relink_keeps_global_resort_lookup_bound_to_the_declaring_definition() {
         "func Cmp(object first, object second) { return 22; }\n\
              func Trigger() { return Queue(); }",
     );
-    engine.relink_scripts().expect("scripts relink");
-    let declaring_script = engine
-        .definitions
-        .get("ADEF")
-        .expect("declaring definition remains")
-        .script_arc();
-    let destination_script = engine
-        .definitions
-        .get("BDEF")
-        .expect("destination definition remains")
-        .script_arc();
-    let caller = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("destination object spawns");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let declaring_script =
+        crate::TestValueExt::test_value(engine.definitions.get("ADEF")).script_arc();
+    let destination_script =
+        crate::TestValueExt::test_value(engine.definitions.get("BDEF")).script_arc();
+    let caller = engine.spawn_test_object(SpawnConfig::new("BDEF"));
 
     assert_eq!(call(&mut engine, caller, "Trigger"), Value::Bool(true));
     let [ObjectOrderCommand::OrderFuncAll { order, category }] =
@@ -455,23 +434,18 @@ fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
         "func Cmp(object first, object second) { return 1; }\n\
              func Trigger() { return Queue(); }",
     );
-    engine.relink_scripts().expect("system scripts relink");
-    let system_script = engine
-        .script_link_sources
-        .iter()
-        .find_map(|source| match source {
-            ScriptLinkSource::Script { name, script, .. } if name == "System/Order.c" => {
-                Some(Arc::clone(script))
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let system_script =
+        crate::TestValueExt::test_value(engine.script_link_sources.iter().find_map(|source| {
+            match source {
+                ScriptLinkSource::Script { name, script, .. } if name == "System/Order.c" => {
+                    Some(Arc::clone(script))
+                }
+                _ => None,
             }
-            _ => None,
-        })
-        .expect("retained System host exists");
-    let first = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("first destination object spawns");
-    let second = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("second destination object spawns");
+        }));
+    let first = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let second = engine.spawn_test_object(SpawnConfig::new("BDEF"));
     assert_eq!(engine.debug_exec_order(), [first, second]);
 
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
@@ -520,18 +494,11 @@ fn global_resort_comparator_executes_without_a_definition_context() {
              }\n\
              func Trigger() { return Queue(); }",
     );
-    engine.relink_scripts().expect("global comparator relinks");
-    let declaring_script = engine
-        .definitions
-        .get("BDEF")
-        .expect("comparator definition remains")
-        .script_arc();
-    let first = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("first destination object spawns");
-    let second = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("second destination object spawns");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let declaring_script =
+        crate::TestValueExt::test_value(engine.definitions.get("BDEF")).script_arc();
+    let first = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let second = engine.spawn_test_object(SpawnConfig::new("BDEF"));
     assert_eq!(engine.debug_exec_order(), [first, second]);
 
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
@@ -567,13 +534,9 @@ fn queued_global_resort_pins_its_body_across_relink() {
         "global func Cmp(object first, object second) { return -1; }\n\
              func Trigger() { return Queue(); }",
     );
-    engine.relink_scripts().expect("global comparator relinks");
-    let first = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("first object spawns");
-    let second = engine
-        .spawn_object(SpawnConfig::new("BDEF"))
-        .expect("second object spawns");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let first = engine.spawn_test_object(SpawnConfig::new("BDEF"));
+    let second = engine.spawn_test_object(SpawnConfig::new("BDEF"));
     assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
 
     assert!(engine
@@ -616,16 +579,10 @@ fn reloaded_definition_globals_move_to_the_engine_function_tail() {
              func Own() { return Layer(); }",
     );
     register(&mut engine, "CALL", "func Probe() { return Layer(); }");
-    engine.relink_scripts().expect("initial globals link");
-    let early = engine
-        .spawn_object(SpawnConfig::new("EARL"))
-        .expect("early object spawns");
-    let late = engine
-        .spawn_object(SpawnConfig::new("LATE"))
-        .expect("late object spawns");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("CALL"))
-        .expect("caller object spawns");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let early = engine.spawn_test_object(SpawnConfig::new("EARL"));
+    let late = engine.spawn_test_object(SpawnConfig::new("LATE"));
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
     assert_eq!(call(&mut engine, early, "Own"), Value::Int(123));
     assert_eq!(call(&mut engine, late, "Own"), Value::Int(123));
     assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(123));
@@ -642,7 +599,7 @@ fn reloaded_definition_globals_move_to_the_engine_function_tail() {
     assert_eq!(call(&mut engine, late, "Own"), Value::Int(134));
     assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
 
-    engine.relink_scripts().expect("repeat relink succeeds");
+    crate::TestValueExt::test_value(engine.relink_scripts());
     assert_eq!(call(&mut engine, early, "Own"), Value::Int(134));
     assert_eq!(call(&mut engine, late, "Own"), Value::Int(134));
     assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
@@ -655,42 +612,33 @@ fn relink_resets_include_metadata_and_refreshes_step_flags() {
     register(&mut engine, "PRBB", "");
     register(&mut engine, "META", "#include PRAA\n#include PRBB");
     register(&mut engine, "APNM", "#appendto META");
-    engine
-        .definitions
-        .get_mut("PRAA")
-        .expect("first parent")
+    crate::TestValueExt::test_value(engine.definitions.get_mut("PRAA"))
         .set_clonk_names(Some("Alpha".into()));
-    engine
-        .definitions
-        .get_mut("PRBB")
-        .expect("second parent")
+    crate::TestValueExt::test_value(engine.definitions.get_mut("PRBB"))
         .set_clonk_names(Some("Beta".into()));
-    engine
-        .definitions
-        .get_mut("APNM")
-        .expect("append source")
+    crate::TestValueExt::test_value(engine.definitions.get_mut("APNM"))
         .set_clonk_names(Some("Append".into()));
 
-    engine.relink_scripts().expect("includes link");
-    let child = engine.definitions.get("META").expect("child definition");
+    crate::TestValueExt::test_value(engine.relink_scripts());
+    let child = crate::TestValueExt::test_value(engine.definitions.get("META"));
     assert_eq!(child.clonk_names(), Some("Alpha"));
     assert!(child.has_step);
 
     assert!(engine
         .reload_definition_script("META", "#include PRBB")
         .expect("child source reloads"));
-    let child = engine.definitions.get("META").expect("child definition");
+    let child = crate::TestValueExt::test_value(engine.definitions.get("META"));
     assert_eq!(child.clonk_names(), Some("Beta"));
     assert!(!child.has_step);
 
     assert!(engine
         .reload_definition_script("META", "")
         .expect("include removal reloads"));
-    let child = engine.definitions.get("META").expect("child definition");
+    let child = crate::TestValueExt::test_value(engine.definitions.get("META"));
     assert_eq!(child.clonk_names(), Some("Append"));
     assert!(!child.has_step);
 
-    engine.relink_scripts().expect("repeat relink succeeds");
+    crate::TestValueExt::test_value(engine.relink_scripts());
     assert_eq!(
         engine
             .definitions

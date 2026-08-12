@@ -53,6 +53,112 @@ pub use clonk_script::DebuggerHooks;
 mod tests {
     use super::*;
 
+    const NOOP_DEFINITION_SCRIPT: &str = r#"
+        global func Initialize(state, random) {
+            return 0;
+        }
+
+        global func Step(state, frame, random) {
+            return 0;
+        }
+        "#;
+
+    #[track_caller]
+    fn test_definition(id: impl Into<String>, name: impl Into<String>, source: &str) -> Definition {
+        Definition::from_script(id, name, source).expect("test definition compiles")
+    }
+
+    trait TestValueExt<T> {
+        fn test_value(self) -> T;
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            self.expect("unit-test value exists")
+        }
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            self.expect("unit-test operation succeeds")
+        }
+    }
+
+    trait TestEngineExt {
+        fn register_test_definition(&mut self, definition: Definition);
+        fn register_test_player(&mut self, config: PlayerConfig);
+        fn register_test_script_definition(
+            &mut self,
+            id: impl Into<String>,
+            name: impl Into<String>,
+            source: &str,
+        );
+        fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
+        fn test_object_index(&self, id: ObjectId) -> usize;
+        fn test_object_snapshot(&self, id: ObjectId) -> ObjectSnapshot;
+        fn test_tick(&mut self) -> SimulationSnapshot;
+        fn call_test_object_function(
+            &mut self,
+            index: usize,
+            function: &str,
+            args: Vec<Value>,
+        ) -> Value;
+    }
+
+    impl TestEngineExt for Engine {
+        fn register_test_definition(&mut self, definition: Definition) {
+            self.register_definition(definition)
+                .expect("test definition registers");
+        }
+
+        fn register_test_player(&mut self, config: PlayerConfig) {
+            self.register_player(config).expect("test player registers");
+        }
+
+        fn register_test_script_definition(
+            &mut self,
+            id: impl Into<String>,
+            name: impl Into<String>,
+            source: &str,
+        ) {
+            self.register_script_definition(id, name, source)
+                .expect("test script definition registers");
+        }
+
+        fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
+            self.spawn_object(config).expect("test object spawns")
+        }
+
+        #[track_caller]
+        fn test_object_index(&self, id: ObjectId) -> usize {
+            self.find_object_index(id).expect("test object exists")
+        }
+
+        #[track_caller]
+        fn test_object_snapshot(&self, id: ObjectId) -> ObjectSnapshot {
+            self.object_snapshot(id)
+                .expect("test object has a snapshot")
+        }
+
+        #[track_caller]
+        fn test_tick(&mut self) -> SimulationSnapshot {
+            self.tick().expect("test tick succeeds")
+        }
+
+        #[track_caller]
+        fn call_test_object_function(
+            &mut self,
+            index: usize,
+            function: &str,
+            args: Vec<Value>,
+        ) -> Value {
+            self.call_object_function(index, function, args)
+                .expect("test object function succeeds")
+        }
+    }
+
     // Area part files spliced into this same `tests` module: each part is a
     // bare item sequence (not a child module), so test ids stay `tests::<fn>`.
     include!("parts/fire_blast.rs");

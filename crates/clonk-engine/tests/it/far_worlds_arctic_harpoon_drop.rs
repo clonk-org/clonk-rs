@@ -10,15 +10,13 @@ fn arctic_inuk_with_harpoon(
 ) -> (Engine, i32, ObjectId, ObjectId) {
     let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, name);
-    let inuk = engine
-        .crew_cursor(owner)
-        .expect("Arctic joins with a selected Inuit");
-    engine
-        .apply_object_update(inuk, ObjectUpdate::new().clear_container())
-        .expect("the Inuit leaves the starting igloo for the control probe");
-    let harpoon = engine
-        .spawn_object(SpawnConfig::new("HARP").with_container(inuk))
-        .expect("the shipped Arctic harpoon enters the Inuit inventory");
+    let inuk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(inuk, ObjectUpdate::new().clear_container()),
+    );
+    let harpoon = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("HARP").with_container(inuk)),
+    );
     assert_eq!(
         engine
             .object_snapshot(inuk)
@@ -43,9 +41,7 @@ fn arctic_inuk_harpoon_throw_respects_down_double_drop_latch() {
     let (mut ordinary, _owner, inuk, harpoon) =
         arctic_inuk_with_harpoon(&prepared, "Arctic ordinary harpoon throw");
 
-    let inuk_index = ordinary
-        .find_object_index(inuk)
-        .expect("the Inuit has an index");
+    let inuk_index = crate::support::TestValueExt::test_value(ordinary.find_object_index(inuk));
     assert_eq!(
         ordinary
             .call_object_function(inuk_index, "ControlThrow", Vec::new())
@@ -53,9 +49,7 @@ fn arctic_inuk_harpoon_throw_respects_down_double_drop_latch() {
         Value::Bool(true),
         "without a down-double latch INUK consumes Throw as ThrowHarpoon"
     );
-    let ordinary_inuk = ordinary
-        .object_snapshot(inuk)
-        .expect("the ordinary-throw Inuit remains live");
+    let ordinary_inuk = crate::support::TestValueExt::test_value(ordinary.object_snapshot(inuk));
     assert_eq!(ordinary_inuk.action.name, "ThrowHarpoon");
     assert_eq!(
         ordinary
@@ -67,18 +61,12 @@ fn arctic_inuk_harpoon_throw_respects_down_double_drop_latch() {
 
     let (mut dropping, owner, inuk, _harpoon) =
         arctic_inuk_with_harpoon(&prepared, "Arctic down-double harpoon drop");
-    dropping
-        .player_mut(owner)
-        .expect("the Arctic player remains joined")
+    crate::support::TestValueExt::test_value(dropping.player_mut(owner))
         .control
         .last_com_down_double = 7;
 
-    dropping
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("latched harpoon drop control completes");
-    let dropping_inuk = dropping
-        .object_snapshot(inuk)
-        .expect("the dropping Inuit remains live");
+    crate::support::TestValueExt::test_value(dropping.player_in_com(owner, COM_THROW, 0));
+    let dropping_inuk = crate::support::TestValueExt::test_value(dropping.object_snapshot(inuk));
     assert_eq!(
         dropping_inuk.command_stack.command_names(),
         vec!["Drop"],

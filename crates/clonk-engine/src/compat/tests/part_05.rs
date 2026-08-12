@@ -192,21 +192,19 @@
     fn terrain_mutators_are_visible_to_same_callback_gback_queries() {
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\nBlastFree=1\n",
-        )
-        .expect("terrain-query material builds");
+        ).test_value();
         let materials = Rc::new(MaterialSet::from_resource_library(&library));
-        let earth = materials.id_of("Earth").expect("Earth exists");
+        let earth = materials.id_of("Earth").test_value();
         let map_world = || {
             let mut world = draw_map_world(8, 7, 3, true);
             world
-                .landscape_mut()
-                .expect("landscape exists")
+                .landscape_mut().test_value()
                 .resolve_grid_materials(|name| materials.id_of(name));
             world.with_materials(Some(Rc::clone(&materials)))
         };
         let terrain_world = || {
             let mut world = map_world();
-            let landscape = world.landscape_mut().expect("landscape exists");
+            let landscape = world.landscape_mut().test_value();
             for y in 0..7 {
                 for x in 0..8 {
                     landscape.grid_write_byte(x, y, 1);
@@ -221,40 +219,39 @@
         script
             .load_script(
                 r#"#strict 2
-func TerrainState(x, y) { return [GBackSolid(x, y), GetMaterial(x, y), GetTexture(x, y)]; }
-func ProbeBlast() {
-    var before = TerrainState(3, 3);
-    var changed = BlastFree(3, 3, 1, 1);
-    return [before, changed, TerrainState(3, 3)];
-}
-func ProbeShake() {
-    var before = TerrainState(3, 3);
-    var changed = ShakeFree(3, 3, 1);
-    return [before, changed, TerrainState(3, 3)];
-}
-func ProbeDig() {
-    var before = TerrainState(3, 3);
-    var changed = DigFree(3, 3, 1);
-    return [before, changed, TerrainState(3, 3)];
-}
-func ProbeDigRect() {
-    var before = TerrainState(3, 3);
-    var changed = DigFreeRect(3, 3, 1, 1);
-    return [before, changed, TerrainState(3, 3)];
-}
-func ProbeDrawMap() {
-    var before = TerrainState(0, 1);
-    var changed = DrawMap(-2, 1, 7, 5, "map Runtime { seed = 9; Named; };");
-    return [before, changed, TerrainState(0, 1)];
-}
-func ProbeDrawDefMap() {
-    var before = TerrainState(0, 1);
-    var changed = DrawDefMap(-2, 1, 7, 5, "Requested");
-    return [before, changed, TerrainState(0, 1)];
-}
-"#,
-            )
-            .expect("terrain visibility probes compile");
+        func TerrainState(x, y) { return [GBackSolid(x, y), GetMaterial(x, y), GetTexture(x, y)]; }
+        func ProbeBlast() {
+            var before = TerrainState(3, 3);
+            var changed = BlastFree(3, 3, 1, 1);
+            return [before, changed, TerrainState(3, 3)];
+        }
+        func ProbeShake() {
+            var before = TerrainState(3, 3);
+            var changed = ShakeFree(3, 3, 1);
+            return [before, changed, TerrainState(3, 3)];
+        }
+        func ProbeDig() {
+            var before = TerrainState(3, 3);
+            var changed = DigFree(3, 3, 1);
+            return [before, changed, TerrainState(3, 3)];
+        }
+        func ProbeDigRect() {
+            var before = TerrainState(3, 3);
+            var changed = DigFreeRect(3, 3, 1, 1);
+            return [before, changed, TerrainState(3, 3)];
+        }
+        func ProbeDrawMap() {
+            var before = TerrainState(0, 1);
+            var changed = DrawMap(-2, 1, 7, 5, "map Runtime { seed = 9; Named; };");
+            return [before, changed, TerrainState(0, 1)];
+        }
+        func ProbeDrawDefMap() {
+            var before = TerrainState(0, 1);
+            var changed = DrawDefMap(-2, 1, 7, 5, "Requested");
+            return [before, changed, TerrainState(0, 1)];
+        }
+        "#,
+            ).test_value();
 
         let earth_state = Value::Array(vec![
             Value::Bool(true),
@@ -640,7 +637,7 @@ func ProbeDrawDefMap() {
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
         });
-        let value = result.expect("GBackLiquid succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -657,7 +654,7 @@ func ProbeDrawDefMap() {
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
         });
-        let value = result.expect("GBackLiquid succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
     }
 
@@ -667,10 +664,9 @@ func ProbeDrawDefMap() {
         // then returns Landscape.ExtractMaterial's material number
         // (C4Script.cpp:2194-2199).
         let library =
-            clonk_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
-                .expect("water material builds");
+            clonk_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n").test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
+        let water = materials.id_of("Water").test_value();
         let mut landscape = Landscape::flat(16, 20);
         landscape.set_liquid_column(
             5,
@@ -700,8 +696,7 @@ func ProbeDrawDefMap() {
         script
             .load_script(
                 "#strict 2\nfunc Probe() { return [ExtractLiquid(1, 3), ExtractLiquid(2, 3)]; }",
-            )
-            .expect("ExtractLiquid probe compiles");
+            ).test_value();
 
         let (result, outcome) =
             with_effect_context(Some(object), &[], world, 2, || script.call("Probe", &[]));
@@ -728,11 +723,10 @@ func ProbeDrawDefMap() {
         // therefore peel FindMatTop pixels until that point is dry, and a
         // later GBackLiquid in the SAME callback observes the cleared plane.
         let library =
-            clonk_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
-                .expect("water material builds");
+            clonk_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n").test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let mut landscape = Landscape::new(1, vec![4]).expect("landscape builds");
+        let water = materials.id_of("Water").test_value();
+        let mut landscape = Landscape::new(1, vec![4]).test_value();
         landscape.set_world_height(4);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             1,
@@ -759,8 +753,7 @@ func ProbeDrawDefMap() {
                  ExtractLiquid(0, 3), ExtractLiquid(0, 3),\n\
                  GBackLiquid(0, 3)\n\
                  ]; }",
-            )
-            .expect("repeated ExtractLiquid probe compiles");
+            ).test_value();
 
         let (result, outcome) =
             with_effect_context(None, &[], world, 1, || script.call("Probe", &[]));
@@ -789,8 +782,7 @@ func ProbeDrawDefMap() {
         // Deep Sea passes ExtractLiquid's MNone result straight through here
         // after a pump source dries.
         let library =
-            clonk_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
-                .expect("water material builds");
+            clonk_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n").test_value();
         let materials = MaterialSet::from_resource_library(&library);
         let world = HostWorldContext::default().with_materials(Some(Rc::new(materials)));
 
@@ -817,16 +809,15 @@ func ProbeDrawDefMap() {
             "[Material Water]\nName=Water\nDensity=25\n\n\
              [Material Earth]\nName=Earth\nDensity=100\n\n\
              [Material Air]\nName=Air\nDensity=0\n",
-        )
-        .expect("material library builds");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let air = materials.id_of("Air").expect("air exists");
+        let water = materials.id_of("Water").test_value();
+        let air = materials.id_of("Air").test_value();
         let mut densities = vec![0; 3];
         densities[1] = 25;
         densities[2] = 100;
         let names = vec![None, Some("Water".to_string()), Some("Earth".to_string())];
-        let mut landscape = Landscape::new(3, vec![3; 3]).expect("landscape builds");
+        let mut landscape = Landscape::new(3, vec![3; 3]).test_value();
         landscape.set_world_height(3);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             3,
@@ -897,14 +888,12 @@ func ProbeDrawDefMap() {
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material Water]\nName=Water\nDensity=25\nMaxSlide=1\nInstable=1\n\n\
              [Material Earth]\nName=Earth\nDensity=100\n",
-        )
-        .expect("push-pull materials build");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
+        let water = materials.id_of("Water").test_value();
         let world = |width: u32, height: u32, bytes: Vec<u8>, push_pull: bool| {
             let materials = materials.clone();
-            let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
-                .expect("landscape builds");
+            let mut landscape = Landscape::new(width, vec![height as i32; width as usize]).test_value();
             landscape.set_world_height(height as i32);
             landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
                 width,
@@ -1882,35 +1871,23 @@ func ProbeDrawDefMap() {
             auto_generate_teams: false,
             team_colors: true,
         });
-        engine
-            .register_definition(
-                crate::Definition::from_script(
-                    "TEAM",
-                    "Team config probe",
-                    r#"#strict 2
-public func Probe()
-{
-    return [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3),
-            GetTeamConfig(4), GetTeamConfig(5), GetTeamConfig(6),
-            GetTeamConfig(7), GetTeamConfig(6, 123), GetTeamConfig(99)];
-}
-"#,
-                )
-                .expect("team config probe compiles"),
-            )
-            .expect("team config probe registers");
-        let probe = engine
-            .spawn_object(SpawnConfig::new("TEAM"))
-            .expect("team config probe spawns");
-        let probe_index = engine.find_object_index(probe).expect("probe exists");
+        engine.register_test_definition(test_definition("TEAM", "Team config probe", r#"#strict 2
+                public func Probe()
+                {
+        return [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3),
+                GetTeamConfig(4), GetTeamConfig(5), GetTeamConfig(6),
+                GetTeamConfig(7), GetTeamConfig(6, 123), GetTeamConfig(99)];
+                }
+                "#));
+        let probe = engine.spawn_test_object(SpawnConfig::new("TEAM"));
+        let probe_index = engine.find_object_index(probe).test_value();
 
         let records = Arc::new(Mutex::new(Vec::new()));
         let layer = RecordingLayer::new(Arc::clone(&records));
         let subscriber = Registry::default().with(layer);
         let value = subscriber::with_default(subscriber, || {
             engine
-                .call_object_function(probe_index, "Probe", Vec::new())
-                .expect("GetTeamConfig probe runs")
+                .call_object_function(probe_index, "Probe", Vec::new()).test_value()
         });
 
         assert_eq!(
@@ -1927,7 +1904,7 @@ public func Probe()
                 Value::Nil,
             ])
         );
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level, Level::ERROR);
         assert_eq!(records[0].target, "clonk-script");
@@ -1953,14 +1930,11 @@ public func Probe()
         let mut encoded = Vec::new();
         engine
             .capture_state()
-            .to_writer(&mut encoded)
-            .expect("team configuration serializes");
-        let state = crate::EngineState::from_reader(encoded.as_slice())
-            .expect("team configuration deserializes");
+            .to_writer(&mut encoded).test_value();
+        let state = crate::EngineState::from_reader(encoded.as_slice()).test_value();
         let mut restored = crate::Engine::with_seed(1);
         restored
-            .restore_state(&state)
-            .expect("team configuration restores");
+            .restore_state(&state).test_value();
 
         let world = restored.host_world_context();
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -2101,7 +2075,7 @@ public func Probe()
             );
             Ok::<Value, RuntimeError>(Value::Nil)
         });
-        result.expect("SetWealth succeeds");
+        result.test_value();
         assert!(matches!(
             outcome.player_commands.as_slice(),
             [PlayerCommand::SetWealth {
@@ -2136,8 +2110,7 @@ public func Probe()
                 let borrow = cell.borrow();
                 let player = borrow
                     .as_ref()
-                    .and_then(|context| context.player_state(0))
-                    .expect("player zero remains visible in the callback");
+                    .and_then(|context| context.player_state(0)).test_value();
                 (player.fog_of_war, player.force_fog_of_war)
             });
             assert_eq!(disabled, (false, true));
@@ -2148,8 +2121,7 @@ public func Probe()
                 let borrow = cell.borrow();
                 let player = borrow
                     .as_ref()
-                    .and_then(|context| context.player_state(0))
-                    .expect("player zero remains visible in the callback");
+                    .and_then(|context| context.player_state(0)).test_value();
                 (player.fog_of_war, player.force_fog_of_war)
             });
             assert_eq!(enabled, (true, true));
@@ -2162,7 +2134,7 @@ public func Probe()
             assert!(set_fow(&[Value::Bool(true), Value::Int(0), Value::Nil]).is_err());
             Ok::<Value, RuntimeError>(Value::Nil)
         });
-        result.expect("SetFoW calls succeed");
+        result.test_value();
         assert!(matches!(
             outcome.player_commands.as_slice(),
             [
@@ -2378,7 +2350,7 @@ public func Probe()
             );
             Ok::<Value, RuntimeError>(Value::Nil)
         });
-        result.expect("extra data calls succeed");
+        result.test_value();
         assert!(matches!(
             outcome.player_commands.as_slice(),
             [PlayerCommand::SetExtraData { player_id: 3, .. }]
@@ -2404,12 +2376,9 @@ func Probe(object crew, object info_less)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
-            .expect("crew extra-data fixture compiles");
+        let mut definition = test_definition("CREW", "Crew", script);
         definition.set_crew_member(true);
-        engine
-            .register_definition(definition)
-            .expect("crew extra-data fixture registers");
+        engine.register_test_definition(definition);
 
         let mut start = crate::scenario::PlayerStart::default();
         start.ready_crew = vec![("CREW".to_string(), 1)];
@@ -2442,13 +2411,10 @@ func Probe(object crew, object info_less)
                 control_style: false,
                 auto_context_menu: false,
                 startup_player_count: 1,
-            })
-            .expect("extra data owner joins");
+            }).test_value();
 
-        let crew = engine.player(0).expect("player exists").crew()[0];
-        let info_less = engine
-            .spawn_object(crate::SpawnConfig::new("CREW"))
-            .expect("info-less comparison object spawns");
+        let crew = engine.player(0).test_value().crew()[0];
+        let info_less = engine.spawn_test_object(crate::SpawnConfig::new("CREW"));
         let expected = Value::Array(vec![
             Value::Nil,
             Value::Int(17),
@@ -2458,7 +2424,7 @@ func Probe(object crew, object info_less)
             Value::Nil,
         ]);
         let probe = |engine: &mut crate::Engine| {
-            let index = engine.find_object_index(crew).expect("crew remains live");
+            let index = engine.find_object_index(crew).test_value();
             engine
                 .call_object_function(
                     index,
@@ -2467,8 +2433,7 @@ func Probe(object crew, object info_less)
                         Value::Object(crew.as_u64()),
                         Value::Object(info_less.as_u64()),
                     ],
-                )
-                .expect("GetCrewExtraData probe runs")
+                ).test_value()
         };
         assert_eq!(probe(&mut engine), expected);
         assert_eq!(
@@ -2479,9 +2444,9 @@ func Probe(object crew, object info_less)
             extra_data
         );
 
-        let json = serde_json::to_string(&engine.capture_state()).expect("state serializes");
-        let state: crate::EngineState = serde_json::from_str(&json).expect("state deserializes");
-        engine.restore_state(&state).expect("state restores");
+        let json = serde_json::to_string(&engine.capture_state()).test_value();
+        let state: crate::EngineState = serde_json::from_str(&json).test_value();
+        engine.restore_state(&state).test_value();
         assert_eq!(probe(&mut engine), expected);
     }
 
@@ -2533,12 +2498,9 @@ func Transfer(object donor, object recipient)
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
-            .expect("crew extra-data setter fixture compiles");
+        let mut definition = test_definition("CREW", "Crew", script);
         definition.set_crew_member(true);
-        engine
-            .register_definition(definition)
-            .expect("crew extra-data setter fixture registers");
+        engine.register_test_definition(definition);
 
         let mut start = crate::scenario::PlayerStart::default();
         start.ready_crew = vec![("CREW".to_string(), 1)];
@@ -2565,14 +2527,11 @@ func Transfer(object donor, object recipient)
                 control_style: false,
                 auto_context_menu: false,
                 startup_player_count: 1,
-            })
-            .expect("extra data owner joins");
+            }).test_value();
 
-        let crew = engine.player(0).expect("player exists").crew()[0];
-        let info_less = engine
-            .spawn_object(crate::SpawnConfig::new("CREW"))
-            .expect("info-less comparison object spawns");
-        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let crew = engine.player(0).test_value().crew()[0];
+        let info_less = engine.spawn_test_object(crate::SpawnConfig::new("CREW"));
+        let crew_index = engine.find_object_index(crew).test_value();
         let records = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
         let result = subscriber::with_default(subscriber, || {
@@ -2585,8 +2544,7 @@ func Transfer(object donor, object recipient)
                         Value::Object(info_less.as_u64()),
                         Value::C4Id("ROCK".into()),
                     ],
-                )
-                .expect("SetCrewExtraData probe runs")
+                ).test_value()
         });
         assert_eq!(
             result,
@@ -2610,7 +2568,7 @@ func Transfer(object donor, object recipient)
                 Value::Nil,
             ])
         );
-        let records = records.lock().expect("log records");
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level, Level::ERROR);
         assert_eq!(records[0].target, "clonk-script");
@@ -2633,10 +2591,9 @@ func Transfer(object donor, object recipient)
             Value::Nil,
         ]);
         let read = |engine: &mut crate::Engine| {
-            let index = engine.find_object_index(crew).expect("crew remains live");
+            let index = engine.find_object_index(crew).test_value();
             engine
-                .call_object_function(index, "Read", Vec::new())
-                .expect("GetCrewExtraData readback runs")
+                .call_object_function(index, "Read", Vec::new()).test_value()
         };
         assert_eq!(read(&mut engine), read_expected);
         assert_eq!(
@@ -2653,9 +2610,9 @@ func Transfer(object donor, object recipient)
             expected_slots
         );
 
-        let json = serde_json::to_string(&state).expect("state serializes");
-        let state: crate::EngineState = serde_json::from_str(&json).expect("state deserializes");
-        engine.restore_state(&state).expect("state restores");
+        let json = serde_json::to_string(&state).test_value();
+        let state: crate::EngineState = serde_json::from_str(&json).test_value();
+        engine.restore_state(&state).test_value();
         assert_eq!(read(&mut engine), read_expected);
         assert_eq!(
             engine
@@ -2673,8 +2630,7 @@ func Transfer(object donor, object recipient)
                     Value::Object(crew.as_u64()),
                     Value::Object(info_less.as_u64()),
                 ],
-            )
-            .expect("ExtraData follows GrabObjectInfo");
+            ).test_value();
         assert_eq!(
             transfer,
             Value::Array(vec![
@@ -2688,8 +2644,7 @@ func Transfer(object donor, object recipient)
         );
         assert!(engine.crew_object_info(crew).is_none());
         let transferred_slots = engine
-            .crew_object_info(info_less)
-            .expect("recipient owns the transferred info")
+            .crew_object_info(info_less).test_value()
             .extra_data
             .clone();
         assert_eq!(
@@ -2721,8 +2676,7 @@ func Transfer(object donor, object recipient)
         let mut landscape = Landscape::flat(200, 100);
         landscape.set_world_height(400);
         let expected = landscape
-            .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false)
-            .expect("the flat surface has a site");
+            .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false).test_value();
         let mut definitions = HashMap::new();
         definitions.insert(
             DefinitionId::from("HUT1"),
@@ -2797,6 +2751,6 @@ func ProbeBadIndex(definition) {
             );
             Ok::<Value, RuntimeError>(Value::Nil)
         });
-        result.expect("scripted probes succeed");
+        result.test_value();
     }
 

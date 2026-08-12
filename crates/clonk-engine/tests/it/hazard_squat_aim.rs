@@ -1,4 +1,5 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::EngineTestExt;
 use clonk_engine::{
     landscape::PixelGrid, Landscape, ObjectUpdate, SpawnConfig, Vector2, COM_DOWN,
     COM_RELEASE_OFFSET,
@@ -37,42 +38,33 @@ fn hazard_three_down_presses_enter_squat_aim_with_a_pistol() {
     // 785-807; oracle-src-pinned src/C4Player.cpp:1490-1554).
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
     let owner = join_local_player(&mut engine, "Hazard squat-aim parity");
-    let hazard_clonk = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.owner == owner && object.definition_id == "HZCK")
-        .expect("Hazard joins with an HZCK")
-        .id;
+    let hazard_clonk = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.owner == owner && object.definition_id == "HZCK"),
+    )
+    .id;
     // Hazard's tutorial temporarily disables its crew until the scripted
     // introduction completes. Enable the fixture so C4Player::InCom routes
     // controls to the same HZCK whose ControlDown behavior we are testing.
     let mut ready = ObjectUpdate::new().with_action("Walk");
     ready.crew_disabled = Some(false);
-    engine
-        .apply_object_update(hazard_clonk, ready)
-        .expect("enable the tutorial HZCK for player control");
-    engine
-        .select_crew(owner, [hazard_clonk])
-        .expect("select the tutorial HZCK");
-    engine
-        .set_crew_cursor(owner, Some(hazard_clonk))
-        .expect("make the tutorial HZCK the control cursor");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(hazard_clonk, ready));
+    crate::support::TestValueExt::test_value(engine.select_crew(owner, [hazard_clonk]));
+    crate::support::TestValueExt::test_value(engine.set_crew_cursor(owner, Some(hazard_clonk)));
     assert_eq!(engine.crew_cursor(owner), Some(hazard_clonk));
 
-    let pistol = engine
-        .spawn_object(
-            SpawnConfig::new("PIWP")
-                .with_owner(owner)
-                .with_container(hazard_clonk),
-        )
-        .expect("equip Hazard's aimable pistol");
-    engine
-        .apply_object_update(
-            hazard_clonk,
-            ObjectUpdate::new().with_contents_front(pistol),
-        )
-        .expect("select the pistol");
+    let pistol = engine.spawn_test_object(
+        SpawnConfig::new("PIWP")
+            .with_owner(owner)
+            .with_container(hazard_clonk),
+    );
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        hazard_clonk,
+        ObjectUpdate::new().with_contents_front(pistol),
+    ));
 
     for press in 1..=3 {
         engine
@@ -85,9 +77,7 @@ fn hazard_three_down_presses_enter_squat_aim_with_a_pistol() {
             });
     }
 
-    let aimed = engine
-        .object_snapshot(hazard_clonk)
-        .expect("the HZCK remains live");
+    let aimed = engine.test_object_snapshot(hazard_clonk);
     assert_eq!(
         aimed.action.name, "AimSquat",
         "PIWP's deterministic FM_Aim=0 path must enter Hazard's generic firearm aim"
@@ -108,96 +98,69 @@ fn hazard_pistol_bullet_keeps_its_cpp_velocity_through_the_first_frame() {
     // Its anchor column remains solid while the shot tunnel stays clear; the
     // test does not depend on the retired column-only collision substitute.
     let owner = join_local_player(&mut engine, "Hazard bullet parity");
-    let hazard_clonk = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.owner == owner && object.definition_id == "HZCK")
-        .expect("Hazard joins with an HZCK")
-        .id;
-    let anchor = engine
-        .object_snapshot(hazard_clonk)
-        .expect("HZCK snapshot")
-        .position;
-    let (loaded_width, loaded_height) = engine
-        .landscape()
-        .map(|landscape| (landscape.width(), landscape.estimated_height()))
-        .expect("Hazard scenario has a landscape");
+    let hazard_clonk = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.owner == owner && object.definition_id == "HZCK"),
+    )
+    .id;
+    let anchor = engine.test_object_snapshot(hazard_clonk).position;
+    let (loaded_width, loaded_height) = crate::support::TestValueExt::test_value(
+        engine
+            .landscape()
+            .map(|landscape| (landscape.width(), landscape.estimated_height())),
+    );
     engine.set_landscape(hazard_pixel_landscape(anchor, loaded_width, loaded_height));
     let mut ready = ObjectUpdate::new().with_action("Walk");
     ready.crew_disabled = Some(false);
-    engine
-        .apply_object_update(hazard_clonk, ready)
-        .expect("enable the tutorial HZCK for player control");
-    engine
-        .select_crew(owner, [hazard_clonk])
-        .expect("select the tutorial HZCK");
-    engine
-        .set_crew_cursor(owner, Some(hazard_clonk))
-        .expect("make the tutorial HZCK the control cursor");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(hazard_clonk, ready));
+    crate::support::TestValueExt::test_value(engine.select_crew(owner, [hazard_clonk]));
+    crate::support::TestValueExt::test_value(engine.set_crew_cursor(owner, Some(hazard_clonk)));
 
-    let pistol = engine
-        .spawn_object(
-            SpawnConfig::new("PIWP")
-                .with_owner(owner)
-                .with_container(hazard_clonk),
-        )
-        .expect("equip Hazard's pistol");
-    engine
-        .apply_object_update(
-            hazard_clonk,
-            ObjectUpdate::new().with_contents_front(pistol),
-        )
-        .expect("select the pistol");
-    engine
-        .spawn_object(
-            SpawnConfig::new("STAM")
-                .with_owner(owner)
-                .with_container(pistol)
-                .with_local_vars(HashMap::from([("__local_0".to_string(), Value::Int(12))])),
-        )
-        .expect("load the pistol's standard ammunition");
+    let pistol = engine.spawn_test_object(
+        SpawnConfig::new("PIWP")
+            .with_owner(owner)
+            .with_container(hazard_clonk),
+    );
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        hazard_clonk,
+        ObjectUpdate::new().with_contents_front(pistol),
+    ));
+    engine.spawn_test_object(
+        SpawnConfig::new("STAM")
+            .with_owner(owner)
+            .with_container(pistol)
+            .with_local_vars(HashMap::from([("__local_0".to_string(), Value::Int(12))])),
+    );
 
-    let pistol_idx = engine.find_object_index(pistol).expect("pistol exists");
-    engine
-        .call_object_function(
-            pistol_idx,
-            "SetUser",
-            vec![Value::Object(hazard_clonk.as_u64())],
-        )
-        .expect("bind the pistol to its Hazard Clonk");
-    let clonk_idx = engine
-        .find_object_index(hazard_clonk)
-        .expect("Hazard Clonk exists");
-    engine
-        .call_object_function(clonk_idx, "StartAiming", Vec::new())
-        .expect("enter Hazard crosshair aiming");
-    engine.tick().expect("settle the aiming effect");
+    let pistol_idx = engine.test_object_index(pistol);
+    engine.call_test_object_function(
+        pistol_idx,
+        "SetUser",
+        vec![Value::Object(hazard_clonk.as_u64())],
+    );
+    let clonk_idx = engine.test_object_index(hazard_clonk);
+    engine.call_test_object_function(clonk_idx, "StartAiming", Vec::new());
+    crate::support::TestValueExt::test_value(engine.tick());
 
-    let position = engine
-        .object_snapshot(hazard_clonk)
-        .expect("Hazard Clonk remains live")
-        .position;
-    let clonk_idx = engine
-        .find_object_index(hazard_clonk)
-        .expect("Hazard Clonk exists");
-    engine
-        .call_object_function(
-            clonk_idx,
-            "DoMouseAiming",
-            vec![Value::Int(position.x + 80), Value::Int(position.y - 20)],
-        )
-        .expect("aim and fire the selected pistol");
+    let position = engine.test_object_snapshot(hazard_clonk).position;
+    let clonk_idx = engine.test_object_index(hazard_clonk);
+    engine.call_test_object_function(
+        clonk_idx,
+        "DoMouseAiming",
+        vec![Value::Int(position.x + 80), Value::Int(position.y - 20)],
+    );
 
-    let launched = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "SHT1")
-        .expect("Pistol::Fire1 creates an SHT1 bullet");
-    let launch_velocity = launched
-        .fixed_velocity
-        .expect("SHT1 keeps its raw C4Fixed launch velocity");
+    let launched = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "SHT1"),
+    );
+    let launch_velocity = crate::support::TestValueExt::test_value(launched.fixed_velocity);
     assert_eq!(
         (launch_velocity.x.val(), launch_velocity.y.val()),
         (1_592_524, -393_216),
@@ -208,12 +171,8 @@ fn hazard_pistol_bullet_keeps_its_cpp_velocity_through_the_first_frame() {
         "the Hazard bullet must start above the synthetic 12 px/frame cap"
     );
 
-    engine
-        .tick()
-        .expect("the bullet's first full frame executes");
-    let advanced = engine
-        .object_snapshot(launched.id)
-        .expect("the clear-landscape bullet remains live");
+    crate::support::TestValueExt::test_value(engine.tick());
+    let advanced = engine.test_object_snapshot(launched.id);
     assert_eq!(
         advanced.fixed_velocity,
         Some(launch_velocity),
@@ -236,96 +195,69 @@ fn hazard_pistol_bullet_sweeps_through_an_alien_on_its_first_frame() {
     // anchor column remains solid while the shot tunnel stays clear; the test
     // does not depend on the retired column-only collision substitute.
     let owner = join_local_player(&mut engine, "Hazard alien-hit parity");
-    let hazard_clonk = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.owner == owner && object.definition_id == "HZCK")
-        .expect("Hazard joins with an HZCK")
-        .id;
-    let anchor = engine
-        .object_snapshot(hazard_clonk)
-        .expect("HZCK snapshot")
-        .position;
-    let (loaded_width, loaded_height) = engine
-        .landscape()
-        .map(|landscape| (landscape.width(), landscape.estimated_height()))
-        .expect("Hazard scenario has a landscape");
+    let hazard_clonk = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.owner == owner && object.definition_id == "HZCK"),
+    )
+    .id;
+    let anchor = engine.test_object_snapshot(hazard_clonk).position;
+    let (loaded_width, loaded_height) = crate::support::TestValueExt::test_value(
+        engine
+            .landscape()
+            .map(|landscape| (landscape.width(), landscape.estimated_height())),
+    );
     engine.set_landscape(hazard_pixel_landscape(anchor, loaded_width, loaded_height));
     let mut ready = ObjectUpdate::new().with_action("Walk");
     ready.crew_disabled = Some(false);
-    engine
-        .apply_object_update(hazard_clonk, ready)
-        .expect("enable the tutorial HZCK for player control");
-    engine
-        .select_crew(owner, [hazard_clonk])
-        .expect("select the tutorial HZCK");
-    engine
-        .set_crew_cursor(owner, Some(hazard_clonk))
-        .expect("make the tutorial HZCK the control cursor");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(hazard_clonk, ready));
+    crate::support::TestValueExt::test_value(engine.select_crew(owner, [hazard_clonk]));
+    crate::support::TestValueExt::test_value(engine.set_crew_cursor(owner, Some(hazard_clonk)));
 
-    let pistol = engine
-        .spawn_object(
-            SpawnConfig::new("PIWP")
-                .with_owner(owner)
-                .with_container(hazard_clonk),
-        )
-        .expect("equip Hazard's pistol");
-    engine
-        .apply_object_update(
-            hazard_clonk,
-            ObjectUpdate::new().with_contents_front(pistol),
-        )
-        .expect("select the pistol");
-    engine
-        .spawn_object(
-            SpawnConfig::new("STAM")
-                .with_owner(owner)
-                .with_container(pistol)
-                .with_local_vars(HashMap::from([("__local_0".to_string(), Value::Int(12))])),
-        )
-        .expect("load the pistol's standard ammunition");
+    let pistol = engine.spawn_test_object(
+        SpawnConfig::new("PIWP")
+            .with_owner(owner)
+            .with_container(hazard_clonk),
+    );
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        hazard_clonk,
+        ObjectUpdate::new().with_contents_front(pistol),
+    ));
+    engine.spawn_test_object(
+        SpawnConfig::new("STAM")
+            .with_owner(owner)
+            .with_container(pistol)
+            .with_local_vars(HashMap::from([("__local_0".to_string(), Value::Int(12))])),
+    );
 
-    let pistol_idx = engine.find_object_index(pistol).expect("pistol exists");
-    engine
-        .call_object_function(
-            pistol_idx,
-            "SetUser",
-            vec![Value::Object(hazard_clonk.as_u64())],
-        )
-        .expect("bind the pistol to its Hazard Clonk");
-    let clonk_idx = engine
-        .find_object_index(hazard_clonk)
-        .expect("Hazard Clonk exists");
-    engine
-        .call_object_function(clonk_idx, "StartAiming", Vec::new())
-        .expect("enter Hazard crosshair aiming");
-    engine.tick().expect("settle the aiming effect");
+    let pistol_idx = engine.test_object_index(pistol);
+    engine.call_test_object_function(
+        pistol_idx,
+        "SetUser",
+        vec![Value::Object(hazard_clonk.as_u64())],
+    );
+    let clonk_idx = engine.test_object_index(hazard_clonk);
+    engine.call_test_object_function(clonk_idx, "StartAiming", Vec::new());
+    crate::support::TestValueExt::test_value(engine.tick());
 
-    let position = engine
-        .object_snapshot(hazard_clonk)
-        .expect("Hazard Clonk remains live")
-        .position;
-    let clonk_idx = engine
-        .find_object_index(hazard_clonk)
-        .expect("Hazard Clonk exists");
-    engine
-        .call_object_function(
-            clonk_idx,
-            "DoMouseAiming",
-            vec![Value::Int(position.x + 80), Value::Int(position.y - 20)],
-        )
-        .expect("aim and fire the selected pistol");
+    let position = engine.test_object_snapshot(hazard_clonk).position;
+    let clonk_idx = engine.test_object_index(hazard_clonk);
+    engine.call_test_object_function(
+        clonk_idx,
+        "DoMouseAiming",
+        vec![Value::Int(position.x + 80), Value::Int(position.y - 20)],
+    );
 
-    let launched = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "SHT1")
-        .expect("Pistol::Fire1 creates an SHT1 bullet");
-    let launch_velocity = launched
-        .fixed_velocity
-        .expect("SHT1 keeps its raw C4Fixed launch velocity");
+    let launched = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "SHT1"),
+    );
+    let launch_velocity = crate::support::TestValueExt::test_value(launched.fixed_velocity);
     assert_eq!(
         (launch_velocity.x.val(), launch_velocity.y.val()),
         (1_592_524, -393_216),
@@ -333,28 +265,21 @@ fn hazard_pistol_bullet_sweeps_through_an_alien_on_its_first_frame() {
     );
     let alien_position = Vector2::new(launched.position.x + 25, launched.position.y + 2);
 
-    let alien = engine
-        .spawn_object(
-            SpawnConfig::new("ALN2")
-                .with_position(alien_position)
-                .with_loaded(true)
-                .with_alive(true)
-                .with_energy(10_000)
-                .with_mobile(false),
-        )
-        .expect("place a stationary Hazard alien across the first bullet segment");
-    let energy_before = engine
-        .object_snapshot(alien)
-        .expect("the alien starts live")
-        .energy;
+    let alien = engine.spawn_test_object(
+        SpawnConfig::new("ALN2")
+            .with_position(alien_position)
+            .with_loaded(true)
+            .with_alive(true)
+            .with_energy(10_000)
+            .with_mobile(false),
+    );
+    let energy_before = engine.test_object_snapshot(alien).energy;
     assert_eq!(
         energy_before, 10_000,
         "the pinned ALN2 starts at its C++ Physical.Energy"
     );
 
-    engine
-        .tick()
-        .expect("the bullet and its HitCheck effect execute");
+    crate::support::TestValueExt::test_value(engine.tick());
 
     assert!(
         engine.object_snapshot(launched.id).is_none(),

@@ -23,21 +23,25 @@ func Construction()
 "#;
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(400, 100));
-    engine
-        .register_script_definition("ORDR", "Ordered candidate", "#strict\n")
-        .expect("candidate definition registers");
-    engine
-        .register_script_definition("PEND", "Pending object", pending_script)
-        .expect("pending definition registers");
-    let older = engine
-        .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(10, 10)))
-        .expect("older candidate spawns");
-    let newer = engine
-        .spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(20, 10)))
-        .expect("newer candidate spawns");
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "ORDR",
+        "Ordered candidate",
+        "#strict\n",
+    ));
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "PEND",
+        "Pending object",
+        pending_script,
+    ));
+    let older = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(10, 10))),
+    );
+    let newer = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("ORDR").with_position(Vector2::new(20, 10))),
+    );
 
-    let older_index = engine.find_object_index(older).expect("older exists");
-    let newer_index = engine.find_object_index(newer).expect("newer exists");
+    let older_index = crate::TestValueExt::test_value(engine.find_object_index(older));
+    let newer_index = crate::TestValueExt::test_value(engine.find_object_index(newer));
     engine.objects[older_index].state.category = CATEGORY_OBJECT;
     engine.objects[newer_index].state.category = CATEGORY_STRUCTURE;
     engine
@@ -45,12 +49,10 @@ func Construction()
         .push(ObjectOrderCommand::SortByCategory);
     engine.execute_object_order_commands();
 
-    let pending_id = engine
-        .spawn_object(SpawnConfig::new("PEND").with_position(Vector2::new(110, 10)))
-        .expect("pending object spawns");
-    let pending_index = engine
-        .find_object_index(pending_id)
-        .expect("pending object materializes");
+    let pending_id = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("PEND").with_position(Vector2::new(110, 10))),
+    );
+    let pending_index = crate::TestValueExt::test_value(engine.find_object_index(pending_id));
     let pending = &engine.objects[pending_index];
     assert_eq!(
         pending.state.local_vars.get("pending_count"),
@@ -100,28 +102,32 @@ func Trigger()
 
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(200, 200));
-    let mut grown =
-        Definition::from_script("GROW", "Growing object", grown_script).expect("grown compiles");
+    let mut grown = test_definition("GROW", "Growing object", grown_script);
     grown.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
-    engine.register_definition(grown).expect("grown registers");
-    engine
-        .register_script_definition("CALL", "Creator", creator_script)
-        .expect("creator registers");
-    let creator = engine
-        .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
-        .expect("creator spawns");
+    crate::TestValueExt::test_value(engine.register_definition(grown));
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "CALL",
+        "Creator",
+        creator_script,
+    ));
+    let creator = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT)),
+    );
 
-    let creator_index = engine.find_object_index(creator).expect("creator exists");
-    engine
-        .call_object_function(creator_index, "Trigger", Vec::new())
-        .expect("creation succeeds");
+    let creator_index = crate::TestValueExt::test_value(engine.find_object_index(creator));
+    crate::TestValueExt::test_value(engine.call_object_function(
+        creator_index,
+        "Trigger",
+        Vec::new(),
+    ));
 
-    let creator = engine.object_snapshot(creator).expect("creator remains");
-    let grown = engine
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "GROW")
-        .expect("grown object materializes");
+    let creator = crate::TestValueExt::test_value(engine.object_snapshot(creator));
+    let grown = crate::TestValueExt::test_value(
+        engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GROW"),
+    );
     assert_eq!(grown.state.position.y, 80, "initial DoCon keeps the bottom");
     assert_eq!(
         grown.state.local_vars.get("completion_count"),

@@ -9,26 +9,21 @@ const CMD_MOVE_TO: i32 = 2;
 /// Arm the tutorial's Hazard Clonk with `weapon` and hand it player control.
 fn armed_hazard_clonk(engine: &mut Engine, weapon: &str) -> (i32, ObjectId, ObjectId) {
     let owner = join_local_player(engine, "Hazard crosshair parity");
-    let clonk = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.owner == owner && object.definition_id == "HZCK")
-        .expect("Hazard joins with an HZCK")
-        .id;
+    let clonk = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.owner == owner && object.definition_id == "HZCK"),
+    )
+    .id;
     // Hazard's tutorial disables its crew until the scripted introduction
     // completes; enable the fixture so C4Player::InCom routes controls here.
     let mut ready = ObjectUpdate::new().with_action("Walk");
     ready.crew_disabled = Some(false);
-    engine
-        .apply_object_update(clonk, ready)
-        .expect("enable the tutorial HZCK for player control");
-    engine
-        .select_crew(owner, [clonk])
-        .expect("select the tutorial HZCK");
-    engine
-        .set_crew_cursor(owner, Some(clonk))
-        .expect("make the tutorial HZCK the control cursor");
+    crate::support::TestValueExt::test_value(engine.apply_object_update(clonk, ready));
+    crate::support::TestValueExt::test_value(engine.select_crew(owner, [clonk]));
+    crate::support::TestValueExt::test_value(engine.set_crew_cursor(owner, Some(clonk)));
     let weapon = engine
         .spawn_object(
             SpawnConfig::new(weapon)
@@ -36,9 +31,9 @@ fn armed_hazard_clonk(engine: &mut Engine, weapon: &str) -> (i32, ObjectId, Obje
                 .with_container(clonk),
         )
         .unwrap_or_else(|error| panic!("equip {weapon}: {error}"));
-    engine
-        .apply_object_update(clonk, ObjectUpdate::new().with_contents_front(weapon))
-        .expect("select the weapon");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(clonk, ObjectUpdate::new().with_contents_front(weapon)),
+    );
     (owner, clonk, weapon)
 }
 
@@ -57,41 +52,37 @@ fn hazard_crosshair_orbits_the_aiming_clonk_at_ch_distance() {
     // instead of firing (Items.c4d/Weapons.c4d/Weapon.c4d/Script.c:146-153).
     let (owner, clonk, _weapon) = armed_hazard_clonk(&mut engine, "BZWP");
 
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw press reaches C4Player::InCom");
-    engine
-        .player_in_com(owner, COM_THROW + COM_RELEASE_OFFSET, 0)
-        .expect("Throw release reaches C4Player::InCom");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_THROW + COM_RELEASE_OFFSET,
+        0,
+    ));
 
     // DFA_ATTACH forces the position from C4Object::ExecAction, and the
     // UpdateAiming effect moves the Clonk's own attach vertex onto the weapon
     // muzzle. Two frames settle both (the crosshair executes after the Clonk
     // only from the second frame on).
-    engine.tick().expect("first simulation frame runs");
-    engine.tick().expect("second simulation frame runs");
+    crate::support::TestValueExt::test_value(engine.tick());
+    crate::support::TestValueExt::test_value(engine.tick());
 
     let snapshot = engine.snapshot();
-    let clonk_state = snapshot
-        .objects
-        .iter()
-        .find(|object| object.id == clonk)
-        .expect("the HZCK remains live");
-    let crosshair = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "HCRH")
-        .expect("StartAiming creates Hazard's HCRH crosshair");
+    let clonk_state = crate::support::TestValueExt::test_value(
+        snapshot.objects.iter().find(|object| object.id == clonk),
+    );
+    let crosshair = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "HCRH"),
+    );
 
     assert_eq!(
         crosshair.rotation, 90,
         "InitCrosshair aims straight ahead with SetAngle(90)"
     );
-    let attach_vertex = crosshair
-        .vertices
-        .first()
-        .copied()
-        .expect("the crosshair keeps its single attach vertex");
+    let attach_vertex =
+        crate::support::TestValueExt::test_value(crosshair.vertices.first().copied());
     assert_eq!(
         (attach_vertex.x, attach_vertex.y),
         (-60, 0),
@@ -104,11 +95,8 @@ fn hazard_crosshair_orbits_the_aiming_clonk_at_ch_distance() {
     // (CanAim.c4d/Script.c:218-224), so the reticle pivots at the weapon.
     // C4Object.cpp:5390-5395 ForcePosition: Target->x + Target vertex -
     // own vertex.
-    let clonk_vertex = clonk_state
-        .vertices
-        .first()
-        .copied()
-        .expect("the HZCK keeps its attach vertex");
+    let clonk_vertex =
+        crate::support::TestValueExt::test_value(clonk_state.vertices.first().copied());
     assert_eq!(
         (crosshair.position.x, crosshair.position.y),
         (
@@ -142,23 +130,23 @@ fn hazard_mouse_click_while_aiming_launches_the_bazooka_rocket() {
     let (owner, clonk, weapon) = armed_hazard_clonk(&mut engine, "BZWP");
     // WEPN::CheckAmmo counts the weapon's own MIAM, whose round count lives in
     // the ammo object's numbered local 0 (Hazard.c4d/System.c4g/Ammo.c:20-64).
-    engine
-        .spawn_object(
+    crate::support::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("MIAM")
                 .with_owner(owner)
                 .with_container(weapon)
                 .with_local_vars(HashMap::from([("__local_0".to_string(), Value::Int(5))])),
-        )
-        .expect("load the bazooka's missiles");
+        ),
+    );
 
     // First Throw enters crosshair aiming (FM_Aim = 1).
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("Throw press reaches C4Player::InCom");
-    engine
-        .player_in_com(owner, COM_THROW + COM_RELEASE_OFFSET, 0)
-        .expect("Throw release reaches C4Player::InCom");
-    engine.tick().expect("one simulation frame runs");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        owner,
+        COM_THROW + COM_RELEASE_OFFSET,
+        0,
+    ));
+    crate::support::TestValueExt::test_value(engine.tick());
     assert!(
         engine
             .snapshot()
@@ -169,22 +157,17 @@ fn hazard_mouse_click_while_aiming_launches_the_bazooka_rocket() {
     );
 
     // Now the click: MoveTo at a point ahead of the Clonk.
-    let position = engine
-        .object_snapshot(clonk)
-        .expect("the HZCK remains live")
-        .position;
-    engine
-        .execute_player_command(
-            owner,
-            CMD_MOVE_TO,
-            position.x + 80,
-            position.y - 20,
-            0,
-            0,
-            0,
-            1,
-        )
-        .expect("the left-click MoveTo command reaches the crew");
+    let position = crate::support::TestValueExt::test_value(engine.object_snapshot(clonk)).position;
+    crate::support::TestValueExt::test_value(engine.execute_player_command(
+        owner,
+        CMD_MOVE_TO,
+        position.x + 80,
+        position.y - 20,
+        0,
+        0,
+        0,
+        1,
+    ));
 
     assert!(
         engine

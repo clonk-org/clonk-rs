@@ -130,47 +130,42 @@ fn bang_nil_coalescing_assignment_short_circuits_before_reference_check() {
     assert_eq!(global_value(&globals, "rhs_calls"), Value::Nil);
 }
 
-#[test]
-fn dynb_line_57_pattern() {
-    // Exact pattern from DYNB line 57: if(!iCount = GetComponent(...))
-    let source = r#"
+// Exact pattern from DYNB line 57: if(!iCount = GetComponent(...))
+crate::support::compile_case!(
+    dynb_line_57_pattern,
+    r#"
         func Test() {
             var iCount;
             if(!iCount = GetComponent()) {
                 return 1;
             }
         }
-    "#;
-    crate::support::assert_compiles(source);
-}
+    "#,
+);
 
-#[test]
-fn not_with_assignment() {
-    // Simple: !x = y is C++-valid syntax with a runtime-invalid bool lhs.
-    let source = r#"func Test() { var x; if(!x = 42) return 1; }"#;
-    crate::support::assert_compiles(source);
-}
+// Simple: !x = y is C++-valid syntax with a runtime-invalid bool lhs.
+crate::support::compile_case!(
+    not_with_assignment,
+    r#"func Test() { var x; if(!x = 42) return 1; }"#
+);
 
-#[test]
-fn not_with_addition_preserved() {
-    // Precedence preservation: !a + b should still be (!a) + b, not !(a + b)
-    let source = r#"func Test() { var a = 1; var b = 2; return !a + b; }"#;
-    crate::support::assert_compiles(source);
-}
+// Precedence preservation: !a + b should still be (!a) + b, not !(a + b)
+crate::support::compile_case!(
+    not_with_addition_preserved,
+    r#"func Test() { var a = 1; var b = 2; return !a + b; }"#
+);
 
-#[test]
-fn not_with_function_call() {
-    // Baseline: !func() should continue to work
-    let source = r#"func Test() { return !GetFlag(); }"#;
-    crate::support::assert_compiles(source);
-}
+// Baseline: !func() should continue to work
+crate::support::compile_case!(
+    not_with_function_call,
+    r#"func Test() { return !GetFlag(); }"#
+);
 
-#[test]
-fn not_with_parenthesized_assignment() {
-    // Control: !(x = y) with explicit parens should work
-    let source = r#"func Test() { var x; if(!(x = 42)) return 1; }"#;
-    crate::support::assert_compiles(source);
-}
+// Control: !(x = y) with explicit parens should work
+crate::support::compile_case!(
+    not_with_parenthesized_assignment,
+    r#"func Test() { var x; if(!(x = 42)) return 1; }"#
+);
 
 #[test]
 fn increment_not_affected() {
@@ -189,23 +184,20 @@ fn increment_not_affected() {
     assert!(error.to_string().contains("parse error"));
 }
 
-#[test]
-fn not_with_complex_assignment() {
-    // Complex RHS: !x = a + b
-    let source = r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#;
-    crate::support::assert_compiles(source);
-}
+// Complex RHS: !x = a + b
+crate::support::compile_case!(
+    not_with_complex_assignment,
+    r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#
+);
 
-#[test]
-fn bitwise_not_precedence_preserved() {
-    // Ensure ~ (bitwise NOT) still has normal precedence with addition
-    let source = r#"func Test() { var a = 5; return ~a + 1; }"#;
-    crate::support::assert_compiles(source);
-}
+// Ensure ~ (bitwise NOT) still has normal precedence with addition
+crate::support::compile_case!(
+    bitwise_not_precedence_preserved,
+    r#"func Test() { var a = 5; return ~a + 1; }"#
+);
 
-#[test]
-fn negate_precedence_preserved() {
-    // Ensure - (unary negate) still has normal precedence with addition
-    let source = r#"func Test() { var a = 5; return -a + 1; }"#;
-    crate::support::assert_compiles(source);
-}
+// Ensure - (unary negate) still has normal precedence with addition
+crate::support::compile_case!(
+    negate_precedence_preserved,
+    r#"func Test() { var a = 5; return -a + 1; }"#
+);

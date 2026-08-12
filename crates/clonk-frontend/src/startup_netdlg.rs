@@ -6211,6 +6211,51 @@ mod tests {
     use crate::test_support::endeavour_font_set;
     use clonk_graphics::{Color, PixelFormat};
 
+    macro_rules! assert_no_actions {
+        ($actual:expr $(, $($arg:tt)+)?) => {
+            assert!($actual.is_empty() $(, $($arg)+)?);
+        };
+    }
+
+    macro_rules! assert_same {
+        ($actual:expr => $expected:expr $(, $($arg:tt)+)?) => {
+            assert_eq!($actual, $expected $(, $($arg)+)?);
+        };
+    }
+
+    macro_rules! assert_action {
+        ($actual:expr => $expected:expr $(, $($arg:tt)+)?) => {
+            assert_eq!($actual, vec![$expected] $(, $($arg)+)?);
+        };
+        ($actual:expr, $expected:expr $(, $($arg:tt)+)?) => {
+            assert_eq!($actual, vec![$expected] $(, $($arg)+)?);
+        };
+    }
+
+    macro_rules! assert_actions {
+        ($actual:expr => [$($expected:expr),+ $(,)?] $(, $($arg:tt)+)?) => {
+            assert_eq!($actual, vec![$($expected),+] $(, $($arg)+)?);
+        };
+        ($actual:expr, [$($expected:expr),+ $(,)?] $(, $($arg:tt)+)?) => {
+            assert_eq!($actual, vec![$($expected),+] $(, $($arg)+)?);
+        };
+    }
+
+    macro_rules! assert_focus {
+        ($actual:expr => $expected:expr) => {
+            assert_action!($actual => NetDlgAction::FocusChanged($expected));
+        };
+        ($actual:expr, $expected:expr) => {
+            assert_action!($actual => NetDlgAction::FocusChanged($expected));
+        };
+    }
+
+    macro_rules! assert_chat {
+        ($actual:expr => $input:expr => $command:expr) => {
+            assert_same!($actual => chat_actions([($input, $command)]));
+        };
+    }
+
     /// The two text extents the C++ constructor measures from the live fonts
     /// (C4StartupNetDlg.cpp:636,685-686), pinned to the spec's values.
     #[test]
@@ -6291,6 +6336,21 @@ mod tests {
             .collect()
     }
 
+    fn game_entry(
+        title: impl Into<String>,
+        details: impl Into<String>,
+        address: Option<&str>,
+        joinable: bool,
+    ) -> NetDlgGameEntry {
+        NetDlgGameEntry {
+            title: title.into(),
+            details: details.into(),
+            address: address.map(str::to_owned),
+            joinable,
+            ..NetDlgGameEntry::default()
+        }
+    }
+
     fn center(rect: IntRect) -> crate::GuiPoint {
         crate::GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
     }
@@ -6302,9 +6362,7 @@ mod tests {
 
     fn click(controller: &mut NetDlgController, rect: IntRect) -> Vec<NetDlgAction> {
         let point = center(rect);
-        assert!(controller
-            .handle_pointer_down(point, text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(point, text_font()));
         controller.handle_pointer_up(point, text_font())
     }
 
@@ -6321,6 +6379,111 @@ mod tests {
             gui_scroll: load("GUIScroll.png"),
             gui_icons: load("GUIIcons.png"),
             gui_icons_ex: load("GUIIcons2.png"),
+        }
+    }
+
+    fn controller_with_config(config: NetDlgConfig) -> NetDlgController {
+        let mut controller = NetDlgController::new(config, metrics());
+        controller.resize(1280, 720);
+        controller
+    }
+
+    fn controller() -> NetDlgController {
+        controller_with_config(NetDlgConfig::default())
+    }
+
+    fn offline_controller() -> NetDlgController {
+        controller_with_config(NetDlgConfig {
+            masterserver_signup: false,
+            ..NetDlgConfig::default()
+        })
+    }
+
+    fn controller_with_font(config: NetDlgConfig, font: &ClonkFont) -> NetDlgController {
+        let mut controller = controller_with_config(config);
+        controller.set_text_font(font);
+        controller
+    }
+
+    fn default_controller_with_font(font: &ClonkFont) -> NetDlgController {
+        controller_with_font(NetDlgConfig::default(), font)
+    }
+
+    fn offline_controller_with_font(font: &ClonkFont) -> NetDlgController {
+        controller_with_font(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            font,
+        )
+    }
+
+    fn rendered_controller(
+        controller: &NetDlgController,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        get_ref_phase: u32,
+    ) -> Surface {
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        NetDlgScreen::render_controller(
+            &mut surface,
+            assets,
+            fonts,
+            gamma,
+            controller,
+            get_ref_phase,
+        );
+        surface
+    }
+
+    fn captured_controller(
+        controller: &NetDlgController,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        get_ref_phase: u32,
+    ) -> Surface {
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(
+            &mut surface,
+            assets,
+            fonts,
+            gamma,
+            controller,
+            get_ref_phase,
+        );
+        surface
+    }
+
+    fn rendered_texts(
+        controller: &NetDlgController,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        get_ref_phase: u32,
+    ) -> Vec<String> {
+        captured_controller(controller, assets, fonts, gamma, get_ref_phase)
+            .take_clonk_text_capture()
+            .into_iter()
+            .map(|command| command.text)
+            .collect()
+    }
+
+    fn masterserver_entry() -> NetDlgMasterserverEntry {
+        NetDlgMasterserverEntry {
+            title: "Internet server on league.example".into(),
+            details: "3 game(s) found, 7 players online.".into(),
+            extra_lines: vec![
+                NetDlgTextLine::Plain("Message of the day: Welcome".into()),
+                NetDlgTextLine::Hyperlink {
+                    label: "https://league.example/news".into(),
+                    url: "https://league.example/news".into(),
+                },
+            ],
+            row_icon: NetDlgRowIcon::None,
         }
     }
 
@@ -6351,15 +6514,7 @@ mod tests {
     #[test]
     fn resolved_row_wraps_five_info_lines_and_maps_every_status_icon() {
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.set_text_font(&fonts.text);
-        controller.resize(1280, 720);
+        let mut controller = offline_controller_with_font(&fonts.text);
         let statuses = vec![
             NetDlgStatusIcon::PasswordNeeded,
             NetDlgStatusIcon::League,
@@ -6380,10 +6535,7 @@ mod tests {
         assert_eq!(rows[0].lines.len(), 5);
         assert!(rows[0].lines[4].rect.h > metrics().text_line_height);
         assert_eq!(rows[0].status_icons, statuses);
-        assert_eq!(
-            rows[0].lines[0].rect.w,
-            layout.entry_labels[0].w - 7 * metrics().text_line_height
-        );
+        assert_same!(rows[0].lines[0].rect.w => layout.entry_labels[0].w - 7 * metrics().text_line_height);
         assert_eq!(
             rows[0]
                 .status_icons
@@ -6403,9 +6555,7 @@ mod tests {
         );
 
         let assets = net_assets();
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let mut surface = captured_controller(&controller, &assets, &fonts, None, 0);
         let row_text = surface
             .take_clonk_text_capture()
             .into_iter()
@@ -6425,35 +6575,17 @@ mod tests {
     #[test]
     fn overflowing_expanded_rows_collapse_except_selection_and_remain_hittable() {
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.set_text_font(&fonts.text);
-        controller.resize(1280, 720);
+        let mut controller = offline_controller_with_font(&fonts.text);
         controller.set_games((0..6).map(rich_game).collect());
         let layout = controller.layout();
 
         assert!(controller.list_is_collapsed());
-        assert_eq!(
-            controller
-                .row_layouts(&layout)
-                .iter()
-                .map(|row| row.rect.h)
-                .collect::<Vec<_>>(),
-            vec![48; 6]
-        );
+        assert_same!(controller .row_layouts(&layout) .iter() .map(|row| row.rect.h) .collect::<Vec<_>>() => vec![48; 6]);
         assert_eq!(controller.list_max_scroll(), 0);
 
         assert!(controller.focus_game(2).is_empty());
         let rows = controller.row_layouts(&layout);
-        assert_eq!(
-            rows.iter().map(|row| row.rect.h).collect::<Vec<_>>(),
-            vec![48, 48, 120, 48, 48, 48]
-        );
+        assert_same!(rows.iter().map(|row| row.rect.h).collect::<Vec<_>>() => vec![48, 48, 120, 48, 48, 48]);
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(
                 controller.game_index_at(GuiPoint::new(
@@ -6468,14 +6600,10 @@ mod tests {
         assert!(controller.list_max_scroll() > 0);
         assert!(controller.focus_game(9).is_empty());
         assert_eq!(controller.selected_game(), Some(9));
-        assert_eq!(
-            controller.list_scroll_offset(),
-            controller.list_max_scroll()
-        );
+        assert_same!(controller.list_scroll_offset() => controller.list_max_scroll());
 
-        let mut with_master = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut with_master = self::controller();
         with_master.set_text_font(&fonts.text);
-        with_master.resize(1280, 720);
         with_master.set_masterserver_entry(NetDlgMasterserverEntry {
             title: "Masterserver".into(),
             details: "Six games".into(),
@@ -6491,23 +6619,13 @@ mod tests {
         assert_eq!(with_master.row_layouts(&master_layout)[0].rect.h, 120);
         assert!(with_master.focus_game(2).is_empty());
         let selected_rows = with_master.row_layouts(&master_layout);
-        assert_eq!(
-            selected_rows[0].rect.h, 48,
-            "selected game collapses master"
-        );
+        assert_same!(selected_rows[0].rect.h => 48, "selected game collapses master");
         assert_eq!(selected_rows[3].rect.h, 120, "selected game stays expanded");
     }
 
     #[test]
     fn native_row_top_spacing_drives_collapse_scroll_and_gap_hit_testing() {
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(10));
         let layout = controller.layout();
 
@@ -6544,44 +6662,19 @@ mod tests {
     #[test]
     fn masterserver_reply_renders_count_motd_and_link_and_link_activates() {
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.set_text_font(&fonts.text);
-        controller.resize(1280, 720);
-        controller.set_masterserver_entry(NetDlgMasterserverEntry {
-            title: "Internet server on league.example".into(),
-            details: "3 game(s) found, 7 players online.".into(),
-            extra_lines: vec![
-                NetDlgTextLine::Plain("Message of the day: Welcome".into()),
-                NetDlgTextLine::Hyperlink {
-                    label: "https://league.example/news".into(),
-                    url: "https://league.example/news".into(),
-                },
-            ],
-            row_icon: NetDlgRowIcon::None,
-        });
+        let mut controller = default_controller_with_font(&fonts.text);
+        controller.set_masterserver_entry(masterserver_entry());
 
         let layout = controller.layout();
         let rows = controller.row_layouts(&layout);
         assert_eq!(rows[0].rect.h, 96);
         assert_eq!(rows[0].lines.len(), 4);
         let link = rows[0].lines[3].rect;
-        assert_eq!(
-            controller.handle_pointer_down(
-                GuiPoint::new((link.x + 2) as f32, (link.y + 2) as f32),
-                text_font(),
-            ),
-            vec![NetDlgAction::OpenUrl("https://league.example/news".into())]
-        );
+        let link_point = GuiPoint::new((link.x + 2) as f32, (link.y + 2) as f32);
+        assert_action!(controller.handle_pointer_down(link_point, text_font()) => NetDlgAction::OpenUrl("https://league.example/news".into()));
 
         let assets = net_assets();
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
-        let captured = surface
-            .take_clonk_text_capture()
-            .into_iter()
-            .map(|command| command.text)
-            .collect::<Vec<_>>();
+        let captured = rendered_texts(&controller, &assets, &fonts, None, 0);
         for expected in [
             "Internet server on league.example",
             "3 game(s) found, 7 players online.",
@@ -6595,32 +6688,20 @@ mod tests {
     #[test]
     fn hyperlink_uses_cpp_color_exact_underline_and_only_link_opens() {
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.set_text_font(&fonts.text);
-        controller.resize(1280, 720);
-        controller.set_masterserver_entry(NetDlgMasterserverEntry {
-            title: "Internet server on league.example".into(),
-            details: "3 game(s) found, 7 players online.".into(),
-            extra_lines: vec![
-                NetDlgTextLine::Plain("Message of the day: Welcome".into()),
-                NetDlgTextLine::Hyperlink {
-                    label: "https://league.example/news".into(),
-                    url: "https://league.example/news".into(),
-                },
-            ],
-            row_icon: NetDlgRowIcon::None,
-        });
-        controller.set_games(vec![NetDlgGameEntry {
-            title: "Wrong version".into(),
-            details: "Engine version: 4.9.11.0 [363]".into(),
-            joinable: false,
-            ..NetDlgGameEntry::default()
-        }]);
+        let mut controller = default_controller_with_font(&fonts.text);
+        controller.set_masterserver_entry(masterserver_entry());
+        controller.set_games(vec![game_entry(
+            "Wrong version",
+            "Engine version: 4.9.11.0 [363]",
+            None,
+            false,
+        )]);
 
         let layout = controller.layout();
         let rows = controller.row_layouts(&layout);
         let link_rect = rows[0].lines[3].rect;
         let ordinary_rect = rows[1].lines[0].rect;
+        let link_point = GuiPoint::new((link_rect.x + 2) as f32, (link_rect.y + 2) as f32);
         let ordinary_actions = controller.handle_pointer_down(
             GuiPoint::new((ordinary_rect.x + 2) as f32, (ordinary_rect.y + 2) as f32),
             text_font(),
@@ -6628,18 +6709,10 @@ mod tests {
         assert!(!ordinary_actions
             .iter()
             .any(|action| matches!(action, NetDlgAction::OpenUrl(_))));
-        assert_eq!(
-            controller.handle_pointer_down(
-                GuiPoint::new((link_rect.x + 2) as f32, (link_rect.y + 2) as f32),
-                text_font(),
-            ),
-            vec![NetDlgAction::OpenUrl("https://league.example/news".into())]
-        );
+        assert_action!(controller.handle_pointer_down(link_point, text_font()) => NetDlgAction::OpenUrl("https://league.example/news".into()));
 
         let assets = net_assets();
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let mut surface = captured_controller(&controller, &assets, &fonts, None, 0);
         let captured = surface.take_clonk_text_capture();
         let color_for = |text: &str| {
             captured
@@ -6676,14 +6749,8 @@ mod tests {
     fn official_unselected_row_uses_important_background_but_selection_wins() {
         let fonts = endeavour_font_set();
         let assets = net_assets();
-        let config = NetDlgConfig {
-            masterserver_signup: false,
-            ..NetDlgConfig::default()
-        };
         let render = |official: bool, selected: bool| {
-            let mut controller = NetDlgController::new(config, metrics());
-            controller.set_text_font(&fonts.text);
-            controller.resize(1280, 720);
+            let mut controller = offline_controller_with_font(&fonts.text);
             let mut game = rich_game(0);
             if official {
                 game.status_icons.push(NetDlgStatusIcon::OfficialServer);
@@ -6692,9 +6759,7 @@ mod tests {
             if selected {
                 let _ = controller.focus_game(0);
             }
-            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-            NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
-            surface
+            rendered_controller(&controller, &assets, &fonts, None, 0)
         };
         let layout = net_dlg_layout(1280, 720, &metrics());
         let sample = (layout.list_entry.x + 2, layout.list_entry.y + 2);
@@ -6716,30 +6781,15 @@ mod tests {
     fn row_icons_use_native_query_error_and_scenario_sources() {
         let fonts = endeavour_font_set();
         let assets = net_assets();
-        let config = NetDlgConfig {
-            masterserver_signup: false,
-            ..NetDlgConfig::default()
-        };
         let render = |icon, phase| {
-            let mut controller = NetDlgController::new(config, metrics());
-            controller.set_text_font(&fonts.text);
-            controller.resize(1280, 720);
+            let mut controller = offline_controller_with_font(&fonts.text);
             controller.set_games(vec![NetDlgGameEntry {
                 title: "Direct join on example.test".into(),
                 details: "Query status".into(),
                 row_icon: icon,
                 ..NetDlgGameEntry::default()
             }]);
-            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-            NetDlgScreen::render_controller(
-                &mut surface,
-                &assets,
-                &fonts,
-                None,
-                &controller,
-                phase,
-            );
-            surface
+            rendered_controller(&controller, &assets, &fonts, None, phase)
         };
         let query_0 = render(NetDlgRowIcon::Query, 0);
         let query_1 = render(NetDlgRowIcon::Query, 1);
@@ -6768,14 +6818,8 @@ mod tests {
         assert_eq!(icon_pixels(&error_0), icon_pixels(&error_1));
         assert_ne!(icon_pixels(&scenario_0), icon_pixels(&scenario_1));
         assert_eq!(icon_pixels(&scenario_0), icon_pixels(&scenario_0_later));
-        assert_eq!(
-            icon_pixels(&scenario_default),
-            icon_pixels(&scenario_negative)
-        );
-        assert_eq!(
-            icon_pixels(&scenario_default),
-            icon_pixels(&scenario_too_large)
-        );
+        assert_same!(icon_pixels(&scenario_default) => icon_pixels(&scenario_negative));
+        assert_same!(icon_pixels(&scenario_default) => icon_pixels(&scenario_too_large));
 
         let small_icon = IntRect {
             x: icon.x + 8,
@@ -6809,23 +6853,15 @@ mod tests {
     #[test]
     fn scenario_row_icons_derive_the_cell_from_the_strip_height() {
         let fonts = endeavour_font_set();
-        let config = NetDlgConfig {
-            masterserver_signup: false,
-            ..NetDlgConfig::default()
-        };
         let render = |assets: &NetDlgAssets, phase: i32| {
-            let mut controller = NetDlgController::new(config, metrics());
-            controller.set_text_font(&fonts.text);
-            controller.resize(1280, 720);
+            let mut controller = offline_controller_with_font(&fonts.text);
             controller.set_games(vec![NetDlgGameEntry {
                 title: "Direct join on example.test".into(),
                 details: "Query status".into(),
                 row_icon: NetDlgRowIcon::Scenario(phase),
                 ..NetDlgGameEntry::default()
             }]);
-            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-            NetDlgScreen::render_controller(&mut surface, assets, &fonts, None, &controller, 0);
-            surface
+            rendered_controller(&controller, assets, &fonts, None, 0)
         };
 
         let native = net_assets();
@@ -6861,10 +6897,7 @@ mod tests {
             let nearest = (0..4)
                 .min_by_key(|candidate| distance(&drawn, &natives[*candidate as usize]))
                 .unwrap();
-            assert_eq!(
-                nearest, phase,
-                "a 3x strip drew icon {nearest} where phase {phase} was asked for"
-            );
+            assert_same!(nearest => phase, "a 3x strip drew icon {nearest} where phase {phase} was asked for");
         }
     }
 
@@ -6872,24 +6905,14 @@ mod tests {
     fn disabled_reference_rows_use_native_inactive_message_color() {
         let fonts = endeavour_font_set();
         let assets = net_assets();
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.set_text_font(&fonts.text);
-        controller.resize(1280, 720);
-        controller.set_games(vec![NetDlgGameEntry {
-            title: "Wrong version".into(),
-            details: "Engine version: 4.9.11.0 [363]".into(),
-            joinable: false,
-            ..NetDlgGameEntry::default()
-        }]);
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let mut controller = offline_controller_with_font(&fonts.text);
+        controller.set_games(vec![game_entry(
+            "Wrong version",
+            "Engine version: 4.9.11.0 [363]",
+            None,
+            false,
+        )]);
+        let mut surface = captured_controller(&controller, &assets, &fonts, None, 0);
         let rows = surface
             .take_clonk_text_capture()
             .into_iter()
@@ -6907,249 +6930,114 @@ mod tests {
     // (C4GuiButton.cpp:128-155; C4Rect.h:40-43).
     #[test]
     fn controller_routes_every_visible_button_and_uses_half_open_hits() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         let layout = net_dlg_layout(1280, 720, &metrics());
 
-        assert_eq!(
-            click(&mut controller, layout.buttons[0]),
-            vec![NetDlgAction::Back]
-        );
-        assert_eq!(
-            click(&mut controller, layout.buttons[1]),
-            vec![NetDlgAction::Refresh]
-        );
+        assert_action!(click(&mut controller, layout.buttons[0]) => NetDlgAction::Back);
+        assert_action!(click(&mut controller, layout.buttons[1]) => NetDlgAction::Refresh);
 
         controller.set_join_address(" 127.0.0.1:11111 ");
-        assert_eq!(
-            click(&mut controller, layout.buttons[2]),
-            vec![NetDlgAction::JoinGame { address: None }],
-            "a Join button click must not reinterpret an unfocused edit as a direct query"
-        );
-        assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit), text_font()),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
-        assert_eq!(
-            click(&mut controller, layout.buttons[2]),
-            vec![
-                NetDlgAction::QueryAddress {
-                    address: " 127.0.0.1:11111 ".into()
-                },
-                NetDlgAction::FocusChanged(NetDlgControl::GameList),
-            ]
-        );
-        assert_eq!(
-            click(&mut controller, layout.buttons[3]),
-            vec![NetDlgAction::CreateGame]
-        );
+        assert_action!(click(&mut controller, layout.buttons[2]) => NetDlgAction::JoinGame {address: None }, "a Join button click must not reinterpret an unfocused edit as a direct query");
+        assert_focus!(controller.handle_pointer_down(center(layout.join_edit), text_font()) => NetDlgControl::JoinAddress);
+        assert_actions!(click(&mut controller, layout.buttons[2]) => [NetDlgAction::QueryAddress {address: " 127.0.0.1:11111 ".into() }, NetDlgAction::FocusChanged(NetDlgControl::GameList), ]);
+        assert_action!(click(&mut controller, layout.buttons[3]) => NetDlgAction::CreateGame);
 
-        assert_eq!(
-            click(&mut controller, layout.btn_internet),
-            vec![NetDlgAction::MasterserverSignupChanged(false)]
-        );
+        assert_action!(click(&mut controller, layout.btn_internet) => NetDlgAction::MasterserverSignupChanged(false));
         assert!(!controller.config().masterserver_signup);
-        assert_eq!(
-            click(&mut controller, layout.btn_record),
-            vec![NetDlgAction::RecordingChanged(true)]
-        );
+        assert_action!(click(&mut controller, layout.btn_record) => NetDlgAction::RecordingChanged(true));
         assert!(controller.config().record);
-        assert_eq!(
-            click(&mut controller, layout.btn_chat),
-            vec![
-                NetDlgAction::ModeChanged(NetDlgMode::Chat),
-                NetDlgAction::FocusChanged(NetDlgControl::ChatInput),
-            ]
-        );
-        assert_eq!(
-            click(&mut controller, layout.btn_game_list),
-            vec![
-                NetDlgAction::ModeChanged(NetDlgMode::GameList),
-                NetDlgAction::FocusChanged(NetDlgControl::GameList),
-            ]
-        );
+        assert_actions!(click(&mut controller, layout.btn_chat) => [NetDlgAction::ModeChanged(NetDlgMode::Chat), NetDlgAction::FocusChanged(NetDlgControl::ChatInput), ]);
+        assert_actions!(click(&mut controller, layout.btn_game_list) => [NetDlgAction::ModeChanged(NetDlgMode::GameList), NetDlgAction::FocusChanged(NetDlgControl::GameList), ]);
 
         let outside = crate::GuiPoint::new(
             (layout.buttons[0].x + layout.buttons[0].w) as f32,
             layout.buttons[0].y as f32,
         );
-        assert!(controller
-            .handle_pointer_down(outside, text_font())
-            .is_empty());
-        assert!(controller
-            .handle_pointer_up(outside, text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(outside, text_font()));
+        assert_no_actions!(controller.handle_pointer_up(outside, text_font()));
     }
 
     #[test]
     fn mode_switch_preserves_standalone_button_focus_and_structural_tab_order() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         let layout = net_dlg_layout(1280, 720, &metrics());
         for _ in 0..9 {
             controller.handle_key_down(crate::KeyCode::Tab);
         }
         assert_eq!(controller.focused_control(), NetDlgControl::ChatButton);
 
-        assert!(controller.handle_key_down(crate::KeyCode::Space).is_empty());
-        assert_eq!(
-            controller.handle_key_up(crate::KeyCode::Space),
-            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
-        );
+        assert_no_actions!(controller.handle_key_down(crate::KeyCode::Space));
+        assert_action!(controller.handle_key_up(crate::KeyCode::Space) => NetDlgAction::ModeChanged(NetDlgMode::Chat));
         assert_eq!(controller.focused_control(), NetDlgControl::ChatButton);
 
-        let mut hidden_button_focus = NetDlgController::new(NetDlgConfig::default(), metrics());
-        hidden_button_focus.resize(1280, 720);
+        let mut hidden_button_focus = self::controller();
         for _ in 0..5 {
             hidden_button_focus.handle_key_down(crate::KeyCode::Tab);
         }
-        assert_eq!(
-            hidden_button_focus.focused_control(),
-            NetDlgControl::Refresh
-        );
-        assert_eq!(
-            click(&mut hidden_button_focus, layout.btn_chat),
-            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
-        );
-        assert_eq!(
-            hidden_button_focus.focused_control(),
-            NetDlgControl::Refresh
-        );
-        assert!(hidden_button_focus
-            .handle_key_down(crate::KeyCode::Enter)
-            .is_empty());
-        assert_eq!(
-            hidden_button_focus.handle_key_up(crate::KeyCode::Enter),
-            vec![NetDlgAction::Refresh]
-        );
-        assert!(hidden_button_focus
-            .handle_key_down(crate::KeyCode::Space)
-            .is_empty());
-        assert_eq!(
-            hidden_button_focus.handle_key_up(crate::KeyCode::Space),
-            vec![NetDlgAction::Refresh]
-        );
-        assert_eq!(
-            hidden_button_focus.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::CreateGame)]
-        );
+        assert_same!(hidden_button_focus.focused_control() => NetDlgControl::Refresh);
+        assert_action!(click(&mut hidden_button_focus, layout.btn_chat) => NetDlgAction::ModeChanged(NetDlgMode::Chat));
+        assert_same!(hidden_button_focus.focused_control() => NetDlgControl::Refresh);
+        assert_no_actions!(hidden_button_focus.handle_key_down(crate::KeyCode::Enter));
+        assert_action!(hidden_button_focus.handle_key_up(crate::KeyCode::Enter) => NetDlgAction::Refresh);
+        assert_no_actions!(hidden_button_focus.handle_key_down(crate::KeyCode::Space));
+        assert_action!(hidden_button_focus.handle_key_up(crate::KeyCode::Space) => NetDlgAction::Refresh);
+        assert_focus!(hidden_button_focus.handle_key_down(crate::KeyCode::Tab) => NetDlgControl::CreateGame);
 
-        let mut internet_focus = NetDlgController::new(NetDlgConfig::default(), metrics());
-        internet_focus.resize(1280, 720);
+        let mut internet_focus = self::controller();
         for _ in 0..2 {
             internet_focus.handle_key_down(crate::KeyCode::Tab);
         }
         assert_eq!(internet_focus.focused_control(), NetDlgControl::Internet);
-        assert_eq!(
-            click(&mut internet_focus, layout.btn_chat),
-            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
-        );
-        assert_eq!(
-            internet_focus.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::Back)]
-        );
+        assert_action!(click(&mut internet_focus, layout.btn_chat) => NetDlgAction::ModeChanged(NetDlgMode::Chat));
+        assert_focus!(internet_focus.handle_key_down(crate::KeyCode::Tab) => NetDlgControl::Back);
 
-        let mut hidden_join_focus = NetDlgController::new(NetDlgConfig::default(), metrics());
-        hidden_join_focus.resize(1280, 720);
+        let mut hidden_join_focus = self::controller();
         for _ in 0..6 {
             hidden_join_focus.handle_key_down(crate::KeyCode::Tab);
         }
         assert_eq!(hidden_join_focus.focused_control(), NetDlgControl::JoinGame);
-        assert_eq!(
-            click(&mut hidden_join_focus, layout.btn_chat),
-            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
-        );
-        assert!(hidden_join_focus
-            .handle_key_down(crate::KeyCode::Enter)
-            .is_empty());
-        assert!(hidden_join_focus
-            .handle_key_up(crate::KeyCode::Enter)
-            .is_empty());
-        assert!(hidden_join_focus
-            .handle_key_down(crate::KeyCode::Space)
-            .is_empty());
-        assert!(hidden_join_focus
-            .handle_key_up(crate::KeyCode::Space)
-            .is_empty());
+        assert_action!(click(&mut hidden_join_focus, layout.btn_chat) => NetDlgAction::ModeChanged(NetDlgMode::Chat));
+        assert_no_actions!(hidden_join_focus.handle_key_down(crate::KeyCode::Enter));
+        assert_no_actions!(hidden_join_focus.handle_key_up(crate::KeyCode::Enter));
+        assert_no_actions!(hidden_join_focus.handle_key_down(crate::KeyCode::Space));
+        assert_no_actions!(hidden_join_focus.handle_key_up(crate::KeyCode::Space));
     }
 
     #[test]
     fn shift_tab_reverses_game_list_focus_order() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = self::controller();
         assert_eq!(controller.focused_control(), NetDlgControl::GameList);
-        assert_eq!(
-            controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::ChatButton)]
-        );
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::GameList)]
-        );
+        assert_focus!(controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true) => NetDlgControl::ChatButton);
+        assert_focus!(controller.handle_key_down(KeyCode::Tab) => NetDlgControl::GameList);
 
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::Internet)]
-        );
-        assert_eq!(
-            controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::Internet)]
-        );
+        assert_focus!(controller.handle_key_down(crate::KeyCode::Tab) => NetDlgControl::JoinAddress);
+        assert_focus!(controller.handle_key_down(crate::KeyCode::Tab) => NetDlgControl::Internet);
+        assert_focus!(controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true) => NetDlgControl::JoinAddress);
+        assert_focus!(controller.handle_key_down(crate::KeyCode::Tab) => NetDlgControl::Internet);
     }
 
     #[test]
     fn direct_join_edit_is_a_two_step_query_then_selected_row_join() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         let layout = net_dlg_layout(1280, 720, &metrics());
         controller.set_join_address("   ");
 
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame { address: None }]
-        );
-        assert_eq!(
-            click(&mut controller, layout.buttons[2]),
-            vec![NetDlgAction::JoinGame { address: None }]
-        );
-        assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit), text_font()),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Enter),
-            vec![
-                NetDlgAction::QueryAddress {
-                    address: "   ".into()
-                },
-                NetDlgAction::FocusChanged(NetDlgControl::GameList),
-            ]
-        );
+        assert_action!(controller.handle_key_down(crate::KeyCode::Enter) => NetDlgAction::JoinGame {address: None });
+        assert_action!(click(&mut controller, layout.buttons[2]) => NetDlgAction::JoinGame {address: None });
+        assert_action!(controller.handle_pointer_down(center(layout.join_edit), text_font()) => NetDlgAction::FocusChanged(NetDlgControl::JoinAddress));
+        assert_actions!(controller.handle_key_down(crate::KeyCode::Enter) => [NetDlgAction::QueryAddress {address: "   ".into() }, NetDlgAction::FocusChanged(NetDlgControl::GameList), ]);
         assert_eq!(controller.focused_control(), NetDlgControl::GameList);
         assert_eq!(controller.join_address(), "   ");
 
         // The application materializes and selects the direct-query row.
-        controller.set_games(vec![NetDlgGameEntry {
-            title: "Direct query".into(),
-            details: "Querying".into(),
-            address: Some("example.test".into()),
-            joinable: false,
-            ..NetDlgGameEntry::default()
-        }]);
-        assert!(controller.focus_game(0).is_empty());
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame {
-                address: Some("example.test".into())
-            }]
-        );
+        controller.set_games(vec![game_entry(
+            "Direct query",
+            "Querying",
+            Some("example.test"),
+            false,
+        )]);
+        assert_no_actions!(controller.focus_game(0));
+        assert_action!(controller.handle_key_down(crate::KeyCode::Enter) => NetDlgAction::JoinGame {address: Some("example.test".into()) });
     }
 
     // The game list owns initial focus; Tab advances into the IP edit, whose
@@ -7158,50 +7046,27 @@ mod tests {
     // C4GuiDialogs.cpp:343-357,616-644; C4GuiButton.cpp:22-35,112-126).
     #[test]
     fn controller_matches_initial_focus_and_keyboard_activation() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         assert_eq!(controller.focused_control(), NetDlgControl::GameList);
 
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame { address: None }]
-        );
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
-        assert!(controller.handle_key_down(crate::KeyCode::Left).is_empty());
+        assert_action!(controller.handle_key_down(crate::KeyCode::Enter) => NetDlgAction::JoinGame {address: None });
+        assert_action!(controller.handle_key_down(crate::KeyCode::Tab) => NetDlgAction::FocusChanged(NetDlgControl::JoinAddress));
+        assert_no_actions!(controller.handle_key_down(crate::KeyCode::Left));
 
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::Internet)]
-        );
-        assert!(controller.handle_key_down(crate::KeyCode::Space).is_empty());
-        assert_eq!(
-            controller.handle_key_up(crate::KeyCode::Space),
-            vec![NetDlgAction::MasterserverSignupChanged(false)]
-        );
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Escape),
-            vec![NetDlgAction::Back]
-        );
+        assert_action!(controller.handle_key_down(crate::KeyCode::Tab) => NetDlgAction::FocusChanged(NetDlgControl::Internet));
+        assert_no_actions!(controller.handle_key_down(crate::KeyCode::Space));
+        assert_action!(controller.handle_key_up(crate::KeyCode::Space) => NetDlgAction::MasterserverSignupChanged(false));
+        assert_action!(controller.handle_key_down(crate::KeyCode::Escape) => NetDlgAction::Back);
     }
 
     #[test]
     fn join_edit_keyboard_matches_cpp_caret_selection_words_and_char_in() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_join_address("alpha beta");
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
+        assert_action!(controller.handle_key_down(KeyCode::Tab) => NetDlgAction::FocusChanged(NetDlgControl::JoinAddress));
         assert_eq!(controller.join_address_selection(), Some((0, 10)));
 
-        assert_eq!(
-            controller.handle_text_input("x|\n\u{7f}", text_font()),
-            vec![NetDlgAction::JoinAddressChanged("x\u{a6}".into())]
-        );
+        assert_action!(controller.handle_text_input("x|\n\u{7f}", text_font()) => NetDlgAction::JoinAddressChanged("x\u{a6}".into()));
         assert_eq!(controller.join_address(), "x\u{a6}");
         assert_eq!(controller.join_address_caret(), "x\u{a6}".len());
         assert_eq!(controller.join_address_selection(), None);
@@ -7219,28 +7084,17 @@ mod tests {
         key(&mut controller, NetDlgEditKey::Right, false, true);
         assert_eq!(controller.join_address_caret(), 4, "Ctrl+Right skips comma");
         key(&mut controller, NetDlgEditKey::Right, false, true);
-        assert_eq!(
-            controller.join_address_caret(),
-            9,
-            "underscore is a word char"
-        );
+        assert_same!(controller.join_address_caret() => 9, "underscore is a word char");
         key(&mut controller, NetDlgEditKey::Right, true, false);
         assert_eq!(controller.join_address_selection(), Some((9, 11)));
         assert_eq!(controller.join_edit.selected_text(), Some("é"));
-        assert_eq!(
-            key(&mut controller, NetDlgEditKey::Delete, false, false).actions,
-            vec![NetDlgAction::JoinAddressChanged("one,_two lan".into())]
-        );
+        assert_action!(key(&mut controller, NetDlgEditKey::Delete, false, false).actions => NetDlgAction::JoinAddressChanged("one,_two lan".into()));
 
         controller.set_join_address("abcd");
         key(&mut controller, NetDlgEditKey::Left, true, false);
         assert_eq!(controller.join_address_selection(), Some((3, 4)));
         key(&mut controller, NetDlgEditKey::Left, false, false);
-        assert_eq!(
-            controller.join_address_caret(),
-            2,
-            "plain movement clears a selection and still moves from its caret"
-        );
+        assert_same!(controller.join_address_caret() => 2, "plain movement clears a selection and still moves from its caret");
         let unchanged = controller.join_address().to_string();
         key(&mut controller, NetDlgEditKey::Delete, true, false);
         assert_eq!(controller.join_address(), unchanged);
@@ -7248,8 +7102,7 @@ mod tests {
 
     #[test]
     fn join_edit_pointer_midpoints_drag_and_double_click_match_cpp() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_join_address("Wi");
         controller.handle_key_down(KeyCode::Tab);
         let edit = controller.layout().join_edit;
@@ -7260,11 +7113,7 @@ mod tests {
 
         let tie = GuiPoint::new((client.x + midpoint) as f32, y);
         controller.handle_pointer_down(tie, text_font());
-        assert_eq!(
-            controller.join_address_caret(),
-            0,
-            "midpoint tie stays left"
-        );
+        assert_same!(controller.join_address_caret() => 0, "midpoint tie stays left");
         controller.handle_pointer_up(tie, text_font());
 
         let right_half = GuiPoint::new((client.x + midpoint + 1) as f32, y);
@@ -7292,8 +7141,7 @@ mod tests {
 
     #[test]
     fn join_edit_mouse_selection_and_select_all_preserve_cpp_blink_phase() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_join_address("alpha beta gamma");
         controller.focus = NetDlgControl::JoinAddress;
         let edit = controller.layout().join_edit;
@@ -7319,8 +7167,7 @@ mod tests {
 
     #[test]
     fn join_edit_clipboard_context_middle_paste_and_multiline_abort_match_cpp() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_join_address("copy me");
         controller.handle_key_down(KeyCode::Tab);
 
@@ -7330,40 +7177,24 @@ mod tests {
             text_font(),
         );
         assert!(copy.captured);
-        assert_eq!(
-            copy.actions,
-            vec![NetDlgAction::ClipboardTransfer {
-                text: "copy me".into(),
-                cut: false,
-            }]
-        );
+        assert_action!(copy.actions => NetDlgAction::ClipboardTransfer {text: "copy me".into(), cut: false, });
         let cut = controller.handle_clipboard_shortcut(
             NetDlgEditClipboardShortcut::Cut,
             None,
             text_font(),
         );
-        assert_eq!(
-            cut.actions,
-            vec![NetDlgAction::ClipboardTransfer {
-                text: "copy me".into(),
-                cut: true,
-            }]
-        );
+        assert_action!(cut.actions => NetDlgAction::ClipboardTransfer {text: "copy me".into(), cut: true, });
         assert_eq!(controller.join_address(), "copy me", "cut waits for host");
-        assert_eq!(
-            controller.confirm_clipboard_cut(text_font()),
-            vec![NetDlgAction::JoinAddressChanged(String::new())]
-        );
+        assert_action!(controller.confirm_clipboard_cut(text_font()) => NetDlgAction::JoinAddressChanged(String::new()));
 
         controller.set_join_address("old");
         controller.apply_context_command(NetDlgEditContextCommand::SelectAll, None, text_font());
-        assert_eq!(
+        assert_actions!(
             controller.apply_context_command(
                 NetDlgEditContextCommand::Paste,
                 Some("\r\nhost|name\nignored"),
                 text_font(),
-            ),
-            vec![
+            ) => [
                 NetDlgAction::JoinAddressChanged("host\u{a6}name".into()),
                 NetDlgAction::QueryAddress {
                     address: "host\u{a6}name".into(),
@@ -7404,7 +7235,7 @@ mod tests {
 
     #[test]
     fn join_edit_capacity_scroll_and_blink_transition_are_bounded() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.resize(320, 240);
         controller.set_join_address("W".repeat(300));
         assert_eq!(controller.join_address().len(), JOIN_EDIT_MAX_PAYLOAD);
@@ -7425,75 +7256,45 @@ mod tests {
 
     #[test]
     fn discovered_rows_are_selectable_and_disabled_rows_remain_actionable() {
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(vec![
-            NetDlgGameEntry {
-                title: "Joinable game".into(),
-                details: "Lobby — Host One".into(),
-                address: Some("203.0.113.10:11112".into()),
-                joinable: true,
-                ..NetDlgGameEntry::default()
-            },
-            NetDlgGameEntry {
-                title: "Wrong version".into(),
-                details: "LegacyClonk 4.9.11.0 [363]".into(),
-                address: Some("203.0.113.11:11112".into()),
-                joinable: false,
-                ..NetDlgGameEntry::default()
-            },
+            game_entry(
+                "Joinable game",
+                "Lobby — Host One",
+                Some("203.0.113.10:11112"),
+                true,
+            ),
+            game_entry(
+                "Wrong version",
+                "LegacyClonk 4.9.11.0 [363]",
+                Some("203.0.113.11:11112"),
+                false,
+            ),
         ]);
 
         assert_eq!(controller.selected_game(), None);
-        assert!(controller.handle_key_down(crate::KeyCode::Down).is_empty());
+        assert_no_actions!(controller.handle_key_down(crate::KeyCode::Down));
         assert_eq!(controller.selected_game(), Some(0));
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame {
-                address: Some("203.0.113.10:11112".into())
-            }]
-        );
-        assert!(controller.handle_key_down(crate::KeyCode::Down).is_empty());
+        assert_action!(controller.handle_key_down(crate::KeyCode::Enter) => NetDlgAction::JoinGame {address: Some("203.0.113.10:11112".into()) });
+        assert_no_actions!(controller.handle_key_down(crate::KeyCode::Down));
         assert_eq!(controller.selected_game(), Some(1));
-        assert_eq!(
-            controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame {
-                address: Some("203.0.113.11:11112".into())
-            }]
-        );
+        assert_action!(controller.handle_key_down(crate::KeyCode::Enter) => NetDlgAction::JoinGame {address: Some("203.0.113.11:11112".into()) });
     }
 
     #[test]
     fn list_double_click_selects_focuses_and_joins_the_row_under_pointer() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_games(vec![
-            NetDlgGameEntry {
-                title: "Joinable".into(),
-                details: "Lobby".into(),
-                address: Some("203.0.113.10:11112".into()),
-                joinable: true,
-                ..NetDlgGameEntry::default()
-            },
-            NetDlgGameEntry {
-                title: "Runtime confirmation required".into(),
-                details: "Running".into(),
-                address: Some("203.0.113.11:11112".into()),
-                joinable: false,
-                ..NetDlgGameEntry::default()
-            },
+            game_entry("Joinable", "Lobby", Some("203.0.113.10:11112"), true),
+            game_entry(
+                "Runtime confirmation required",
+                "Running",
+                Some("203.0.113.11:11112"),
+                false,
+            ),
         ]);
         let layout = net_dlg_layout(1280, 720, &metrics());
-        assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit), text_font()),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
+        assert_action!(controller.handle_pointer_down(center(layout.join_edit), text_font()) => NetDlgAction::FocusChanged(NetDlgControl::JoinAddress));
 
         // Row zero is the masterserver query; the second discovered game is
         // therefore visual row two.
@@ -7507,35 +7308,23 @@ mod tests {
             (second_game.rect.y + 4) as f32,
         );
         assert_eq!(controller.game_index_at(point), Some(1));
-        assert_eq!(
-            controller.handle_pointer_double_click(point, text_font()),
-            vec![
+        assert_actions!(
+            controller.handle_pointer_double_click(point, text_font()) => [
                 NetDlgAction::FocusChanged(NetDlgControl::GameList),
                 NetDlgAction::JoinGame {
-                    address: Some("203.0.113.11:11112".into())
+                    address: Some("203.0.113.11:11112".into()),
                 },
             ]
         );
         assert_eq!(controller.selected_game(), Some(1));
         assert_eq!(controller.focused_control(), NetDlgControl::GameList);
 
-        assert_eq!(
-            controller.game_index_at(center(layout.list_entry)),
-            None,
-            "the masterserver query row is not a discovered game"
-        );
+        assert_same!(controller.game_index_at(center(layout.list_entry)) => None, "the masterserver query row is not a discovered game");
     }
 
     #[test]
     fn overflowing_game_list_wheel_scrolls_clamps_and_hit_tests_content() {
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(20));
         let layout = net_dlg_layout(1280, 720, &metrics());
         let point = GuiPoint::new(
@@ -7544,13 +7333,10 @@ mod tests {
         );
 
         assert_eq!(controller.list_max_scroll(), 565);
-        assert!(controller.handle_wheel(point, -60).is_empty());
+        assert_no_actions!(controller.handle_wheel(point, -60));
         assert_eq!(controller.list_scroll_offset(), 60);
         controller.handle_wheel(point, -10_000);
-        assert_eq!(
-            controller.list_scroll_offset(),
-            controller.list_max_scroll()
-        );
+        assert_same!(controller.list_scroll_offset() => controller.list_max_scroll());
         controller.handle_wheel(point, 10_000);
         assert_eq!(controller.list_scroll_offset(), 0);
 
@@ -7563,27 +7349,18 @@ mod tests {
 
         let third_row_top = controller.row_layouts(&layout)[2].rect.y - layout.list_viewport.y;
         controller.handle_wheel(point, -third_row_top);
-        assert!(controller
-            .handle_pointer_down(point, text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(point, text_font()));
         assert_eq!(controller.selected_game(), Some(2));
     }
 
     #[test]
     fn keyboard_selection_scrolls_each_row_range_into_view() {
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(20));
         let layout = net_dlg_layout(1280, 720, &metrics());
 
         for index in 0..20 {
-            assert!(controller.handle_key_down(KeyCode::Down).is_empty());
+            assert_no_actions!(controller.handle_key_down(KeyCode::Down));
             assert_eq!(controller.selected_game(), Some(index));
             let row = controller
                 .row_layouts(&layout)
@@ -7595,13 +7372,10 @@ mod tests {
             assert!(controller.list_scroll_offset() <= top);
             assert!(controller.list_scroll_offset() + layout.list_viewport.h >= bottom);
         }
-        assert_eq!(
-            controller.list_scroll_offset(),
-            controller.list_max_scroll()
-        );
+        assert_same!(controller.list_scroll_offset() => controller.list_max_scroll());
 
         for index in (0..19).rev() {
-            assert!(controller.handle_key_down(KeyCode::Up).is_empty());
+            assert_no_actions!(controller.handle_key_down(KeyCode::Up));
             assert_eq!(controller.selected_game(), Some(index));
         }
         assert_eq!(controller.list_scroll_offset(), 0);
@@ -7610,22 +7384,14 @@ mod tests {
     #[test]
     fn home_end_and_pages_use_live_network_row_ranges() {
         let command = vec![NetDlgAction::GuiSound(NetDlgSound::Command)];
-        let mut with_master = NetDlgController::new(NetDlgConfig::default(), metrics());
-        with_master.resize(1280, 720);
+        let mut with_master = controller();
         with_master.set_games(games(3));
         assert_eq!(with_master.handle_key_down(KeyCode::Home), command);
         assert_eq!(with_master.selection, Some(NetDlgSelection::Masterserver));
         assert_eq!(with_master.handle_key_down(KeyCode::End), command);
         assert_eq!(with_master.selection, Some(NetDlgSelection::Game(2)));
 
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(20));
 
         assert_eq!(controller.handle_key_down(KeyCode::Home), command);
@@ -7633,10 +7399,7 @@ mod tests {
         assert_eq!(controller.list_scroll_offset(), 0);
         assert_eq!(controller.handle_key_down(KeyCode::End), command);
         assert_eq!(controller.selected_game(), Some(19));
-        assert_eq!(
-            controller.list_scroll_offset(),
-            controller.list_max_scroll()
-        );
+        assert_same!(controller.list_scroll_offset() => controller.list_max_scroll());
         assert_eq!(controller.handle_key_down(KeyCode::Home), command);
         assert_eq!(controller.selected_game(), Some(0));
         assert_eq!(controller.list_scroll_offset(), 0);
@@ -7654,29 +7417,19 @@ mod tests {
             assert_eq!(controller.list_scroll_offset(), expected_scroll);
         }
 
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Tab),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
+        assert_action!(controller.handle_key_down(KeyCode::Tab) => NetDlgAction::FocusChanged(NetDlgControl::JoinAddress));
         for key in [
             KeyCode::Home,
             KeyCode::End,
             KeyCode::PageUp,
             KeyCode::PageDown,
         ] {
-            assert!(controller.handle_key_down(key).is_empty());
+            assert_no_actions!(controller.handle_key_down(key));
             assert_eq!(controller.selected_game(), Some(0));
             assert_eq!(controller.list_scroll_offset(), 0);
         }
 
-        let mut unselected = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        unselected.resize(1280, 720);
+        let mut unselected = offline_controller();
         unselected.set_games(games(20));
         assert_eq!(unselected.handle_key_down(KeyCode::PageDown), command);
         assert_eq!(unselected.selected_game(), Some(8));
@@ -7687,14 +7440,7 @@ mod tests {
 
     #[test]
     fn network_rows_do_not_match_typed_characters() {
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_join_address("unchanged");
         controller.set_games(vec![
             NetDlgGameEntry {
@@ -7709,7 +7455,7 @@ mod tests {
         controller.focus_game(1);
         let scroll = controller.list_scroll_offset();
 
-        assert!(controller.handle_text_input("T", text_font()).is_empty());
+        assert_no_actions!(controller.handle_text_input("T", text_font()));
         assert_eq!(controller.focused_control(), NetDlgControl::GameList);
         assert_eq!(controller.selected_game(), Some(1));
         assert_eq!(controller.list_scroll_offset(), scroll);
@@ -7718,14 +7464,7 @@ mod tests {
 
     #[test]
     fn scrollbar_track_drag_and_held_arrows_match_fixed_pin_math() {
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(20));
         let layout = net_dlg_layout(1280, 720, &metrics());
         let track = GuiPoint::new(
@@ -7733,27 +7472,13 @@ mod tests {
             (layout.list_scrollbar.y + layout.list_scrollbar.h / 2) as f32,
         );
 
-        assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit), text_font()),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
-        );
-        assert_eq!(
-            controller.handle_pointer_down(track, text_font()),
-            vec![
-                NetDlgAction::FocusChanged(NetDlgControl::GameList),
-                NetDlgAction::GuiSound(NetDlgSound::Command),
-            ]
-        );
+        assert_action!(controller.handle_pointer_down(center(layout.join_edit), text_font()) => NetDlgAction::FocusChanged(NetDlgControl::JoinAddress));
+        assert_actions!(controller.handle_pointer_down(track, text_font()) => [NetDlgAction::FocusChanged(NetDlgControl::GameList), NetDlgAction::GuiSound(NetDlgSound::Command), ]);
         assert!(controller.list_scroll_offset() > 0);
         let below = GuiPoint::new(track.x, (layout.list_scrollbar.y + 10_000) as f32);
-        assert!(controller
-            .handle_pointer_move(below, text_font())
-            .is_empty());
-        assert_eq!(
-            controller.list_scroll_offset(),
-            controller.list_max_scroll()
-        );
-        assert!(controller.handle_pointer_up(below, text_font()).is_empty());
+        assert_no_actions!(controller.handle_pointer_move(below, text_font()));
+        assert_same!(controller.list_scroll_offset() => controller.list_max_scroll());
+        assert_no_actions!(controller.handle_pointer_up(below, text_font()));
 
         let viewport = GuiPoint::new(
             (layout.list_viewport.x + 4) as f32,
@@ -7764,39 +7489,25 @@ mod tests {
             (layout.list_scrollbar.x + 8) as f32,
             (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
         );
-        assert_eq!(
-            controller.handle_pointer_down(bottom_arrow, text_font()),
-            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
-        );
+        assert_action!(controller.handle_pointer_down(bottom_arrow, text_font()) => NetDlgAction::GuiSound(NetDlgSound::ArrowHit));
         assert_eq!(controller.list_scroll_pin, 0);
         assert!(controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_pin, 1);
         assert!(controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_pin, 2);
-        assert_eq!(
-            controller.handle_pointer_move(track, text_font()),
-            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
-        );
+        assert_action!(controller.handle_pointer_move(track, text_font()) => NetDlgAction::GuiSound(NetDlgSound::ArrowHit));
         assert!(!controller.tick_scrollbar());
-        assert_eq!(
-            controller.handle_pointer_move(bottom_arrow, text_font()),
-            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
-        );
+        assert_action!(controller.handle_pointer_move(bottom_arrow, text_font()) => NetDlgAction::GuiSound(NetDlgSound::ArrowHit));
         assert!(controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_pin, 3);
         let after_held_frames = controller.list_scroll_offset();
-        assert_eq!(
-            controller.handle_pointer_up(bottom_arrow, text_font()),
-            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
-        );
+        assert_action!(controller.handle_pointer_up(bottom_arrow, text_font()) => NetDlgAction::GuiSound(NetDlgSound::ArrowHit));
         assert!(!controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_offset(), after_held_frames);
 
         controller.change_mode(NetDlgMode::Chat);
         let before_hidden_click = controller.list_scroll_offset();
-        assert!(controller
-            .handle_pointer_down(bottom_arrow, text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(bottom_arrow, text_font()));
         assert!(!controller.scrollbar_arrow_captured);
         assert!(!controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_offset(), before_hidden_click);
@@ -7810,13 +7521,7 @@ mod tests {
         let layout = net_dlg_layout(1280, height, &metrics());
         assert!(!NetDlgController::scrollbar_has_pin(&layout));
 
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
+        let mut controller = offline_controller();
         controller.resize(1280, height);
         controller.set_games(games(4));
         assert_eq!(controller.list_max_scroll(), 159);
@@ -7824,10 +7529,7 @@ mod tests {
             (layout.list_scrollbar.x + 8) as f32,
             (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
         );
-        assert_eq!(
-            controller.handle_pointer_down(bottom_arrow, text_font()),
-            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
-        );
+        assert_action!(controller.handle_pointer_down(bottom_arrow, text_font()) => NetDlgAction::GuiSound(NetDlgSound::ArrowHit));
         assert!(controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_pin, 1);
         assert_eq!(controller.list_scroll_offset(), 1);
@@ -7835,22 +7537,14 @@ mod tests {
 
     #[test]
     fn gamepad_horizontal_traverses_without_firing_keyboard_back() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        assert_eq!(
-            controller.handle_gamepad_horizontal(true),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::ChatButton)]
-        );
-        assert_eq!(
-            controller.handle_gamepad_horizontal(false),
-            vec![NetDlgAction::FocusChanged(NetDlgControl::GameList)]
-        );
+        let mut controller = controller();
+        assert_action!(controller.handle_gamepad_horizontal(true) => NetDlgAction::FocusChanged(NetDlgControl::ChatButton));
+        assert_action!(controller.handle_gamepad_horizontal(false) => NetDlgAction::FocusChanged(NetDlgControl::GameList));
     }
 
     #[test]
     fn tooltip_targets_match_native_net_dialog_visibility_and_ip_parent_pair() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         let layout = net_dlg_layout(1280, 720, &metrics());
         for (rect, key) in [
             (layout.btn_game_list, "IDS_DESC_SHOWSAVAILABLENETWORKGAME"),
@@ -7862,29 +7556,14 @@ mod tests {
             (layout.buttons[2], "IDS_NET_JOINGAME_DESC"),
             (layout.buttons[3], "IDS_NET_NEWGAME_DESC"),
         ] {
-            assert_eq!(
-                controller.tooltip_at(center(rect)),
-                Some(StartupTooltip::resource(key))
-            );
+            assert_same!(controller.tooltip_at(center(rect)) => Some(StartupTooltip::resource(key)));
         }
         for rect in [layout.ip_label, layout.join_edit] {
-            assert_eq!(
-                controller.tooltip_at(center(rect)),
-                Some(StartupTooltip::resource("IDS_NET_IP_DESC"))
-            );
+            assert_same!(controller.tooltip_at(center(rect)) => Some(StartupTooltip::resource("IDS_NET_IP_DESC")));
         }
-        assert_eq!(
-            controller.tooltip_at(center(layout.game_list_caption)),
-            None
-        );
+        assert_same!(controller.tooltip_at(center(layout.game_list_caption)) => None);
 
-        assert_eq!(
-            click(&mut controller, layout.btn_chat),
-            vec![
-                NetDlgAction::ModeChanged(NetDlgMode::Chat),
-                NetDlgAction::FocusChanged(NetDlgControl::ChatInput),
-            ]
-        );
+        assert_actions!(click(&mut controller, layout.btn_chat) => [NetDlgAction::ModeChanged(NetDlgMode::Chat), NetDlgAction::FocusChanged(NetDlgControl::ChatInput), ]);
         for rect in [
             layout.btn_internet,
             layout.btn_record,
@@ -7895,10 +7574,7 @@ mod tests {
         ] {
             assert_eq!(controller.tooltip_at(center(rect)), None);
         }
-        assert_eq!(
-            controller.tooltip_at(center(layout.buttons[0])),
-            Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"))
-        );
+        assert_same!(controller.tooltip_at(center(layout.buttons[0])) => Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN")));
     }
 
     // OnShown calls UpdateMasterserver, which replaces the Internet icon and
@@ -7908,20 +7584,9 @@ mod tests {
     // refresh (C4StartupNetDlg.cpp:771-781,851-867; C4GuiButton.cpp:241-244).
     #[test]
     fn masterserver_config_sync_preserves_all_retained_dialog_state() {
-        use crate::test_support::{load_graphics_png, standard_gamma};
+        use crate::test_support::standard_gamma;
 
-        let assets = NetDlgAssets {
-            background: load_graphics_png("StartupNetworkBG.png"),
-            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
-            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
-            gui_caption: load_graphics_png("GUICaption.png"),
-            gui_button: load_graphics_png("GUIButton.png"),
-            gui_button_down: load_graphics_png("GUIButtonDown.png"),
-            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            gui_scroll: load_graphics_png("GUIScroll.png"),
-            gui_icons: load_graphics_png("GUIIcons.png"),
-            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
-        };
+        let assets = net_assets();
         let fonts = endeavour_font_set();
         let mut controller = NetDlgController::new(
             NetDlgConfig {
@@ -7939,30 +7604,14 @@ mod tests {
             NetDlgControl::Internet,
             NetDlgControl::Record,
         ] {
-            assert_eq!(
-                controller.handle_key_down(KeyCode::Tab),
-                vec![NetDlgAction::FocusChanged(expected)]
-            );
+            assert_action!(controller.handle_key_down(KeyCode::Tab) => NetDlgAction::FocusChanged(expected));
         }
         assert!(controller.handle_key_down(KeyCode::Space).is_empty());
-        assert!(controller
-            .handle_pointer_down(center(layout.btn_internet), text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(center(layout.btn_internet), text_font()));
         assert_eq!(controller.pointer_pressed, Some(NetDlgControl::Internet));
-        assert_eq!(
-            controller.key_pressed,
-            Some((NetDlgControl::Record, KeyCode::Space))
-        );
+        assert_same!(controller.key_pressed => Some((NetDlgControl::Record, KeyCode::Space)));
 
-        let mut before = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        NetDlgScreen::render_controller(
-            &mut before,
-            &assets,
-            &fonts,
-            Some(standard_gamma()),
-            &controller,
-            0,
-        );
+        let before = rendered_controller(&controller, &assets, &fonts, Some(standard_gamma()), 0);
         let retained = (
             controller.metrics,
             controller.width,
@@ -7978,13 +7627,7 @@ mod tests {
 
         controller.sync_masterserver_signup_from_config(false);
 
-        assert_eq!(
-            controller.config(),
-            NetDlgConfig {
-                masterserver_signup: false,
-                record: true,
-            }
-        );
+        assert_same!(controller.config() => NetDlgConfig {masterserver_signup: false, record: true, });
         assert_eq!(
             (
                 controller.metrics,
@@ -8001,15 +7644,7 @@ mod tests {
             retained
         );
 
-        let mut after = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        NetDlgScreen::render_controller(
-            &mut after,
-            &assets,
-            &fonts,
-            Some(standard_gamma()),
-            &controller,
-            0,
-        );
+        let after = rendered_controller(&controller, &assets, &fonts, Some(standard_gamma()), 0);
         let changed_pixels = before
             .pixels()
             .chunks_exact(4)
@@ -8044,15 +7679,7 @@ mod tests {
         assert!(query_text_changed, "query labels must disappear");
 
         controller.sync_masterserver_signup_from_config(true);
-        let mut restored = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        NetDlgScreen::render_controller(
-            &mut restored,
-            &assets,
-            &fonts,
-            Some(standard_gamma()),
-            &controller,
-            0,
-        );
+        let restored = rendered_controller(&controller, &assets, &fonts, Some(standard_gamma()), 0);
         assert!(
             (layout.list_entry.y..layout.list_entry.y + layout.list_entry.h).all(|y| {
                 (layout.list_entry.x..layout.list_entry.x + layout.list_entry.w).all(|x| {
@@ -8068,34 +7695,13 @@ mod tests {
     // C4GuiButton.cpp:81-110,205-232; C4GuiEdit.cpp:556-634).
     #[test]
     fn live_renderer_reflects_controller_state() {
-        use crate::test_support::{load_graphics_png, standard_gamma};
-        let assets = NetDlgAssets {
-            background: load_graphics_png("StartupNetworkBG.png"),
-            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
-            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
-            gui_caption: load_graphics_png("GUICaption.png"),
-            gui_button: load_graphics_png("GUIButton.png"),
-            gui_button_down: load_graphics_png("GUIButtonDown.png"),
-            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            gui_scroll: load_graphics_png("GUIScroll.png"),
-            gui_icons: load_graphics_png("GUIIcons.png"),
-            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
-        };
+        use crate::test_support::standard_gamma;
+        let assets = net_assets();
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
 
         let render = |controller: &NetDlgController| {
-            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-            NetDlgScreen::render_controller(
-                &mut surface,
-                &assets,
-                &fonts,
-                Some(standard_gamma()),
-                controller,
-                0,
-            );
-            surface
+            rendered_controller(controller, &assets, &fonts, Some(standard_gamma()), 0)
         };
         let first_shown = render(&controller);
 
@@ -8121,23 +7727,9 @@ mod tests {
 
     #[test]
     fn join_edit_renderer_draws_and_clips_selection_and_caret() {
-        use crate::test_support::load_graphics_png;
-
-        let assets = NetDlgAssets {
-            background: load_graphics_png("StartupNetworkBG.png"),
-            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
-            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
-            gui_caption: load_graphics_png("GUICaption.png"),
-            gui_button: load_graphics_png("GUIButton.png"),
-            gui_button_down: load_graphics_png("GUIButtonDown.png"),
-            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            gui_scroll: load_graphics_png("GUIScroll.png"),
-            gui_icons: load_graphics_png("GUIIcons.png"),
-            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
-        };
+        let assets = net_assets();
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_join_address("alpha beta");
         controller.focus = NetDlgControl::JoinAddress;
         controller.join_edit.caret = 5;
@@ -8191,39 +7783,14 @@ mod tests {
 
     #[test]
     fn scrolled_rows_and_scrollbar_are_clipped_inside_the_list_client() {
-        use crate::test_support::{load_graphics_png, standard_gamma};
-        let assets = NetDlgAssets {
-            background: load_graphics_png("StartupNetworkBG.png"),
-            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
-            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
-            gui_caption: load_graphics_png("GUICaption.png"),
-            gui_button: load_graphics_png("GUIButton.png"),
-            gui_button_down: load_graphics_png("GUIButtonDown.png"),
-            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            gui_scroll: load_graphics_png("GUIScroll.png"),
-            gui_icons: load_graphics_png("GUIIcons.png"),
-            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
-        };
+        use crate::test_support::standard_gamma;
+        let assets = net_assets();
         let fonts = endeavour_font_set();
-        let config = NetDlgConfig {
-            masterserver_signup: false,
-            ..NetDlgConfig::default()
-        };
-        let mut controller = NetDlgController::new(config, metrics());
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(20));
         let layout = net_dlg_layout(1280, 720, &metrics());
         let render = |controller: &NetDlgController| {
-            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-            NetDlgScreen::render_controller(
-                &mut surface,
-                &assets,
-                &fonts,
-                Some(standard_gamma()),
-                controller,
-                0,
-            );
-            surface
+            rendered_controller(controller, &assets, &fonts, Some(standard_gamma()), 0)
         };
 
         let top = render(&controller);
@@ -8247,10 +7814,7 @@ mod tests {
             if contains(layout.list_viewport, point) {
                 viewport_changed |= top_pixel != bottom_pixel;
             } else if !contains(layout.list_client, point) {
-                assert_eq!(
-                    top_pixel, bottom_pixel,
-                    "scrolled row bled outside list client at pixel {index}"
-                );
+                assert_same!(top_pixel => bottom_pixel, "scrolled row bled outside list client at pixel {index}");
             }
         }
         assert!(viewport_changed, "later rows must become visible");
@@ -8258,28 +7822,10 @@ mod tests {
 
     #[test]
     fn ordered_native_game_row_text_retains_the_scrollwindow_clipper() {
-        use crate::test_support::{load_graphics_png, standard_gamma};
-        let assets = NetDlgAssets {
-            background: load_graphics_png("StartupNetworkBG.png"),
-            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
-            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
-            gui_caption: load_graphics_png("GUICaption.png"),
-            gui_button: load_graphics_png("GUIButton.png"),
-            gui_button_down: load_graphics_png("GUIButtonDown.png"),
-            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            gui_scroll: load_graphics_png("GUIScroll.png"),
-            gui_icons: load_graphics_png("GUIIcons.png"),
-            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
-        };
+        use crate::test_support::standard_gamma;
+        let assets = net_assets();
         let fonts = endeavour_font_set();
-        let mut controller = NetDlgController::new(
-            NetDlgConfig {
-                masterserver_signup: false,
-                ..NetDlgConfig::default()
-            },
-            metrics(),
-        );
-        controller.resize(1280, 720);
+        let mut controller = offline_controller();
         controller.set_games(games(20));
         let layout = net_dlg_layout(1280, 720, &metrics());
         controller.handle_wheel(
@@ -8290,16 +7836,8 @@ mod tests {
             -10_000,
         );
 
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(
-            &mut surface,
-            &assets,
-            &fonts,
-            Some(standard_gamma()),
-            &controller,
-            0,
-        );
+        let mut surface =
+            captured_controller(&controller, &assets, &fonts, Some(standard_gamma()), 0);
         let expected = clonk_graphics::Rect::new(
             layout.list_viewport.x,
             layout.list_viewport.y,
@@ -8355,37 +7893,131 @@ mod tests {
         }
     }
 
+    fn chat_message(
+        kind: NetDlgChatMessageKind,
+        source: impl Into<String>,
+        target: impl Into<String>,
+        text: impl Into<String>,
+        is_channel: bool,
+    ) -> NetDlgChatMessage {
+        NetDlgChatMessage {
+            kind,
+            source: source.into(),
+            target: target.into(),
+            text: text.into(),
+            is_channel,
+        }
+    }
+
+    fn chat_user(prefix: &str, name: &str) -> NetDlgChatUser {
+        NetDlgChatUser {
+            prefix: prefix.into(),
+            name: name.into(),
+        }
+    }
+
+    fn message_command(text: impl Into<String>) -> NetDlgChatCommand {
+        NetDlgChatCommand::Message {
+            target: "#clonken".into(),
+            text: text.into(),
+        }
+    }
+
+    fn action_command(text: impl Into<String>) -> NetDlgChatCommand {
+        NetDlgChatCommand::Action {
+            target: "#clonken".into(),
+            text: text.into(),
+        }
+    }
+
+    fn chat_actions<const N: usize>(
+        submissions: [(&str, NetDlgChatCommand); N],
+    ) -> Vec<NetDlgAction> {
+        submissions
+            .into_iter()
+            .flat_map(|(input, command)| {
+                [
+                    NetDlgAction::ChatHistoryStored(input.into()),
+                    NetDlgAction::ChatCommand(command),
+                ]
+            })
+            .collect()
+    }
+
+    fn channel_message(text: impl Into<String>) -> NetDlgChatMessage {
+        chat_message(
+            NetDlgChatMessageKind::Message,
+            "Keeper!ident@example",
+            "#clonken",
+            text,
+            true,
+        )
+    }
+
+    fn chat_controller(messages: Vec<NetDlgChatMessage>, unread_index: usize) -> NetDlgController {
+        let mut controller = controller();
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            messages,
+            unread_index,
+        ));
+        controller
+    }
+
+    fn focused_chat_controller(
+        messages: Vec<NetDlgChatMessage>,
+        unread_index: usize,
+    ) -> NetDlgController {
+        let mut controller = chat_controller(messages, unread_index);
+        controller.force_chat_mode_and_focus();
+        controller
+    }
+
+    fn chat_sheet_index(
+        controller: &NetDlgController,
+        kind: NetDlgChatSheetKind,
+        expectation: &str,
+    ) -> usize {
+        controller
+            .chat_sheets()
+            .iter()
+            .position(|sheet| sheet.kind == kind)
+            .expect(expectation)
+    }
+
+    fn chat_sheet<'a>(
+        controller: &'a NetDlgController,
+        kind: NetDlgChatSheetKind,
+        expectation: &str,
+    ) -> &'a NetDlgChatSheet {
+        controller
+            .chat_sheets()
+            .iter()
+            .find(|sheet| sheet.kind == kind)
+            .expect(expectation)
+    }
+
     #[test]
     fn chat_login_enter_traversal_validates_and_submits_without_game_controls() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_chat_login(chat_login());
         let layout = net_dlg_layout(1280, 720, &metrics());
-        assert_eq!(
-            click(&mut controller, layout.btn_chat),
-            vec![
-                NetDlgAction::ModeChanged(NetDlgMode::Chat),
-                NetDlgAction::FocusChanged(NetDlgControl::ChatInput),
-            ]
-        );
+        assert_actions!(click(&mut controller, layout.btn_chat) => [NetDlgAction::ModeChanged(NetDlgMode::Chat), NetDlgAction::FocusChanged(NetDlgControl::ChatInput), ]);
         assert_eq!(controller.chat_page(), NetDlgChatPage::Login);
-        assert!(click(&mut controller, layout.btn_internet).is_empty());
-        assert!(click(&mut controller, layout.buttons[1]).is_empty());
-        assert!(click(&mut controller, layout.buttons[2]).is_empty());
+        assert_no_actions!(click(&mut controller, layout.btn_internet));
+        assert_no_actions!(click(&mut controller, layout.buttons[1]));
+        assert_no_actions!(click(&mut controller, layout.buttons[2]));
 
         for expected in [
             NetDlgChatLoginField::Password,
             NetDlgChatLoginField::RealName,
             NetDlgChatLoginField::Channel,
         ] {
-            assert!(controller.handle_key_down(KeyCode::Enter).is_empty());
+            assert_no_actions!(controller.handle_key_down(KeyCode::Enter));
             assert_eq!(controller.chat_login_field(), expected);
         }
-        assert!(controller.handle_key_down(KeyCode::Enter).is_empty());
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![NetDlgAction::ChatConnect(chat_login())]
-        );
+        assert_no_actions!(controller.handle_key_down(KeyCode::Enter));
+        assert_action!(controller.handle_key_down(KeyCode::Enter) => NetDlgAction::ChatConnect(chat_login()));
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connected,
             Vec::new(),
@@ -8393,27 +8025,13 @@ mod tests {
         ));
         controller.handle_text_input("after connect", text_font());
         assert_eq!(controller.chat_input(), "after connect");
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![
-                NetDlgAction::ChatHistoryStored("after connect".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
-                    target: "#clonken".into(),
-                    text: "after connect".into(),
-                }),
-            ]
-        );
+        assert_chat!(controller.handle_key_down(KeyCode::Enter) => "after connect" => message_command("after connect"));
 
         let mut invalid = chat_login();
         invalid.nick = "NickServ".into();
         controller.show_chat_login();
         controller.set_chat_login(invalid);
-        assert_eq!(
-            controller.submit_chat_login(),
-            vec![NetDlgAction::ChatValidationFailed(
-                NetDlgChatValidationError::InvalidNick
-            )]
-        );
+        assert_action!(controller.submit_chat_login() => NetDlgAction::ChatValidationFailed(NetDlgChatValidationError::InvalidNick));
         assert_eq!(controller.chat_login_field(), NetDlgChatLoginField::Nick);
     }
 
@@ -8426,48 +8044,22 @@ mod tests {
     // src/C4LogBuf.cpp:96-148; src/C4GuiContainers.cpp:477-623).
     #[test]
     fn irc_chat_scroll_windows_match_cpp_pointer_overflow_and_limits() {
-        let message = |text: &str| NetDlgChatMessage {
-            kind: NetDlgChatMessageKind::Message,
-            source: "Keeper!ident@example".into(),
-            target: "#clonken".into(),
-            text: text.into(),
-            is_channel: true,
-        };
-
         // Far more than the native line cap, each line short enough that the
         // character budget is not what evicts.
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
         let many = (0..250)
-            .map(|index| message(&format!("m{index}")))
+            .map(|index| channel_message(format!("m{index}")))
             .collect();
-        controller.sync_chat_snapshot(chat_snapshot(NetDlgChatConnectionState::Connected, many, 0));
-        let channel = controller
-            .chat_sheets()
-            .iter()
-            .find(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel tab");
-        assert_eq!(
-            channel.lines.len(),
-            CHAT_TRANSCRIPT_MAX_LINES,
-            "the transcript is bounded by iMaxLines"
-        );
-        assert_eq!(
-            channel.lines.last().expect("newest line"),
-            &"<Keeper> m249",
-            "eviction is from the front"
-        );
+        let controller = chat_controller(many, 0);
+        let channel = chat_sheet(&controller, NetDlgChatSheetKind::Channel, "channel tab");
+        assert_same!(channel.lines.len() => CHAT_TRANSCRIPT_MAX_LINES, "the transcript is bounded by iMaxLines");
+        assert_same!(channel.lines.last().expect("newest line") => &"<Keeper> m249", "eviction is from the front");
 
         // Long lines hit the character budget before the line cap.
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
         let long = (0..40)
-            .map(|index| message(&format!("{index:03}{}", "x".repeat(200))))
+            .map(|index| channel_message(format!("{index:03}{}", "x".repeat(200))))
             .collect();
-        controller.sync_chat_snapshot(chat_snapshot(NetDlgChatConnectionState::Connected, long, 0));
-        let channel = controller
-            .chat_sheets()
-            .iter()
-            .find(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel tab");
+        let controller = chat_controller(long, 0);
+        let channel = chat_sheet(&controller, NetDlgChatSheetKind::Channel, "channel tab");
         assert!(
             channel.lines.len() < CHAT_TRANSCRIPT_MAX_LINES,
             "the character budget evicts before the line cap"
@@ -8493,21 +8085,12 @@ mod tests {
 
         // The transcript bar's arrows step a line, its pin drags, and its bare
         // track pages, exactly like C4GUI::ScrollBar.
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
         let overflow = (0..90)
-            .map(|index| message(&format!("line {index}")))
+            .map(|index| channel_message(format!("line {index}")))
             .collect();
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            overflow,
-            0,
-        ));
-        let channel_index = controller
-            .chat_sheets()
-            .iter()
-            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel tab");
+        let mut controller = chat_controller(overflow, 0);
+        let channel_index =
+            chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel tab");
         controller.select_chat_sheet(channel_index);
         controller.force_chat_mode_and_focus();
         let layout = controller.chat_layout();
@@ -8532,10 +8115,7 @@ mod tests {
         // The down arrow steps back and re-pins.
         controller.handle_pointer_down(at(bar.y + bar.h - 2), text_font());
         controller.handle_pointer_up(at(bar.y + bar.h - 2), text_font());
-        assert_eq!(
-            controller.chat_sheets()[channel_index].transcript_scroll,
-            max_scroll
-        );
+        assert_same!(controller.chat_sheets()[channel_index].transcript_scroll => max_scroll);
         assert!(controller.chat_sheets()[channel_index].transcript_follow_bottom);
 
         // Pressing the bare track pages to that position, and dragging the pin
@@ -8553,8 +8133,7 @@ mod tests {
         );
 
         // The nick list retains a scroll offset instead of dropping rows.
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = self::controller();
         let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
         snapshot.channels[0].users = (0..500)
             .map(|index| NetDlgChatUser {
@@ -8563,11 +8142,8 @@ mod tests {
             })
             .collect();
         controller.sync_chat_snapshot(snapshot);
-        let channel_index = controller
-            .chat_sheets()
-            .iter()
-            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel tab");
+        let channel_index =
+            chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel tab");
         controller.select_chat_sheet(channel_index);
         controller.force_chat_mode_and_focus();
         let line_height = metrics().text_line_height.max(1);
@@ -8587,22 +8163,13 @@ mod tests {
         for _ in 0..200 {
             controller.handle_wheel(inside, -60);
         }
-        assert_eq!(
-            controller.chat_sheets()[channel_index].user_scroll,
-            max_scroll,
-            "the offset is bounded by the overflow"
-        );
+        assert_same!(controller.chat_sheets()[channel_index].user_scroll => max_scroll, "the offset is bounded by the overflow");
     }
 
     #[test]
     fn irc_login_validation_counts_legacy_bytes_and_rejects_unrepresentable_text() {
         let password_at_limit = format!("{}é", "a".repeat(30));
-        assert_eq!(
-            clonk_resources::encode_legacy_script_text(&password_at_limit)
-                .expect("Windows-1252 password")
-                .len(),
-            31
-        );
+        assert_same!(clonk_resources::encode_legacy_script_text(&password_at_limit) .expect("Windows-1252 password") .len() => 31);
         assert!(NetDlgController::valid_irc_password(&password_at_limit));
         assert!(!NetDlgController::valid_irc_password(&format!(
             "{}é",
@@ -8612,12 +8179,7 @@ mod tests {
         assert!(!NetDlgController::valid_irc_password("has space"));
 
         let channel_at_limit = format!("#{}é", "a".repeat(30));
-        assert_eq!(
-            clonk_resources::encode_legacy_script_text(&channel_at_limit)
-                .expect("Windows-1252 channel")
-                .len(),
-            32
-        );
+        assert_same!(clonk_resources::encode_legacy_script_text(&channel_at_limit) .expect("Windows-1252 channel") .len() => 32);
         assert!(NetDlgController::valid_irc_channel(&channel_at_limit));
         assert!(!NetDlgController::valid_irc_channel(&format!(
             "#{}é",
@@ -8630,45 +8192,36 @@ mod tests {
 
     #[test]
     fn chat_snapshot_builds_tabs_routes_messages_and_appends_only_unread_suffix() {
-        let first = NetDlgChatMessage {
-            kind: NetDlgChatMessageKind::Message,
-            source: "Keeper!ident@example".into(),
-            target: "#clonken".into(),
-            text: "Welcome".into(),
-            is_channel: true,
-        };
-        let second = NetDlgChatMessage {
-            kind: NetDlgChatMessageKind::Action,
-            source: "Keeper!ident@example".into(),
-            target: "#clonken".into(),
-            text: "waves".into(),
-            is_channel: true,
-        };
+        let first = channel_message("Welcome");
+        let second = chat_message(
+            NetDlgChatMessageKind::Action,
+            "Keeper!ident@example",
+            "#clonken",
+            "waves",
+            true,
+        );
         assert_eq!(
             NetDlgController::format_chat_message(
-                &NetDlgChatMessage {
-                    kind: NetDlgChatMessageKind::Message,
-                    source: "Clonker!ident@example".into(),
-                    target: "#clonken".into(),
-                    text: "local echo".into(),
-                    is_channel: true,
-                },
+                &chat_message(
+                    NetDlgChatMessageKind::Message,
+                    "Clonker!ident@example",
+                    "#clonken",
+                    "local echo",
+                    true,
+                ),
                 "Clonker",
                 "Clonker",
             ),
             "<Clonker> local echo"
         );
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connecting,
             Vec::new(),
             0,
         ));
         assert_eq!(controller.chat_page(), NetDlgChatPage::Chats);
-        assert_eq!(
-            controller.chat_sheets()[0].lines,
-            vec!["Connecting to irc.example.test at "]
-        );
+        assert_same!(controller.chat_sheets()[0].lines => vec!["Connecting to irc.example.test at "]);
 
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connected,
@@ -8686,94 +8239,33 @@ mod tests {
             vec![first, second],
             1,
         ));
-        assert_eq!(
-            controller.active_chat_sheet().unwrap().lines,
-            vec!["<Keeper> Welcome", "* Keeper waves"]
-        );
-        assert_eq!(
-            controller.chat_sheets()[0].lines,
-            vec!["Connecting to irc.example.test at "]
-        );
+        assert_same!(controller.active_chat_sheet().unwrap().lines => vec!["<Keeper> Welcome", "* Keeper waves"]);
+        assert_same!(controller.chat_sheets()[0].lines => vec!["Connecting to irc.example.test at "]);
     }
 
     #[test]
     fn connected_chat_enter_routes_messages_commands_and_history() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            Vec::new(),
-            0,
-        ));
+        let mut controller = chat_controller(Vec::new(), 0);
         controller.mode = NetDlgMode::Chat;
         controller.focus = NetDlgControl::ChatInput;
 
-        assert!(controller
-            .handle_text_input("hello channel", text_font())
-            .is_empty());
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![
-                NetDlgAction::ChatHistoryStored("hello channel".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
-                    target: "#clonken".into(),
-                    text: "hello channel".into(),
-                }),
-            ]
-        );
+        assert_no_actions!(controller.handle_text_input("hello channel", text_font()));
+        assert_chat!(controller.handle_key_down(KeyCode::Enter) => "hello channel" => message_command("hello channel"));
         controller.handle_text_input("/me waves", text_font());
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![
-                NetDlgAction::ChatHistoryStored("/me waves".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Action {
-                    target: "#clonken".into(),
-                    text: "waves".into(),
-                }),
-            ]
-        );
+        assert_chat!(controller.handle_key_down(KeyCode::Enter) => "/me waves" => action_command("waves"));
         controller.handle_text_input("/part", text_font());
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![
-                NetDlgAction::ChatHistoryStored("/part".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Part {
-                    channel: "#clonken".into(),
-                }),
-            ]
-        );
-        assert!(controller.handle_key_down(KeyCode::Up).is_empty());
+        assert_chat!(controller.handle_key_down(KeyCode::Enter) => "/part" => NetDlgChatCommand::Part { channel: "#clonken".into() });
+        assert_no_actions!(controller.handle_key_down(KeyCode::Up));
         assert_eq!(controller.chat_input(), "/part");
-        assert!(controller.handle_key_down(KeyCode::Down).is_empty());
+        assert_no_actions!(controller.handle_key_down(KeyCode::Down));
         assert_eq!(controller.chat_input(), "");
         controller.handle_text_input("Grüße", text_font());
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![
-                NetDlgAction::ChatHistoryStored("Grüße".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
-                    target: "#clonken".into(),
-                    text: "Grüße".into(),
-                }),
-            ]
-        );
+        assert_chat!(controller.handle_key_down(KeyCode::Enter) => "Grüße" => message_command("Grüße"));
     }
 
     #[test]
     fn chat_edit_keys_clipboard_and_rendered_tabs_are_functional() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            vec![NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Keeper!ident@example".into(),
-                target: "#clonken".into(),
-                text: "Welcome".into(),
-                is_channel: true,
-            }],
-            0,
-        ));
+        let mut controller = chat_controller(vec![channel_message("Welcome")], 0);
         controller.mode = NetDlgMode::Chat;
         controller.focus = NetDlgControl::ChatInput;
         controller.handle_text_input("copy me", text_font());
@@ -8786,15 +8278,7 @@ mod tests {
                 )
                 .captured
         );
-        assert_eq!(
-            controller
-                .handle_clipboard_shortcut(NetDlgEditClipboardShortcut::Copy, None, text_font())
-                .actions,
-            vec![NetDlgAction::ClipboardTransfer {
-                text: "copy me".into(),
-                cut: false,
-            }]
-        );
+        assert_action!(controller .handle_clipboard_shortcut(NetDlgEditClipboardShortcut::Copy, None, text_font()) .actions => NetDlgAction::ClipboardTransfer {text: "copy me".into(), cut: false, });
         assert!(
             controller
                 .handle_edit_key_down(
@@ -8808,14 +8292,7 @@ mod tests {
 
         let fonts = endeavour_font_set();
         let assets = net_assets();
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
-        let texts = surface
-            .take_clonk_text_capture()
-            .into_iter()
-            .map(|command| command.text)
-            .collect::<Vec<_>>();
+        let texts = rendered_texts(&controller, &assets, &fonts, None, 0);
         assert!(texts.iter().any(|text| text == "#clonken"));
         assert!(texts.iter().any(|text| text == "<Keeper> Welcome"));
         assert!(texts.iter().any(|text| text == "Keeper"));
@@ -8824,8 +8301,7 @@ mod tests {
 
     #[test]
     fn chat_login_uses_cpp_centered_geometry_localized_strings_and_typed_validation() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.force_chat_mode_and_focus();
         controller.set_chat_strings(NetDlgChatStrings {
             chat: "Gespräch".into(),
@@ -8848,37 +8324,19 @@ mod tests {
         assert_eq!(layout.login_labels[0].x, login.x + 2);
         assert_eq!(layout.login_labels[0].y, login.y + 2);
         assert_eq!(layout.login_labels[0].w, login.w - 4);
-        assert_eq!(
-            layout.login_edits[0].h,
-            (metrics().text_line_height + 3).max(23)
-        );
+        assert_same!(layout.login_edits[0].h => (metrics().text_line_height + 3).max(23));
         assert_eq!(layout.connect.w, 140);
-        assert_eq!(
-            layout.connect.x + layout.connect.w / 2,
-            login.x + login.w / 2
-        );
+        assert_same!(layout.connect.x + layout.connect.w / 2 => login.x + login.w / 2);
 
         let mut login_values = chat_login();
         login_values.nick = "NickServ".into();
         controller.set_chat_login(login_values);
-        assert_eq!(
-            controller.submit_chat_login(),
-            vec![NetDlgAction::ChatValidationFailed(
-                NetDlgChatValidationError::InvalidNick
-            )]
-        );
+        assert_action!(controller.submit_chat_login() => NetDlgAction::ChatValidationFailed(NetDlgChatValidationError::InvalidNick));
         assert_eq!(controller.chat_login_field(), NetDlgChatLoginField::Nick);
 
         let fonts = endeavour_font_set();
         let assets = net_assets();
-        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        surface.begin_clonk_text_capture();
-        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
-        let texts = surface
-            .take_clonk_text_capture()
-            .into_iter()
-            .map(|command| command.text)
-            .collect::<Vec<_>>();
+        let texts = rendered_texts(&controller, &assets, &fonts, None, 0);
         assert!(texts
             .iter()
             .any(|text| text == "Gespräch - Nicht verbunden"));
@@ -8890,72 +8348,46 @@ mod tests {
     #[test]
     fn chat_snapshot_sanitizes_colors_unread_routes_and_sorts_like_cpp() {
         let users = vec![
-            NetDlgChatUser {
-                prefix: String::new(),
-                name: "zulu".into(),
-            },
-            NetDlgChatUser {
-                prefix: "@".into(),
-                name: "beta".into(),
-            },
-            NetDlgChatUser {
-                prefix: "+".into(),
-                name: "alpha".into(),
-            },
-            NetDlgChatUser {
-                prefix: "!".into(),
-                name: "Owner".into(),
-            },
-            NetDlgChatUser {
-                prefix: "@".into(),
-                name: "Alpha".into(),
-            },
+            chat_user("", "zulu"),
+            chat_user("@", "beta"),
+            chat_user("+", "alpha"),
+            chat_user("!", "Owner"),
+            chat_user("@", "Alpha"),
         ];
         let messages = vec![
-            NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Ghost!gone@example".into(),
-                target: "#already-parted".into(),
-                text: "must be dropped".into(),
-                is_channel: true,
-            },
-            NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Notice,
-                source: "Announcer!ident@example".into(),
-                target: "Clonker".into(),
-                text: "red\u{1}notice".into(),
-                is_channel: false,
-            },
-            NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Alice!ident@example".into(),
-                target: "Clonker".into(),
-                text: "hi\u{1}there".into(),
-                is_channel: false,
-            },
-            NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Clonker!own@example".into(),
-                target: "Bob".into(),
-                text: "outgoing".into(),
-                is_channel: false,
-            },
+            chat_message(
+                NetDlgChatMessageKind::Message,
+                "Ghost!gone@example",
+                "#already-parted",
+                "must be dropped",
+                true,
+            ),
+            chat_message(
+                NetDlgChatMessageKind::Notice,
+                "Announcer!ident@example",
+                "Clonker",
+                "red\u{1}notice",
+                false,
+            ),
+            chat_message(
+                NetDlgChatMessageKind::Message,
+                "Alice!ident@example",
+                "Clonker",
+                "hi\u{1}there",
+                false,
+            ),
+            chat_message(
+                NetDlgChatMessageKind::Message,
+                "Clonker!own@example",
+                "Bob",
+                "outgoing",
+                false,
+            ),
         ];
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        controller.sync_chat_snapshot(NetDlgChatSnapshot {
-            connection_state: NetDlgChatConnectionState::Connected,
-            server: "irc.example.test".into(),
-            nick: "Clonker".into(),
-            channels: vec![NetDlgChatChannel {
-                name: "#clonken".into(),
-                topic: "Clonk Rust".into(),
-                users,
-            }],
-            messages,
-            unread_index: 0,
-            last_error: None,
-        });
+        let mut controller = controller();
+        let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, messages, 0);
+        snapshot.channels[0].users = users;
+        controller.sync_chat_snapshot(snapshot);
 
         assert!(!controller.chat_sheets()[0]
             .lines
@@ -8978,10 +8410,7 @@ mod tests {
         );
         assert_eq!(channel.lines[0].kind, NetDlgChatLineKind::Notice);
         assert_eq!(channel.lines[0].text, "-Announcer- red notice");
-        assert_eq!(
-            NetDlgScreen::chat_line_color(channel.lines[0].kind),
-            CLR_NOTIFY
-        );
+        assert_same!(NetDlgScreen::chat_line_color(channel.lines[0].kind) => CLR_NOTIFY);
         let alice = controller
             .chat_sheets()
             .iter()
@@ -9020,119 +8449,55 @@ mod tests {
 
     #[test]
     fn chat_tab_close_cycle_and_channel_part_match_native_sheet_types() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            Vec::new(),
-            0,
-        ));
-        controller.force_chat_mode_and_focus();
-        assert_eq!(
-            controller.close_chat_sheet(0),
-            vec![NetDlgAction::ChatDisconnectConfirmationRequested]
-        );
+        let mut controller = focused_chat_controller(Vec::new(), 0);
+        assert_action!(controller.close_chat_sheet(0) => NetDlgAction::ChatDisconnectConfirmationRequested);
         assert_eq!(controller.chat_page(), NetDlgChatPage::Chats);
-        assert_eq!(
-            controller.close_active_chat_sheet(),
-            vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Part {
-                channel: "#clonken".into(),
-            })]
-        );
+        assert_action!(controller.close_active_chat_sheet() => NetDlgAction::ChatCommand(NetDlgChatCommand::Part {channel: "#clonken".into(), }));
 
         controller.handle_text_input("/query Keeper", text_font());
         let query_actions = controller.submit_chat_input();
-        assert_eq!(
-            query_actions[0],
-            NetDlgAction::ChatHistoryStored("/query Keeper".into())
-        );
+        assert_same!(query_actions[0] => NetDlgAction::ChatHistoryStored("/query Keeper".into()));
         let query_index = controller.chat_active_sheet;
-        assert_eq!(
-            controller.chat_sheets()[query_index].kind,
-            NetDlgChatSheetKind::Query
-        );
-        assert!(controller.close_active_chat_sheet().is_empty());
+        assert_same!(controller.chat_sheets()[query_index].kind => NetDlgChatSheetKind::Query);
+        assert_no_actions!(controller.close_active_chat_sheet());
         assert!(!controller
             .chat_sheets()
             .iter()
             .any(|sheet| sheet.title == "Keeper"));
 
         assert_eq!(controller.chat_active_sheet, 1);
-        assert_eq!(
-            controller.cycle_chat_sheet(false),
-            vec![NetDlgAction::ChatSelectSheet {
-                kind: NetDlgChatSheetKind::Server,
-                ident: "irc.example.test".into(),
-            }]
-        );
+        assert_action!(controller.cycle_chat_sheet(false) => NetDlgAction::ChatSelectSheet {kind: NetDlgChatSheetKind::Server, ident: "irc.example.test".into(), });
         controller.chat_sheets[1].unread = true;
         let channel_tab = controller.chat_layout().tabs[1];
         let channel_point = GuiPoint::new(
             (channel_tab.rect.x + 3) as f32,
             (channel_tab.rect.y + channel_tab.rect.h / 2) as f32,
         );
-        assert_eq!(
-            controller.handle_pointer_down(channel_point, text_font()),
-            vec![NetDlgAction::ChatSelectSheet {
-                kind: NetDlgChatSheetKind::Channel,
-                ident: "#clonken".into(),
-            }]
-        );
+        assert_action!(controller.handle_pointer_down(channel_point, text_font()) => NetDlgAction::ChatSelectSheet {kind: NetDlgChatSheetKind::Channel, ident: "#clonken".into(), });
         assert!(!controller.chat_sheets()[1].unread);
-        assert!(controller
-            .handle_pointer_up(channel_point, text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_up(channel_point, text_font()));
 
         controller.select_chat_sheet(0);
         let close = controller.chat_layout().tabs[0].close;
         let close_point = center(close);
-        assert_eq!(
-            controller.handle_pointer_down(close_point, text_font()),
-            vec![NetDlgAction::ChatDisconnectConfirmationRequested]
-        );
-        assert!(controller
-            .handle_pointer_up(close_point, text_font())
-            .is_empty());
+        assert_action!(controller.handle_pointer_down(close_point, text_font()) => NetDlgAction::ChatDisconnectConfirmationRequested);
+        assert_no_actions!(controller.handle_pointer_up(close_point, text_font()));
 
         controller.show_chat_login();
-        assert_eq!(
-            controller.close_chat_sheet(0),
-            vec![NetDlgAction::ChatDisconnect]
-        );
+        assert_action!(controller.close_chat_sheet(0) => NetDlgAction::ChatDisconnect);
         assert_eq!(controller.chat_page(), NetDlgChatPage::Login);
     }
 
     #[test]
     fn chat_multiline_paste_submits_lines_retains_tail_and_honors_abort() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = focused_chat_controller(Vec::new(), 0);
         controller.set_text_font(text_font());
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            Vec::new(),
-            0,
-        ));
-        controller.force_chat_mode_and_focus();
         let actions = controller.apply_context_command(
             NetDlgEditContextCommand::Paste,
             Some("one\r\n\r\ntwo\nfinal|tail"),
             text_font(),
         );
-        assert_eq!(
-            actions,
-            vec![
-                NetDlgAction::ChatHistoryStored("one".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
-                    target: "#clonken".into(),
-                    text: "one".into(),
-                }),
-                NetDlgAction::ChatHistoryStored("two".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
-                    target: "#clonken".into(),
-                    text: "two".into(),
-                }),
-            ]
-        );
+        assert_same!(actions => chat_actions([("one", message_command("one")), ("two", message_command("two"))]));
         assert_eq!(controller.chat_input(), "final¦tail");
 
         controller.chat_edit.set_text("");
@@ -9141,15 +8506,7 @@ mod tests {
             Some("/quit bye\nignored\n"),
             text_font(),
         );
-        assert_eq!(
-            actions,
-            vec![
-                NetDlgAction::ChatHistoryStored("/quit bye".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Quit {
-                    reason: "bye".into(),
-                }),
-            ]
-        );
+        assert_same!(actions => chat_actions([("/quit bye", NetDlgChatCommand::Quit { reason: "bye".into() })]));
         assert_eq!(controller.chat_input(), "");
 
         let actions = controller.apply_context_command(
@@ -9157,15 +8514,7 @@ mod tests {
             Some("/part\nignored\n"),
             text_font(),
         );
-        assert_eq!(
-            actions,
-            vec![
-                NetDlgAction::ChatHistoryStored("/part".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Part {
-                    channel: "#clonken".into(),
-                }),
-            ]
-        );
+        assert_same!(actions => chat_actions([("/part", NetDlgChatCommand::Part { channel: "#clonken".into() })]));
     }
 
     /// Chat `TextWindow`s are built with `fMarkup = false` (C4Gui.h:1309), so
@@ -9176,56 +8525,35 @@ mod tests {
     /// (C4ChatDlg.cpp:729-773,834-854).
     #[test]
     fn irc_transcript_literal_pipes_and_query_routing_match_cpp() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_text_font(text_font());
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connected,
-            vec![NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Keeper!ident@example".into(),
-                target: "#clonken".into(),
-                text: "a|b".into(),
-                is_channel: true,
-            }],
+            vec![channel_message("a|b")],
             0,
         ));
         controller.force_chat_mode_and_focus();
-        let channel = controller
-            .chat_sheets()
-            .iter()
-            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel sheet");
+        let channel = chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel sheet");
         let lines = NetDlgController::wrapped_chat_lines(
             &controller.chat_sheets()[channel],
             Some(text_font()),
             4000,
         );
-        assert_eq!(
-            lines
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<Vec<_>>(),
-            vec!["<Keeper> a|b"]
-        );
+        assert_same!(lines .iter() .map(|line| line.text.as_str()) .collect::<Vec<_>>() => vec!["<Keeper> a|b"]);
 
         // A source-less notice reaches the active sheet, not Server.
         controller.select_chat_sheet(channel);
         let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
-        snapshot.messages = vec![NetDlgChatMessage {
-            kind: NetDlgChatMessageKind::Notice,
-            source: String::new(),
-            target: "Clonker".into(),
-            text: "server notice".into(),
-            is_channel: false,
-        }];
+        snapshot.messages = vec![chat_message(
+            NetDlgChatMessageKind::Notice,
+            "",
+            "Clonker",
+            "server notice",
+            false,
+        )];
         snapshot.unread_index = 0;
         controller.sync_chat_snapshot(snapshot);
-        let channel = controller
-            .chat_sheets()
-            .iter()
-            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel sheet");
+        let channel = chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel sheet");
         assert!(
             controller.chat_sheets()[channel]
                 .lines
@@ -9246,20 +8574,20 @@ mod tests {
         // One query survives the sender's nick change because its ident did not.
         let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
         snapshot.messages = vec![
-            NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Keeper!ident@example".into(),
-                target: "Clonker".into(),
-                text: "first".into(),
-                is_channel: false,
-            },
-            NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Wache!ident@example".into(),
-                target: "Clonker".into(),
-                text: "second".into(),
-                is_channel: false,
-            },
+            chat_message(
+                NetDlgChatMessageKind::Message,
+                "Keeper!ident@example",
+                "Clonker",
+                "first",
+                false,
+            ),
+            chat_message(
+                NetDlgChatMessageKind::Message,
+                "Wache!ident@example",
+                "Clonker",
+                "second",
+                false,
+            ),
         ];
         snapshot.unread_index = 0;
         controller.sync_chat_snapshot(snapshot);
@@ -9288,26 +8616,15 @@ mod tests {
     /// originating sheet rather than Server (C4ChatDlg.cpp:899-1018).
     #[test]
     fn irc_process_input_errors_spacing_and_send_failure_match_cpp() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            Vec::new(),
-            0,
-        ));
-        controller.force_chat_mode_and_focus();
-        let channel = controller
-            .chat_sheets()
-            .iter()
-            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel sheet");
+        let mut controller = focused_chat_controller(Vec::new(), 0);
+        let channel = chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel sheet");
         controller.select_chat_sheet(channel);
 
         // Empty submission sounds without a transcript line or a history entry.
         controller.handle_key_down(KeyCode::Up);
         let before = controller.chat_sheets()[channel].lines.clone();
         let actions = controller.submit_chat_input();
-        assert_eq!(actions, vec![NetDlgAction::GuiSound(NetDlgSound::Error)]);
+        assert_action!(actions => NetDlgAction::GuiSound(NetDlgSound::Error));
         assert_eq!(controller.chat_sheets()[channel].lines, before);
         assert!(controller.chat_history().is_empty());
         assert_eq!(controller.chat_input(), "");
@@ -9334,13 +8651,7 @@ mod tests {
         // The invalid-nick error carries the command token like IDS_ERR_INVALIDNICKNAME2.
         controller.handle_text_input("/nick bad nick", text_font());
         controller.submit_chat_input();
-        assert_eq!(
-            controller.chat_sheets()[channel]
-                .lines
-                .last()
-                .map(|line| line.text.as_str()),
-            Some("/nick: invalid nick name")
-        );
+        assert_same!(controller.chat_sheets()[channel] .lines .last() .map(|line| line.text.as_str()) => Some("/nick: invalid nick name"));
 
         // A queued send that fails reports on the sheet it was typed into.
         controller.handle_text_input("hello", text_font());
@@ -9348,11 +8659,7 @@ mod tests {
         let mut snapshot = chat_snapshot(NetDlgChatConnectionState::Connected, Vec::new(), 0);
         snapshot.last_error = Some("Send failed".into());
         controller.sync_chat_snapshot(snapshot);
-        let channel = controller
-            .chat_sheets()
-            .iter()
-            .position(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
-            .expect("channel sheet");
+        let channel = chat_sheet_index(&controller, NetDlgChatSheetKind::Channel, "channel sheet");
         assert!(
             controller.chat_sheets()[channel]
                 .lines
@@ -9373,14 +8680,7 @@ mod tests {
 
     #[test]
     fn chat_history_is_shared_order_bounded_deduplicated_and_cycles_to_empty() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
-        controller.sync_chat_snapshot(chat_snapshot(
-            NetDlgChatConnectionState::Connected,
-            Vec::new(),
-            0,
-        ));
-        controller.force_chat_mode_and_focus();
+        let mut controller = focused_chat_controller(Vec::new(), 0);
         let mut seeded = (0..22)
             .map(|index| format!("entry {index}"))
             .collect::<Vec<_>>();
@@ -9405,34 +8705,22 @@ mod tests {
 
         controller.handle_text_input("entry 5", text_font());
         let actions = controller.submit_chat_input();
-        assert_eq!(
-            actions[0],
-            NetDlgAction::ChatHistoryStored("entry 5".into())
-        );
+        assert_same!(actions[0] => NetDlgAction::ChatHistoryStored("entry 5".into()));
         assert_eq!(controller.chat_history()[0], "entry 5");
-        assert_eq!(
-            controller
-                .chat_history()
-                .iter()
-                .filter(|entry| entry.as_str() == "entry 5")
-                .count(),
-            1
-        );
+        assert_same!(controller .chat_history() .iter() .filter(|entry| entry.as_str() == "entry 5") .count() => 1);
         assert_eq!(controller.chat_history().len(), 20);
     }
 
     #[test]
     fn chat_transcript_wheel_breaks_follow_and_new_line_restores_bottom() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.resize(640, 480);
         controller.set_text_font(text_font());
         let messages = (0..60)
-            .map(|index| NetDlgChatMessage {
-                kind: NetDlgChatMessageKind::Message,
-                source: "Keeper!ident@example".into(),
-                target: "#clonken".into(),
-                text: format!("wrapped transcript line {index} with enough words to wrap"),
-                is_channel: true,
+            .map(|index| {
+                channel_message(format!(
+                    "wrapped transcript line {index} with enough words to wrap"
+                ))
             })
             .collect::<Vec<_>>();
         controller.sync_chat_snapshot(chat_snapshot(
@@ -9450,39 +8738,22 @@ mod tests {
         assert!(controller.chat_transcript_scroll_offset() < max_before);
 
         let mut updated = messages;
-        updated.push(NetDlgChatMessage {
-            kind: NetDlgChatMessageKind::Message,
-            source: "Keeper!ident@example".into(),
-            target: "#clonken".into(),
-            text: "fresh channel line".into(),
-            is_channel: true,
-        });
+        updated.push(channel_message("fresh channel line"));
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connected,
             updated,
             60,
         ));
         assert!(controller.chat_transcript_follows_bottom());
-        assert_eq!(
-            controller.chat_transcript_scroll_offset(),
-            controller.chat_transcript_max_scroll()
-        );
+        assert_same!(controller.chat_transcript_scroll_offset() => controller.chat_transcript_max_scroll());
     }
 
     #[test]
     fn standalone_chat_renderer_uses_override_and_draws_only_chat_dialog() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.resize(1000, 800);
         let bounds = NetDlgController::standalone_chat_bounds(1000, 800);
-        assert_eq!(
-            bounds,
-            IntRect {
-                x: 100,
-                y: 80,
-                w: 800,
-                h: 640
-            }
-        );
+        assert_same!(bounds => IntRect {x: 100, y: 80, w: 800, h: 640 });
         controller.set_chat_bounds_override(Some(bounds));
         controller.force_chat_mode_and_focus();
         controller.set_chat_strings(NetDlgChatStrings {
@@ -9491,14 +8762,8 @@ mod tests {
             ..NetDlgChatStrings::default()
         });
         let layout = controller.chat_layout();
-        assert_eq!(
-            layout.group.y,
-            bounds.y + metrics().text_line_height.max(23)
-        );
-        assert_eq!(
-            layout.group.h,
-            bounds.h - metrics().text_line_height.max(23)
-        );
+        assert_same!(layout.group.y => bounds.y + metrics().text_line_height.max(23));
+        assert_same!(layout.group.h => bounds.h - metrics().text_line_height.max(23));
 
         let fonts = endeavour_font_set();
         let assets = net_assets();
@@ -9522,19 +8787,13 @@ mod tests {
         assert!(!texts.iter().any(|text| text == "Games"));
         assert!(!texts.iter().any(|text| text == "X"));
         let close = NetDlgController::chat_dialog_close_rect(controller.chat_caption_and_group().0);
-        assert_eq!(
-            click(&mut controller, close),
-            vec![NetDlgAction::ChatDialogCloseRequested]
-        );
-        assert_eq!(
-            controller.chat_connection_state(),
-            NetDlgChatConnectionState::Disconnected
-        );
+        assert_action!(click(&mut controller, close) => NetDlgAction::ChatDialogCloseRequested);
+        assert_same!(controller.chat_connection_state() => NetDlgChatConnectionState::Disconnected);
     }
 
     #[test]
     fn chat_tooltips_match_native_controls_and_standalone_hides_startup_chrome() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.resize(1000, 800);
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connected,
@@ -9546,10 +8805,7 @@ mod tests {
         controller.force_chat_mode_and_default_focus();
 
         let chat = controller.chat_layout();
-        assert_eq!(
-            controller.tooltip_at(center(chat.input)),
-            Some(StartupTooltip::resource("IDS_DLGTIP_CHAT"))
-        );
+        assert_same!(controller.tooltip_at(center(chat.input)) => Some(StartupTooltip::resource("IDS_DLGTIP_CHAT")));
         assert_eq!(
             controller.tooltip_at(center(chat.input_label.expect("channel input label"))),
             Some(StartupTooltip::resource("IDS_DLGTIP_CHAT"))
@@ -9570,15 +8826,12 @@ mod tests {
         assert_eq!(controller.tooltip_at(center(hidden_startup_control)), None);
 
         controller.set_chat_bounds_override(None);
-        assert_eq!(
-            controller.tooltip_at(center(controller.chat_layout().input)),
-            Some(StartupTooltip::resource("IDS_DLGTIP_CHAT"))
-        );
+        assert_same!(controller.tooltip_at(center(controller.chat_layout().input)) => Some(StartupTooltip::resource("IDS_DLGTIP_CHAT")));
     }
 
     #[test]
     fn standalone_chat_caption_drag_moves_override_and_close_keeps_precedence() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.resize(1000, 800);
         let initial = NetDlgController::standalone_chat_bounds(1000, 800);
         controller.set_chat_bounds_override(Some(initial));
@@ -9586,52 +8839,27 @@ mod tests {
 
         let caption = controller.chat_caption_and_group().0;
         let close = NetDlgController::chat_dialog_close_rect(caption);
-        assert!(controller
-            .handle_pointer_down(center(close), text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(center(close), text_font()));
         assert!(!controller.chat_dialog_drag_active());
-        assert_eq!(
-            controller.handle_pointer_up(center(close), text_font()),
-            vec![NetDlgAction::ChatDialogCloseRequested]
-        );
+        assert_action!(controller.handle_pointer_up(center(close), text_font()) => NetDlgAction::ChatDialogCloseRequested);
         assert_eq!(controller.chat_bounds_override(), Some(initial));
 
         let start = GuiPoint::new((caption.x + 12) as f32, (caption.y + 8) as f32);
-        assert!(controller
-            .handle_pointer_down(start, text_font())
-            .is_empty());
+        assert_no_actions!(controller.handle_pointer_down(start, text_font()));
         assert!(controller.chat_dialog_drag_active());
         let moved = GuiPoint::new(start.x - 325.0, start.y + 41.0);
-        assert!(controller
-            .handle_pointer_move(moved, text_font())
-            .is_empty());
-        assert_eq!(
-            controller.chat_bounds_override(),
-            Some(IntRect {
-                x: initial.x - 325,
-                y: initial.y + 41,
-                ..initial
-            })
-        );
+        assert_no_actions!(controller.handle_pointer_move(moved, text_font()));
+        assert_same!(controller.chat_bounds_override() => Some(IntRect {x: initial.x - 325, y: initial.y + 41, ..initial }));
 
         let released = GuiPoint::new(moved.x - 7.0, moved.y + 3.0);
-        assert!(controller
-            .handle_pointer_up(released, text_font())
-            .is_empty());
-        assert_eq!(
-            controller.chat_bounds_override(),
-            Some(IntRect {
-                x: initial.x - 332,
-                y: initial.y + 44,
-                ..initial
-            })
-        );
+        assert_no_actions!(controller.handle_pointer_up(released, text_font()));
+        assert_same!(controller.chat_bounds_override() => Some(IntRect {x: initial.x - 332, y: initial.y + 44, ..initial }));
         assert!(!controller.chat_dialog_drag_active());
         let retained = controller.chat_bounds_override();
         controller.handle_pointer_move(GuiPoint::new(900.0, 700.0), text_font());
         assert_eq!(controller.chat_bounds_override(), retained);
 
-        let mut embedded = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut embedded = self::controller();
         embedded.resize(1000, 800);
         embedded.force_chat_mode_and_default_focus();
         let embedded_caption = embedded.chat_caption_and_group().0;
@@ -9641,7 +8869,7 @@ mod tests {
 
     #[test]
     fn standalone_chat_drag_capture_is_cleared_by_leave_resize_and_cancel() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        let mut controller = controller();
         controller.resize(1000, 800);
         controller.set_chat_bounds_override(Some(IntRect {
             x: 100,
@@ -9654,9 +8882,7 @@ mod tests {
         let start_drag = |controller: &mut NetDlgController| {
             let caption = controller.chat_caption_and_group().0;
             let point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 8) as f32);
-            assert!(controller
-                .handle_pointer_down(point, text_font())
-                .is_empty());
+            assert_no_actions!(controller.handle_pointer_down(point, text_font()));
             assert!(controller.chat_dialog_drag_active());
         };
 
@@ -9678,15 +8904,11 @@ mod tests {
 
     #[test]
     fn standalone_chat_default_focus_uses_connect_then_live_message_input() {
-        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
-        controller.resize(1280, 720);
+        let mut controller = controller();
         controller.set_chat_login(chat_login());
         controller.force_chat_mode_and_default_focus();
         assert!(controller.chat_connect_focused);
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![NetDlgAction::ChatConnect(chat_login())]
-        );
+        assert_action!(controller.handle_key_down(KeyCode::Enter) => NetDlgAction::ChatConnect(chat_login()));
 
         controller.sync_chat_snapshot(chat_snapshot(
             NetDlgChatConnectionState::Connected,
@@ -9695,19 +8917,8 @@ mod tests {
         ));
         controller.force_chat_mode_and_default_focus();
         assert!(!controller.chat_connect_focused);
-        assert!(controller
-            .handle_text_input("live input", text_font())
-            .is_empty());
-        assert_eq!(
-            controller.handle_key_down(KeyCode::Enter),
-            vec![
-                NetDlgAction::ChatHistoryStored("live input".into()),
-                NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
-                    target: "#clonken".into(),
-                    text: "live input".into(),
-                }),
-            ]
-        );
+        assert_no_actions!(controller.handle_text_input("live input", text_font()));
+        assert_chat!(controller.handle_key_down(KeyCode::Enter) => "live input" => message_command("live input"));
     }
 
     /// Renders the dialog at 1280x720 with the final whole-surface gamma pass
@@ -9716,19 +8927,8 @@ mod tests {
     /// reference, so this test only checks coarse invariants.
     #[test]
     fn render_matches_reference() {
-        use crate::test_support::{load_graphics_png, standard_gamma, write_ppm};
-        let assets = NetDlgAssets {
-            background: load_graphics_png("StartupNetworkBG.png"),
-            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
-            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
-            gui_caption: load_graphics_png("GUICaption.png"),
-            gui_button: load_graphics_png("GUIButton.png"),
-            gui_button_down: load_graphics_png("GUIButtonDown.png"),
-            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            gui_scroll: load_graphics_png("GUIScroll.png"),
-            gui_icons: load_graphics_png("GUIIcons.png"),
-            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
-        };
+        use crate::test_support::{standard_gamma, write_ppm};
+        let assets = net_assets();
         let fonts = endeavour_font_set();
         let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
         // The capture machine had Config.General.Record enabled (the icons

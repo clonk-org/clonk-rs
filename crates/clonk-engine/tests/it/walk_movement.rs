@@ -39,23 +39,17 @@ fn walk_procedure_accelerates_and_brakes() -> Result<(), Box<dyn std::error::Err
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after first tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 3);
     assert_eq!(object.direction, Direction::Right);
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after second tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 6);
     assert_eq!(object.direction, Direction::Right);
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after third tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 8);
     assert_eq!(object.direction, Direction::Right);
 
@@ -65,22 +59,16 @@ fn walk_procedure_accelerates_and_brakes() -> Result<(), Box<dyn std::error::Err
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after braking tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 5);
     assert_eq!(object.direction, Direction::Right);
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after second braking tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 2);
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after third braking tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 0);
 
     engine.apply_object_update(
@@ -89,9 +77,7 @@ fn walk_procedure_accelerates_and_brakes() -> Result<(), Box<dyn std::error::Err
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after accelerating left");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, -3);
     assert_eq!(object.direction, Direction::Left);
 
@@ -126,9 +112,7 @@ fn walkto_action_uses_walk_procedure() -> Result<(), Box<dyn std::error::Error>>
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after first WalkTo tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 2);
     assert_eq!(object.direction, Direction::Right);
 

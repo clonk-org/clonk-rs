@@ -31,9 +31,7 @@ fn flight_procedure_applies_gravity() -> Result<(), Box<dyn std::error::Error>> 
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object present after tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 0);
     assert_eq!(object.velocity.y, -5);
     assert_eq!(

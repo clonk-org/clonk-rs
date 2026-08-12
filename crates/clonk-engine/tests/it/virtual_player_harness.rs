@@ -160,7 +160,7 @@ fn route_checkpoint_reset_changes_only_the_physical_input_ledger() -> Result<(),
     let mut player = VirtualPlayer::new(&mut engine, 1);
     player.reset_input_ledger_with_control_style(true)?;
 
-    let control = player.engine().player(1).expect("player remains").control;
+    let control = crate::support::TestValueExt::test_value(player.engine().player(1)).control;
     assert_eq!(
         (
             control.last_com,

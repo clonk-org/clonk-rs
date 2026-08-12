@@ -378,7 +378,7 @@
             Ok::<Value, RuntimeError>(Value::Nil)
         });
 
-        result.expect("Sound custom-falloff probes run");
+        result.test_value();
         assert_eq!(
             outcome.audio.events,
             vec![
@@ -451,7 +451,7 @@
             Ok::<Value, RuntimeError>(Value::Nil)
         });
 
-        result.expect("Sound at-player probes run");
+        result.test_value();
         let played = outcome
             .audio
             .events
@@ -500,7 +500,7 @@
             Ok::<Value, RuntimeError>(Value::Nil)
         });
 
-        result.expect("empty-name sound probes run");
+        result.test_value();
         assert!(
             outcome.audio.events.is_empty(),
             "an empty name resolves no sample; got {:?}",
@@ -535,7 +535,7 @@
             Ok::<Value, RuntimeError>(Value::Nil)
         });
 
-        result.expect("Sound command probes run");
+        result.test_value();
         let played = outcome
             .audio
             .events
@@ -571,7 +571,7 @@
             Ok::<_, RuntimeError>(Value::Nil)
         });
 
-        result.expect("SoundLevel probes run");
+        result.test_value();
         assert_eq!(
             outcome.audio.events,
             vec![
@@ -688,7 +688,7 @@
             Ok::<_, RuntimeError>(Value::Nil)
         });
 
-        result.expect("alias and wildcard Sound calls succeed");
+        result.test_value();
         let target = Some(ObjectId::new(1));
         let play = |name: &str| AudioCommand::PlaySound {
             name: name.into(),
@@ -1003,15 +1003,9 @@ public func UseDefault()
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
-            )
-            .expect("caller registers");
-        let caller = engine
-            .spawn_object(crate::SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine.register_test_definition(test_definition("CALL", "Caller", script));
+        let caller = engine.spawn_test_object(crate::SpawnConfig::new("CALL"));
+        let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -1056,11 +1050,9 @@ public func UseDefault()
 
         let captured = engine.capture_state();
         engine
-            .call_object_function(caller_index, "StoreMask", vec![Value::Int(-1)])
-            .expect("post-save runtime mask write runs");
+            .call_object_function(caller_index, "StoreMask", vec![Value::Int(-1)]).test_value();
         engine
-            .restore_state(&captured)
-            .expect("in-place state restore succeeds");
+            .restore_state(&captured).test_value();
         assert_eq!(
             engine.restart_restore_info_mask(),
             -1,
@@ -1068,15 +1060,9 @@ public func UseDefault()
         );
 
         let mut fresh = crate::Engine::with_seed(1);
+        fresh.register_test_definition(test_definition("CALL", "Caller", script));
         fresh
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", script)
-                    .expect("fresh caller compiles"),
-            )
-            .expect("fresh caller registers");
-        fresh
-            .restore_state(&captured)
-            .expect("captured state restores into a fresh engine");
+            .restore_state(&captured).test_value();
         assert_eq!(
             fresh.restart_restore_info_mask(),
             0,
@@ -1087,32 +1073,23 @@ public func UseDefault()
     #[test]
     fn gain_mission_access_persists_and_goal_flow_reaches_game_over_return() {
         let mut engine = crate::Engine::with_seed(7);
-        let definition = crate::Definition::from_script(
-            "GOAL",
-            "Goal",
-            r#"#strict 2
-public func Grant(password) { return GainMissionAccess(password); }
-public func HasAccess(password) { return GetMissionAccess(password); }
-public func CheckGoals()
-{
-    var passwords = ["goal-pass"];
-    for (var missionPassword in passwords)
-    {
-        if (!missionPassword) return 1;
-        GainMissionAccess(missionPassword);
-    }
-    return 0;
-}
-"#,
-        )
-        .expect("goal-style script compiles");
-        engine
-            .register_definition(definition)
-            .expect("goal definition registers");
-        let goal = engine
-            .spawn_object(SpawnConfig::new("GOAL"))
-            .expect("goal spawns");
-        let goal_index = engine.find_object_index(goal).expect("goal exists");
+        let definition = test_definition("GOAL", "Goal", r#"#strict 2
+        public func Grant(password) { return GainMissionAccess(password); }
+        public func HasAccess(password) { return GetMissionAccess(password); }
+        public func CheckGoals()
+        {
+            var passwords = ["goal-pass"];
+            for (var missionPassword in passwords)
+            {
+                if (!missionPassword) return 1;
+                GainMissionAccess(missionPassword);
+            }
+            return 0;
+        }
+        "#);
+        engine.register_test_definition(definition);
+        let goal = engine.spawn_test_object(SpawnConfig::new("GOAL"));
+        let goal_index = engine.find_object_index(goal).test_value();
 
         assert_eq!(
             engine
@@ -1250,8 +1227,7 @@ public func CheckGoals()
                 .with_mission_access(access)
                 .with_control_sync_mode(sync);
             with_effect_context(None, &[], world, 1, || get_mission_access(args))
-                .0
-                .expect("GetMissionAccess query succeeds")
+                .0.test_value()
         }
 
         let access = Rc::new(RefCell::new("Alpha; Beta ;Gamma".to_string()));
@@ -1287,7 +1263,7 @@ public func CheckGoals()
             );
         });
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level, Level::WARN);
         assert_eq!(records[0].target, "clonk-script");
@@ -1480,7 +1456,7 @@ public func CheckGoals()
             Value::String("Ready".into()),
             Value::Int(5),
         ];
-        let result = format_string(&args).expect("Format succeeds");
+        let result = format_string(&args).test_value();
         assert_eq!(result, Value::String("Crew 007 CLNK Ready 5 %".into()));
     }
 
@@ -1522,8 +1498,7 @@ public func CheckGoals()
             script
                 .load_script(&format!(
                     "#strict {strict}\nfunc Probe() {{ var unset; return [Format(\"%v %v\", 0, 5), Format(\"%v\", false), Format(\"%v\", unset), Format(\"%5v\", 7)]; }}"
-                ))
-                .expect("Format strictness probe compiles");
+                )).test_value();
 
             assert_eq!(
                 script.call("Probe", &[]).expect("Format probe runs"),
@@ -1536,20 +1511,9 @@ public func CheckGoals()
     #[test]
     fn format_v_renders_live_object_name_and_number() {
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script(
-                    "ACTR",
-                    "Actor",
-                    "#strict 3\npublic func Render() { return Format(\"%v\", this()); }",
-                )
-                .expect("actor definition compiles"),
-            )
-            .expect("actor definition registers");
-        let actor = engine
-            .spawn_object(crate::SpawnConfig::new("ACTR"))
-            .expect("actor spawns");
-        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.register_test_definition(test_definition("ACTR", "Actor", "#strict 3\npublic func Render() { return Format(\"%v\", this()); }"));
+        let actor = engine.spawn_test_object(crate::SpawnConfig::new("ACTR"));
+        let actor_index = engine.find_object_index(actor).test_value();
 
         assert_eq!(
             engine
@@ -1566,8 +1530,7 @@ public func CheckGoals()
             Value::String(clonk_script::c4_string_from_bytes("\u{ff}".as_bytes()).into());
         let format = Value::String("%.1s|%3s|%c".into());
         let render = |value: Value| {
-            let result = format_string(&[format.clone(), value.clone(), value, Value::Int(0xff)])
-                .expect("byte-oriented Format succeeds");
+            let result = format_string(&[format.clone(), value.clone(), value, Value::Int(0xff)]).test_value();
             let Value::String(result) = result else {
                 panic!("Format returns a string");
             };
@@ -1580,16 +1543,14 @@ public func CheckGoals()
 
         let raw_id = i32::from_le_bytes([0xff, b'A', 0, 0]);
         let Value::String(rendered_id) =
-            format_string(&[Value::String("%i".into()), Value::Int(raw_id)])
-                .expect("raw C4ID formats")
+            format_string(&[Value::String("%i".into()), Value::Int(raw_id)]).test_value()
         else {
             panic!("Format returns a string");
         };
         assert_eq!(clonk_script::c4_string_bytes(&rendered_id), [0xff, b'A']);
 
         let Value::String(nul_truncated) =
-            format_string(&[Value::String("A%cB".into()), Value::Int(0)])
-                .expect("embedded NUL formats")
+            format_string(&[Value::String("A%cB".into()), Value::Int(0)]).test_value()
         else {
             panic!("Format returns a string");
         };
@@ -1598,15 +1559,14 @@ public func CheckGoals()
         let raw = [0xff, b'A', b'B', b'C'];
         let id = c4_id(&[Value::String(
             clonk_script::c4_string_from_bytes(&raw).into(),
-        )])
-        .expect("raw C4ID converts");
+        )]).test_value();
         assert_eq!(
             cast_int(std::slice::from_ref(&id)).expect("raw C4ID payload casts"),
             Value::Int(-1),
             "C4Id casts signed char 0xff to unsigned long before OR-ing"
         );
         let Value::String(formatted) =
-            format_string(&[Value::String("%i".into()), id]).expect("raw C4ID formats")
+            format_string(&[Value::String("%i".into()), id]).test_value()
         else {
             panic!("Format returns a string");
         };
@@ -1649,8 +1609,7 @@ public func CheckGoals()
             ],
             CommandArgLayout::Set,
             "SetCommand",
-        )
-        .expect("typed command Tx parses");
+        ).test_value();
         assert_eq!(request.tx, Some(12345));
         assert_eq!(
             request
@@ -1674,16 +1633,9 @@ public func Open()
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("ACTR", "Actor", script)
-                    .expect("menu fixture compiles"),
-            )
-            .expect("menu fixture registers");
-        let actor = engine
-            .spawn_object(crate::SpawnConfig::new("ACTR"))
-            .expect("menu fixture spawns");
-        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.register_test_definition(test_definition("ACTR", "Actor", script));
+        let actor = engine.spawn_test_object(crate::SpawnConfig::new("ACTR"));
+        let actor_index = engine.find_object_index(actor).test_value();
 
         assert_eq!(
             engine
@@ -1693,8 +1645,7 @@ public func Open()
         );
         let menu = engine
             .debug_object_menu(actor.as_u64())
-            .expect("actor remains")
-            .expect("menu opens");
+            .expect("actor remains").test_value();
         let packed_raw = u32::from_le_bytes(*b"1111") as usize;
         assert_eq!(menu.selection, 1);
         assert_eq!(clonk_script::c4_id_raw(&menu.items[0].item_id), packed_raw);
@@ -1772,64 +1723,43 @@ public func Open()
     #[test]
     fn cast_builtins_retag_payloads_and_drive_construction_paths() {
         let mut engine = crate::Engine::with_seed(3);
-        let builder = crate::Definition::from_script(
-            "ACLD",
-            "Builder",
-            r#"#strict 2
-public func CastValues()
-{
-    var unset;
-    return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(true), CastInt(unset), CastC4ID(0), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
-}
-public func WideCastValues()
-{
-    var id = C4Id("4294967296"), boolean = CastBool(id);
-    return [boolean && true, CastInt(boolean), Equal(boolean, id), CastC4ID(boolean)];
-}
-public func MakePacked() { return CreateContents(CastC4ID(1279546187)); }
-public func MakeRacesOffset(object container)
-{
-    return CreateContents(CastC4ID(CastInt(GetID()) + 201135119), container);
-}
-public func ControlCommand(command, target, tx, ty, target2, data)
-{
-    if (command == "Construct")
-        if (CastC4ID(data)->~RejectConstruction(tx - GetX(), ty - GetY(), this()))
-            return true;
-    return false;
-}
-"#,
-        )
-        .expect("builder script compiles");
-        engine
-            .register_definition(builder)
-            .expect("builder registers");
-        let target = crate::Definition::from_script(
-            "KSDL",
-            "Packed target",
-            r#"#strict 2
-public func RejectConstruction(x, y, builder)
-{
-    if (!builder) return false;
-    return x == 5 && y == 7;
-}
-"#,
-        )
-        .expect("packed target script compiles");
-        engine
-            .register_definition(target)
-            .expect("packed target registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("PWIP", "Races offset target", "#strict 2")
-                    .expect("offset target script compiles"),
-            )
-            .expect("offset target registers");
+        let builder = test_definition("ACLD", "Builder", r#"#strict 2
+        public func CastValues()
+        {
+            var unset;
+            return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(true), CastInt(unset), CastC4ID(0), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
+        }
+        public func WideCastValues()
+        {
+            var id = C4Id("4294967296"), boolean = CastBool(id);
+            return [boolean && true, CastInt(boolean), Equal(boolean, id), CastC4ID(boolean)];
+        }
+        public func MakePacked() { return CreateContents(CastC4ID(1279546187)); }
+        public func MakeRacesOffset(object container)
+        {
+            return CreateContents(CastC4ID(CastInt(GetID()) + 201135119), container);
+        }
+        public func ControlCommand(command, target, tx, ty, target2, data)
+        {
+            if (command == "Construct")
+                if (CastC4ID(data)->~RejectConstruction(tx - GetX(), ty - GetY(), this()))
+        return true;
+            return false;
+        }
+        "#);
+        engine.register_test_definition(builder);
+        let target = test_definition("KSDL", "Packed target", r#"#strict 2
+        public func RejectConstruction(x, y, builder)
+        {
+            if (!builder) return false;
+            return x == 5 && y == 7;
+        }
+        "#);
+        engine.register_test_definition(target);
+        engine.register_test_definition(test_definition("PWIP", "Races offset target", "#strict 2"));
 
-        let builder = engine
-            .spawn_object(SpawnConfig::new("ACLD").with_position(Vector2::new(20, 30)))
-            .expect("builder spawns");
-        let builder_index = engine.find_object_index(builder).expect("builder exists");
+        let builder = engine.spawn_test_object(SpawnConfig::new("ACLD").with_position(Vector2::new(20, 30)));
+        let builder_index = engine.find_object_index(builder).test_value();
 
         #[cfg(all(not(target_os = "windows"), target_pointer_width = "64"))]
         let wide_bool = Value::from_c4_bool_data_raw(1_usize << 32);
@@ -1875,9 +1805,8 @@ public func RejectConstruction(x, y, builder)
         );
 
         let created = engine
-            .call_object_function(builder_index, "MakePacked", Vec::new())
-            .expect("packed id reaches CreateContents");
-        let created = object_id_from_value(&created).expect("CreateContents returns an object");
+            .call_object_function(builder_index, "MakePacked", Vec::new()).test_value();
+        let created = object_id_from_value(&created).test_value();
         assert_eq!(
             engine
                 .object_snapshot(created)
@@ -1891,12 +1820,10 @@ public func RejectConstruction(x, y, builder)
                 builder_index,
                 "MakeRacesOffset",
                 vec![object_reference_value(created)],
-            )
-            .expect("MonsterRescue-style packed id reaches CreateContents");
-        let offset = object_id_from_value(&offset).expect("CreateContents returns an object");
+            ).test_value();
+        let offset = object_id_from_value(&offset).test_value();
         let offset = engine
-            .object_snapshot(offset)
-            .expect("offset object survives");
+            .object_snapshot(offset).test_value();
         assert_eq!(offset.definition_id, "PWIP");
         assert_eq!(offset.container, Some(created));
 
@@ -1912,8 +1839,7 @@ public func RejectConstruction(x, y, builder)
                     Value::Nil,
                     Value::Int(1_279_546_187),
                 ],
-            )
-            .expect("construction command executes without a script error");
+            ).test_value();
         assert!(
             rejected.as_bool(),
             "the packed definition receives RejectConstruction"
@@ -1926,7 +1852,7 @@ public func RejectConstruction(x, y, builder)
             create_array(&[]).expect("bare CreateArray succeeds"),
             Value::Array(Vec::new())
         );
-        let result = create_array(&[Value::Int(3)]).expect("CreateArray succeeds");
+        let result = create_array(&[Value::Int(3)]).test_value();
         assert_eq!(
             result,
             Value::Array(vec![Value::Nil, Value::Nil, Value::Nil])
@@ -1988,8 +1914,7 @@ public func RejectConstruction(x, y, builder)
                 }
                 func RValue() { SetLength([1, 2], 1); }
                 "#,
-            )
-            .expect("SetLength fixture compiles");
+            ).test_value();
 
         assert_eq!(
             script.call("Grow", &[]).expect("array grows"),
@@ -2041,17 +1966,17 @@ public func RejectConstruction(x, y, builder)
 
     #[test]
     fn get_length_returns_lengths_for_supported_types() {
-        let result = get_length(&[Value::String("abc".into())]).expect("GetLength succeeds");
+        let result = get_length(&[Value::String("abc".into())]).test_value();
         assert_eq!(result, Value::Int(3));
 
         let result =
-            get_length(&[Value::Array(vec![Value::Int(1), Value::Int(2)])]).expect("array length");
+            get_length(&[Value::Array(vec![Value::Int(1), Value::Int(2)])]).test_value();
         assert_eq!(result, Value::Int(2));
 
         let mut map = ValueMap::new();
         map.insert("a".into(), Value::Int(1));
         map.insert("b".into(), Value::Bool(true));
-        let result = get_length(&[Value::Proplist(map.into_iter().collect())]).expect("map length");
+        let result = get_length(&[Value::Proplist(map.into_iter().collect())]).test_value();
         assert_eq!(result, Value::Int(2));
     }
 
@@ -2095,8 +2020,7 @@ public func RejectConstruction(x, y, builder)
                     ];
                 }
                 "#,
-            )
-            .expect("GetChar fixture compiles");
+            ).test_value();
 
         assert_eq!(
             script.call("Probe", &[]).expect("GetChar probe executes"),
@@ -2119,8 +2043,7 @@ public func RejectConstruction(x, y, builder)
         let mut nonstrict = ScriptEngine::new();
         register_host_functions(&mut nonstrict);
         nonstrict
-            .load_script("func Probe(needle, values) { return GetIndexOf(needle, values); }")
-            .expect("NONSTRICT scalar probe loads without array syntax");
+            .load_script("func Probe(needle, values) { return GetIndexOf(needle, values); }").test_value();
         for (needle, values) in [
             (Value::Nil, vec![Value::Int(0)]),
             (Value::Bool(false), vec![Value::Int(0)]),
@@ -2174,8 +2097,7 @@ public func RejectConstruction(x, y, builder)
                         ];
                     }}
                     "#
-                ))
-                .expect("GetIndexOf scalar probe loads");
+                )).test_value();
 
             assert_eq!(
                 script.call("Probe", &[]).expect("scalar probe runs"),
@@ -2237,8 +2159,7 @@ public func RejectConstruction(x, y, builder)
                     return GetIndexOf(nil, RetainedZeroIdArray());
                 }
                 "#,
-            )
-            .expect("strict3 GetIndexOf probe loads");
+            ).test_value();
 
         assert_eq!(
             script.call("Probe", &[]).expect("strict3 probe runs"),
@@ -2304,8 +2225,7 @@ public func RejectConstruction(x, y, builder)
                         ];
                     }}
                     "#
-                ))
-                .expect("content matching probe loads");
+                )).test_value();
 
             assert_eq!(
                 script
@@ -2343,8 +2263,7 @@ public func RejectConstruction(x, y, builder)
                     ];
                 }
                 "#,
-            )
-            .expect("identity probe loads");
+            ).test_value();
 
         assert_eq!(
             script.call("Probe", &[]).expect("identity probe runs"),
@@ -2361,14 +2280,12 @@ public func RejectConstruction(x, y, builder)
     fn get_index_of_uses_calling_functions_origin_strictness() {
         let mut strict3_source = ScriptEngine::new();
         strict3_source
-            .load_script("#strict 3\nfunc Probe() { return GetIndexOf(0, [nil]); }")
-            .expect("strict3 source loads");
+            .load_script("#strict 3\nfunc Probe() { return GetIndexOf(0, [nil]); }").test_value();
 
         let mut strict2_destination = ScriptEngine::new();
         register_host_functions(&mut strict2_destination);
         strict2_destination
-            .load_script("#strict 2\nfunc Own() { return 1; }")
-            .expect("strict2 destination loads");
+            .load_script("#strict 2\nfunc Own() { return 1; }").test_value();
         strict2_destination.merge_from(&strict3_source);
         assert_eq!(
             strict2_destination
@@ -2379,14 +2296,12 @@ public func RejectConstruction(x, y, builder)
 
         let mut strict2_source = ScriptEngine::new();
         strict2_source
-            .load_script("#strict 2\nfunc Probe() { var unset; return GetIndexOf(0, [unset]); }")
-            .expect("strict2 source loads");
+            .load_script("#strict 2\nfunc Probe() { var unset; return GetIndexOf(0, [unset]); }").test_value();
 
         let mut strict3_destination = ScriptEngine::new();
         register_host_functions(&mut strict3_destination);
         strict3_destination
-            .load_script("#strict 3\nfunc Own() { return 1; }")
-            .expect("strict3 destination loads");
+            .load_script("#strict 3\nfunc Own() { return 1; }").test_value();
         strict3_destination.merge_from(&strict2_source);
         assert_eq!(
             strict3_destination
@@ -2411,8 +2326,7 @@ public func RejectConstruction(x, y, builder)
                 func Passed(value) { return GetIndexOf(1, value); }
                 func Entry(value) { return GetIndexOf(false, [value]); }
                 "#,
-            )
-            .expect("strict2 parameter probe loads");
+            ).test_value();
         for function in ["Missing", "Zero", "False"] {
             assert_eq!(
                 strict2.call(function, &[]).expect("nil array is accepted"),
@@ -2445,8 +2359,7 @@ public func RejectConstruction(x, y, builder)
             .load_script(
                 "#strict 3\nfunc Zero() { return GetIndexOf(1, 0); }\n\
                  func Passed(value) { return GetIndexOf(1, value); }",
-            )
-            .expect("strict3 parameter probe loads");
+            ).test_value();
         assert!(strict3
             .call("Zero", &[])
             .expect_err("strict3 retains typed zero")
@@ -2467,10 +2380,10 @@ public func RejectConstruction(x, y, builder)
         let subscriber = Registry::default().with(layer);
         subscriber::with_default(subscriber, || {
             let args = [Value::String("Log %02d".into()), Value::Int(3)];
-            let result = log_message(&args).expect("Log succeeds");
+            let result = log_message(&args).test_value();
             assert_eq!(result, Value::Nil);
         });
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.level, Level::INFO);
@@ -2485,10 +2398,10 @@ public func RejectConstruction(x, y, builder)
         let subscriber = Registry::default().with(layer);
         subscriber::with_default(subscriber, || {
             let args = [Value::String("Debug %d".into()), Value::Int(42)];
-            let result = debug_log_message(&args).expect("DebugLog succeeds");
+            let result = debug_log_message(&args).test_value();
             assert_eq!(result, Value::Nil);
         });
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.level, Level::DEBUG);
@@ -2513,8 +2426,7 @@ public func RejectConstruction(x, y, builder)
                     return [result, 7];
                 }
                 "#,
-            )
-            .expect("Log return probe compiles");
+            ).test_value();
 
         assert_eq!(
             script.call("Probe", &[]).expect("Log return probe runs"),
@@ -2527,8 +2439,7 @@ public func RejectConstruction(x, y, builder)
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
         script
-            .load_script("#strict 3\nfunc Probe() { return StartCallTrace(); }")
-            .expect("StartCallTrace probe compiles");
+            .load_script("#strict 3\nfunc Probe() { return StartCallTrace(); }").test_value();
 
         assert_eq!(
             script.call("Probe", &[]).expect("StartCallTrace executes"),
@@ -2547,8 +2458,7 @@ public func RejectConstruction(x, y, builder)
                  func Outer() { return Inner(); }\n\
                  func Inner() { return 7; }\n\
                  func Untraced() { return 8; }",
-            )
-            .expect("call-trace probes compile");
+            ).test_value();
         let records = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
 
@@ -2565,7 +2475,7 @@ public func RejectConstruction(x, y, builder)
             );
         });
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         assert!(records.iter().all(|record| record.level == Level::INFO));
         assert!(records
             .iter()
@@ -2600,8 +2510,7 @@ public func RejectConstruction(x, y, builder)
                  func Helper() { return 7; }\n\
                  func EvalProfileFail() { return eval(\"ProfilerDelay() || Missing()\"); }\n\
                  func EndProfile() { return StopScriptProfiler(); }",
-            )
-            .expect("DirectExec diagnostic probes compile");
+            ).test_value();
 
         let records = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
@@ -2612,8 +2521,7 @@ public func RejectConstruction(x, y, builder)
                     &HashMap::new(),
                     Value::Nil,
                     "console script",
-                )
-                .expect("traced DirectExec succeeds");
+                ).test_value();
             assert_eq!(value, Value::Int(7));
             assert_eq!(
                 script.call("Helper", &[]).expect("later call succeeds"),
@@ -2629,8 +2537,7 @@ public func RejectConstruction(x, y, builder)
                         &HashMap::new(),
                         Value::Nil,
                         context,
-                    )
-                    .expect("profiled DirectExec succeeds");
+                    ).test_value();
                 assert_eq!(value, Value::Int(1));
             }
             assert!(
@@ -2663,7 +2570,7 @@ public func RejectConstruction(x, y, builder)
             );
         });
 
-        let records = records.lock().unwrap();
+        let records = records.lock().test_value();
         let trace = records
             .iter()
             .filter(|record| record.target == "clonk-script-trace")
@@ -2688,8 +2595,7 @@ public func RejectConstruction(x, y, builder)
             .split_once("ms\t")
             .expect("native profiler row format")
             .0
-            .parse::<u128>()
-            .expect("native profiler duration");
+            .parse::<u128>().test_value();
         assert!(
             elapsed_ms >= 9,
             "success and swallowed-error DirectExec calls all contribute"
@@ -2710,14 +2616,13 @@ public func RejectConstruction(x, y, builder)
                  func NestedFail() { StartCallTrace(); return eval(\"eval(\\\"Missing()\\\")\"); }\n\
                  func ParseFail() { StartCallTrace(); return eval(\"(\"); }\n\
                  func GlobalEval() { StartCallTrace(); return global->eval(\"1\"); }",
-            )
-            .expect("eval diagnostic probes compile");
+            ).test_value();
 
         let records = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
         subscriber::with_default(subscriber, || {
             let take_trace = || {
-                let mut records = records.lock().unwrap();
+                let mut records = records.lock().test_value();
                 let trace = records
                     .iter()
                     .filter(|record| record.target == "clonk-script-trace")
@@ -2823,7 +2728,7 @@ public func RejectConstruction(x, y, builder)
         script.register_host_function("CaptureDirectTrace", move |_| {
             let direct_trace = Arc::clone(&direct_trace_sink);
             clonk_script::start_call_trace(move |message| {
-                direct_trace.lock().unwrap().push(message.to_string());
+                direct_trace.lock().test_value().push(message.to_string());
             });
             Ok(Value::Nil)
         });
@@ -2835,8 +2740,7 @@ public func RejectConstruction(x, y, builder)
                  func DefinitionFrame() { return eval(\"CaptureFrames()\"); }\n\
                  func DefinitionThroughEval() { return eval(\"NestedDefinitionFrame()\"); }\n\
                  func ProbeGlobal() { return global->GlobalFrame(); }",
-            )
-            .expect("stack-display host compiles");
+            ).test_value();
 
         let (frames, _) = with_effect_context(
             Some(object_host_context_with_physical_energy(100, 100).with_definition_id("Clonk")),
@@ -2852,8 +2756,7 @@ public func RejectConstruction(x, y, builder)
                 )
             },
         )
-        .0
-        .expect("nested DirectExec stack capture succeeds");
+        .0.test_value();
         assert_eq!(
             frames,
             Value::Array(vec![
@@ -2917,8 +2820,7 @@ public func RejectConstruction(x, y, builder)
                 )
             },
         )
-        .0
-        .expect("object-return DirectExec succeeds");
+        .0.test_value();
         assert_eq!(returned_object, Value::Object(1));
         assert_eq!(
             *direct_trace.lock().unwrap(),
@@ -2965,9 +2867,8 @@ public func RejectConstruction(x, y, builder)
                 &HashMap::new(),
                 Value::Nil,
                 "console script",
-            )
-            .expect("target-independent DirectExec profiling succeeds");
-        let entries = clonk_script::stop_script_profiler().expect("profiler was active");
+            ).test_value();
+        let entries = clonk_script::stop_script_profiler().test_value();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].direct_exec);
         assert_eq!(entries[0].function, "Direct exec");
@@ -2980,13 +2881,11 @@ public func RejectConstruction(x, y, builder)
                 &HashMap::new(),
                 Value::Nil,
                 "internal script",
-            )
-            .expect("profiling can start inside DirectExec");
-        let entries = clonk_script::stop_script_profiler().expect("inner profiler remains active");
+            ).test_value();
+        let entries = clonk_script::stop_script_profiler().test_value();
         let direct = entries
             .iter()
-            .find(|entry| entry.direct_exec)
-            .expect("active DirectExec starts timing at profiler start");
+            .find(|entry| entry.direct_exec).test_value();
         assert!(direct.elapsed >= std::time::Duration::from_millis(3));
 
         clonk_script::start_script_profiler(None);
@@ -3014,8 +2913,7 @@ public func RejectConstruction(x, y, builder)
                 Some(3),
                 "ObjectMenuValue",
                 false,
-            )
-            .expect("Rust-only expression adapter executes");
+            ).test_value();
         assert!(
             clonk_script::stop_script_profiler()
                 .expect("adapter profiler was active")
@@ -3043,8 +2941,7 @@ public func RejectConstruction(x, y, builder)
                  func StartKnown() { return StartScriptProfiler(GOOD); }\n\
                  func StartUnknown() { return StartScriptProfiler(MISS); }\n\
                  func Stop() { return StopScriptProfiler(); }",
-            )
-            .expect("script-profiler probes compile");
+            ).test_value();
         let script = Arc::new(script);
         assert_eq!(
             script
@@ -3091,5 +2988,5 @@ public func RejectConstruction(x, y, builder)
             );
             Ok::<_, RuntimeError>(())
         });
-        result.expect("script-profiler builtins execute");
+        result.test_value();
     }

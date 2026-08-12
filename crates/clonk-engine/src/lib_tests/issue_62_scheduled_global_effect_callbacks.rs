@@ -1,7 +1,7 @@
 use super::*;
 
 fn dispatch_scheduled_global_timer(engine: &Engine, effect: &EffectState) -> Option<Value> {
-    dispatch_global_effect_callback(
+    crate::TestValueExt::test_value(dispatch_global_effect_callback(
         effect,
         "Timer",
         "FxTimer",
@@ -14,8 +14,7 @@ fn dispatch_scheduled_global_timer(engine: &Engine, effect: &EffectState) -> Opt
         engine.host_world_context(),
         engine.game_over_triggered,
         engine.audio_registry.clone(),
-    )
-    .expect("pre-strict3 scheduled callback warns and continues")
+    ))
     .3
 }
 
@@ -40,29 +39,25 @@ fn scheduled_global_command_target_local_callback_keeps_pre_strict3_effect_numbe
     // conversion warns rather than replacing that unconvertible value
     // (src/C4AulExec.cpp:1364-1397,1610-1627,1638-1656).
     let mut engine = Engine::new();
-    engine
-        .register_script_definition(
-            "SGLC",
-            "Scheduled-global local callback probe",
-            r#"#strict 2
-func FxGlobalLocalTimer(target, object declared_but_unused, int time)
-{
-  return(declared_but_unused);
-}
-"#,
-        )
-        .expect("scheduled-global callback definition registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("SGLC"))
-        .expect("scheduled-global command target spawns");
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "SGLC",
+        "Scheduled-global local callback probe",
+        r#"#strict 2
+    func FxGlobalLocalTimer(target, object declared_but_unused, int time)
+    {
+      return(declared_but_unused);
+    }
+    "#,
+    ));
+    let target = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("SGLC")));
     let mut effect = EffectState::new("GlobalLocal")
         .with_interval(1)
-        .with_command_target(Some(
-            i32::try_from(target.as_u64()).expect("object id fits C4 int"),
-        ));
+        .with_command_target(Some(crate::TestValueExt::test_value(i32::try_from(
+            target.as_u64(),
+        ))));
     effect.number = 47;
 
-    let (_, _, _, result) = dispatch_global_effect_callback(
+    let (_, _, _, result) = crate::TestValueExt::test_value(dispatch_global_effect_callback(
         &effect,
         "Timer",
         "FxTimer",
@@ -75,8 +70,7 @@ func FxGlobalLocalTimer(target, object declared_but_unused, int time)
         engine.host_world_context(),
         engine.game_over_triggered,
         engine.audio_registry.clone(),
-    )
-    .expect("pre-strict3 scheduled callback warns and continues");
+    ));
 
     assert!(
         result == Some(Value::Int(47)),
@@ -93,47 +87,41 @@ fn scheduled_global_dispatcher_marks_each_callback_carrier_once() {
     // warning-only compatibility at its own call boundary
     // (src/C4AulExec.cpp:1364-1397,1610-1627,1638-1656).
     let mut engine = Engine::new();
-    engine
-        .register_script_definition(
-            "TGCB",
-            "Scheduled-global command target carrier",
-            r#"#strict 2
-func FxTargetLocalTimer(target, object declared_but_unused, int time)
-{
-  return(declared_but_unused);
-}
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "TGCB",
+        "Scheduled-global command target carrier",
+        r#"#strict 2
+    func FxTargetLocalTimer(target, object declared_but_unused, int time)
+    {
+      return(declared_but_unused);
+    }
 
-global func FxTargetGlobalTimer(target, object declared_but_unused, int time)
-{
-  return(declared_but_unused);
-}
-"#,
-        )
-        .expect("command-target carrier registers");
-    engine
-        .register_script_definition(
-            "IGLC",
-            "Scheduled-global command-ID local carrier",
-            r#"#strict 2
-func FxIdLocalTimer(target, object declared_but_unused, int time)
-{
-  return(declared_but_unused);
-}
-"#,
-        )
-        .expect("command-ID local carrier registers");
-    engine
-        .register_script_definition(
-            "IGLB",
-            "Scheduled-global command-ID global carrier",
-            r#"#strict 2
-global func FxIdGlobalTimer(target, object declared_but_unused, int time)
-{
-  return(declared_but_unused);
-}
-"#,
-        )
-        .expect("command-ID global carrier registers");
+    global func FxTargetGlobalTimer(target, object declared_but_unused, int time)
+    {
+      return(declared_but_unused);
+    }
+    "#,
+    ));
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "IGLC",
+        "Scheduled-global command-ID local carrier",
+        r#"#strict 2
+    func FxIdLocalTimer(target, object declared_but_unused, int time)
+    {
+      return(declared_but_unused);
+    }
+    "#,
+    ));
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "IGLB",
+        "Scheduled-global command-ID global carrier",
+        r#"#strict 2
+    global func FxIdGlobalTimer(target, object declared_but_unused, int time)
+    {
+      return(declared_but_unused);
+    }
+    "#,
+    ));
     assert_eq!(
         engine.install_additional_global_scripts(&[(
             "Issue62ScheduledGlobal.c".to_string(),
@@ -147,10 +135,10 @@ global func FxEngineGlobalTimer(target, object declared_but_unused, int time)
         )]),
         1
     );
-    let target = engine
-        .spawn_object(SpawnConfig::new("TGCB"))
-        .expect("command target spawns");
-    let command_target = Some(i32::try_from(target.as_u64()).expect("object id fits C4 int"));
+    let target = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("TGCB")));
+    let command_target = Some(crate::TestValueExt::test_value(i32::try_from(
+        target.as_u64(),
+    )));
 
     for effect in [
         scheduled_global_effect("TargetLocal", command_target, None),
@@ -200,9 +188,7 @@ global func ReadStrictScheduledRuns()
     effect.number = 1;
     engine.global_effects.push(effect);
 
-    engine
-        .tick_without_snapshot()
-        .expect("strict-3 scheduled callback is fail-safe to the tick");
+    crate::TestValueExt::test_value(engine.tick_without_snapshot());
     assert_eq!(
         engine
             .call_engine_global_function("ReadStrictScheduledRuns", &[])

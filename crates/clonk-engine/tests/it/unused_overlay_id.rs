@@ -6,12 +6,11 @@ use clonk_script::Value;
 #[test]
 fn get_unused_overlay_id_is_registered_and_matches_search_semantics() {
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_script(
-                "OVLY",
-                "Overlay ID probe",
-                r#"
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_script(
+            "OVLY",
+            "Overlay ID probe",
+            r#"
                 #strict
 
                 public func Probe(object empty)
@@ -35,19 +34,15 @@ fn get_unused_overlay_id_is_registered_and_matches_search_semantics() {
                     return GetUnusedOverlayID(1, 0);
                 }
                 "#,
-            )
-            .expect("overlay ID probe compiles"),
-        )
-        .expect("overlay ID probe registers");
+        )),
+    ));
 
-    let caller = engine
-        .spawn_object(SpawnConfig::new("OVLY"))
-        .expect("caller spawns");
-    let empty = engine
-        .spawn_object(SpawnConfig::new("OVLY"))
-        .expect("empty target spawns");
-    engine
-        .apply_object_update(
+    let caller =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("OVLY")));
+    let empty =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("OVLY")));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             caller,
             ObjectUpdate {
                 graphics_overlays: Some(
@@ -58,12 +53,10 @@ fn get_unused_overlay_id_is_registered_and_matches_search_semantics() {
                 ),
                 ..ObjectUpdate::default()
             },
-        )
-        .expect("occupied overlay slots install");
+        ),
+    );
 
-    let caller_index = engine
-        .find_object_index(caller)
-        .expect("caller remains present");
+    let caller_index = crate::support::TestValueExt::test_value(engine.find_object_index(caller));
     assert_eq!(
         engine
             .call_object_function(caller_index, "Probe", vec![Value::Object(empty.as_u64())],)

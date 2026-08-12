@@ -1,4 +1,5 @@
 use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
+use crate::support::EngineTestExt;
 use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{SpawnConfig, Vector2};
 use clonk_script::Value;
@@ -51,31 +52,23 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline(
         (20, "AMPO", Some("BanPoison"), None),
         (40, "AMMA", None, Some("Be")),
     ] {
-        let clonk = engine
-            .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(100 + offset, 100)))
-            .expect("the shipped Jungle Clonk spawns");
-        let amulet = engine
-            .spawn_object(
-                SpawnConfig::new("AMUL")
-                    .with_position(Vector2::new(100 + offset, 100))
-                    .with_container(clonk),
-            )
-            .expect("the shipped base amulet spawns in the Clonk");
-        let index = engine
-            .find_object_index(amulet)
-            .expect("the base amulet remains live");
+        let clonk = engine.spawn_test_object(
+            SpawnConfig::new("JCLK").with_position(Vector2::new(100 + offset, 100)),
+        );
+        let amulet = engine.spawn_test_object(
+            SpawnConfig::new("AMUL")
+                .with_position(Vector2::new(100 + offset, 100))
+                .with_container(clonk),
+        );
+        let index = engine.test_object_index(amulet);
 
-        engine
-            .call_object_function(
-                index,
-                "Upgrade",
-                vec![Value::C4Id(upgraded.into()), Value::Object(clonk.as_u64())],
-            )
-            .expect("the shipped Upgrade callback completes");
+        engine.call_test_object_function(
+            index,
+            "Upgrade",
+            vec![Value::C4Id(upgraded.into()), Value::Object(clonk.as_u64())],
+        );
 
-        let amulet = engine
-            .object_snapshot(amulet)
-            .expect("the upgraded amulet remains live");
+        let amulet = engine.test_object_snapshot(amulet);
         assert_eq!(amulet.definition_id, upgraded);
         assert_eq!(
             amulet.container,
@@ -90,9 +83,7 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline(
             assert_eq!(amulet.local_vars.get("iSelection"), Some(&Value::Nil));
         }
 
-        let clonk = engine
-            .object_snapshot(clonk)
-            .expect("the amulet carrier remains live");
+        let clonk = engine.test_object_snapshot(clonk);
         assert_eq!(
             clonk.action.name, "Magic",
             "Upgrade performs the shipped Clonk magic action"
@@ -111,9 +102,7 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline(
             assert_eq!(entry.command_id.as_deref(), Some(upgraded));
         }
         if upgraded == "AMPH" {
-            let physical = clonk
-                .temporary_physical
-                .expect("PhysicalBless starts synchronously");
+            let physical = crate::support::TestValueExt::test_value(clonk.temporary_physical);
             assert_eq!(physical.can_hangle, 1);
             assert_eq!(physical.dig, 50_000);
             assert_eq!(physical.walk, 80_000);
@@ -154,59 +143,38 @@ fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline(
     // FarWorlds.c4d/Jungle.c4d/Items.c4d/Tools.c4d/Amulet.c4d/Immun.c4d/
     // Script.c:20-31; src/C4Effect.cpp:97-116,271-285).
     let mut engine = prepared.instantiate();
-    let protected = engine
-        .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(100, 100)))
-        .expect("the protected shipped Jungle Clonk spawns");
-    let unprotected = engine
-        .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(140, 100)))
-        .expect("the control shipped Jungle Clonk spawns");
-    let amulet = engine
-        .spawn_object(
-            SpawnConfig::new("AMUL")
-                .with_position(Vector2::new(100, 100))
-                .with_container(protected),
-        )
-        .expect("the shipped base amulet spawns in the protected Clonk");
-    let amulet_index = engine
-        .find_object_index(amulet)
-        .expect("the shipped base amulet remains live");
-    engine
-        .call_object_function(
-            amulet_index,
-            "Upgrade",
-            vec![
-                Value::C4Id("AMPO".into()),
-                Value::Object(protected.as_u64()),
-            ],
-        )
-        .expect("the shipped poison-immunity Upgrade completes");
+    let protected =
+        engine.spawn_test_object(SpawnConfig::new("JCLK").with_position(Vector2::new(100, 100)));
+    let unprotected =
+        engine.spawn_test_object(SpawnConfig::new("JCLK").with_position(Vector2::new(140, 100)));
+    let amulet = engine.spawn_test_object(
+        SpawnConfig::new("AMUL")
+            .with_position(Vector2::new(100, 100))
+            .with_container(protected),
+    );
+    let amulet_index = engine.test_object_index(amulet);
+    engine.call_test_object_function(
+        amulet_index,
+        "Upgrade",
+        vec![
+            Value::C4Id("AMPO".into()),
+            Value::Object(protected.as_u64()),
+        ],
+    );
 
     for target in [protected, unprotected] {
-        let arrow = engine
-            .spawn_object(
-                SpawnConfig::new("PARW").with_position(
-                    engine
-                        .object_snapshot(target)
-                        .expect("the arrow target remains live")
-                        .position,
-                ),
-            )
-            .expect("a fresh shipped poison arrow spawns");
-        let arrow_index = engine
-            .find_object_index(arrow)
-            .expect("the fresh poison arrow remains live");
-        engine
-            .call_object_function(
-                arrow_index,
-                "HitTarget",
-                vec![Value::Object(target.as_u64()), Value::Nil],
-            )
-            .expect("the shipped poison-arrow hit callback completes");
+        let arrow = engine.spawn_test_object(
+            SpawnConfig::new("PARW").with_position(engine.test_object_snapshot(target).position),
+        );
+        let arrow_index = engine.test_object_index(arrow);
+        engine.call_test_object_function(
+            arrow_index,
+            "HitTarget",
+            vec![Value::Object(target.as_u64()), Value::Nil],
+        );
     }
 
-    let protected_snapshot = engine
-        .object_snapshot(protected)
-        .expect("the protected Jungle Clonk remains live");
+    let protected_snapshot = engine.test_object_snapshot(protected);
     assert!(
         protected_snapshot
             .effects
@@ -215,9 +183,7 @@ fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline(
         "the AMPO protection must survive the rejected curse"
     );
 
-    let unprotected_snapshot = engine
-        .object_snapshot(unprotected)
-        .expect("the control Jungle Clonk remains live");
+    let unprotected_snapshot = engine.test_object_snapshot(unprotected);
     assert!(
         unprotected_snapshot
             .effects
@@ -237,12 +203,9 @@ fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline(
         .effects
         .iter()
         .any(|effect| effect.name == "PoisonCurse" && effect.priority == 0));
-    engine
-        .tick_without_snapshot()
-        .expect("the protected Clonk's next Execute cleans the dead curse");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(engine
-        .object_snapshot(protected)
-        .expect("the protected Jungle Clonk remains live")
+        .test_object_snapshot(protected)
         .effects
         .iter()
         .all(|effect| effect.name != "PoisonCurse"));

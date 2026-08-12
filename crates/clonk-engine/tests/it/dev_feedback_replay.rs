@@ -20,7 +20,7 @@ fn replay_fixture(name: &str) -> PathBuf {
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    crate::support::TestValueExt::test_value(LOCK.get_or_init(|| Mutex::new(())).lock())
 }
 
 struct EnvRestore {
@@ -84,15 +84,12 @@ fn synthetic_replay() -> ScenarioReplayV1 {
 
 #[test]
 fn replay_hash_version_defaults_to_legacy_and_rejects_unknown_versions() {
-    let mut value = serde_json::to_value(synthetic_replay()).expect("replay serializes");
-    value
-        .as_object_mut()
-        .expect("replay is an object")
-        .remove("snapshot_hash_version");
-    let legacy = ScenarioReplayV1::from_json(
-        &serde_json::to_string(&value).expect("legacy replay serializes"),
-    )
-    .expect("legacy replay remains readable");
+    let mut value =
+        crate::support::TestValueExt::test_value(serde_json::to_value(synthetic_replay()));
+    crate::support::TestValueExt::test_value(value.as_object_mut()).remove("snapshot_hash_version");
+    let legacy = crate::support::TestValueExt::test_value(ScenarioReplayV1::from_json(
+        &crate::support::TestValueExt::test_value(serde_json::to_string(&value)),
+    ));
     assert_eq!(legacy.snapshot_hash_version, 1);
 
     value["snapshot_hash_version"] = serde_json::json!(SNAPSHOT_HASH_VERSION + 1);
@@ -124,7 +121,7 @@ fn snapshot_diff_has_stable_structured_paths() {
     actual.frame = 4;
     actual.game_time = 2;
 
-    let diff = snapshot_diff(&expected, &actual, 16).expect("snapshots differ");
+    let diff = crate::support::TestValueExt::test_value(snapshot_diff(&expected, &actual, 16));
     assert_eq!(
         diff.entries
             .iter()
@@ -210,7 +207,8 @@ fn real_scenario_replays_repeat_with_native_group_order() -> Result<(), Box<dyn 
                 .collect::<Vec<_>>(),
             "fixture {name}"
         );
-        let final_hash = &report.checkpoints.last().unwrap().snapshot_hash;
+        let final_hash =
+            &crate::support::TestValueExt::test_value(report.checkpoints.last()).snapshot_hash;
         assert!(
             report
                 .metrics
@@ -255,12 +253,12 @@ fn virtual_player_timeout_writes_replay_bundle_after_held_key_release() -> Resul
         .hold_until(COM_RIGHT, "never reached", 2, |_| false)
         .expect_err("the synthetic milestone is impossible");
     assert!(matches!(error, VirtualPlayerError::Timeout { .. }));
-    let inputs = player.recorded_inputs().expect("input tape enabled");
+    let inputs = crate::support::TestValueExt::test_value(player.recorded_inputs());
     assert_eq!(inputs.len(), 2);
     assert_eq!(inputs[0].command, COM_RIGHT);
     assert_eq!(inputs[1].command, COM_RIGHT + 16);
 
-    let bundle = error.artifact_dir().expect("timeout bundle path");
+    let bundle = crate::support::TestValueExt::test_value(error.artifact_dir());
     assert!(bundle.starts_with(temp.path()));
     for file in [
         "replay.json",
@@ -292,7 +290,7 @@ fn passing_replay_is_retained_with_metrics_when_requested() -> Result<(), Box<dy
 
     let report =
         run_replay_twice_with_policy(&replay, "retained-pass", ReplayCheckpointPolicy::SameHost)?;
-    let bundle = report.artifact_dir.expect("passing bundle retained");
+    let bundle = crate::support::TestValueExt::test_value(report.artifact_dir);
     for file in [
         "replay.json",
         "replay-metrics.json",
@@ -321,8 +319,9 @@ fn passing_replay_is_retained_with_metrics_when_requested() -> Result<(), Box<dy
         serde_json::from_str(&fs::read_to_string(bundle.join("failure.json"))?)?;
     assert_eq!(failure["kind"], "same_host_passed");
     let logs = fs::read_to_string(bundle.join("logs.ndjson"))?;
-    let log: serde_json::Value =
-        serde_json::from_str(logs.lines().next().expect("retained bundle log"))?;
+    let log: serde_json::Value = serde_json::from_str(crate::support::TestValueExt::test_value(
+        logs.lines().next(),
+    ))?;
     assert_eq!(log["level"], "info");
     let readme = fs::read_to_string(bundle.join("README.txt"))?;
     assert!(readme.contains("LC_REPLAY_PATH=/path/to/artifact/replay.json"));
@@ -343,14 +342,14 @@ fn stale_checkpoint_writes_before_failing_diff_and_metrics() -> Result<(), Box<d
     )?
     .checkpoints;
     let current_hash = std::mem::replace(
-        &mut replay.checkpoints.first_mut().unwrap().snapshot_hash,
+        &mut crate::support::TestValueExt::test_value(replay.checkpoints.first_mut()).snapshot_hash,
         "0000000000000000".to_owned(),
     );
 
     let error = run_replay_twice(&replay, "stale-checkpoint")
         .expect_err("a stale committed checkpoint must fail");
     assert!(error.to_string().contains("checkpoint hash mismatch"));
-    let bundle = error.artifact_dir().expect("failure bundle retained");
+    let bundle = crate::support::TestValueExt::test_value(error.artifact_dir());
     for file in [
         "replay.json",
         "replay-metrics.json",

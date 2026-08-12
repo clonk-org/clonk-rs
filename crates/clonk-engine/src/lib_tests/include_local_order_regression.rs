@@ -8,34 +8,26 @@ fn sibling_include_local_names_follow_cpp_push_front_order() {
     // (C4AulParse.cpp:1456; C4AulLink.cpp:84-94,145-157;
     // C4ValueMap.cpp:406-427).
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_script("INCA", "A", "local a0, shared, a1;").expect("A compiles"),
-        )
-        .expect("A registers");
-    engine
-        .register_definition(
-            Definition::from_script("INCB", "B", "local b0, shared, b1;").expect("B compiles"),
-        )
-        .expect("B registers");
-    engine
-        .register_definition(
-            Definition::from_script(
-                "CHLD",
-                "Child",
-                "#include INCA\n#include INCB\nlocal c0, c1;",
-            )
-            .expect("child compiles"),
-        )
-        .expect("child registers");
+    crate::TestValueExt::test_value(engine.register_definition(test_definition(
+        "INCA",
+        "A",
+        "local a0, shared, a1;",
+    )));
+    crate::TestValueExt::test_value(engine.register_definition(test_definition(
+        "INCB",
+        "B",
+        "local b0, shared, b1;",
+    )));
+    crate::TestValueExt::test_value(engine.register_definition(test_definition(
+        "CHLD",
+        "Child",
+        "#include INCA\n#include INCB\nlocal c0, c1;",
+    )));
 
-    engine.resolve_includes().expect("includes resolve");
-    engine.resolve_includes().expect("repeat resolve is stable");
+    crate::TestValueExt::test_value(engine.resolve_includes());
+    crate::TestValueExt::test_value(engine.resolve_includes());
 
-    let names = engine
-        .definitions
-        .get("CHLD")
-        .expect("child definition exists")
+    let names = crate::TestValueExt::test_value(engine.definitions.get("CHLD"))
         .script
         .local_variable_names()
         .collect::<Vec<_>>();

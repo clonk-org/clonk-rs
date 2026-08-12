@@ -35,9 +35,7 @@ public func NamespacedObjectCall(object target)
 "#;
 
 fn call(engine: &mut Engine, object_id: ObjectId, function: &str, args: Vec<Value>) -> Value {
-    let index = engine
-        .find_object_index(object_id)
-        .expect("caller object remains active");
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object_id));
     engine
         .call_object_function(index, function, args)
         .unwrap_or_else(|error| panic!("{function} succeeds: {error}"))
@@ -45,25 +43,28 @@ fn call(engine: &mut Engine, object_id: ObjectId, function: &str, args: Vec<Valu
 
 fn fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("TARG", "NONSTRICT typed callee", TYPED_CALLEE)
-        .expect("callee registers");
-    engine
-        .register_script_definition("STRC", "strict-3 caller", STRICT_CALLER)
-        .expect("strict caller registers");
-    engine
-        .register_script_definition("NSTR", "NONSTRICT caller", NONSTRICT_CALLER)
-        .expect("NONSTRICT caller registers");
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "TARG",
+        "NONSTRICT typed callee",
+        TYPED_CALLEE,
+    ));
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "STRC",
+        "strict-3 caller",
+        STRICT_CALLER,
+    ));
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "NSTR",
+        "NONSTRICT caller",
+        NONSTRICT_CALLER,
+    ));
 
-    let strict = engine
-        .spawn_object(SpawnConfig::new("STRC"))
-        .expect("strict caller spawns");
-    let nonstrict = engine
-        .spawn_object(SpawnConfig::new("NSTR"))
-        .expect("NONSTRICT caller spawns");
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("namespaced target spawns");
+    let strict =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("STRC")));
+    let nonstrict =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("NSTR")));
+    let target =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("TARG")));
     (engine, strict, nonstrict, target)
 }
 

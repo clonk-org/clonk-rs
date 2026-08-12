@@ -22,7 +22,7 @@ where
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
         if let Some(message) = visitor.message {
-            self.messages.lock().unwrap().push(message);
+            crate::TestValueExt::test_value(self.messages.lock()).push(message);
         }
     }
 }
@@ -52,14 +52,12 @@ fn capture_warnings(run: impl FnOnce()) -> Vec<String> {
         messages: Arc::clone(&messages),
     });
     subscriber::with_default(subscriber, run);
-    let captured = messages.lock().unwrap().clone();
+    let captured = crate::TestValueExt::test_value(messages.lock()).clone();
     captured
 }
 
 fn register(engine: &mut Engine, id: &str, source: &str) {
-    engine
-        .register_script_definition(id, id, source)
-        .expect("fixture definition registers");
+    crate::TestValueExt::test_value(engine.register_script_definition(id, id, source));
 }
 
 #[test]
@@ -73,7 +71,7 @@ fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() 
                 name,
                 "MissingStart" | "MissingPhase" | "MissingEnd" | "MissingAbort" | "MissingTimer"
             ) {
-                calls.lock().unwrap().push(name.to_string());
+                crate::TestValueExt::test_value(calls.lock()).push(name.to_string());
             }
         });
     }
@@ -85,12 +83,11 @@ fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() 
         .with_phase_call("MissingPhase")
         .with_end_call("MissingEnd")
         .with_abort_call("MissingAbort");
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "CBLK",
         "Callback linker",
         "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
-    )
-    .expect("missing-callback fixture compiles");
+    );
     definition.set_c4_callback_convention(true);
     definition.set_debugger_hooks(hooks);
     definition.configure_actions(None, HashMap::from([("Probe".to_string(), probe.clone())]));
@@ -99,9 +96,7 @@ fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() 
     definition.set_timer_call(Some("MissingTimer".to_string()));
 
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("callback definition registers");
+    crate::TestValueExt::test_value(engine.register_definition(definition));
     engine.resolve_appends();
     let expected = [
         "Error getting Action Probe: StartCall function 'MissingStart'",
@@ -127,27 +122,21 @@ private func MissingTimer() { return 1; }
 
     let mut action = ActionState::new("Probe");
     action.act_map_index = Some(0);
-    let object = engine
-        .spawn_object(
+    let object = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("CBLK")
                 .with_action(action)
                 .with_loaded(true),
-        )
-        .expect("callback fixture spawns");
-    let index = engine.find_object_index(object).expect("fixture exists");
+        ),
+    );
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
 
     // Make every name dynamically resolvable without touching the base
     // script or relinking. C++ must keep using its five cached nulls.
     let injected =
-        clonk_script::Script::compile_c4_string(valid_source).expect("injected callbacks compile");
-    Arc::make_mut(
-        &mut engine
-            .definitions
-            .get_mut("CBLK")
-            .expect("callback definition exists")
-            .script,
-    )
-    .add_script(injected);
+        crate::TestValueExt::test_value(clonk_script::Script::compile_c4_string(valid_source));
+    Arc::make_mut(&mut crate::TestValueExt::test_value(engine.definitions.get_mut("CBLK")).script)
+        .add_script(injected);
     engine.invalidate_host_definition_tables();
     assert!(engine
         .definitions
@@ -155,24 +144,22 @@ private func MissingTimer() { return 1; }
         .expect("callback definition exists")
         .has_function("MissingTimer"));
     let runtime_warnings = capture_warnings(|| {
-        engine
-            .call_object_function(index, "ExerciseSetAction", Vec::new())
-            .expect("missing synchronous Start/Abort callbacks are no-ops");
-        engine
-            .tick_without_snapshot()
-            .expect("cached missing PhaseCall and TimerCall remain no-ops");
-        engine
-            .invoke_action_callback(
-                index,
-                ActionCallbackKind::End,
-                "Probe",
-                Some(0),
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect("a cached missing EndCall is a no-op");
+        crate::TestValueExt::test_value(engine.call_object_function(
+            index,
+            "ExerciseSetAction",
+            Vec::new(),
+        ));
+        crate::TestValueExt::test_value(engine.tick_without_snapshot());
+        crate::TestValueExt::test_value(engine.invoke_action_callback(
+            index,
+            ActionCallbackKind::End,
+            "Probe",
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+        ));
     });
     assert!(runtime_warnings.is_empty());
     assert!(calls.lock().unwrap().is_empty());
@@ -196,18 +183,11 @@ private func MissingTimer() { return 1; }
     // Delete all callback names from the live lookup table without a
     // relink. The retained bodies must still run, including compat's
     // synchronous SetAction path.
-    let driver_only = clonk_script::Script::compile_c4_string(
+    let driver_only = crate::TestValueExt::test_value(clonk_script::Script::compile_c4_string(
         "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
-    )
-    .expect("driver-only replacement compiles");
-    Arc::make_mut(
-        &mut engine
-            .definitions
-            .get_mut("CBLK")
-            .expect("callback definition exists")
-            .script,
-    )
-    .replace_script(driver_only, false);
+    ));
+    Arc::make_mut(&mut crate::TestValueExt::test_value(engine.definitions.get_mut("CBLK")).script)
+        .replace_script(driver_only, false);
     engine.invalidate_host_definition_tables();
     assert!(!engine
         .definitions
@@ -215,24 +195,22 @@ private func MissingTimer() { return 1; }
         .expect("callback definition exists")
         .has_function("MissingStart"));
 
-    engine
-        .call_object_function(index, "ExerciseSetAction", Vec::new())
-        .expect("linked synchronous Start/Abort callbacks dispatch");
-    engine
-        .tick_without_snapshot()
-        .expect("linked private PhaseCall and TimerCall dispatch");
-    engine
-        .invoke_action_callback(
-            index,
-            ActionCallbackKind::End,
-            "Probe",
-            Some(0),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("linked private EndCall dispatches");
+    crate::TestValueExt::test_value(engine.call_object_function(
+        index,
+        "ExerciseSetAction",
+        Vec::new(),
+    ));
+    crate::TestValueExt::test_value(engine.tick_without_snapshot());
+    crate::TestValueExt::test_value(engine.invoke_action_callback(
+        index,
+        ActionCallbackKind::End,
+        "Probe",
+        Some(0),
+        None,
+        None,
+        None,
+        None,
+    ));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         [
@@ -248,38 +226,24 @@ private func MissingTimer() { return 1; }
 #[test]
 fn missing_include_warns_and_known_siblings_still_merge() {
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_script(
-                "KNWN",
-                "Known parent",
-                "public func ParentValue() { return 7; }",
-            )
-            .expect("known parent compiles"),
-        )
-        .expect("known parent registers");
-    engine
-        .register_definition(
-            Definition::from_script(
-                "CHLD",
-                "Child",
-                "#include KNWN\n#include MISS\npublic func OwnValue() { return 42; }",
-            )
-            .expect("child compiles"),
-        )
-        .expect("child registers");
+    crate::TestValueExt::test_value(engine.register_definition(test_definition(
+        "KNWN",
+        "Known parent",
+        "public func ParentValue() { return 7; }",
+    )));
+    crate::TestValueExt::test_value(engine.register_definition(test_definition(
+        "CHLD",
+        "Child",
+        "#include KNWN\n#include MISS\npublic func OwnValue() { return 42; }",
+    )));
 
     let messages = capture_warnings(|| {
-        engine
-            .resolve_includes()
-            .expect("missing include is warning-only");
+        crate::TestValueExt::test_value(engine.resolve_includes());
     });
     assert_eq!(messages, ["script to #include not found"]);
 
-    let object = engine
-        .spawn_object(SpawnConfig::new("CHLD"))
-        .expect("child spawns after linking");
-    let index = engine.find_object_index(object).expect("child exists");
+    let object = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("CHLD")));
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     assert_eq!(
         engine
             .call_object_function(index, "OwnValue", Vec::new())
@@ -379,17 +343,15 @@ fn appendto_inherited_reaches_a_function_the_target_only_includes() {
         "#strict\n#appendto DERI\nfunc Probe() { return 100 + _inherited(); }",
     );
 
-    engine.resolve_includes().expect("include resolves");
+    crate::TestValueExt::test_value(engine.resolve_includes());
     let messages = capture_warnings(|| engine.resolve_appends());
     assert!(
         messages.is_empty(),
         "unexpected link warnings: {messages:?}"
     );
 
-    let object = engine
-        .spawn_object(SpawnConfig::new("DERI"))
-        .expect("the appended definition spawns");
-    let index = engine.find_object_index(object).expect("object exists");
+    let object = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("DERI")));
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     assert_eq!(
         engine
             .call_object_function(index, "Probe", Vec::new())
@@ -413,8 +375,8 @@ fn circular_includes_follow_definition_load_order_and_warn_once() {
         }
 
         let messages = capture_warnings(|| {
-            engine.resolve_includes().expect("cycle resolves");
-            engine.resolve_includes().expect("repeat resolve is stable");
+            crate::TestValueExt::test_value(engine.resolve_includes());
+            crate::TestValueExt::test_value(engine.resolve_includes());
         });
         assert_eq!(
             messages,
@@ -447,9 +409,7 @@ fn control_description_uses_effective_function_and_preserves_empty_first_segment
             "CDCH",
             "#include CDPA\npublic func ControlUp() { [|Image=CDCH] return 1; }\npublic func ControlDown() { return 1; }",
     );
-    engine
-        .resolve_includes()
-        .expect("control descriptions link");
+    crate::TestValueExt::test_value(engine.resolve_includes());
 
     assert_eq!(
         engine.definition_control_description("CDCH", "ControlSpecial"),
@@ -491,8 +451,8 @@ fn longer_cycle_marks_the_root_resolved_for_later_backedges() {
     );
 
     let messages = capture_warnings(|| {
-        engine.resolve_includes().expect("long cycle resolves");
-        engine.resolve_includes().expect("repeat resolve is stable");
+        crate::TestValueExt::test_value(engine.resolve_includes());
+        crate::TestValueExt::test_value(engine.resolve_includes());
     });
     assert_eq!(
         messages,

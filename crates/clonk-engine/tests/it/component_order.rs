@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use clonk_engine::{
     Definition, DefinitionComponent, Engine, EngineState, ObjectId, PlayerConfig, SpawnConfig,
 };
@@ -26,12 +27,10 @@ func SeedAndReadBoolIndexes()
 
 fn engine_with_bag() -> (Engine, ObjectId) {
     let mut engine = Engine::new();
-    engine
-        .register_definition(Definition::from_script("BAG_", "Bag", SCRIPT).expect("compile"))
-        .expect("register bag");
-    let bag = engine
-        .spawn_object(SpawnConfig::new("BAG_"))
-        .expect("spawn bag");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script("BAG_", "Bag", SCRIPT),
+    ));
+    let bag = engine.spawn_test_object(SpawnConfig::new("BAG_"));
     (engine, bag)
 }
 
@@ -42,11 +41,9 @@ fn dynamic_object_components_keep_cpp_insertion_order_and_zero_entries() {
     // reads that runtime list, not DefCore order (C4IDList.cpp:38-45,85-103;
     // C4Script.cpp:2653-2709).
     let (mut engine, bag) = engine_with_bag();
-    let bag_index = engine.find_object_index(bag).expect("bag index");
+    let bag_index = engine.test_object_index(bag);
     assert_eq!(
-        engine
-            .call_object_function(bag_index, "SeedAndRead", Vec::new())
-            .expect("component script runs"),
+        engine.call_test_object_function(bag_index, "SeedAndRead", Vec::new()),
         Value::Array(vec![
             Value::C4Id("ZERO".to_string()),
             Value::C4Id("IROC".to_string()),
@@ -55,32 +52,27 @@ fn dynamic_object_components_keep_cpp_insertion_order_and_zero_entries() {
         ])
     );
 
-    let snapshot = engine.object_snapshot(bag).expect("bag snapshot");
+    let snapshot = engine.test_object_snapshot(bag);
     assert_eq!(snapshot.component_order, ["ZERO", "IROC"]);
     assert_eq!(snapshot.components.get("ZERO"), Some(&2));
     assert_eq!(snapshot.components.get("IROC"), Some(&3));
 
-    let state: EngineState = serde_json::from_str(
-        &serde_json::to_string(&engine.capture_state()).expect("component state serializes"),
-    )
-    .expect("component state deserializes");
+    let state: EngineState = crate::support::TestValueExt::test_value(serde_json::from_str(
+        &crate::support::TestValueExt::test_value(serde_json::to_string(&engine.capture_state())),
+    ));
     let (mut restored, _) = engine_with_bag();
-    restored
-        .restore_state(&state)
-        .expect("restore component list");
-    let restored = restored.object_snapshot(bag).expect("restored bag");
+    crate::support::TestValueExt::test_value(restored.restore_state(&state));
+    let restored = restored.test_object_snapshot(bag);
     assert_eq!(restored.component_order, ["ZERO", "IROC"]);
 }
 
 #[test]
 fn optional_integer_builtin_parameters_coerce_bool_to_zero_or_one() {
     let (mut engine, bag) = engine_with_bag();
-    let bag_index = engine.find_object_index(bag).expect("bag index");
+    let bag_index = engine.test_object_index(bag);
 
     assert_eq!(
-        engine
-            .call_object_function(bag_index, "SeedAndReadBoolIndexes", Vec::new())
-            .expect("bool values convert to optional integer indexes"),
+        engine.call_test_object_function(bag_index, "SeedAndReadBoolIndexes", Vec::new()),
         Value::Array(vec![
             Value::C4Id("ZERO".to_owned()),
             Value::C4Id("IROC".to_owned()),
@@ -101,8 +93,9 @@ func ReadOrder()
 }
 "#;
     let mut engine = Engine::new();
-    let mut definition =
-        Definition::from_script("ORDR", "Ordered", script).expect("definition compiles");
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "ORDR", "Ordered", script,
+    ));
     definition.set_components(vec![
         DefinitionComponent {
             id: "ZZZZ".to_owned(),
@@ -117,20 +110,15 @@ func ReadOrder()
             count: 1,
         },
     ]);
-    engine
-        .register_definition(definition.clone())
-        .expect("definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("ORDR").with_components(HashMap::from([
+    engine.register_test_definition(definition.clone());
+    let object =
+        engine.spawn_test_object(SpawnConfig::new("ORDR").with_components(HashMap::from([
             ("AAAA".to_owned(), 1),
             ("ZZZZ".to_owned(), 2),
-        ])))
-        .expect("ordered object spawns");
-    let index = engine.find_object_index(object).expect("object index");
+        ])));
+    let index = engine.test_object_index(object);
     assert_eq!(
-        engine
-            .call_object_function(index, "ReadOrder", Vec::new())
-            .expect("indexed component read succeeds"),
+        engine.call_test_object_function(index, "ReadOrder", Vec::new()),
         Value::Array(vec![
             Value::C4Id("ZZZZ".to_owned()),
             Value::C4Id("AAAA".to_owned()),
@@ -138,22 +126,14 @@ func ReadOrder()
         ])
     );
 
-    let state: EngineState = serde_json::from_str(
-        &serde_json::to_string(&engine.capture_state()).expect("ordered state serializes"),
-    )
-    .expect("ordered state deserializes");
+    let state: EngineState = crate::support::TestValueExt::test_value(serde_json::from_str(
+        &crate::support::TestValueExt::test_value(serde_json::to_string(&engine.capture_state())),
+    ));
     let mut restored = Engine::new();
-    restored
-        .register_definition(definition)
-        .expect("restore definition registers");
-    restored
-        .restore_state(&state)
-        .expect("ordered state restores");
+    restored.register_test_definition(definition);
+    crate::support::TestValueExt::test_value(restored.restore_state(&state));
     assert_eq!(
-        restored
-            .object_snapshot(object)
-            .expect("restored object exists")
-            .component_order,
+        restored.test_object_snapshot(object).component_order,
         ["ZZZZ", "AAAA", "AAAA"]
     );
 }
@@ -231,15 +211,16 @@ protected func GetCustomComponents(builder)
         ("ZERO", "Nullstoff"),
         ("EMPT", ""),
     ] {
-        engine
-            .register_definition(Definition::from_script(id, name, "").expect("component compiles"))
-            .expect("component registers");
+        engine.register_test_definition(crate::support::TestValueExt::test_value(
+            Definition::from_script(id, name, ""),
+        ));
     }
-    engine
-        .register_script_definition("BULD", "Builder", BUILDER_SCRIPT)
-        .expect("builder registers");
-    let mut static_definition =
-        Definition::from_script("SITE", "Construction Site", "").expect("site compiles");
+    engine.register_test_script_definition("BULD", "Builder", BUILDER_SCRIPT);
+    let mut static_definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "SITE",
+        "Construction Site",
+        "",
+    ));
     static_definition.set_components(vec![
         DefinitionComponent {
             id: "ROCK".to_owned(),
@@ -266,102 +247,76 @@ protected func GetCustomComponents(builder)
             count: 1,
         },
     ]);
-    engine
-        .register_definition(static_definition)
-        .expect("site registers");
-    engine
-        .register_script_definition("DYNA", "Dynamic", DYNAMIC_SCRIPT)
-        .expect("dynamic site registers");
-    engine
-        .register_script_definition("LEAD", "Leading", LEADING_INVALID_SCRIPT)
-        .expect("leading-invalid site registers");
-    let mut empty_custom = Definition::from_script("CEMP", "Empty custom", EMPTY_CUSTOM_SCRIPT)
-        .expect("empty-custom site compiles");
+    engine.register_test_definition(static_definition);
+    engine.register_test_script_definition("DYNA", "Dynamic", DYNAMIC_SCRIPT);
+    engine.register_test_script_definition("LEAD", "Leading", LEADING_INVALID_SCRIPT);
+    let mut empty_custom = crate::support::TestValueExt::test_value(Definition::from_script(
+        "CEMP",
+        "Empty custom",
+        EMPTY_CUSTOM_SCRIPT,
+    ));
     empty_custom.set_components(vec![DefinitionComponent {
         id: "WOOD".to_owned(),
         count: 2,
     }]);
-    engine
-        .register_definition(empty_custom)
-        .expect("empty-custom site registers");
-    let mut nonarray_custom = Definition::from_script("NARR", "Non-array", NONARRAY_CUSTOM_SCRIPT)
-        .expect("non-array site compiles");
+    engine.register_test_definition(empty_custom);
+    let mut nonarray_custom = crate::support::TestValueExt::test_value(Definition::from_script(
+        "NARR",
+        "Non-array",
+        NONARRAY_CUSTOM_SCRIPT,
+    ));
     nonarray_custom.set_components(vec![DefinitionComponent {
         id: "ROCK".to_owned(),
         count: 2,
     }]);
-    engine
-        .register_definition(nonarray_custom)
-        .expect("non-array site registers");
+    engine.register_test_definition(nonarray_custom);
 
-    let builder = engine
-        .spawn_object(SpawnConfig::new("BULD"))
-        .expect("builder spawns");
-    let static_site = engine
-        .spawn_object(
-            SpawnConfig::new("SITE")
-                .with_custom_name("Nordwerk")
-                .with_ordered_components(vec![
-                    ("ROCK".to_owned(), 0),
-                    ("WOOD".to_owned(), 1),
-                    ("METL".to_owned(), 2),
-                    ("ZERO".to_owned(), 0),
-                    ("EMPT".to_owned(), 0),
-                    ("MISS".to_owned(), 0),
-                ]),
-        )
-        .expect("static site spawns");
+    let builder = engine.spawn_test_object(SpawnConfig::new("BULD"));
+    let static_site = engine.spawn_test_object(
+        SpawnConfig::new("SITE")
+            .with_custom_name("Nordwerk")
+            .with_ordered_components(vec![
+                ("ROCK".to_owned(), 0),
+                ("WOOD".to_owned(), 1),
+                ("METL".to_owned(), 2),
+                ("ZERO".to_owned(), 0),
+                ("EMPT".to_owned(), 0),
+                ("MISS".to_owned(), 0),
+            ]),
+    );
     // These are exactly the missing pieces, but C++ deliberately ignores
     // Contents here and still reports the Component-ledger deficits.
     for definition in ["ROCK", "WOOD", "WOOD"] {
-        engine
-            .spawn_object(SpawnConfig::new(definition).with_container(static_site))
-            .expect("site content spawns");
+        engine.spawn_test_object(SpawnConfig::new(definition).with_container(static_site));
     }
-    assert_eq!(
-        engine
-            .object_snapshot(static_site)
-            .expect("static site exists")
-            .contents
-            .len(),
-        3
-    );
-    let dynamic_site = engine
-        .spawn_object(SpawnConfig::new("DYNA").with_ordered_components(vec![
+    assert_eq!(engine.test_object_snapshot(static_site).contents.len(), 3);
+    let dynamic_site =
+        engine.spawn_test_object(SpawnConfig::new("DYNA").with_ordered_components(vec![
             ("METL".to_owned(), 0),
             ("WOOD".to_owned(), 0),
             ("ROCK".to_owned(), 0),
-        ]))
-        .expect("dynamic site spawns");
-    let leading_site = engine
-        .spawn_object(SpawnConfig::new("LEAD"))
-        .expect("leading-invalid site spawns");
-    let empty_site = engine
-        .spawn_object(
-            SpawnConfig::new("CEMP").with_ordered_components(vec![("WOOD".to_owned(), 0)]),
-        )
-        .expect("empty-custom site spawns");
-    let nonarray_site = engine
-        .spawn_object(
-            SpawnConfig::new("NARR").with_ordered_components(vec![("ROCK".to_owned(), 0)]),
-        )
-        .expect("non-array site spawns");
+        ]));
+    let leading_site = engine.spawn_test_object(SpawnConfig::new("LEAD"));
+    let empty_site = engine.spawn_test_object(
+        SpawnConfig::new("CEMP").with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+    );
+    let nonarray_site = engine.spawn_test_object(
+        SpawnConfig::new("NARR").with_ordered_components(vec![("ROCK".to_owned(), 0)]),
+    );
 
-    let builder_index = engine.find_object_index(builder).expect("builder index");
+    let builder_index = engine.test_object_index(builder);
     assert_eq!(
-        engine
-            .call_object_function(
-                builder_index,
-                "Probe",
-                vec![
-                    Value::Object(static_site.as_u64()),
-                    Value::Object(dynamic_site.as_u64()),
-                    Value::Object(leading_site.as_u64()),
-                    Value::Object(empty_site.as_u64()),
-                    Value::Object(nonarray_site.as_u64()),
-                ],
-            )
-            .expect("needed-material probe runs"),
+        engine.call_test_object_function(
+            builder_index,
+            "Probe",
+            vec![
+                Value::Object(static_site.as_u64()),
+                Value::Object(dynamic_site.as_u64()),
+                Value::Object(leading_site.as_u64()),
+                Value::Object(empty_site.as_u64()),
+                Value::Object(nonarray_site.as_u64()),
+            ],
+        ),
         Value::Array(vec![
             Value::String("Builder needs|no more material.".to_owned().into()),
             Value::String("Builder needs|no more material.".to_owned().into()),
@@ -387,13 +342,11 @@ protected func GetCustomComponents(builder)
         "%s braucht kein|weiteres Baumaterial.",
     );
     assert_eq!(
-        engine
-            .call_object_function(
-                builder_index,
-                "ProbeLocalized",
-                vec![Value::Object(static_site.as_u64())],
-            )
-            .expect("localized needed-material probe runs"),
+        engine.call_test_object_function(
+            builder_index,
+            "ProbeLocalized",
+            vec![Value::Object(static_site.as_u64())],
+        ),
         Value::Array(vec![
             Value::String(
                 "Builder braucht kein|weiteres Baumaterial."
@@ -431,11 +384,17 @@ func Read()
 }
 "#;
 
-    let positive = Definition::from_script("POSI", "Positive", "").expect("positive compiles");
-    let negative = Definition::from_script("NEGA", "Negative", "").expect("negative compiles");
-    let zero = Definition::from_script("ZERO", "Zero", "").expect("zero compiles");
-    let mut signed =
-        Definition::from_script("SIGN", "Signed", SIGNED_SCRIPT).expect("signed compiles");
+    let positive =
+        crate::support::TestValueExt::test_value(Definition::from_script("POSI", "Positive", ""));
+    let negative =
+        crate::support::TestValueExt::test_value(Definition::from_script("NEGA", "Negative", ""));
+    let zero =
+        crate::support::TestValueExt::test_value(Definition::from_script("ZERO", "Zero", ""));
+    let mut signed = crate::support::TestValueExt::test_value(Definition::from_script(
+        "SIGN",
+        "Signed",
+        SIGNED_SCRIPT,
+    ));
     signed.set_components(vec![
         DefinitionComponent {
             id: "POSI".to_owned(),
@@ -453,18 +412,12 @@ func Read()
 
     let mut engine = Engine::new();
     for definition in [&positive, &negative, &zero, &signed] {
-        engine
-            .register_definition(definition.clone())
-            .expect("definition registers");
+        engine.register_test_definition(definition.clone());
     }
-    let object = engine
-        .spawn_object(SpawnConfig::new("SIGN"))
-        .expect("signed object spawns");
-    let index = engine.find_object_index(object).expect("signed index");
+    let object = engine.spawn_test_object(SpawnConfig::new("SIGN"));
+    let index = engine.test_object_index(object);
     assert_eq!(
-        engine
-            .call_object_function(index, "SeedAndRead", Vec::new())
-            .expect("signed probe runs"),
+        engine.call_test_object_function(index, "SeedAndRead", Vec::new()),
         Value::Array(vec![
             Value::Bool(true),
             Value::Int(-2),
@@ -473,29 +426,22 @@ func Read()
             Value::String("Signed|needs|3x Positive|3x Negative".to_owned().into()),
         ])
     );
-    let snapshot = engine.object_snapshot(object).expect("signed snapshot");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.components.get("POSI"), Some(&-2));
     assert_eq!(snapshot.components.get("NEGA"), Some(&-5));
     assert_eq!(snapshot.components.get("ZERO"), Some(&-7));
 
-    let state: EngineState = serde_json::from_str(
-        &serde_json::to_string(&engine.capture_state()).expect("signed state serializes"),
-    )
-    .expect("signed state deserializes");
+    let state: EngineState = crate::support::TestValueExt::test_value(serde_json::from_str(
+        &crate::support::TestValueExt::test_value(serde_json::to_string(&engine.capture_state())),
+    ));
     let mut restored = Engine::new();
     for definition in [positive, negative, zero, signed] {
-        restored
-            .register_definition(definition)
-            .expect("restore definition registers");
+        restored.register_test_definition(definition);
     }
-    restored
-        .restore_state(&state)
-        .expect("signed state restores");
-    let index = restored.find_object_index(object).expect("restored index");
+    crate::support::TestValueExt::test_value(restored.restore_state(&state));
+    let index = restored.test_object_index(object);
     assert_eq!(
-        restored
-            .call_object_function(index, "Read", Vec::new())
-            .expect("restored signed probe runs"),
+        restored.call_test_object_function(index, "Read", Vec::new()),
         Value::Array(vec![
             Value::Int(-2),
             Value::Int(-5),
@@ -509,9 +455,9 @@ func Read()
 fn get_needed_mat_str_without_explicit_or_current_object_is_nil() {
     let mut script = clonk_script::Engine::new();
     clonk_engine::compat::register_host_functions(&mut script);
-    script
-        .load_script("#strict 2\nfunc Probe(target) { return GetNeededMatStr(target); }")
-        .expect("probe compiles");
+    crate::support::TestValueExt::test_value(
+        script.load_script("#strict 2\nfunc Probe(target) { return GetNeededMatStr(target); }"),
+    );
     assert_eq!(script.call("Probe", &[]).expect("probe runs"), Value::Nil);
     let error = script
         .call("Probe", &[Value::Proplist(Default::default())])
@@ -541,28 +487,23 @@ protected func GetCustomComponents(builder)
 }
 "#;
     let mut engine = Engine::new();
-    engine
-        .register_player(PlayerConfig::new(0, "Player"))
-        .expect("player registers");
+    engine.register_test_player(PlayerConfig::new(0, "Player"));
     engine.set_standard_names(Some("Roster Name\n".to_owned()));
-    engine
-        .register_definition(Definition::from_script("ROCK", "Stein", "").expect("rock compiles"))
-        .expect("rock registers");
-    let mut crew = Definition::from_script("CREW", "Crew", SCRIPT).expect("crew compiles");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script("ROCK", "Stein", ""),
+    ));
+    let mut crew =
+        crate::support::TestValueExt::test_value(Definition::from_script("CREW", "Crew", SCRIPT));
     crew.set_crew_member(true);
-    engine.register_definition(crew).expect("crew registers");
-    let crew = engine
-        .spawn_object(
-            SpawnConfig::new("CREW")
-                .with_owner(0)
-                .with_crew_member(false),
-        )
-        .expect("crew spawns");
-    let index = engine.find_object_index(crew).expect("crew index");
+    engine.register_test_definition(crew);
+    let crew = engine.spawn_test_object(
+        SpawnConfig::new("CREW")
+            .with_owner(0)
+            .with_crew_member(false),
+    );
+    let index = engine.test_object_index(crew);
     assert_eq!(
-        engine
-            .call_object_function(index, "JoinRemoveAndRead", Vec::new())
-            .expect("removal-time query runs"),
+        engine.call_test_object_function(index, "JoinRemoveAndRead", Vec::new()),
         Value::String("Crew|needs|1x Stein".to_owned().into())
     );
 }

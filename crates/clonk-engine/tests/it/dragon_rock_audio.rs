@@ -35,19 +35,17 @@ fn dragon_rock_princess_scream_is_one_targeted_non_looping_effect() {
         // this audio regression is independent of the dragon-flight route; from
         // here onward the ordinary Script20.. counter executes through engine ticks.
         for _ in 0..30 {
-            let presentation = engine
-                .tick_with_presentation()
-                .expect("Dragon Rock opening tick succeeds");
+            let presentation =
+                crate::support::TestValueExt::test_value(engine.tick_with_presentation());
             record_audio(presentation.audio);
         }
-        engine
-            .call_scenario_script_function("OnDragonReachTarget", Vec::new())
-            .expect("the shipped dragon-arrival callback succeeds");
+        crate::support::TestValueExt::test_value(
+            engine.call_scenario_script_function("OnDragonReachTarget", Vec::new()),
+        );
 
         for _ in 0..500 {
-            let presentation = engine
-                .tick_with_presentation()
-                .expect("Dragon Rock intro tick succeeds");
+            let presentation =
+                crate::support::TestValueExt::test_value(engine.tick_with_presentation());
             record_audio(presentation.audio);
         }
     }

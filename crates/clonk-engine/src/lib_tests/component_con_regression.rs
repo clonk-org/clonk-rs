@@ -5,17 +5,19 @@ fn loaded_object_preserves_negative_raw_construction() {
     // C4Object::CompileFunc assigns Objects.txt Size directly to Con without
     // clamping it in the compiler tail (C4Object.cpp:2777,2858-2891).
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("NEGC", "Negative construction", "")
-        .expect("definition registers");
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "NEGC",
+        "Negative construction",
+        "",
+    ));
 
-    let object = engine
-        .spawn_object(
+    let object = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("NEGC")
                 .with_loaded(true)
                 .with_construction(-1),
-        )
-        .expect("loaded object spawns");
+        ),
+    );
 
     assert_eq!(
         engine
@@ -33,8 +35,7 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
     // Construction changes a freshly initialized zero-count entry before
     // NewObject's partial initial DoCon.
     let mut engine = Engine::new();
-    let mut definition =
-        Definition::from_script("PART", "Partial", "#strict\n").expect("definition compiles");
+    let mut definition = test_definition("PART", "Partial", "#strict\n");
     definition.set_components(vec![
         DefinitionComponent {
             id: "ROCK".to_owned(),
@@ -45,13 +46,11 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
             count: -3,
         },
     ]);
-    engine
-        .register_definition(definition)
-        .expect("definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("PART").with_construction(0))
-        .expect("zero-con object spawns");
-    let index = engine.find_object_index(object).expect("object exists");
+    crate::TestValueExt::test_value(engine.register_definition(definition));
+    let object = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("PART").with_construction(0)),
+    );
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
 
     assert_eq!(
         engine
@@ -77,12 +76,10 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
         "growth uses max(-3, trunc(-3 * 50%))"
     );
 
-    let partial = engine
-        .spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 2))
-        .expect("partial-con object spawns");
-    let partial = engine
-        .object_snapshot(partial)
-        .expect("partial object exists");
+    let partial = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 2)),
+    );
+    let partial = crate::TestValueExt::test_value(engine.object_snapshot(partial));
     assert_eq!(partial.components.get("ROCK"), Some(&2));
     assert_eq!(
         partial.components.get("NEGA"),
@@ -90,12 +87,11 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
         "fresh partial Con includes the initial ComponentConGain"
     );
 
-    let below_first_step = engine
-        .spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 100 - 1))
-        .expect("sub-step object spawns");
-    let below_first_step = engine
-        .object_snapshot(below_first_step)
-        .expect("sub-step object exists");
+    let below_first_step = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 100 - 1)),
+    );
+    let below_first_step =
+        crate::TestValueExt::test_value(engine.object_snapshot(below_first_step));
     assert_eq!(below_first_step.components.get("ROCK"), Some(&0));
     assert_eq!(
         below_first_step.components.get("NEGA"),
@@ -107,36 +103,25 @@ fn initial_component_gain_scales_the_raw_definition_count_once() {
 #[test]
 fn zero_requirement_still_consumes_toward_a_negative_live_count() {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("ZERO", "Zero", "")
-        .expect("component registers");
-    engine
-        .register_script_definition("BLDR", "Builder", "")
-        .expect("builder registers");
-    let mut target = Definition::from_script("SITE", "Site", "").expect("site compiles");
+    crate::TestValueExt::test_value(engine.register_script_definition("ZERO", "Zero", ""));
+    crate::TestValueExt::test_value(engine.register_script_definition("BLDR", "Builder", ""));
+    let mut target = test_definition("SITE", "Site", "");
     target.set_components(vec![DefinitionComponent {
         id: "ZERO".to_owned(),
         count: 0,
     }]);
-    engine.register_definition(target).expect("site registers");
+    crate::TestValueExt::test_value(engine.register_definition(target));
 
-    let builder = engine
-        .spawn_object(SpawnConfig::new("BLDR"))
-        .expect("builder spawns");
-    let site = engine
-        .spawn_object(
-            SpawnConfig::new("SITE").with_ordered_components(vec![("ZERO".to_owned(), -1)]),
-        )
-        .expect("site spawns");
-    engine
-        .spawn_object(SpawnConfig::new("ZERO").with_container(builder))
-        .expect("material spawns");
-    let builder_idx = engine.find_object_index(builder).expect("builder exists");
-    let site_idx = engine.find_object_index(site).expect("site exists");
-    let required = engine
-        .definitions
-        .get("SITE")
-        .expect("site definition exists")
+    let builder = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("BLDR")));
+    let site = crate::TestValueExt::test_value(engine.spawn_object(
+        SpawnConfig::new("SITE").with_ordered_components(vec![("ZERO".to_owned(), -1)]),
+    ));
+    crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("ZERO").with_container(builder)),
+    );
+    let builder_idx = crate::TestValueExt::test_value(engine.find_object_index(builder));
+    let site_idx = crate::TestValueExt::test_value(engine.find_object_index(site));
+    let required = crate::TestValueExt::test_value(engine.definitions.get("SITE"))
         .components()
         .to_vec();
 

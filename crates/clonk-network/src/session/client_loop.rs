@@ -441,27 +441,6 @@ pub(crate) async fn run_udp_client_route<S>(
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn run_client_loop<S>(
-    transport: crate::ControlTransport<S>,
-    commands: mpsc::Receiver<ClientCommand>,
-    event_tx: mpsc::Sender<ClientEvent>,
-    shutdown_rx: oneshot::Receiver<()>,
-) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    run_client_loop_with_addresses(
-        transport,
-        commands,
-        event_tx,
-        shutdown_rx,
-        None,
-        BTreeMap::new(),
-        ClientResourceState::empty(),
-    )
-    .await;
-}
-
 async fn replay_client_controls(
     transport: &mut ClientRouteManager,
     backlog: &ControlBacklog,

@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use std::collections::{HashMap, HashSet};
 
 use crate::support::real_scenario::PreparedInstalledScenario;
@@ -38,46 +39,34 @@ global func GetCustomComponents(object builder)
         ("PLAI", "Plain recipe", GLOBAL_ONLY_SCRIPT),
         ("BULD", "Builder", BUILDER_SCRIPT),
     ] {
-        engine
-            .register_script_definition(id, name, script)
-            .expect("definition registers");
+        engine.register_test_script_definition(id, name, script);
     }
 
-    let custom = engine
-        .spawn_object(
-            SpawnConfig::new("CUST")
-                .with_components(HashMap::from([(DefinitionId::from("METL"), 1)])),
-        )
-        .expect("custom-recipe object spawns with a conflicting instance ledger");
-    let mixed = engine
-        .spawn_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
+    let custom = engine.spawn_test_object(
+        SpawnConfig::new("CUST").with_components(HashMap::from([(DefinitionId::from("METL"), 1)])),
+    );
+    let mixed =
+        engine.spawn_test_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
             (DefinitionId::from("WOOD"), 1),
             (DefinitionId::from("METL"), 1),
-        ])))
-        .expect("mixed fallback object spawns");
-    let pure = engine
-        .spawn_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
-            (DefinitionId::from("WOOD"), 2),
-            (DefinitionId::from("METL"), 0),
-        ])))
-        .expect("pure fallback object spawns");
-    let builder = engine
-        .spawn_object(SpawnConfig::new("BULD"))
-        .expect("builder spawns");
+        ])));
+    let pure = engine.spawn_test_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
+        (DefinitionId::from("WOOD"), 2),
+        (DefinitionId::from("METL"), 0),
+    ])));
+    let builder = engine.spawn_test_object(SpawnConfig::new("BULD"));
 
-    let builder_index = engine.find_object_index(builder).expect("builder index");
+    let builder_index = engine.test_object_index(builder);
     assert_eq!(
-        engine
-            .call_object_function(
-                builder_index,
-                "Probe",
-                vec![
-                    Value::Object(custom.as_u64()),
-                    Value::Object(mixed.as_u64()),
-                    Value::Object(pure.as_u64()),
-                ],
-            )
-            .expect("ComponentAll probe executes"),
+        engine.call_test_object_function(
+            builder_index,
+            "Probe",
+            vec![
+                Value::Object(custom.as_u64()),
+                Value::Object(mixed.as_u64()),
+                Value::Object(pure.as_u64()),
+            ],
+        ),
         Value::Array(vec![
             Value::Bool(true),
             Value::Bool(false),
@@ -86,9 +75,7 @@ global func GetCustomComponents(object builder)
         ])
     );
 
-    let custom_state = engine
-        .object_snapshot(custom)
-        .expect("custom-recipe object remains");
+    let custom_state = engine.test_object_snapshot(custom);
     assert_eq!(
         custom_state.local_vars.get("seen_builder"),
         Some(&Value::Object(builder.as_u64())),
@@ -110,13 +97,13 @@ pub(super) fn get_component_definition_branch_uses_custom_recipe_and_builder(
     // adjacent duplicate FSHM entries (C4Script.cpp:2679-2691;
     // C4Def.cpp:1278-1320).
     let mut engine = prepared.instantiate();
-    let query = Definition::from_script(
+    let query = crate::support::TestValueExt::test_value(Definition::from_script(
         "QRY1",
         "Component query",
         r#"#strict 2
-public func IsTrapper() { return true; }
-public func Probe()
-{
+    public func IsTrapper() { return true; }
+    public func Probe()
+    {
     return [
         GetComponent(FSHM, 0, 0, DFSH),
         GetComponent(MEAT, 0, 0, DFSH),
@@ -128,24 +115,15 @@ public func Probe()
         GetComponent(0, 0, 0, FSHM),
         GetComponent(0, 1, 0, FSHM)
     ];
-}
-"#,
-    )
-    .expect("component query compiles");
-    engine
-        .register_definition(query)
-        .expect("component query registers");
-    let builder = engine
-        .spawn_object(SpawnConfig::new("QRY1"))
-        .expect("component builder spawns");
-    let index = engine
-        .find_object_index(builder)
-        .expect("component builder index");
+    }
+    "#,
+    ));
+    engine.register_test_definition(query);
+    let builder = engine.spawn_test_object(SpawnConfig::new("QRY1"));
+    let index = engine.test_object_index(builder);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", Vec::new())
-            .expect("definition component query runs"),
+        engine.call_test_object_function(index, "Probe", Vec::new()),
         Value::Array(vec![
             Value::Int(2),
             Value::Int(0),
@@ -171,22 +149,18 @@ pub(super) fn dead_fish_embowel_uses_the_trappers_custom_components(
     // container before finally removing it (src/C4Script.cpp:415-454;
     // src/C4Def.cpp:1266-1355).
     let mut engine = prepared.instantiate();
-    let trapper = engine
-        .spawn_object(
-            SpawnConfig::new("TRPR")
-                .with_position(Vector2::new(320, 120))
-                .with_owner(3)
-                .with_controller(7),
-        )
-        .expect("the real Western Trapper spawns");
-    let fish = engine
-        .spawn_object(
-            SpawnConfig::new("DFSH")
-                .with_position(Vector2::new(320, 120))
-                .with_owner(5)
-                .with_container(trapper),
-        )
-        .expect("the real dead fish spawns in the Trapper's inventory");
+    let trapper = engine.spawn_test_object(
+        SpawnConfig::new("TRPR")
+            .with_position(Vector2::new(320, 120))
+            .with_owner(3)
+            .with_controller(7),
+    );
+    let fish = engine.spawn_test_object(
+        SpawnConfig::new("DFSH")
+            .with_position(Vector2::new(320, 120))
+            .with_owner(5)
+            .with_container(trapper),
+    );
     let objects_before = engine
         .snapshot()
         .objects
@@ -204,11 +178,13 @@ pub(super) fn dead_fish_embowel_uses_the_trappers_custom_components(
         })
         .collect::<Vec<_>>();
 
-    let fish_index = engine.find_object_index(fish).expect("dead fish index");
+    let fish_index = engine.test_object_index(fish);
     assert_eq!(
-        engine
-            .call_object_function(fish_index, "Embowel", vec![Value::Object(trapper.as_u64())],)
-            .expect("the shipped DFSH::Embowel callback completes"),
+        engine.call_test_object_function(
+            fish_index,
+            "Embowel",
+            vec![Value::Object(trapper.as_u64())],
+        ),
         Value::Int(1)
     );
 

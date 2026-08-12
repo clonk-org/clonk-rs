@@ -22,7 +22,7 @@ where
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
         if let Some(message) = visitor.message {
-            self.messages.lock().unwrap().push(message);
+            crate::TestValueExt::test_value(self.messages.lock()).push(message);
         }
     }
 }
@@ -52,7 +52,7 @@ fn capture_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
         messages: Arc::clone(&messages),
     });
     let result = subscriber::with_default(subscriber, run);
-    let captured = messages.lock().unwrap().clone();
+    let captured = crate::TestValueExt::test_value(messages.lock()).clone();
     (result, captured)
 }
 
@@ -67,13 +67,13 @@ public func Healthy() { return 9; }
 public func Lone() { return MissingFromLone(); }
 "#;
     let mut engine = Engine::with_seed(47);
-    engine
-        .register_script_definition("STAK", "Stack fixture", script)
-        .expect("stack fixture registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("STAK"))
-        .expect("stack fixture spawns");
-    let index = engine.find_object_index(object).expect("object exists");
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "STAK",
+        "Stack fixture",
+        script,
+    ));
+    let object = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("STAK")));
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
 
     let (recovered, warnings) = capture_warnings(|| {
         tolerate_script_error(engine.call_object_function(
@@ -111,13 +111,8 @@ public func Lone() { return MissingFromLone(); }
     assert!(frames[1].contains("(obj Stack fixture #"));
     assert!(frames[1].contains("(STAK:"));
 
-    let raw_script = Arc::clone(
-        &engine
-            .definitions
-            .get("STAK")
-            .expect("definition exists")
-            .script,
-    );
+    let raw_script =
+        Arc::clone(&crate::TestValueExt::test_value(engine.definitions.get("STAK")).script);
     let raw_args = vec![Value::Int(8), Value::Nil, Value::from("raw")];
     let world = engine.host_world_context();
     let rng = engine.rng.clone();
@@ -159,10 +154,9 @@ public func Lone() { return MissingFromLone(); }
     let mut scenario_host = ScriptEngine::new();
     scenario_host.set_script_name("Scenario");
     scenario_host.add_script(
-        clonk_script::Script::compile_c4_string(
+        crate::TestValueExt::test_value(clonk_script::Script::compile_c4_string(
                 "#strict 3\nfunc SceneOuter() { return SceneInner(); }\nfunc SceneInner() { return MissingScene(); }",
-        )
-        .expect("scenario fixture compiles"),
+        )),
     );
     let (scenario_result, warnings) = capture_warnings(|| {
         ScenarioScript::execute_value_for_script(

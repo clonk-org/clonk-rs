@@ -8571,6 +8571,27 @@ fn current_millis() -> u64 {
 }
 
 #[cfg(test)]
+trait TestValueExt<T> {
+    fn test_value(self) -> T;
+}
+
+#[cfg(test)]
+impl<T> TestValueExt<T> for Option<T> {
+    #[track_caller]
+    fn test_value(self) -> T {
+        Option::expect(self, "netplay-test value exists")
+    }
+}
+
+#[cfg(test)]
+impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+    #[track_caller]
+    fn test_value(self) -> T {
+        Result::expect(self, "netplay-test operation succeeds")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
 
@@ -8581,6 +8602,130 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[track_caller]
+    fn legacy_string(bytes: &[u8]) -> clonk_engine::LegacyCString {
+        clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value()
+    }
+
+    struct EventHarness {
+        sender: NetworkEventSender,
+        receiver: Receiver<NetworkEvent>,
+        telemetry: SyncSender<NetworkEvent>,
+        _telemetry_receiver: Receiver<NetworkEvent>,
+        player_info_echo_provenance: VecDeque<PlayerInfoEchoProvenance>,
+        netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
+    }
+
+    impl EventHarness {
+        fn new() -> Self {
+            let (sender, receiver) = NetworkEventSender::channel();
+            let (telemetry, telemetry_receiver) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+            Self {
+                sender,
+                receiver,
+                telemetry,
+                _telemetry_receiver: telemetry_receiver,
+                player_info_echo_provenance: VecDeque::new(),
+                netpuncher_state: test_netpuncher_state(),
+            }
+        }
+
+        async fn host(&mut self, event: HostEvent) {
+            handle_host_event(
+                event,
+                0,
+                &self.sender,
+                &self.telemetry,
+                &mut self.player_info_echo_provenance,
+                &self.netpuncher_state,
+            )
+            .await
+            .test_value();
+        }
+
+        async fn client(&self, event: ClientEvent) {
+            handle_client_event(event, 0, 7, &self.sender, &self.telemetry)
+                .await
+                .test_value();
+        }
+
+        #[track_caller]
+        fn recv(&self) -> NetworkEvent {
+            self.receiver.recv().test_value()
+        }
+    }
+
+    async fn forwarded_host_event(event: HostEvent) -> NetworkEvent {
+        let mut events = EventHarness::new();
+        events.host(event).await;
+        events.recv()
+    }
+
+    async fn forwarded_client_event(event: ClientEvent) -> NetworkEvent {
+        let events = EventHarness::new();
+        events.client(event).await;
+        events.recv()
+    }
+
+    #[track_caller]
+    fn direct_control_event(
+        delivery: clonk_network::ControlDelivery,
+        packet: clonk_engine::ControlPacket,
+    ) -> NetworkEvent {
+        let payload = clonk_network::encode_control_entry_payload(&packet).test_value();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        handle_direct_packet(delivery, payload, &event_tx).test_value();
+        let event = event_rx.recv().test_value();
+        assert!(event_rx.try_recv().is_err());
+        event
+    }
+
+    #[track_caller]
+    fn assert_accumulator_roundtrip(control: clonk_engine::ControlPacket) {
+        let mut accumulator = ControlFrameAccumulator::new(4);
+        accumulator.record_control(12, control.clone(), 100);
+        let frame = accumulator.finalize_tick(12).test_value();
+        let encoded = encode_control_packet(&frame).test_value();
+        assert_eq!(
+            decode_control_packet(&encoded).expect("decode accumulated frame"),
+            frame
+        );
+        assert_eq!(frame.controls, vec![control]);
+    }
+
+    #[track_caller]
+    fn ready_event(
+        tick: Tick,
+        timestamp_ms: u64,
+        controls: Vec<clonk_engine::ControlPacket>,
+        local_owner: i32,
+    ) -> NetworkEvent {
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick,
+            timestamp_ms,
+            controls,
+        };
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        emit_frame_controls(frame, local_owner, &event_tx).test_value();
+        let event = event_rx.recv().test_value();
+        assert!(
+            event_rx.try_recv().is_err(),
+            "one aggregate must produce one scheduling event"
+        );
+        event
+    }
+
+    #[track_caller]
+    fn scheduled_sync_event(
+        tick: Tick,
+        controls: Vec<clonk_engine::ControlPacket>,
+    ) -> NetworkEvent {
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        emit_scheduled_sync_controls(tick, controls, &event_tx).test_value();
+        event_rx.recv().test_value()
     }
 
     #[test]
@@ -8607,7 +8752,7 @@ mod tests {
         // `Config.General.ThreadPoolThreadCount` on non-Windows targets, which
         // C++ defaults to 8 (C4Config.cpp:406-408; C4Application.cpp:152-159).
         let restore = network_runtime_worker_threads();
-        let runtime = build_network_runtime().expect("build production network runtime");
+        let runtime = build_network_runtime().test_value();
         assert_eq!(
             runtime.metrics().num_workers(),
             DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
@@ -8617,11 +8762,11 @@ mod tests {
         // A configured count sizes the pool; zero keeps the default so tokio is
         // never asked for an invalid worker count.
         set_network_runtime_worker_threads(2);
-        let configured = build_network_runtime().expect("build a configured runtime");
+        let configured = build_network_runtime().test_value();
         assert_eq!(configured.metrics().num_workers(), 2);
         drop(configured);
         set_network_runtime_worker_threads(0);
-        let fallback = build_network_runtime().expect("build the fallback runtime");
+        let fallback = build_network_runtime().test_value();
         assert_eq!(
             fallback.metrics().num_workers(),
             DEFAULT_NETWORK_RUNTIME_WORKER_THREADS
@@ -8659,7 +8804,7 @@ mod tests {
         assert!(!cancelled_attempt.cancel());
         tokio::time::timeout(Duration::from_millis(100), cancelled_attempt.cancelled())
             .await
-            .expect("cancellation sent before the waiter is retained");
+            .test_value();
         assert!(!later_attempt.is_cancelled());
     }
 
@@ -8678,7 +8823,7 @@ mod tests {
     fn join_parameters_fixture() -> clonk_network::JoinGameParametersEnvelope {
         HostConfig::default()
             .initial_join_snapshot
-            .expect("default host JoinData")
+            .test_value()
             .parameters
     }
 
@@ -8686,9 +8831,7 @@ mod tests {
     fn synchronize_submission_uses_cpp_runtime_join_flags_and_sync_delivery() {
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
 
-        manager
-            .submit_synchronize(23, false, true)
-            .expect("queue runtime-join synchronization");
+        manager.submit_synchronize(23, false, true).test_value();
 
         let Some(NetworkCommand::SubmitDecidedControl {
             tick,
@@ -8718,7 +8861,7 @@ mod tests {
 
             manager
                 .submit_queued_synchronize(29, false, true)
-                .expect("queue runtime-record synchronization");
+                .test_value();
 
             assert_eq!(
                 commands.take_submitted_decided_controls(),
@@ -8746,7 +8889,7 @@ mod tests {
             id: 41,
             ..Default::default()
         };
-        let reason = clonk_engine::LegacyCString::from_bytes(b"dynamic failed".to_vec()).unwrap();
+        let reason = legacy_string(b"dynamic failed");
         let expected_dynamic = dynamic.clone();
         let expected_parameters = parameters.clone();
         let expected_core = published_core.clone();
@@ -8762,24 +8905,20 @@ mod tests {
                     assert_eq!(*dynamic, expected_dynamic);
                     assert_eq!(dynamic_tick, 23);
                     assert_eq!(*parameters, expected_parameters);
-                    completion
-                        .send(Ok(expected_core))
-                        .expect("complete dynamic publication");
+                    completion.send(Ok(expected_core)).test_value();
                 }
                 command => panic!("unexpected runtime-dynamic publication command: {command:?}"),
             }
             match commands.command_rx.blocking_recv() {
                 Some(NetworkCommand::RemoveRuntimeDynamic { completion }) => {
-                    completion.send(Ok(true)).expect("complete dynamic removal")
+                    completion.send(Ok(true)).test_value()
                 }
                 command => panic!("unexpected runtime-dynamic removal command: {command:?}"),
             }
             match commands.command_rx.blocking_recv() {
                 Some(NetworkCommand::FailPendingJoinData { reason, completion }) => {
                     assert_eq!(reason, expected_reason);
-                    completion
-                        .send(Ok(2))
-                        .expect("complete pending JoinData failure");
+                    completion.send(Ok(2)).test_value();
                 }
                 command => panic!("unexpected pending JoinData command: {command:?}"),
             }
@@ -8800,7 +8939,7 @@ mod tests {
                 .expect("fail pending JoinData"),
             2
         );
-        responder.join().expect("runtime-dynamic responder");
+        responder.join().test_value();
     }
 
     #[test]
@@ -8875,7 +9014,7 @@ mod tests {
                 packet_type: 0x41,
             })
             .await
-            .unwrap();
+            .test_value();
         let blocked_host_event_tx = host_event_tx.clone();
         let host_operation = async move {
             blocked_host_event_tx
@@ -8884,7 +9023,7 @@ mod tests {
                     packet_type: 0x42,
                 })
                 .await
-                .unwrap();
+                .test_value();
             7
         };
         let (event_tx, _event_rx) = NetworkEventSender::channel();
@@ -8904,21 +9043,21 @@ mod tests {
             ),
         )
         .await
-        .expect("host event pump should release the blocked operation")
-        .unwrap();
+        .test_value()
+        .test_value();
         assert_eq!(host_result, 7);
 
         let (client_event_tx, mut client_events) = tokio_mpsc::channel(1);
         client_event_tx
             .send(ClientEvent::PingMeasured { round_trip_ms: 1 })
             .await
-            .unwrap();
+            .test_value();
         let blocked_client_event_tx = client_event_tx.clone();
         let client_operation = async move {
             blocked_client_event_tx
                 .send(ClientEvent::PingMeasured { round_trip_ms: 2 })
                 .await
-                .unwrap();
+                .test_value();
             9
         };
         let mut client_status = ClientStatusState::default();
@@ -8940,8 +9079,8 @@ mod tests {
             ),
         )
         .await
-        .expect("client event pump should release the blocked operation")
-        .unwrap();
+        .test_value()
+        .test_value();
         assert_eq!(client_result, 9);
     }
 
@@ -8954,7 +9093,7 @@ mod tests {
                 current_control_tick: 23,
             })
             .await
-            .unwrap();
+            .test_value();
         let blocked_host_event_tx = host_event_tx.clone();
         let operation = async move {
             blocked_host_event_tx
@@ -8963,7 +9102,7 @@ mod tests {
                     controls: Vec::new(),
                 })
                 .await
-                .unwrap();
+                .test_value();
             41
         };
         let (event_tx, event_rx) = NetworkEventSender::channel();
@@ -8984,8 +9123,8 @@ mod tests {
             ),
         )
         .await
-        .expect("runtime-dynamic command must not deadlock behind host events")
-        .unwrap();
+        .test_value()
+        .test_value();
 
         assert_eq!(result, 41);
         assert_eq!(
@@ -9003,19 +9142,19 @@ mod tests {
         Sender<()>,
         thread::JoinHandle<Vec<u8>>,
     ) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+        let address = listener.local_addr().test_value();
         let (request_received, request_ready) = mpsc::channel();
         let (respond, response_release) = mpsc::channel();
         let request = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().test_value();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+                .test_value();
             let mut request = Vec::new();
             let mut buffer = [0_u8; 4096];
             loop {
-                let count = stream.read(&mut buffer).unwrap();
+                let count = stream.read(&mut buffer).test_value();
                 if count == 0 {
                     break;
                 }
@@ -9024,7 +9163,7 @@ mod tests {
                 else {
                     continue;
                 };
-                let header = std::str::from_utf8(&request[..header_end]).unwrap();
+                let header = std::str::from_utf8(&request[..header_end]).test_value();
                 let content_length = header
                     .lines()
                     .find_map(|line| {
@@ -9033,18 +9172,18 @@ mod tests {
                                 .then(|| value.trim().parse::<usize>().unwrap())
                         })
                     })
-                    .unwrap();
+                    .test_value();
                 if request.len() >= header_end + 4 + content_length {
                     break;
                 }
             }
-            request_received.send(()).unwrap();
+            request_received.send(()).test_value();
             response_release
                 .recv_timeout(Duration::from_secs(5))
-                .unwrap();
+                .test_value();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .unwrap();
+                .test_value();
             request
         });
         (
@@ -9062,7 +9201,7 @@ mod tests {
             endpoint,
             clonk_network::LeagueHttpTransportConfig::default(),
         )
-        .unwrap();
+        .test_value();
         assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
         let (started, start_result) = std::sync::mpsc::channel();
         runtime
@@ -9071,11 +9210,11 @@ mod tests {
                 now: 100,
                 completion: started,
             })
-            .unwrap();
+            .test_value();
         start_result
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
-            .unwrap();
+            .test_value();
         assert_eq!(
             runtime.status(),
             LeagueRecordStreamStatus {
@@ -9091,7 +9230,7 @@ mod tests {
         runtime
             .command_tx
             .send(LeagueRecordRuntimeCommand::Append(source.clone()))
-            .unwrap();
+            .test_value();
         let (finished, finish_result) = std::sync::mpsc::channel();
         runtime
             .command_tx
@@ -9099,46 +9238,48 @@ mod tests {
                 now: 100,
                 completion: finished,
             })
-            .unwrap();
+            .test_value();
         finish_result
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
-            .unwrap();
+            .test_value();
         let finishing_status = runtime.status();
         assert!(finishing_status.is_streaming());
         assert_eq!(finishing_status.waiting_raw_bytes(), 0);
         assert_eq!(finishing_status.input_position(), source.len() as u64);
         assert!(finishing_status.pending_compressed_bytes() > 0);
         assert_eq!(finishing_status.sent_position(), 0);
-        request_ready.recv_timeout(Duration::from_secs(5)).unwrap();
-        respond.send(()).unwrap();
+        request_ready
+            .recv_timeout(Duration::from_secs(5))
+            .test_value();
+        respond.send(()).test_value();
         let (shutdown, shut_down) = tokio::sync::oneshot::channel();
         runtime
             .command_tx
             .send(LeagueRecordRuntimeCommand::Shutdown {
                 completion: shutdown,
             })
-            .unwrap();
+            .test_value();
         tokio::time::timeout(Duration::from_secs(5), shut_down)
             .await
             .unwrap()
             .unwrap()
-            .unwrap();
+            .test_value();
         // C++ clears the stream synchronously before returning from
         // `StopStreaming` (`src/C4Network2.cpp:3099-3112`).
         assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
 
-        let request = request.join().unwrap();
+        let request = request.join().test_value();
         let header_end = request
             .windows(4)
             .position(|part| part == b"\r\n\r\n")
-            .unwrap();
-        let header = std::str::from_utf8(&request[..header_end]).unwrap();
+            .test_value();
+        let header = std::str::from_utf8(&request[..header_end]).test_value();
         assert!(header.starts_with("POST /stream?token=x&pos=0&end=true HTTP/1."));
         let mut decoded = Vec::new();
         ZlibDecoder::new(&request[header_end + 4..])
             .read_to_end(&mut decoded)
-            .unwrap();
+            .test_value();
         assert_eq!(decoded, source);
     }
 
@@ -9152,12 +9293,12 @@ mod tests {
         manager.control_tick_reached(7, 2, DEFAULT_CONTROL_TARGET_FPS, reached_at);
         let stored_reached_at = {
             let probe = manager.control_tick_probe.lock();
-            let probe = probe.as_ref().unwrap();
+            let probe = probe.as_ref().test_value();
             assert!(probe.queued);
             probe.reached_at
         };
         assert_eq!(stored_reached_at, reached_at);
-        let queued = control_tick_rx.try_recv().unwrap();
+        let queued = control_tick_rx.try_recv().test_value();
         assert_eq!(queued.tick, 7);
         assert_eq!(queued.control_rate, 2);
         assert_eq!(queued.target_fps, DEFAULT_CONTROL_TARGET_FPS);
@@ -9174,7 +9315,7 @@ mod tests {
         ));
 
         manager.control_tick_reached(7, 3, 76, reached_at + Duration::from_secs(1));
-        let refreshed = control_tick_rx.try_recv().unwrap();
+        let refreshed = control_tick_rx.try_recv().test_value();
         assert_eq!(
             (refreshed.tick, refreshed.control_rate, refreshed.target_fps),
             (7, 3, 76)
@@ -9185,10 +9326,10 @@ mod tests {
     #[test]
     fn netpuncher_resolution_normalizes_default_port_and_family_order() {
         let addresses = normalize_resolved_netpuncher_addresses([
-            "[2001:db8::2]:0".parse().unwrap(),
-            "192.0.2.9:0".parse().unwrap(),
-            "192.0.2.10:1234".parse().unwrap(),
-            "[2001:db8::3]:1234".parse().unwrap(),
+            "[2001:db8::2]:0".parse().test_value(),
+            "192.0.2.9:0".parse().test_value(),
+            "192.0.2.10:1234".parse().test_value(),
+            "[2001:db8::3]:1234".parse().test_value(),
         ]);
 
         assert_eq!(
@@ -9229,8 +9370,8 @@ mod tests {
 
     #[test]
     fn league_start_addresses_keep_tcp_and_configured_udp_ports_distinct() {
-        let tcp = "192.0.2.4:11112".parse().unwrap();
-        let udp = "192.0.2.4:11113".parse().unwrap();
+        let tcp = "192.0.2.4:11112".parse().test_value();
+        let udp = "192.0.2.4:11113".parse().test_value();
         assert_eq!(
             host_registration_addresses(Some(tcp), Some(11_112), Some(udp), Some(11_113)),
             vec![
@@ -9250,8 +9391,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn league_start_omits_udp_when_the_prebind_fails() {
-        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let occupied_address = occupied.local_addr().unwrap();
+        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .test_value();
+        let occupied_address = occupied.local_addr().test_value();
         let config = HostConfig {
             udp_bind_address: Some(occupied_address),
             configured_udp_port: Some(occupied_address.port()),
@@ -9279,7 +9422,7 @@ mod tests {
         let parameters = config
             .initial_join_snapshot
             .as_ref()
-            .expect("default JoinData")
+            .test_value()
             .parameters
             .clone();
         let summary = clonk_network::NetworkGameReference {
@@ -9323,7 +9466,7 @@ mod tests {
             },
             parameters,
         )
-        .expect("minimal league reference validates")
+        .test_value()
     }
 
     fn minimal_league_reference_with_netpuncher(
@@ -9334,10 +9477,9 @@ mod tests {
         summary.netpuncher_address = address.to_string();
         let mut metadata = reference.metadata().clone();
         metadata.netpuncher_address =
-            clonk_engine::LegacyCString::from_bytes(address.to_string().into_bytes())
-                .expect("socket address has no NUL");
+            clonk_engine::LegacyCString::from_bytes(address.to_string().into_bytes()).test_value();
         clonk_network::HostGameReference::new(summary, metadata, reference.parameters().clone())
-            .expect("netpuncher reference validates")
+            .test_value()
     }
 
     #[test]
@@ -9353,13 +9495,11 @@ mod tests {
                 ..clonk_engine::ControlPlayerInfoEntry::default()
             }],
         }];
-        let reference = reference
-            .replacing_parameters(parameters)
-            .expect("player-info reference validates");
+        let reference = reference.replacing_parameters(parameters).test_value();
 
         let updated =
             reference_with_projected_gains(&reference, &HashMap::from([(17, -8), (99, 42)]))
-                .expect("projected gains preserve reference invariants");
+                .test_value();
 
         assert_eq!(
             updated.parameters().player_infos.clients[0].players[0].league_projected_gain,
@@ -9375,8 +9515,8 @@ mod tests {
         F: FnMut(usize) + Send + 'static,
     {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fixture");
-        listener.set_nonblocking(true).expect("nonblocking fixture");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).test_value();
+        listener.set_nonblocking(true).test_value();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
             let mut bodies = Vec::new();
@@ -9395,16 +9535,14 @@ mod tests {
                         Err(error) => panic!("accept league request: {error}"),
                     }
                 };
-                stream
-                    .set_nonblocking(false)
-                    .expect("blocking fixture stream");
+                stream.set_nonblocking(false).test_value();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
+                    .test_value();
                 let mut request = Vec::new();
                 let header_end = loop {
                     let mut chunk = [0_u8; 4096];
-                    let count = stream.read(&mut chunk).expect("read league request");
+                    let count = stream.read(&mut chunk).test_value();
                     assert_ne!(count, 0, "request ended before its headers");
                     request.extend_from_slice(&chunk[..count]);
                     if let Some(offset) =
@@ -9419,13 +9557,13 @@ mod tests {
                     .find_map(|line| {
                         line.split_once(':').and_then(|(name, value)| {
                             name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().unwrap())
+                                .then(|| value.trim().parse::<usize>().test_value())
                         })
                     })
-                    .expect("Content-Length header");
+                    .test_value();
                 while request.len() < header_end + content_length {
                     let mut chunk = [0_u8; 4096];
-                    let count = stream.read(&mut chunk).expect("read league body");
+                    let count = stream.read(&mut chunk).test_value();
                     assert_ne!(count, 0, "request ended before its body");
                     request.extend_from_slice(&chunk[..count]);
                 }
@@ -9436,8 +9574,8 @@ mod tests {
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     reply.len()
                 )
-                .unwrap();
-                stream.write_all(reply).unwrap();
+                .test_value();
+                stream.write_all(reply).test_value();
             }
             bodies
         });
@@ -9470,7 +9608,7 @@ mod tests {
             event_tx,
         )
         .await
-        .expect("register league host");
+        .test_value();
         assert_eq!(start.league.as_bytes(), b"Cup");
         assert_eq!(start.seed, Some(12));
         assert_eq!(start.max_players, 4);
@@ -9484,7 +9622,7 @@ mod tests {
                 completion: first_complete,
             })
             .await
-            .unwrap();
+            .test_value();
         assert!(matches!(
             first_done.await.expect("first End completes"),
             LeagueEndAttempt::Finished(Some(_))
@@ -9497,7 +9635,7 @@ mod tests {
                 completion: second_complete,
             })
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             second_done.await.expect("latched End completes"),
             LeagueEndAttempt::Finished(None)
@@ -9507,7 +9645,7 @@ mod tests {
 
         let events = event_rx.try_iter().collect::<Vec<_>>();
         assert!(matches!(events.as_slice(), [NetworkEvent::LeagueUpdate(_)]));
-        let bodies = server.join().expect("join league HTTP fixture");
+        let bodies = server.join().test_value();
         assert_eq!(bodies.len(), 3, "second Update and End must be latched");
         assert!(bodies[0]
             .windows(b"Action=Start".len())
@@ -9538,7 +9676,7 @@ mod tests {
             event_tx,
         )
         .await
-        .expect("register league host");
+        .test_value();
         assert_eq!(server.join().expect("join one-request fixture").len(), 1);
 
         for _ in 0..2 {
@@ -9550,7 +9688,7 @@ mod tests {
                     completion,
                 })
                 .await
-                .unwrap();
+                .test_value();
             assert!(matches!(
                 completed.await.expect("retryable End completes"),
                 LeagueEndAttempt::Retryable {
@@ -9571,11 +9709,11 @@ mod tests {
                 completion,
             })
             .await
-            .unwrap();
+            .test_value();
         let packet = completed
             .await
             .expect("failure finalization completes")
-            .expect("failure packet");
+            .test_value();
         assert!(!packet.success);
         assert_eq!(
             packet.result_string.as_bytes(),
@@ -9590,7 +9728,7 @@ mod tests {
                 completion,
             })
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             completed.await.expect("latched End completes"),
             LeagueEndAttempt::Finished(None)
@@ -9626,7 +9764,7 @@ Message=Server says Andr\xe9\r\n\
             event_tx,
         )
         .await
-        .expect("register league host");
+        .test_value();
 
         let mut first_rejection = None;
         for _ in 0..2 {
@@ -9638,10 +9776,8 @@ Message=Server says Andr\xe9\r\n\
                     completion,
                 })
                 .await
-                .unwrap();
-            let LeagueEndAttempt::Rejected(packet) =
-                completed.await.expect("rejected End completes")
-            else {
+                .test_value();
+            let LeagueEndAttempt::Rejected(packet) = completed.await.test_value() else {
                 panic!("server rejection must remain an explicit terminal choice");
             };
             assert_eq!(packet.result_string.as_bytes(), b"Server says Andr\xe9");
@@ -9654,11 +9790,11 @@ Message=Server says Andr\xe9\r\n\
         let (completion, completed) = tokio::sync::oneshot::channel();
         command_tx
             .send_priority(LeagueRuntimeCommand::FinalizeEndFailure {
-                packet: first_rejection.expect("first rejection packet"),
+                packet: first_rejection.test_value(),
                 completion,
             })
             .await
-            .unwrap();
+            .test_value();
         assert!(completed
             .await
             .expect("rejection finalization completes")
@@ -9672,7 +9808,7 @@ Message=Server says Andr\xe9\r\n\
                 completion,
             })
             .await
-            .unwrap();
+            .test_value();
         assert_eq!(
             completed.await.expect("latched rejected End completes"),
             LeagueEndAttempt::Finished(None)
@@ -9687,7 +9823,7 @@ Message=Server says Andr\xe9\r\n\
         let observer = tokio::spawn(async move {
             for attempt in 0..10 {
                 let LeagueRuntimeCommand::End { completion, .. } =
-                    commands.recv().await.expect("headless End attempt")
+                    commands.recv().await.test_value()
                 else {
                     panic!("unexpected headless league command");
                 };
@@ -9714,27 +9850,23 @@ Message=Server says Andr\xe9\r\n\
                         error: "offline".to_string(),
                     }
                 };
-                completion.send(outcome).expect("complete headless End");
+                completion.send(outcome).test_value();
             }
-            let LeagueRuntimeCommand::FinalizeEndFailure { packet, completion } = commands
-                .recv()
-                .await
-                .expect("headless failure finalization")
+            let LeagueRuntimeCommand::FinalizeEndFailure { packet, completion } =
+                commands.recv().await.test_value()
             else {
                 panic!("unexpected final headless league command");
             };
-            completion
-                .send(Some(packet.clone()))
-                .expect("complete headless finalization");
+            completion.send(Some(packet.clone())).test_value();
             packet
         });
 
         let packet = finish_league_runtime(&runtime, minimal_league_reference(), None)
             .await
             .expect("headless End loop")
-            .expect("headless failure packet");
+            .test_value();
         drop(runtime);
-        let observed = observer.await.expect("join headless End observer");
+        let observed = observer.await.test_value();
         assert_eq!(packet, observed);
         assert_eq!(
             packet.result_string.as_bytes(),
@@ -9840,15 +9972,15 @@ Message=Server says Andr\xe9\r\n\
             event_tx,
         )
         .await
-        .expect("register league host");
+        .test_value();
         let auth = clonk_network::LeagueAuthRequestHead {
-            account: clonk_engine::LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
-            password: clonk_engine::LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            account: legacy_string(b"account"),
+            password: legacy_string(b"password"),
             ..Default::default()
         };
         let mut player = clonk_engine::ControlPlayerInfoEntry {
             id: 17,
-            name: clonk_engine::LegacyCString::from_bytes(b"Player".to_vec()).unwrap(),
+            name: legacy_string(b"Player"),
             ..Default::default()
         };
         let auth_player = player.clone();
@@ -9860,11 +9992,11 @@ Message=Server says Andr\xe9\r\n\
                 completion: auth_completion,
             })
             .await
-            .unwrap();
+            .test_value();
         let auth_response = auth_completed
             .recv_timeout(Duration::from_secs(2))
             .expect("Auth completion")
-            .expect("Auth exchange");
+            .test_value();
         assert!(auth_response.apply_player_auth(&mut player));
 
         let checked_player = player.clone();
@@ -9875,11 +10007,11 @@ Message=Server says Andr\xe9\r\n\
                 completion: check_completion,
             })
             .await
-            .unwrap();
+            .test_value();
         let check_response = check_completed
             .recv_timeout(Duration::from_secs(2))
             .expect("Join completion")
-            .expect("Join exchange");
+            .test_value();
         assert!(check_response.head.is_success());
         let disconnect_players = clonk_network::ClientPlayerInfosSnapshot {
             client_id: 0,
@@ -9887,7 +10019,7 @@ Message=Server says Andr\xe9\r\n\
             players: vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 17,
                 flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-                league_account: clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                league_account: legacy_string(b"Alice"),
                 ..Default::default()
             }],
         };
@@ -9900,38 +10032,38 @@ Message=Server says Andr\xe9\r\n\
                 completion: disconnect_completion,
             })
             .await
-            .unwrap();
+            .test_value();
         disconnect_completed
             .recv_timeout(Duration::from_secs(2))
             .expect("ReportDisconnect completion")
-            .expect("ReportDisconnect exchange");
+            .test_value();
         drop(runtime);
 
-        let bodies = server.join().expect("join league HTTP fixture");
+        let bodies = server.join().test_value();
         let auth_player_info =
-            clonk_network::encode_league_player_info_section(&auth_player).unwrap();
+            clonk_network::encode_league_player_info_section(&auth_player).test_value();
         let expected_auth = clonk_network::encode_league_auth_request(
             &auth,
             &auth_player_info,
             league_checksum_start(),
         )
-        .unwrap();
+        .test_value();
         let check_player_info =
-            clonk_network::encode_league_player_info_section(&checked_player).unwrap();
+            clonk_network::encode_league_player_info_section(&checked_player).test_value();
         let expected_check = clonk_network::encode_league_join_request(
             &clonk_network::LeagueJoinRequestHead {
-                csid: clonk_engine::LegacyCString::from_bytes(b"host-session".to_vec()).unwrap(),
-                auid: clonk_engine::LegacyCString::from_bytes(b"one-use-token".to_vec()).unwrap(),
+                csid: legacy_string(b"host-session"),
+                auid: legacy_string(b"one-use-token"),
             },
             &check_player_info,
             league_checksum_start(),
         )
-        .unwrap();
+        .test_value();
         let without_random_checksum = |mut body: Vec<u8>| {
             let checksum = body
                 .windows(b"Checksum=".len())
                 .position(|window| window == b"Checksum=")
-                .expect("Checksum field")
+                .test_value()
                 + b"Checksum=".len();
             assert_ne!(&body[checksum..checksum + 5], b"-----");
             body[checksum..checksum + 5].copy_from_slice(b"-----");
@@ -9946,18 +10078,15 @@ Message=Server says Andr\xe9\r\n\
             without_random_checksum(expected_check)
         );
         let mut expected_fbids = clonk_network::LeagueFbidRegistry::new();
-        expected_fbids.insert(
-            clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
-            clonk_engine::LegacyCString::from_bytes(b"feedback-token".to_vec()).unwrap(),
-        );
+        expected_fbids.insert(legacy_string(b"Alice"), legacy_string(b"feedback-token"));
         let expected_disconnect = clonk_network::encode_league_report_disconnect_request(
-            &clonk_engine::LegacyCString::from_bytes(b"host-session".to_vec()).unwrap(),
+            &legacy_string(b"host-session"),
             clonk_network::LeagueDisconnectReason::ConnectionFailed,
             &disconnect_players,
             &expected_fbids,
             league_checksum_start(),
         )
-        .unwrap();
+        .test_value();
         assert_eq!(
             without_random_checksum(bodies[3].clone()),
             without_random_checksum(expected_disconnect)
@@ -9969,19 +10098,19 @@ Message=Server says Andr\xe9\r\n\
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(7);
         let auth = clonk_network::LeagueAuthRequestHead {
-            account: clonk_engine::LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
-            password: clonk_engine::LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            account: legacy_string(b"account"),
+            password: legacy_string(b"password"),
             ..Default::default()
         };
         let player = clonk_engine::ControlPlayerInfoEntry {
-            name: clonk_engine::LegacyCString::from_bytes(b"Player".to_vec()).unwrap(),
+            name: legacy_string(b"Player"),
             ..Default::default()
         };
 
         let pending = manager
             .begin_authenticate_league_player(auth.clone(), &player)
             .expect("begin Auth")
-            .expect("league runtime available");
+            .test_value();
         assert!(pending.try_complete().is_none());
         let command = commands.receive_league_player_auth();
         assert_eq!(command.auth, auth);
@@ -10004,7 +10133,7 @@ Message=Server says Andr\xe9\r\n\
                 &player,
             )
             .expect("begin abandoned Auth")
-            .expect("league runtime available");
+            .test_value();
         let command = commands.receive_league_player_auth();
         drop(abandoned);
         assert!(
@@ -10018,8 +10147,7 @@ Message=Server says Andr\xe9\r\n\
             message_type: clonk_engine::MESSAGE_TYPE_PRIVATE,
             player: 4,
             to_player: 9,
-            message: clonk_engine::LegacyCString::from_bytes(b"private hello".to_vec())
-                .expect("fixture is NUL-free"),
+            message: legacy_string(b"private hello"),
             by_client,
         }
     }
@@ -10073,7 +10201,7 @@ Message=Server says Andr\xe9\r\n\
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("host worker readiness");
+            .test_value();
         assert_eq!(ready.local_client_id, HOST_CLIENT_ID);
         let local_addresses = netpuncher_state.lock().local_addresses.clone();
         assert_eq!(local_addresses.len(), 2);
@@ -10082,14 +10210,8 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(local_addresses[0].endpoint, local_addresses[1].endpoint);
         assert_ne!(local_addresses[0].endpoint.port(), 0);
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop host worker");
-        worker
-            .await
-            .expect("join host worker")
-            .expect("host worker exits cleanly");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join host worker").test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10132,7 +10254,7 @@ Message=Server says Andr\xe9\r\n\
         local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("UDP fallback host readiness");
+            .test_value();
         let expected_addresses = vec![NetworkAddress::new(
             NetworkProtocol::Udp,
             configured_address,
@@ -10144,14 +10266,11 @@ Message=Server says Andr\xe9\r\n\
                 if error.starts_with("failed to bind host socket at ")
         ));
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop UDP fallback host worker");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
         worker
             .await
             .expect("join UDP fallback host worker")
-            .expect("UDP fallback host exits cleanly");
+            .test_value();
         drop(occupied_tcp);
     }
 
@@ -10195,7 +10314,7 @@ Message=Server says Andr\xe9\r\n\
         local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("configured UDP-only host readiness");
+            .test_value();
         assert_eq!(
             netpuncher_state.lock().local_addresses,
             vec![NetworkAddress::new(
@@ -10211,14 +10330,11 @@ Message=Server says Andr\xe9\r\n\
             })
         ));
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop configured UDP-only host worker");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
         worker
             .await
             .expect("join configured UDP-only host worker")
-            .expect("configured UDP-only host exits cleanly");
+            .test_value();
         drop(occupied_tcp);
     }
 
@@ -10226,8 +10342,8 @@ Message=Server says Andr\xe9\r\n\
     async fn prepared_host_fails_only_when_both_transports_are_unavailable() {
         let (occupied_tcp, occupied_udp, configured_address) =
             reserve_tcp_and_udp_at_same_address().await;
-        let league_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        league_listener.set_nonblocking(true).unwrap();
+        let league_listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+        league_listener.set_nonblocking(true).test_value();
         let league_endpoint = format!("http://{}/", league_listener.local_addr().unwrap());
         let settings = HostSettings {
             bind_addr: configured_address,
@@ -10268,7 +10384,7 @@ Message=Server says Andr\xe9\r\n\
 
         let error = local_id_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("host worker readiness timeout")
+            .test_value()
             .expect_err("both unavailable transports must fail startup");
         assert!(matches!(
             error,
@@ -10333,7 +10449,7 @@ Message=Server says Andr\xe9\r\n\
 
         let error = local_id_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("host worker readiness timeout")
+            .test_value()
             .expect_err("negative Start MaxPlayers must reject local admission");
         assert!(matches!(
             error,
@@ -10345,7 +10461,7 @@ Message=Server says Andr\xe9\r\n\
             .expect("join rejected league host worker")
             .is_err());
 
-        let bodies = league_server.join().expect("join league HTTP fixture");
+        let bodies = league_server.join().test_value();
         assert_eq!(bodies.len(), 2);
         assert!(bodies[0]
             .windows(b"Action=Start".len())
@@ -10409,19 +10525,16 @@ Message=Server says Andr\xe9\r\n\
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("host worker readiness");
+            .test_value();
         assert!(ready.league_runtime_available);
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("shut the registered host worker down");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
         worker
             .await
             .expect("join registered host worker")
-            .expect("registered host worker exits cleanly");
+            .test_value();
 
-        let bodies = league_server.join().expect("join league HTTP fixture");
+        let bodies = league_server.join().test_value();
         assert_eq!(bodies.len(), 2, "shutdown must follow Start with End");
         assert!(bodies[1]
             .windows(b"Action=End".len())
@@ -10482,7 +10595,7 @@ Message=Server says Andr\xe9\r\n\
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("a refused registration must not fail the host session");
+            .test_value();
         assert!(
             !ready.league_runtime_available,
             "a refused Start leaves no registration to update"
@@ -10495,16 +10608,13 @@ Message=Server says Andr\xe9\r\n\
             "the refusal is reported so the caller can present C++'s OK/Abort choice"
         );
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("shut the unregistered host worker down");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
         worker
             .await
             .expect("join unregistered host worker")
-            .expect("an unregistered host still exits cleanly");
+            .test_value();
 
-        let bodies = league_server.join().expect("join league HTTP fixture");
+        let bodies = league_server.join().test_value();
         assert_eq!(
             bodies.len(),
             1,
@@ -10525,17 +10635,15 @@ Message=Server says Andr\xe9\r\n\
             move |reply_index| {
                 if reply_index == 1 {
                     second_start_seen_tx
-                        .send(())
-                        .expect("report gated Start request");
+                        .send(()).test_value();
                     release_second_start_rx
-                        .recv_timeout(Duration::from_secs(5))
-                        .expect("release gated Start response");
+                        .recv_timeout(Duration::from_secs(5)).test_value();
                 }
             },
         );
         let mut puncher =
             clonk_network::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .expect("bind live puncher fixture");
+                .test_value();
         let puncher_address = puncher.local_addr();
         let settings = HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -10565,7 +10673,7 @@ Message=Server says Andr\xe9\r\n\
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("host worker readiness");
+            .test_value();
         assert!(!ready.league_runtime_available);
 
         let failed_reference = minimal_league_reference();
@@ -10591,10 +10699,10 @@ Message=Server says Andr\xe9\r\n\
                 transition: failed_transition,
             })
             .await
-            .expect("attempt masterserver signup");
+            .test_value();
         failed_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("failed masterserver signup completion")
+            .test_value()
             .expect_err("failed Start rolls the runtime back");
 
         let (enabled_tx, enabled_rx) = mpsc::channel();
@@ -10612,38 +10720,36 @@ Message=Server says Andr\xe9\r\n\
                 transition: enabled_transition,
             })
             .await
-            .expect("enable masterserver signup");
+            .test_value();
         second_start_seen_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("second Start request reaches the HTTP server");
+            .test_value();
         let mut puncher_stream = tokio::time::timeout(Duration::from_secs(2), puncher.accept())
             .await
             .expect("live signup contacts puncher before Start responds")
-            .expect("accept live host puncher session");
+            .test_value();
         let puncher_request = tokio::time::timeout(Duration::from_secs(2), async {
             let mut header = [0_u8; 5];
-            puncher_stream.read_exact(&mut header).await.unwrap();
+            puncher_stream.read_exact(&mut header).await.test_value();
             assert_eq!(header[0], 0xff);
-            let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let length = u32::from_ne_bytes(header[1..].try_into().test_value()) as usize;
             let mut payload = vec![0; length];
-            puncher_stream.read_exact(&mut payload).await.unwrap();
+            puncher_stream.read_exact(&mut payload).await.test_value();
             payload
         })
         .await
-        .expect("live puncher ID request arrives before Start responds");
+        .test_value();
         assert_eq!(
             clonk_network::decode_netpuncher_packet(&puncher_request).unwrap(),
             clonk_network::NetpuncherPacket::IdRequest
         );
         assert!(matches!(enabled_rx.try_recv(), Err(TryRecvError::Empty)));
-        release_second_start_tx
-            .send(())
-            .expect("release successful Start response");
+        release_second_start_tx.send(()).test_value();
         let response = enabled_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("masterserver signup enable completion")
             .expect("masterserver signup enables")
-            .expect("fresh enable returns Start response");
+            .test_value();
         assert_eq!(response.league.as_bytes(), b"Cup");
         assert_eq!(response.seed, Some(305_419_896));
         assert_eq!(response.max_players, 4);
@@ -10667,22 +10773,16 @@ Message=Server says Andr\xe9\r\n\
                 transition: disabled_transition,
             })
             .await
-            .expect("disable masterserver signup");
+            .test_value();
         disabled_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("masterserver signup disable completion")
-            .expect("masterserver signup disables");
+            .test_value();
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop host worker");
-        worker
-            .await
-            .expect("join host worker")
-            .expect("host worker exits cleanly");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join host worker").test_value();
 
-        let bodies = league_server.join().expect("join league HTTP fixture");
+        let bodies = league_server.join().test_value();
         assert_eq!(bodies.len(), 3, "shutdown must not repeat the live End");
         assert!(bodies[0]
             .windows(b"Action=Start".len())
@@ -10699,7 +10799,7 @@ Message=Server says Andr\xe9\r\n\
                 .any(|window| window == b"RandomSeed=305419896"),
             "End must identify the Start-updated reference, not the pre-Start command copy"
         );
-        puncher.shutdown().await.unwrap();
+        puncher.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10713,10 +10813,10 @@ Message=Server says Andr\xe9\r\n\
             ],
             move |reply_index| {
                 if reply_index == 1 {
-                    end_seen_tx.send(()).expect("report in-flight End");
+                    end_seen_tx.send(()).test_value();
                     release_end_rx
                         .recv_timeout(Duration::from_secs(5))
-                        .expect("release in-flight End response");
+                        .test_value();
                 }
             },
         );
@@ -10748,7 +10848,7 @@ Message=Server says Andr\xe9\r\n\
         local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
-            .expect("host worker readiness");
+            .test_value();
 
         let reference = minimal_league_reference();
         let config = PreparedLeagueHostConfig {
@@ -10771,11 +10871,11 @@ Message=Server says Andr\xe9\r\n\
                 )),
             })
             .await
-            .expect("enable masterserver signup");
+            .test_value();
         enabled_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("masterserver signup enable completion")
-            .expect("masterserver signup enables");
+            .test_value();
 
         let (disabled_tx, disabled_rx) = mpsc::channel();
         let (disabled_cancel, disabled_cancellation) = tokio::sync::oneshot::channel();
@@ -10792,27 +10892,21 @@ Message=Server says Andr\xe9\r\n\
                 transition: Arc::clone(&disabled_transition),
             })
             .await
-            .expect("queue compensating End");
+            .test_value();
         end_seen_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("End reaches the league server");
+            .test_value();
         drop(disabled_cancel);
-        release_end_tx.send(()).expect("release End response");
+        release_end_tx.send(()).test_value();
         drop(disabled_rx);
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("queue worker shutdown behind End");
-        worker
-            .await
-            .expect("join host worker")
-            .expect("host worker exits cleanly");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join host worker").test_value();
 
         assert_eq!(
             disabled_transition.load(Ordering::Acquire),
             MASTERSERVER_SIGNUP_FINISHED
         );
-        let bodies = league_server.join().expect("join league HTTP fixture");
+        let bodies = league_server.join().test_value();
         assert_eq!(bodies.len(), 2, "End must complete before worker shutdown");
         assert!(bodies[1]
             .windows(b"Action=End".len())
@@ -10833,23 +10927,20 @@ Message=Server says Andr\xe9\r\n\
             },
         )
         .await
-        .expect("start dual-transport host");
-        let host_udp_addr = host.udp_local_addr().expect("host UDP address");
+        .test_value();
+        let host_udp_addr = host.udp_local_addr().test_value();
         let (udp_seen_tx, mut udp_seen_rx) = tokio_mpsc::unbounded_channel();
         let udp_proxy_task = tokio::spawn(async move {
             let mut client_addr = None;
             let mut buffer = vec![0_u8; 65_536];
             loop {
-                let (length, source) = udp_proxy
-                    .recv_from(&mut buffer)
-                    .await
-                    .expect("receive proxied UDP datagram");
+                let (length, source) = udp_proxy.recv_from(&mut buffer).await.test_value();
                 if source == host_udp_addr {
                     if let Some(client_addr) = client_addr {
                         udp_proxy
                             .send_to(&buffer[..length], client_addr)
                             .await
-                            .expect("forward host UDP datagram");
+                            .test_value();
                     }
                 } else {
                     client_addr = Some(source);
@@ -10857,11 +10948,11 @@ Message=Server says Andr\xe9\r\n\
                     udp_proxy
                         .send_to(&buffer[..length], host_udp_addr)
                         .await
-                        .expect("forward client UDP datagram");
+                        .test_value();
                 }
             }
         });
-        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
@@ -10888,21 +10979,15 @@ Message=Server says Andr\xe9\r\n\
         local_id_rx
             .recv_timeout(Duration::from_secs(4))
             .expect("client worker readiness timeout")
-            .expect("client worker readiness");
+            .test_value();
         tokio::time::timeout(Duration::from_secs(4), udp_seen_rx.recv())
             .await
             .expect("client worker UDP contact timeout")
-            .expect("client worker contacted UDP on the configured server endpoint");
+            .test_value();
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop client worker");
-        worker
-            .await
-            .expect("join client worker")
-            .expect("client worker exits cleanly");
-        host.shutdown().await.expect("host shutdown");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join client worker").test_value();
+        host.shutdown().await.test_value();
         udp_proxy_task.abort();
     }
 
@@ -10910,21 +10995,19 @@ Message=Server says Andr\xe9\r\n\
     async fn disconnected_client_ignores_stale_controls_before_reporting_league_loss() {
         let (endpoint, league_server) =
             league_http_fixture(vec![b"[Response]\r\nStatus=Success\r\n"]);
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let mut host_config = HostConfig::default();
         host_config
             .initial_join_snapshot
             .as_mut()
-            .expect("default JoinData")
+            .test_value()
             .parameters
-            .league_address = clonk_engine::LegacyCString::from_bytes(endpoint.into_bytes())
-            .expect("fixture endpoint is NUL-free");
-        let host = start_host(listener, host_config).await.expect("start host");
+            .league_address =
+            clonk_engine::LegacyCString::from_bytes(endpoint.into_bytes()).test_value();
+        let host = start_host(listener, host_config).await.test_value();
 
-        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(16);
@@ -10952,20 +11035,20 @@ Message=Server says Andr\xe9\r\n\
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(4))
             .expect("client worker readiness timeout")
-            .expect("client worker readiness");
+            .test_value();
         assert!(ready.league_runtime_available);
         let remove =
             clonk_engine::ControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
-                client_id: i32::try_from(ready.local_client_id).unwrap(),
+                client_id: i32::try_from(ready.local_client_id).test_value(),
                 reason: clonk_engine::LegacyCString::default(),
-                by_client: i32::try_from(HOST_CLIENT_ID).unwrap(),
+                by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
             });
         host.submit_packet(
             ControlDelivery::Sync,
             encode_control_entry_payload(&remove).expect("encode client removal"),
         )
         .await
-        .expect("close client connection");
+        .test_value();
         let disconnect_deadline = std::time::Instant::now() + Duration::from_secs(4);
         let mut seen_events = Vec::new();
         loop {
@@ -10985,13 +11068,13 @@ Message=Server says Andr\xe9\r\n\
         command_tx
             .send(NetworkCommand::FinalizeTick { tick: 1 })
             .await
-            .expect("queue stale frame");
+            .test_value();
         let (completion, completed) = mpsc::channel();
         command_tx
             .send(NetworkCommand::LeagueReportDisconnect {
                 reason: clonk_network::LeagueDisconnectReason::ConnectionFailed,
                 players: clonk_network::ClientPlayerInfosSnapshot {
-                    client_id: i32::try_from(ready.local_client_id).unwrap(),
+                    client_id: i32::try_from(ready.local_client_id).test_value(),
                     flags: 0,
                     players: vec![clonk_engine::ControlPlayerInfoEntry {
                         id: 17,
@@ -11003,24 +11086,18 @@ Message=Server says Andr\xe9\r\n\
                 completion,
             })
             .await
-            .expect("queue league disconnect report");
+            .test_value();
         assert_eq!(
             completed
                 .recv_timeout(Duration::from_secs(4))
                 .expect("league disconnect completion"),
             Ok(())
         );
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop disconnected client worker");
-        worker
-            .await
-            .expect("join client worker")
-            .expect("client worker exits cleanly");
-        host.shutdown().await.expect("stop host");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join client worker").test_value();
+        host.shutdown().await.test_value();
 
-        let bodies = league_server.join().expect("join league HTTP fixture");
+        let bodies = league_server.join().test_value();
         assert!(bodies[0]
             .windows(b"Action=ReportDisconnect".len())
             .any(|window| window == b"Action=ReportDisconnect"));
@@ -11031,28 +11108,22 @@ Message=Server says Andr\xe9\r\n\
         // HandleJoinData applies the complete packet during client bootstrap,
         // before the client announces addresses or processes ordinary traffic
         // (src/C4Network2.cpp:1574-1623).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host_config = HostConfig::default();
         let host_core = host_config.local_core.clone();
         let host_status = host_config.initial_status;
-        let snapshot = host_config
-            .initial_join_snapshot
-            .clone()
-            .expect("default host publishes JoinData");
-        let host = start_host(listener, host_config).await.expect("start host");
+        let snapshot = host_config.initial_join_snapshot.clone().test_value();
+        let host = start_host(listener, host_config).await.test_value();
         let mut client = clonk_network::connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("connect client");
+        .test_value();
         let client_id = client.client_id();
-        let wire_client_id = i32::try_from(client_id).expect("client ID fits wire field");
-        let name = clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec())
-            .expect("static client name is NUL-free");
+        let wire_client_id = i32::try_from(client_id).test_value();
+        let name = legacy_string(b"Alice");
         let mut parameters = snapshot.parameters;
         parameters.clients = clonk_network::JoinClientRegistrySnapshot {
             clients: vec![
@@ -11083,7 +11154,7 @@ Message=Server says Andr\xe9\r\n\
 
         let announced =
             announce_connected_client(&mut client, "Alice".to_string(), &event_tx, &local_id_tx)
-                .expect("announce connected client");
+                .test_value();
 
         assert_eq!(
             announced,
@@ -11110,8 +11181,8 @@ Message=Server says Andr\xe9\r\n\
             }
         );
 
-        client.shutdown().await.expect("client shutdown");
-        host.shutdown().await.expect("host shutdown");
+        client.shutdown().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11121,10 +11192,8 @@ Message=Server says Andr\xe9\r\n\
         // PID_ClientActReq immediately afterwards with Game.FrameCounter
         // (src/C4Network2Players.cpp:124-136;
         // src/C4Network2.cpp:2041-2058,2116-2145).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host_config = HostConfig {
             udp_bind_address: Some(address),
             ..HostConfig::default()
@@ -11133,13 +11202,13 @@ Message=Server says Andr\xe9\r\n\
             target_tick: host_config
                 .initial_join_snapshot
                 .as_ref()
-                .expect("default JoinData")
+                .test_value()
                 .dynamic_tick,
             ..host_config.initial_status
         };
-        let mut host = start_host(listener, host_config).await.expect("start host");
+        let mut host = start_host(listener, host_config).await.test_value();
         let mut host_events = host.take_event_receiver();
-        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(16);
@@ -11167,14 +11236,14 @@ Message=Server says Andr\xe9\r\n\
         let client_id = loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("client join timeout")
+                .test_value()
             {
                 Some(HostEvent::ClientJoined { client_id, .. }) => break client_id,
                 Some(_) => continue,
                 None => panic!("host event stream ended before client join"),
             }
         };
-        let wire_client_id = i32::try_from(client_id).expect("client ID fits wire field");
+        let wire_client_id = i32::try_from(client_id).test_value();
         let request = clonk_network::PlayerInfoUpdateRequest {
             client_id: wire_client_id,
             flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -11183,7 +11252,7 @@ Message=Server says Andr\xe9\r\n\
         command_tx
             .send(NetworkCommand::SubmitPlayerInfoUpdate(request))
             .await
-            .expect("queue initial PlayerInfo");
+            .test_value();
         command_tx
             .send(NetworkCommand::AcknowledgeRequestedStatus {
                 status: expected_status,
@@ -11191,13 +11260,13 @@ Message=Server says Andr\xe9\r\n\
                 current_frame: 41,
             })
             .await
-            .expect("queue reached status");
+            .test_value();
 
         let mut protocol_order = Vec::new();
         while protocol_order.len() < 3 {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("initial client protocol timeout")
+                .test_value()
             {
                 Some(HostEvent::PlayerInfoUpdate { .. }) => protocol_order.push(("player-info", 0)),
                 Some(HostEvent::StatusAck { status, .. }) => {
@@ -11219,35 +11288,27 @@ Message=Server says Andr\xe9\r\n\
             ]
         );
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop client worker");
-        worker
-            .await
-            .expect("join client worker")
-            .expect("client worker exits cleanly");
-        host.shutdown().await.expect("host shutdown");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join client worker").test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_worker_rebases_deactivated_presend_input_to_first_activated_tick() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host_config = HostConfig::default();
         let expected_status = NetworkStatus {
             target_tick: host_config
                 .initial_join_snapshot
                 .as_ref()
-                .expect("default JoinData")
+                .test_value()
                 .dynamic_tick,
             ..host_config.initial_status
         };
-        let mut host = start_host(listener, host_config).await.expect("start host");
+        let mut host = start_host(listener, host_config).await.test_value();
         let mut host_events = host.take_event_receiver();
-        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(32);
@@ -11274,12 +11335,12 @@ Message=Server says Andr\xe9\r\n\
         let ready = local_id_rx
             .recv_timeout(Duration::from_secs(4))
             .expect("client worker readiness timeout")
-            .expect("client worker readiness");
+            .test_value();
         let client_id = ready.local_client_id;
         loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("client join timeout")
+                .test_value()
             {
                 Some(HostEvent::ClientJoined {
                     client_id: joined, ..
@@ -11299,7 +11360,7 @@ Message=Server says Andr\xe9\r\n\
                 current_frame: 41,
             })
             .await
-            .expect("queue reached status");
+            .test_value();
         command_tx
             .send(NetworkCommand::SubmitLocal {
                 owner: 3,
@@ -11307,16 +11368,16 @@ Message=Server says Andr\xe9\r\n\
                 tick: 2,
             })
             .await
-            .expect("queue inactive input");
+            .test_value();
         command_tx
             .send(NetworkCommand::FinalizeTick { tick: 0 })
             .await
-            .expect("probe inactive finalization");
+            .test_value();
 
         loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("activation request timeout")
+                .test_value()
             {
                 Some(HostEvent::ActivationRequest {
                     client_id: requested,
@@ -11344,15 +11405,13 @@ Message=Server says Andr\xe9\r\n\
                 timestamp_ms: 0,
                 controls: Vec::new(),
             })
-            .expect("encode host control")
+            .test_value()
         };
-        host.submit_local_control(host_frame(0))
-            .await
-            .expect("advance host-only tick");
+        host.submit_local_control(host_frame(0)).await.test_value();
         loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("host-only control timeout")
+                .test_value()
             {
                 Some(HostEvent::Ready { packet }) if packet.tick() == 0 => break,
                 Some(HostEvent::TransportError { error, .. }) => {
@@ -11365,9 +11424,9 @@ Message=Server says Andr\xe9\r\n\
 
         let update = clonk_engine::ClientUpdateControlData {
             update_type: clonk_engine::CLIENT_UPDATE_ACTIVATE,
-            client_id: i32::try_from(client_id).expect("client ID fits i32"),
+            client_id: i32::try_from(client_id).test_value(),
             data: 1,
-            by_client: i32::try_from(HOST_CLIENT_ID).expect("host ID fits i32"),
+            by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
         };
         host.submit_packet(
             ControlDelivery::Sync,
@@ -11377,11 +11436,11 @@ Message=Server says Andr\xe9\r\n\
             .expect("encode activation control"),
         )
         .await
-        .expect("submit activation control");
+        .test_value();
         loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("activation execution timeout")
+                .test_value()
             {
                 Some(HostEvent::SyncScheduled { controls, .. })
                     if controls
@@ -11399,19 +11458,17 @@ Message=Server says Andr\xe9\r\n\
         command_tx
             .send(NetworkCommand::ClientUpdateExecuted(update))
             .await
-            .expect("report executed activation");
+            .test_value();
         command_tx
             .send(NetworkCommand::FinalizeTick { tick: 1 })
             .await
-            .expect("finalize first activated tick");
-        host.submit_local_control(host_frame(1))
-            .await
-            .expect("complete first activated tick");
+            .test_value();
+        host.submit_local_control(host_frame(1)).await.test_value();
 
         let packet = loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("activated control timeout")
+                .test_value()
             {
                 Some(HostEvent::Ready { packet }) if packet.tick() == 1 => break packet,
                 Some(HostEvent::TransportError { error, .. }) => {
@@ -11421,7 +11478,7 @@ Message=Server says Andr\xe9\r\n\
                 None => panic!("host event stream ended before activated input"),
             }
         };
-        let frame = decode_control_packet(&packet).expect("decode complete activated tick");
+        let frame = decode_control_packet(&packet).test_value();
         assert!(frame.controls.iter().any(|control| matches!(
             control,
             clonk_engine::ControlPacket::PlayerControl(data)
@@ -11429,36 +11486,25 @@ Message=Server says Andr\xe9\r\n\
                     && data.command == i32::from(COM_RIGHT)
         )));
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop client worker");
-        worker
-            .await
-            .expect("join client worker")
-            .expect("client worker exits cleanly");
-        host.shutdown().await.expect("host shutdown");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join client worker").test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_join_flow_worker_uses_every_address_and_supplied_password() {
-        let closed = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind disposable route");
-        let closed_address = closed.local_addr().expect("disposable route address");
+        let closed = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let closed_address = closed.local_addr().test_value();
         drop(closed);
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind passworded host");
-        let live_address = listener.local_addr().expect("passworded host address");
-        let password = clonk_engine::LegacyCString::from_bytes(b"join secret".to_vec())
-            .expect("fixture is NUL-free");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let live_address = listener.local_addr().test_value();
+        let password = legacy_string(b"join secret");
         let host_config = HostConfig {
             password: password.clone(),
             ..Default::default()
         };
-        let host = start_host(listener, host_config).await.expect("start host");
-        let temporary = tempfile::tempdir().expect("temporary client work directory");
+        let host = start_host(listener, host_config).await.test_value();
+        let temporary = tempfile::tempdir().test_value();
         let mut settings = ClientSettings::new(closed_address, "Alice")
             .with_join_attempts([
                 NetworkAddress::new(NetworkProtocol::Tcp, closed_address),
@@ -11494,15 +11540,9 @@ Message=Server says Andr\xe9\r\n\
                 .expect("worker reports readiness"),
             Ok(NetworkWorkerReady { local_client_id, .. }) if local_client_id > 0
         ));
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop connected client worker");
-        worker
-            .await
-            .expect("join worker task")
-            .expect("stop worker");
-        host.shutdown().await.expect("stop host");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join worker task").test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -11511,34 +11551,28 @@ Message=Server says Andr\xe9\r\n\
         // The Rust app already executes its installed System group, matching
         // Application.SystemGroup ownership after C++ bootstrap
         // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793).
-        let temporary = tempfile::tempdir().expect("temporary resource roots");
+        let temporary = tempfile::tempdir().test_value();
         let host_root = temporary.path().join("host");
         let client_root = temporary.path().join("client");
         let host_system = host_root.join("System.c4g");
         let client_system = client_root.join("System.c4g");
-        std::fs::create_dir_all(&host_system).expect("host System directory");
-        std::fs::create_dir_all(&client_system).expect("client System directory");
-        std::fs::write(host_system.join("Host.c"), b"C++ host system")
-            .expect("host System contents");
-        std::fs::write(client_system.join("Client.c"), b"Rust client system")
-            .expect("client System contents");
+        std::fs::create_dir_all(&host_system).test_value();
+        std::fs::create_dir_all(&client_system).test_value();
+        std::fs::write(host_system.join("Host.c"), b"C++ host system").test_value();
+        std::fs::write(client_system.join("Client.c"), b"Rust client system").test_value();
         let publication = clonk_network::build_host_resource_core(
             &host_system,
             &host_root,
             clonk_network::HostResourceCoreSpec::new(
                 clonk_network::HostResourceType::System,
                 2,
-                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec())
-                    .expect("static resource name"),
+                legacy_string(b"System.c4g"),
                 "C++ host",
             ),
         )
-        .expect("publish host System");
+        .test_value();
         let mut host_config = HostConfig::default();
-        let snapshot = host_config
-            .initial_join_snapshot
-            .as_mut()
-            .expect("default JoinData");
+        let snapshot = host_config.initial_join_snapshot.as_mut().test_value();
         snapshot.dynamic.id = 3;
         snapshot.parameters.scenario.id = 0;
         snapshot
@@ -11552,11 +11586,9 @@ Message=Server says Andr\xe9\r\n\
             ownership: clonk_network::ResourceFileOwnership::Persistent,
             binary_compatible: false,
         }];
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind C++-style host");
-        let address = listener.local_addr().expect("host address");
-        let host = start_host(listener, host_config).await.expect("start host");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
+        let host = start_host(listener, host_config).await.test_value();
         let mut settings = ClientSettings::new(address, "Alice")
             .with_join_attempts([NetworkAddress::new(NetworkProtocol::Tcp, address)]);
         settings.mesh_udp_bind_address = None;
@@ -11593,10 +11625,7 @@ Message=Server says Andr\xe9\r\n\
         let mut saw_join_data = false;
         let mut saw_system = false;
         while !saw_join_data || !saw_system {
-            match event_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("worker emits bootstrap events")
-            {
+            match event_rx.recv_timeout(Duration::from_secs(2)).test_value() {
                 NetworkEvent::JoinData(_) => saw_join_data = true,
                 NetworkEvent::ResourceComplete {
                     resource_id: 2,
@@ -11614,15 +11643,9 @@ Message=Server says Andr\xe9\r\n\
             }
         }
 
-        command_tx
-            .send(NetworkCommand::Shutdown)
-            .await
-            .expect("stop client worker");
-        worker
-            .await
-            .expect("join worker task")
-            .expect("stop worker");
-        host.shutdown().await.expect("stop host");
+        command_tx.send(NetworkCommand::Shutdown).await.test_value();
+        worker.await.expect("join worker task").test_value();
+        host.shutdown().await.test_value();
     }
 
     #[test]
@@ -11643,7 +11666,7 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .submit_player_info_update(request.clone())
-            .expect("queue PlayerInfo update request");
+            .test_value();
 
         assert_eq!(commands.take_player_info_updates(), vec![request]);
     }
@@ -11658,30 +11681,18 @@ Message=Server says Andr\xe9\r\n\
             data: 4,
             by_client: -1,
         };
-
-        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
-        host.submit_control_set(set)
-            .expect("host queues synchronized CID_Set");
-        assert_eq!(
-            host_commands.take_submitted_control_sets(),
-            vec![LegacyControlSet {
-                by_client: 0,
-                ..set
-            }]
-        );
-
-        let (client, _events, mut client_commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
-        client
-            .submit_control_set(set)
-            .expect("client queues synchronized CID_Set");
-        assert_eq!(
-            client_commands.take_submitted_control_sets(),
-            vec![LegacyControlSet {
-                by_client: 7,
-                ..set
-            }]
-        );
+        for client_id in [HOST_CLIENT_ID, 7] {
+            let (manager, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(client_id);
+            manager.submit_control_set(set).test_value();
+            assert_eq!(
+                commands.take_submitted_control_sets(),
+                vec![LegacyControlSet {
+                    by_client: client_id as i32,
+                    ..set
+                }]
+            );
+        }
     }
 
     #[test]
@@ -11691,40 +11702,27 @@ Message=Server says Andr\xe9\r\n\
             data: 0,
             by_client: -1,
         };
-
-        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
-        host.submit_decided_control_set(12, set, true)
-            .expect("queue frozen-host decided control");
-        let submitted = host_commands.take_submitted_decided_controls();
-        let [(tick, control, sync)] = submitted.as_slice() else {
-            panic!("expected one host decided control");
-        };
-        assert_eq!((*tick, *sync), (12, true));
-        assert_eq!(
-            LegacyControlSet::from_control_packet(control),
-            Some(LegacyControlSet {
-                by_client: 0,
-                ..set
-            })
-        );
-
-        let (client, _events, mut client_commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
-        client
-            .submit_decided_control_set(13, set, true)
-            .expect("queue client decided control");
-        let submitted = client_commands.take_submitted_decided_controls();
-        let [(tick, control, sync)] = submitted.as_slice() else {
-            panic!("expected one client decided control");
-        };
-        assert_eq!((*tick, *sync), (13, false));
-        assert_eq!(
-            LegacyControlSet::from_control_packet(control),
-            Some(LegacyControlSet {
-                by_client: 7,
-                ..set
-            })
-        );
+        for (client_id, expected_tick, expected_sync) in
+            [(HOST_CLIENT_ID, 12, true), (7, 13, false)]
+        {
+            let (manager, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(client_id);
+            manager
+                .submit_decided_control_set(expected_tick, set, true)
+                .test_value();
+            let submitted = commands.take_submitted_decided_controls();
+            let [(tick, control, sync)] = submitted.as_slice() else {
+                panic!("expected one decided control");
+            };
+            assert_eq!((*tick, *sync), (expected_tick, expected_sync));
+            assert_eq!(
+                LegacyControlSet::from_control_packet(control),
+                Some(LegacyControlSet {
+                    by_client: client_id as i32,
+                    ..set
+                })
+            );
+        }
     }
 
     #[test]
@@ -11743,9 +11741,7 @@ Message=Server says Andr\xe9\r\n\
             by_client: -1,
         };
 
-        manager
-            .submit_player_command(12, command)
-            .expect("queue player command");
+        manager.submit_player_command(12, command).test_value();
 
         assert_eq!(
             commands.take_submitted_player_commands(),
@@ -11766,14 +11762,13 @@ Message=Server says Andr\xe9\r\n\
         let script = ScriptControlData {
             target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
             strictness: clonk_engine::ScriptStrictness::Strict3,
-            script: clonk_engine::LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
-                .expect("script is NUL-free"),
+            script: legacy_string(b"SetGravity(77)"),
             by_client: -1,
         };
 
         manager
             .submit_script_control(12, script.clone())
-            .expect("queue script control");
+            .test_value();
 
         assert_eq!(
             commands.take_submitted_scripts(),
@@ -11793,15 +11788,14 @@ Message=Server says Andr\xe9\r\n\
             NetworkManager::test_stub_with_commands_for_client_id(7);
         let answer = MessageBoardAnswerControlData {
             object: 42,
-            answer: clonk_engine::LegacyCString::from_bytes(b"q\"\\z".to_vec())
-                .expect("answer is NUL-free"),
+            answer: legacy_string(b"q\"\\z"),
             player: 3,
             by_client: -1,
         };
 
         manager
             .submit_message_board_answer(12, answer.clone())
-            .expect("queue message-board answer");
+            .test_value();
 
         assert_eq!(
             commands.take_submitted_message_board_answers(),
@@ -11825,10 +11819,8 @@ Message=Server says Andr\xe9\r\n\
             NetworkManager::test_stub_with_commands_for_client_id(7);
         let request = clonk_network::ClientPlayerResourceRequest {
             source_path: PathBuf::from("Alice.c4p"),
-            wire_name: clonk_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec())
-                .expect("fixture filename is NUL-free"),
-            group_maker: clonk_engine::LegacyCString::from_bytes(b"Alice".to_vec())
-                .expect("fixture maker is NUL-free"),
+            wire_name: legacy_string(b"Alice.c4p"),
+            group_maker: legacy_string(b"Alice"),
         };
         let expected = request.clone();
         let caller = thread::spawn(move || manager.publish_client_player_resource(request));
@@ -11836,10 +11828,7 @@ Message=Server says Andr\xe9\r\n\
         let NetworkCommand::PublishPlayerResource {
             request,
             completion,
-        } = commands
-            .command_rx
-            .blocking_recv()
-            .expect("publication command")
+        } = commands.command_rx.blocking_recv().test_value()
         else {
             panic!("expected selected-player publication command");
         };
@@ -11851,9 +11840,7 @@ Message=Server says Andr\xe9\r\n\
             loadable: true,
             ..Default::default()
         };
-        completion
-            .send(Ok(core.clone()))
-            .expect("complete publication");
+        completion.send(Ok(core.clone())).test_value();
 
         assert_eq!(
             caller.join().expect("publication caller exits").unwrap(),
@@ -11884,10 +11871,7 @@ Message=Server says Andr\xe9\r\n\
             source_path,
             ownership,
             completion,
-        } = commands
-            .command_rx
-            .blocking_recv()
-            .expect("resource derivation command")
+        } = commands.command_rx.blocking_recv().test_value()
         else {
             panic!("expected resource derivation command");
         };
@@ -11897,7 +11881,7 @@ Message=Server says Andr\xe9\r\n\
         assert!(!caller.is_finished(), "the source is not protected yet");
         completion
             .send(Err("rescue failed".to_owned()))
-            .expect("complete resource derivation");
+            .test_value();
 
         assert_eq!(
             caller
@@ -11926,12 +11910,12 @@ Message=Server says Andr\xe9\r\n\
             !caller.is_finished(),
             "resource removal has not completed yet"
         );
-        completion.send(Ok(())).expect("complete resource removal");
+        completion.send(Ok(())).test_value();
 
         caller
             .join()
             .expect("resource-removal caller exits")
-            .expect("resource removal succeeds");
+            .test_value();
     }
 
     #[test]
@@ -11939,16 +11923,14 @@ Message=Server says Andr\xe9\r\n\
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
 
-        let removed = manager
-            .remove_client_resource_async(23)
-            .expect("queue resource removal");
+        let removed = manager.remove_client_resource_async(23).test_value();
         let (resource_id, completion) = commands.receive_resource_removal();
         assert_eq!(resource_id, 23);
         assert_eq!(removed.try_recv(), Err(TryRecvError::Empty));
 
         completion
             .send(Err("remove failed".to_owned()))
-            .expect("complete resource removal");
+            .test_value();
         assert_eq!(
             removed.recv().expect("resource-removal result"),
             Err("remove failed".to_owned())
@@ -11981,14 +11963,9 @@ Message=Server says Andr\xe9\r\n\
 
         let completion = commands.receive_graceful_part();
         assert!(!caller.is_finished(), "departure has not been written yet");
-        completion
-            .send(Ok(()))
-            .expect("complete graceful departure");
+        completion.send(Ok(())).test_value();
 
-        caller
-            .join()
-            .expect("departure caller exits")
-            .expect("graceful departure succeeds");
+        caller.join().expect("departure caller exits").test_value();
     }
 
     #[test]
@@ -12004,9 +11981,7 @@ Message=Server says Andr\xe9\r\n\
             ..Default::default()
         };
 
-        manager
-            .broadcast_player_info(info.clone())
-            .expect("host queues authoritative PlayerInfo");
+        manager.broadcast_player_info(info.clone()).test_value();
 
         assert_eq!(
             commands.take_broadcast_player_infos(),
@@ -12031,9 +12006,7 @@ Message=Server says Andr\xe9\r\n\
             ..Default::default()
         };
 
-        manager
-            .submit_join_player(23, join.clone())
-            .expect("host queues synchronized JoinPlayer");
+        manager.submit_join_player(23, join.clone()).test_value();
 
         assert_eq!(
             commands.take_submitted_join_players(),
@@ -12056,9 +12029,7 @@ Message=Server says Andr\xe9\r\n\
             NetworkManager::test_stub_with_commands_for_client_id(7);
         let message = message_control(99);
 
-        manager
-            .submit_message(message.clone())
-            .expect("client queues immediate message control");
+        manager.submit_message(message.clone()).test_value();
 
         assert_eq!(
             commands.take_submitted_messages(),
@@ -12075,44 +12046,30 @@ Message=Server says Andr\xe9\r\n\
         // DoTeamSelection queues the choice for the next complete control tick
         // on both host and client (src/C4Control.cpp:38-56;
         // src/C4Player.cpp:1775-1780; src/C4GameControl.cpp:394-400).
-        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
-        host.submit_init_scenario_player(23, 4, 2)
-            .expect("host queues team choice");
-        assert_eq!(
-            host_commands.take_submitted_init_scenario_players(),
-            vec![(
-                23,
-                clonk_engine::InitScenarioPlayerControlData {
-                    team: 2,
-                    player: 4,
-                    by_client: 0,
-                },
-            )]
-        );
-
-        let (client, _events, mut client_commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
-        client
-            .submit_init_scenario_player(41, 9, 3)
-            .expect("client queues team choice");
-        assert_eq!(
-            client_commands.take_submitted_init_scenario_players(),
-            vec![(
-                41,
-                clonk_engine::InitScenarioPlayerControlData {
-                    team: 3,
-                    player: 9,
-                    by_client: 7,
-                },
-            )]
-        );
+        for (client_id, tick, player, team) in [(HOST_CLIENT_ID, 23, 4, 2), (7, 41, 9, 3)] {
+            let (manager, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(client_id);
+            manager
+                .submit_init_scenario_player(tick, player, team)
+                .test_value();
+            assert_eq!(
+                commands.take_submitted_init_scenario_players(),
+                vec![(
+                    tick,
+                    clonk_engine::InitScenarioPlayerControlData {
+                        team,
+                        player,
+                        by_client: client_id as i32,
+                    },
+                )]
+            );
+        }
     }
 
     #[test]
     fn host_manager_queues_remove_player_with_host_authorship_and_tick() {
         let (host, _events, mut commands) = NetworkManager::test_stub_with_commands();
-        host.submit_remove_player(23, 4, true)
-            .expect("host queues RemovePlr");
+        host.submit_remove_player(23, 4, true).test_value();
         assert_eq!(
             commands.take_submitted_remove_players(),
             vec![(
@@ -12138,35 +12095,21 @@ Message=Server says Andr\xe9\r\n\
         // control tick (pristine 9ffa0a5d src/C4MainMenu.cpp:790-795;
         // src/C4GameControl.cpp:380-406;
         // src/C4GameControlNetwork.cpp:214-256).
-        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
-        host.submit_surrender_player(23, 4)
-            .expect("host queues surrender");
-        assert_eq!(
-            host_commands.take_submitted_surrender_players(),
-            vec![(
-                23,
-                clonk_engine::SurrenderPlayerControlData {
-                    player: 4,
-                    by_client: 0,
-                },
-            )]
-        );
-
-        let (client, _events, mut client_commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
-        client
-            .submit_surrender_player(41, 9)
-            .expect("client queues surrender");
-        assert_eq!(
-            client_commands.take_submitted_surrender_players(),
-            vec![(
-                41,
-                clonk_engine::SurrenderPlayerControlData {
-                    player: 9,
-                    by_client: 7,
-                },
-            )]
-        );
+        for (client_id, tick, player) in [(HOST_CLIENT_ID, 23, 4), (7, 41, 9)] {
+            let (manager, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(client_id);
+            manager.submit_surrender_player(tick, player).test_value();
+            assert_eq!(
+                commands.take_submitted_surrender_players(),
+                vec![(
+                    tick,
+                    clonk_engine::SurrenderPlayerControlData {
+                        player,
+                        by_client: client_id as i32,
+                    },
+                )]
+            );
+        }
     }
 
     #[test]
@@ -12176,12 +12119,8 @@ Message=Server says Andr\xe9\r\n\
         // (src/C4Network2.cpp:835-843; src/C4Game.cpp:3869-3880).
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         let worker = thread::spawn(move || {
-            manager
-                .set_join_allowed(true)
-                .expect("host confirms the live join gate change");
-            manager
-                .set_join_allowed(false)
-                .expect("host confirms the live join gate change");
+            manager.set_join_allowed(true).test_value();
+            manager.set_join_allowed(false).test_value();
         });
 
         let (allowed, completion) = commands.receive_join_allowed();
@@ -12190,7 +12129,7 @@ Message=Server says Andr\xe9\r\n\
             !worker.is_finished(),
             "the live gate has not acknowledged yet"
         );
-        completion.send(Ok(())).expect("acknowledge open gate");
+        completion.send(Ok(())).test_value();
 
         let (allowed, completion) = commands.receive_join_allowed();
         assert!(!allowed);
@@ -12198,8 +12137,8 @@ Message=Server says Andr\xe9\r\n\
             !worker.is_finished(),
             "the live gate has not acknowledged yet"
         );
-        completion.send(Ok(())).expect("acknowledge closed gate");
-        worker.join().expect("gate caller exits after both acks");
+        completion.send(Ok(())).test_value();
+        worker.join().test_value();
     }
 
     #[test]
@@ -12234,8 +12173,8 @@ Message=Server says Andr\xe9\r\n\
                 join_allowed: true,
             }]
         );
-        let (applied, rejected) = caller.join().expect("Go caller");
-        applied.expect("first atomic transition applies");
+        let (applied, rejected) = caller.join().test_value();
+        applied.test_value();
         assert_eq!(
             rejected
                 .expect_err("worker rejection reaches caller")
@@ -12256,14 +12195,12 @@ Message=Server says Andr\xe9\r\n\
             target_tick: 23,
         };
 
-        manager
-            .change_status(status)
-            .expect("host queues status change");
+        manager.change_status(status).test_value();
         assert_eq!(commands.take_status_changes(), vec![status]);
 
         manager
             .status_reached(status, status.target_tick)
-            .expect("host queues local status arrival");
+            .test_value();
         assert_eq!(commands.take_status_reached(), 1);
     }
 
@@ -12296,7 +12233,7 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusRequested(status))
-            .expect("queue exact host status");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusRequested(status)]
@@ -12304,7 +12241,7 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .acknowledge_requested_status_at_frame(41, 0)
-            .expect("client queues the reached status acknowledgement");
+            .test_value();
 
         assert_eq!(commands.take_status_acknowledgements(), vec![status]);
         assert_eq!(manager.client_status.awaiting_commit, Some(status));
@@ -12329,7 +12266,7 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusRequested(requested))
-            .expect("queue host status");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusRequested(requested)]
@@ -12337,7 +12274,7 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .acknowledge_requested_status_at_frame(44, 123)
-            .expect("client queues retargeted status acknowledgement");
+            .test_value();
 
         assert_eq!(
             commands.take_framed_status_acknowledgements(),
@@ -12347,7 +12284,7 @@ Message=Server says Andr\xe9\r\n\
 
         event_tx
             .send(NetworkEvent::StatusRequested(acknowledgement))
-            .expect("queue host's retargeted status broadcast");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusRequested(acknowledgement)]
@@ -12357,13 +12294,13 @@ Message=Server says Andr\xe9\r\n\
 
         event_tx
             .send(NetworkEvent::StatusCommitted(requested))
-            .expect("queue stale host acknowledgement");
+            .test_value();
         assert!(manager.poll_events().is_empty());
         assert_eq!(manager.client_status.awaiting_commit, Some(acknowledgement));
 
         event_tx
             .send(NetworkEvent::StatusCommitted(acknowledgement))
-            .expect("queue retargeted host acknowledgement");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusCommitted(acknowledgement)]
@@ -12386,10 +12323,10 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusRequested(first))
-            .expect("queue first host status");
+            .test_value();
         event_tx
             .send(NetworkEvent::StatusRequested(latest))
-            .expect("queue retargeted host status");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![
@@ -12410,7 +12347,7 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .acknowledge_expected_status_at_frame(latest, 44, 123)
-            .expect("the latest request remains acknowledgeable");
+            .test_value();
         assert_eq!(
             commands.take_framed_status_acknowledgements(),
             vec![(latest, 123)]
@@ -12670,7 +12607,7 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusRequested(status))
-            .expect("queue host status");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusRequested(status)]
@@ -12678,10 +12615,10 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .submit_player_info_update(request.clone())
-            .expect("queue initial PlayerInfo");
+            .test_value();
         manager
             .acknowledge_requested_status_at_frame(23, 41)
-            .expect("queue framed status acknowledgement");
+            .test_value();
 
         assert!(matches!(
             commands.command_rx.blocking_recv(),
@@ -12714,7 +12651,7 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .notify_client_update_executed(update.clone())
-            .expect("queue executed client update");
+            .test_value();
 
         assert!(matches!(
             commands.command_rx.blocking_recv(),
@@ -12733,9 +12670,7 @@ Message=Server says Andr\xe9\r\n\
         let host_config = HostConfig::default();
         let mut reference_status = host_config.initial_status;
         reference_status.target_tick = -1;
-        let snapshot = host_config
-            .initial_join_snapshot
-            .expect("default host publishes JoinData");
+        let snapshot = host_config.initial_join_snapshot.test_value();
         let join_data = clonk_network::JoinDataEnvelope {
             client_id: 7,
             start_control_tick: 23,
@@ -12745,7 +12680,7 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::JoinData(join_data.clone()))
-            .expect("queue initial JoinData");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::JoinData(join_data)]
@@ -12753,7 +12688,7 @@ Message=Server says Andr\xe9\r\n\
 
         manager
             .acknowledge_requested_status_at_frame(23, 0)
-            .expect("acknowledge initialized JoinData status");
+            .test_value();
 
         assert_eq!(
             commands.take_status_acknowledgements(),
@@ -12795,11 +12730,11 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusRequested(status))
-            .expect("queue host status");
+            .test_value();
         assert_eq!(manager.poll_events().len(), 1);
         manager
             .acknowledge_requested_status_at_frame(41, 0)
-            .expect("acknowledge exact host status");
+            .test_value();
 
         let stale = NetworkStatus {
             target_tick: 40,
@@ -12807,13 +12742,13 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusCommitted(stale))
-            .expect("queue stale host acknowledgement");
+            .test_value();
         assert!(manager.poll_events().is_empty());
         assert_eq!(manager.client_status.awaiting_commit, Some(status));
 
         event_tx
             .send(NetworkEvent::StatusCommitted(status))
-            .expect("queue exact host acknowledgement");
+            .test_value();
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusCommitted(status)]
@@ -12835,11 +12770,11 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusRequested(requested))
-            .expect("queue host status");
+            .test_value();
         assert_eq!(manager.poll_events().len(), 1);
         manager
             .acknowledge_requested_status_at_frame(41, 0)
-            .expect("acknowledge host status");
+            .test_value();
 
         let committed = NetworkStatus {
             control_mode: 9,
@@ -12847,7 +12782,7 @@ Message=Server says Andr\xe9\r\n\
         };
         event_tx
             .send(NetworkEvent::StatusCommitted(committed))
-            .expect("queue host acknowledgement");
+            .test_value();
 
         assert_eq!(
             manager.poll_events(),
@@ -12918,22 +12853,19 @@ Message=Server says Andr\xe9\r\n\
             data: 0,
             by_client: 1,
         };
-        let frame = LegacyControlFrame {
-            client_id: HOST_CLIENT_ID,
-            tick: 17,
-            timestamp_ms: 99,
-            controls: vec![
+        let event = ready_event(
+            17,
+            99,
+            vec![
                 clonk_engine::ControlPacket::PlayerControl(right.clone()),
                 clonk_engine::ControlPacket::Synchronize(synchronize.clone()),
                 clonk_engine::ControlPacket::SyncCheck(check.clone()),
                 clonk_engine::ControlPacket::PlayerControl(left.clone()),
             ],
-        };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
+            4,
+        );
 
-        emit_frame_controls(frame, 4, &event_tx).expect("emit ready frame");
-
-        match event_rx.recv().expect("ready event") {
+        match event {
             NetworkEvent::ReadyTick { tick, controls } => {
                 assert_eq!(tick, 17, "the aggregate control tick must be retained");
                 assert_eq!(
@@ -12949,10 +12881,6 @@ Message=Server says Andr\xe9\r\n\
             }
             other => panic!("expected one ready tick, got {other:?}"),
         }
-        assert!(
-            event_rx.try_recv().is_err(),
-            "one aggregate must produce one scheduling event"
-        );
     }
 
     #[test]
@@ -12962,18 +12890,8 @@ Message=Server says Andr\xe9\r\n\
             data: 12_345,
             by_client: 0,
         };
-        let frame = LegacyControlFrame {
-            client_id: HOST_CLIENT_ID,
-            tick: 19,
-            timestamp_ms: 0,
-            controls: vec![set.into_control_packet()],
-        };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
-
         assert_eq!(
-            event_rx.recv().expect("ready event"),
+            ready_event(19, 0, vec![set.into_control_packet()], 0),
             NetworkEvent::ReadyTick {
                 tick: 19,
                 controls: vec![NetworkControl::Set(set)],
@@ -12988,8 +12906,7 @@ Message=Server says Andr\xe9\r\n\
                 data: vec![0x00, 0xff, b'C', b'4'],
             });
 
-        let projected = network_control_for_packet(packet.clone())
-            .expect("known CID_DebugRec remains in the execution stream");
+        let projected = network_control_for_packet(packet.clone()).test_value();
         assert_eq!(
             projected,
             NetworkControl::DebugRecord(clonk_engine::DebugRecordControlData {
@@ -13022,22 +12939,18 @@ Message=Server says Andr\xe9\r\n\
             data: 0,
             by_client: 4,
         };
-        let frame = LegacyControlFrame {
-            client_id: HOST_CLIENT_ID,
-            tick: 23,
-            timestamp_ms: 0,
-            controls: vec![
+        let event = ready_event(
+            23,
+            0,
+            vec![
                 clonk_engine::ControlPacket::PlayerInfo(info.clone()),
                 clonk_engine::ControlPacket::PlayerControl(player.clone()),
                 clonk_engine::ControlPacket::JoinPlayer(join.clone()),
             ],
-        };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
+            0,
+        );
 
-        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
-
-        let NetworkEvent::ReadyTick { tick, controls } = event_rx.recv().expect("ready event")
-        else {
+        let NetworkEvent::ReadyTick { tick, controls } = event else {
             panic!("expected ready tick");
         };
         assert_eq!(tick, 23);
@@ -13060,18 +12973,13 @@ Message=Server says Andr\xe9\r\n\
             player: 7,
             by_client: 3,
         };
-        let frame = LegacyControlFrame {
-            client_id: HOST_CLIENT_ID,
-            tick: 23,
-            timestamp_ms: 0,
-            controls: vec![clonk_engine::ControlPacket::SurrenderPlayer(surrender)],
-        };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
-
         assert_eq!(
-            event_rx.recv().expect("ready event"),
+            ready_event(
+                23,
+                0,
+                vec![clonk_engine::ControlPacket::SurrenderPlayer(surrender)],
+                0,
+            ),
             NetworkEvent::ReadyTick {
                 tick: 23,
                 controls: vec![NetworkControl::SurrenderPlayer(surrender)],
@@ -13089,18 +12997,13 @@ Message=Server says Andr\xe9\r\n\
             player: 4,
             by_client: 7,
         };
-        let frame = LegacyControlFrame {
-            client_id: HOST_CLIENT_ID,
-            tick: 23,
-            timestamp_ms: 0,
-            controls: vec![clonk_engine::ControlPacket::InitScenarioPlayer(selection)],
-        };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
-
         assert_eq!(
-            event_rx.recv().expect("ready event"),
+            ready_event(
+                23,
+                0,
+                vec![clonk_engine::ControlPacket::InitScenarioPlayer(selection)],
+                0,
+            ),
             NetworkEvent::ReadyTick {
                 tick: 23,
                 controls: vec![NetworkControl::InitScenarioPlayer(selection)],
@@ -13121,23 +13024,19 @@ Message=Server says Andr\xe9\r\n\
         };
         let remove = clonk_engine::ClientRemoveControlData {
             client_id: 4,
-            reason: clonk_engine::LegacyCString::from_bytes(b"bye".to_vec()).expect("valid reason"),
+            reason: legacy_string(b"bye"),
             by_client: 0,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        emit_scheduled_sync_controls(
+        let event = scheduled_sync_event(
             23,
             vec![
                 clonk_engine::ControlPacket::ClientUpdate(update.clone()),
                 clonk_engine::ControlPacket::ClientRemove(remove.clone()),
             ],
-            &event_tx,
-        )
-        .expect("emit scheduled sync controls");
+        );
 
         assert_eq!(
-            event_rx.recv().expect("scheduled sync event"),
+            event,
             NetworkEvent::ScheduledSync {
                 tick: 23,
                 controls: vec![
@@ -13159,21 +13058,12 @@ Message=Server says Andr\xe9\r\n\
             data: 7,
             by_client: 0,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        emit_scheduled_sync_controls(
-            23,
-            vec![clonk_engine::ControlPacket::VoteEnd(result)],
-            &event_tx,
-        )
-        .expect("emit synchronized VoteEnd");
-
         assert_eq!(
-            event_rx.recv(),
-            Ok(NetworkEvent::ScheduledSync {
+            scheduled_sync_event(23, vec![clonk_engine::ControlPacket::VoteEnd(result)],),
+            NetworkEvent::ScheduledSync {
                 tick: 23,
                 controls: vec![NetworkControl::VoteEnd(result)],
-            })
+            }
         );
     }
 
@@ -13182,27 +13072,15 @@ Message=Server says Andr\xe9\r\n\
         // C++ gives only a failed speculative/secondary connection warning
         // severity because it may have no player impact; ordinary packet
         // failures remain errors (src/C4Network2IO.cpp:252-261,808-834).
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
         let error = "secondary TCP route closed".to_string();
-
-        handle_host_event(
-            HostEvent::RecoverableRouteDiagnostic {
-                client_id: Some(7),
-                error: error.clone(),
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward recoverable route diagnostic");
+        let event = forwarded_host_event(HostEvent::RecoverableRouteDiagnostic {
+            client_id: Some(7),
+            error: error.clone(),
+        })
+        .await;
 
         assert_eq!(
-            event_rx.recv().expect("recoverable route diagnostic"),
+            event,
             NetworkEvent::RecoverableRouteDiagnostic {
                 client_id: Some(7),
                 error,
@@ -13215,27 +13093,15 @@ Message=Server says Andr\xe9\r\n\
         // Malformed peer input closes only that connection; the host packet
         // loop remains available to every other client
         // (src/C4Network2IO.cpp:808-834).
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
         let error = "failed to decode direct control packet".to_string();
-
-        handle_host_event(
-            HostEvent::TransportError {
-                client_id: Some(7),
-                error: error.clone(),
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward transport diagnostic");
+        let event = forwarded_host_event(HostEvent::TransportError {
+            client_id: Some(7),
+            error: error.clone(),
+        })
+        .await;
 
         assert_eq!(
-            event_rx.recv().expect("transport diagnostic"),
+            event,
             NetworkEvent::TransportDiagnostic {
                 client_id: Some(7),
                 error,
@@ -13251,28 +13117,13 @@ Message=Server says Andr\xe9\r\n\
         // a recoverable peer warning
         // (src/C4GameControlNetwork.cpp:741-777;
         // src/C4Network2.cpp:746-789).
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
         let error = "failed to aggregate ready tick 23".to_string();
+        let event = forwarded_host_event(HostEvent::FatalError {
+            error: error.clone(),
+        })
+        .await;
 
-        handle_host_event(
-            HostEvent::FatalError {
-                error: error.clone(),
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward fatal host event");
-
-        assert_eq!(
-            event_rx.recv().expect("fatal app event"),
-            NetworkEvent::FatalError(error)
-        );
+        assert_eq!(event, NetworkEvent::FatalError(error));
     }
 
     fn unsupported_local_control_frame(client_id: ClientId) -> LegacyControlFrame {
@@ -13295,12 +13146,10 @@ Message=Server says Andr\xe9\r\n\
         // C4Network2 rather than leaving the installed lockstep clock waiting
         // forever (src/C4GameControlNetwork.cpp:741-777;
         // src/C4Network2.cpp:475-510,746-789).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
 
         let error = send_frame_to_host(&host, unsupported_local_control_frame(HOST_CLIENT_ID))
             .await
@@ -13309,7 +13158,7 @@ Message=Server says Andr\xe9\r\n\
         assert!(error
             .to_string()
             .starts_with("failed to encode host control packet:"));
-        host.shutdown().await.expect("shutdown host");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13319,19 +13168,17 @@ Message=Server says Andr\xe9\r\n\
         // C4Network2 instead of treating that condition as a log-only peer
         // diagnostic (src/C4GameControlNetwork.cpp:48-60,741-777;
         // src/C4Network2.cpp:746-789).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let client = clonk_network::connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("connect client");
+        .test_value();
 
         let error =
             send_frame_to_client(&client, unsupported_local_control_frame(client.client_id()))
@@ -13341,8 +13188,8 @@ Message=Server says Andr\xe9\r\n\
         assert!(error
             .to_string()
             .starts_with("failed to encode client control packet:"));
-        client.graceful_part().await.expect("part client");
-        host.shutdown().await.expect("shutdown host");
+        client.graceful_part().await.test_value();
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13351,12 +13198,10 @@ Message=Server says Andr\xe9\r\n\
         // be compiled, continuing the session would leave host and clients
         // with different admission state (src/C4Network2Players.cpp:512-544;
         // src/C4GameControlNetwork.cpp:741-777).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
         let host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let info = PlayerInfoControlData {
             players: vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 17,
@@ -13374,7 +13219,7 @@ Message=Server says Andr\xe9\r\n\
         assert!(error
             .to_string()
             .starts_with("failed to encode authoritative PlayerInfo:"));
-        host.shutdown().await.expect("shutdown host");
+        host.shutdown().await.test_value();
     }
 
     #[test]
@@ -13392,7 +13237,7 @@ Message=Server says Andr\xe9\r\n\
             }),
             0,
         )
-        .expect("start production host worker");
+        .test_value();
         manager
             .broadcast_player_info(PlayerInfoControlData {
                 players: vec![clonk_engine::ControlPlayerInfoEntry {
@@ -13403,7 +13248,7 @@ Message=Server says Andr\xe9\r\n\
                 }],
                 ..Default::default()
             })
-            .expect("queue malformed authoritative PlayerInfo");
+            .test_value();
 
         let fatal = loop {
             match manager.event_rx.recv_timeout(Duration::from_secs(2)) {
@@ -13446,25 +13291,23 @@ Message=Server says Andr\xe9\r\n\
         // only after the client's final connection is gone, and keeps the
         // host/lobby alive while CtrlRemove performs synchronized cleanup
         // (src/C4Network2.cpp:1774-1824).
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let address = listener.local_addr().test_value();
         let mut host = start_host(listener, HostConfig::default())
             .await
-            .expect("start host");
+            .test_value();
         let mut host_events = host.take_event_receiver();
         let client = clonk_network::connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player),
         )
         .await
-        .expect("connect client");
+        .test_value();
         let client_id = client.client_id();
         loop {
             match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
-                .expect("client join timeout")
+                .test_value()
             {
                 Some(HostEvent::ClientJoined {
                     client_id: joined, ..
@@ -13474,10 +13317,7 @@ Message=Server says Andr\xe9\r\n\
             }
         }
 
-        client
-            .graceful_part()
-            .await
-            .expect("part client with native reason");
+        client.graceful_part().await.test_value();
         let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
@@ -13487,7 +13327,7 @@ Message=Server says Andr\xe9\r\n\
             let event = tokio::time::timeout(Duration::from_secs(2), host_events.recv())
                 .await
                 .expect("disconnect event timeout")
-                .expect("host event stream during disconnect");
+                .test_value();
             handle_host_event(
                 event,
                 0,
@@ -13497,7 +13337,7 @@ Message=Server says Andr\xe9\r\n\
                 &netpuncher_state,
             )
             .await
-            .expect("forward disconnect event");
+            .test_value();
             forwarded.extend(event_rx.try_iter());
             if forwarded.iter().any(|event| {
                 matches!(
@@ -13526,7 +13366,7 @@ Message=Server says Andr\xe9\r\n\
                         if *failed == client_id
                 )
             })
-            .expect("peer failure notification");
+            .test_value();
         let departure = forwarded
             .iter()
             .position(|event| {
@@ -13538,7 +13378,7 @@ Message=Server says Andr\xe9\r\n\
                     } if *departed == client_id
                 )
             })
-            .expect("peer departure notification");
+            .test_value();
         let diagnostic = forwarded
             .iter()
             .position(|event| {
@@ -13550,10 +13390,10 @@ Message=Server says Andr\xe9\r\n\
                     } if *source == client_id && error == "removing client"
                 )
             })
-            .expect("typed final-route diagnostic");
+            .test_value();
         assert!(failure < departure && departure < diagnostic);
 
-        host.shutdown().await.expect("shutdown host");
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13563,49 +13403,21 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
+        let event = forwarded_host_event(HostEvent::StatusChanged(status)).await;
 
-        handle_host_event(
-            HostEvent::StatusChanged(status),
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward requested status");
-
-        assert_eq!(
-            event_rx.recv().expect("status event"),
-            NetworkEvent::HostStatusChanged(status)
-        );
+        assert_eq!(event, NetworkEvent::HostStatusChanged(status));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_join_data_request_is_forwarded_to_the_app() {
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
-
-        handle_host_event(
-            HostEvent::JoinDataNeeded {
-                client_id: 7,
-                current_control_tick: 23,
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward runtime JoinData request");
+        let event = forwarded_host_event(HostEvent::JoinDataNeeded {
+            client_id: 7,
+            current_control_tick: 23,
+        })
+        .await;
 
         assert_eq!(
-            event_rx.recv().expect("runtime JoinData event"),
+            event,
             NetworkEvent::JoinDataNeeded {
                 client_id: 7,
                 current_control_tick: 23,
@@ -13621,76 +13433,46 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
+        let event = forwarded_host_event(HostEvent::StatusAck { client_id, status }).await;
 
-        handle_host_event(
-            HostEvent::StatusAck { client_id, status },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward client status acknowledgement");
-
-        assert_eq!(
-            event_rx.recv().expect("status acknowledgement event"),
-            NetworkEvent::HostStatusAck { client_id, status }
-        );
+        assert_eq!(event, NetworkEvent::HostStatusAck { client_id, status });
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn host_puncher_assignment_publishes_one_atomic_app_snapshot() {
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let state = test_netpuncher_state();
-        let mut provenance = VecDeque::new();
+        let mut events = EventHarness::new();
         let addresses = vec![NetworkAddress::new(
             NetworkProtocol::Udp,
             "198.51.100.9:43123".parse().unwrap(),
         )];
 
-        handle_host_event(
-            HostEvent::LocalAddressesChanged {
+        events
+            .host(HostEvent::LocalAddressesChanged {
                 local_addresses: addresses.clone(),
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut provenance,
-            &state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(state.lock().local_addresses, addresses);
-        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+            })
+            .await;
+        assert_eq!(events.netpuncher_state.lock().local_addresses, addresses);
+        assert!(matches!(
+            events.receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
 
         let game_ids = clonk_network::NetpuncherGameIds {
             ipv4: 0x1122_3344,
             ipv6: 0,
         };
-        handle_host_event(
-            HostEvent::NetpuncherStateChanged {
+        events
+            .host(HostEvent::NetpuncherStateChanged {
                 game_ids,
                 local_addresses: addresses.clone(),
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut provenance,
-            &state,
-        )
-        .await
-        .unwrap();
+            })
+            .await;
 
-        let snapshot = state.lock().clone();
+        let snapshot = events.netpuncher_state.lock().clone();
         assert_eq!(snapshot.game_ids, game_ids);
         assert_eq!(snapshot.local_addresses, addresses);
         assert_eq!(
-            event_rx.recv().unwrap(),
+            events.recv(),
             NetworkEvent::NetpuncherStateChanged {
                 game_ids,
                 local_addresses: addresses,
@@ -13705,25 +13487,9 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
+        let event = forwarded_host_event(HostEvent::StatusCommitted(status)).await;
 
-        handle_host_event(
-            HostEvent::StatusCommitted(status),
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward committed status");
-
-        assert_eq!(
-            event_rx.recv().expect("status event"),
-            NetworkEvent::StatusCommitted(status)
-        );
+        assert_eq!(event, NetworkEvent::StatusCommitted(status));
     }
 
     /// The notice is queued on the same command channel the teardown uses, so
@@ -13736,8 +13502,7 @@ Message=Server says Andr\xe9\r\n\
         let (client, _client_events, mut client_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
 
-        host.broadcast_host_restarting(30)
-            .expect("host queues the restart notice");
+        host.broadcast_host_restarting(30).test_value();
         assert!(client.broadcast_host_restarting(30).is_err());
 
         assert_eq!(host_commands.take_host_restart_broadcasts(), vec![30]);
@@ -13753,8 +13518,7 @@ Message=Server says Andr\xe9\r\n\
         let (client, _client_events, mut client_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
 
-        host.broadcast_host_restart_lobby()
-            .expect("host queues the lobby restart");
+        host.broadcast_host_restart_lobby().test_value();
         assert!(client.broadcast_host_restart_lobby().is_err());
 
         assert_eq!(host_commands.take_host_restart_lobby_broadcasts(), 1);
@@ -13766,23 +13530,9 @@ Message=Server says Andr\xe9\r\n\
     /// fold into — the session stays up.
     #[tokio::test(flavor = "current_thread")]
     async fn a_lobby_restart_notice_is_forwarded_to_the_app() {
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let event = forwarded_client_event(ClientEvent::HostRestartLobby).await;
 
-        handle_client_event(
-            ClientEvent::HostRestartLobby,
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward lobby restart notice");
-
-        assert_eq!(
-            event_rx.recv().expect("lobby restart event"),
-            NetworkEvent::HostRestartLobby
-        );
+        assert_eq!(event, NetworkEvent::HostRestartLobby);
     }
 
     /// The app is the only layer that can act on a restart notice — it owns the
@@ -13790,23 +13540,10 @@ Message=Server says Andr\xe9\r\n\
     /// rather than folding it into the disconnect that follows.
     #[tokio::test(flavor = "current_thread")]
     async fn a_host_restart_notice_is_forwarded_to_the_app() {
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let event =
+            forwarded_client_event(ClientEvent::HostRestarting { rejoin_seconds: 30 }).await;
 
-        handle_client_event(
-            ClientEvent::HostRestarting { rejoin_seconds: 30 },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward host restart notice");
-
-        assert_eq!(
-            event_rx.recv().expect("restart notice event"),
-            NetworkEvent::HostRestarting { rejoin_seconds: 30 }
-        );
+        assert_eq!(event, NetworkEvent::HostRestarting { rejoin_seconds: 30 });
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13815,81 +13552,39 @@ Message=Server says Andr\xe9\r\n\
         // client receives the same PID_LobbyCountdown through MainDlg
         // (src/C4GameLobby.cpp:392-418,1111-1131).
         let packet = clonk_network::LobbyCountdownPacket::new(5);
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
+        let mut events = EventHarness::new();
+        events.host(HostEvent::LobbyCountdown { packet }).await;
+        events.client(ClientEvent::LobbyCountdown { packet }).await;
 
-        handle_host_event(
-            HostEvent::LobbyCountdown { packet },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward host lobby countdown");
-        handle_client_event(
-            ClientEvent::LobbyCountdown { packet },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward client lobby countdown");
-
-        assert_eq!(
-            event_rx.recv().expect("host countdown event"),
-            NetworkEvent::LobbyCountdown(packet)
-        );
-        assert_eq!(
-            event_rx.recv().expect("client countdown event"),
-            NetworkEvent::LobbyCountdown(packet)
-        );
+        assert_eq!(events.recv(), NetworkEvent::LobbyCountdown(packet));
+        assert_eq!(events.recv(), NetworkEvent::LobbyCountdown(packet));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn resource_chunk_progress_is_forwarded_to_the_app_for_host_and_client() {
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
-
-        handle_host_event(
-            HostEvent::ResourceProgress {
+        let mut events = EventHarness::new();
+        events
+            .host(HostEvent::ResourceProgress {
                 resource_id: 17,
                 present_percent: 40,
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward host resource progress");
-        handle_client_event(
-            ClientEvent::ResourceProgress {
+            })
+            .await;
+        events
+            .client(ClientEvent::ResourceProgress {
                 resource_id: 23,
                 present_percent: 75,
-            },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward client resource progress");
+            })
+            .await;
 
         assert_eq!(
-            event_rx.recv().expect("host resource progress event"),
+            events.recv(),
             NetworkEvent::ResourceProgress {
                 resource_id: 17,
                 present_percent: 40,
             }
         );
         assert_eq!(
-            event_rx.recv().expect("client resource progress event"),
+            events.recv(),
             NetworkEvent::ResourceProgress {
                 resource_id: 23,
                 present_percent: 75,
@@ -13906,54 +13601,30 @@ Message=Server says Andr\xe9\r\n\
             client_id: 7,
             data: clonk_network::ReadyCheckData::Ready,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
+        let event = forwarded_host_event(HostEvent::ReadyCheck { packet }).await;
 
-        handle_host_event(
-            HostEvent::ReadyCheck { packet },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward ready check");
-
-        assert_eq!(
-            event_rx.recv().expect("ready-check event"),
-            NetworkEvent::ReadyCheck(packet)
-        );
+        assert_eq!(event, NetworkEvent::ReadyCheck(packet));
     }
 
     #[test]
     fn managers_stamp_ready_check_with_the_local_client() {
         // MainDlg::OnReadyCheck always places Game.Clients.getLocalID() in
         // the packet before broadcasting it (src/C4GameLobby.cpp:329-343).
-        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
-        host.submit_ready_check(clonk_network::ReadyCheckData::Ready)
-            .expect("host submits ready state");
-        assert_eq!(
-            host_commands.take_submitted_ready_checks(),
-            vec![clonk_network::ReadyCheckPacket {
-                client_id: 0,
-                data: clonk_network::ReadyCheckData::Ready,
-            }]
-        );
-
-        let (client, _events, mut client_commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
-        client
-            .submit_ready_check(clonk_network::ReadyCheckData::NotReady)
-            .expect("client submits not-ready state");
-        assert_eq!(
-            client_commands.take_submitted_ready_checks(),
-            vec![clonk_network::ReadyCheckPacket {
-                client_id: 7,
-                data: clonk_network::ReadyCheckData::NotReady,
-            }]
-        );
+        for (client_id, data) in [
+            (HOST_CLIENT_ID, clonk_network::ReadyCheckData::Ready),
+            (7, clonk_network::ReadyCheckData::NotReady),
+        ] {
+            let (manager, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(client_id);
+            manager.submit_ready_check(data).test_value();
+            assert_eq!(
+                commands.take_submitted_ready_checks(),
+                vec![clonk_network::ReadyCheckPacket {
+                    client_id: client_id as i32,
+                    data,
+                }]
+            );
+        }
     }
 
     #[test]
@@ -13964,8 +13635,7 @@ Message=Server says Andr\xe9\r\n\
         let (host, _events, mut commands) = NetworkManager::test_stub_with_commands();
         let packet = clonk_network::LobbyCountdownPacket::new(5);
 
-        host.submit_lobby_countdown(packet)
-            .expect("host queues initial countdown");
+        host.submit_lobby_countdown(packet).test_value();
 
         assert_eq!(commands.take_submitted_lobby_countdowns(), vec![packet]);
     }
@@ -13993,17 +13663,9 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let event = forwarded_client_event(ClientEvent::Status(status)).await;
 
-        handle_client_event(ClientEvent::Status(status), 0, 7, &event_tx, &telemetry_tx)
-            .await
-            .expect("forward requested status");
-
-        assert_eq!(
-            event_rx.recv().expect("status request event"),
-            NetworkEvent::StatusRequested(status)
-        );
+        assert_eq!(event, NetworkEvent::StatusRequested(status));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -14015,31 +13677,16 @@ Message=Server says Andr\xe9\r\n\
             client_id: 9,
             data: clonk_network::ReadyCheckData::NotReady,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let event = forwarded_client_event(ClientEvent::ReadyCheck { packet }).await;
 
-        handle_client_event(
-            ClientEvent::ReadyCheck { packet },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward ready check");
-
-        assert_eq!(
-            event_rx.recv().expect("ready-check event"),
-            NetworkEvent::ReadyCheck(packet)
-        );
+        assert_eq!(event, NetworkEvent::ReadyCheck(packet));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn client_league_round_results_are_forwarded_to_the_app_unchanged() {
         let packet = clonk_network::LeagueRoundResultsPacket {
             success: true,
-            result_string: clonk_engine::LegacyCString::from_bytes(b"Result:\xe4".to_vec())
-                .unwrap(),
+            result_string: legacy_string(b"Result:\xe4"),
             players: vec![clonk_network::LeagueRoundResultsPlayer {
                 player_info_id: 17,
                 total_playing_time: 1_234,
@@ -14049,8 +13696,7 @@ Message=Server says Andr\xe9\r\n\
                 league_score_gain: 25,
                 league_rank_new: 3,
                 league_rank_symbol_new: 9,
-                league_progress_data: clonk_engine::LegacyCString::from_bytes(b"A=1\xff".to_vec())
-                    .unwrap(),
+                league_progress_data: legacy_string(b"A=1\xff"),
                 status: clonk_network::LeagueRoundPlayerStatus::Won,
             }],
         };
@@ -14067,7 +13713,7 @@ Message=Server says Andr\xe9\r\n\
             &telemetry_tx,
         )
         .await
-        .expect("forward league round results");
+        .test_value();
 
         assert_eq!(
             event_rx.recv().expect("league round-results event"),
@@ -14085,23 +13731,13 @@ Message=Server says Andr\xe9\r\n\
         // pClient->isHost() before clearing the live network game. The local
         // client ID must never be substituted for that host peer
         // (pristine 9ffa0a5d src/C4Network2.cpp:1758-1765,1786-1817).
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-
-        handle_client_event(
-            ClientEvent::Disconnected {
-                reason: Some("socket closed".to_string()),
-            },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward host disconnect");
+        let event = forwarded_client_event(ClientEvent::Disconnected {
+            reason: Some("socket closed".to_string()),
+        })
+        .await;
 
         assert_eq!(
-            event_rx.recv().expect("disconnect event"),
+            event,
             NetworkEvent::PeerDisconnected {
                 client_id: HOST_CLIENT_ID,
                 reason: Some("socket closed".to_string()),
@@ -14119,23 +13755,9 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 2,
             target_tick: 41,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let event = forwarded_client_event(ClientEvent::StatusAck(status)).await;
 
-        handle_client_event(
-            ClientEvent::StatusAck(status),
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward committed status");
-
-        assert_eq!(
-            event_rx.try_recv(),
-            Ok(NetworkEvent::StatusCommitted(status))
-        );
+        assert_eq!(event, NetworkEvent::StatusCommitted(status));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -14153,67 +13775,26 @@ Message=Server says Andr\xe9\r\n\
             client_id: HOST_CLIENT_ID as i32,
             data: clonk_network::ReadyCheckData::Ready,
         };
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut player_info_echo_provenance = VecDeque::new();
+        let mut events = EventHarness::new();
+        events
+            .host(HostEvent::LobbyCountdown { packet: countdown })
+            .await;
+        events
+            .client(ClientEvent::ReadyCheck { packet: request })
+            .await;
+        events
+            .client(ClientEvent::ReadyCheck { packet: ready })
+            .await;
+        events
+            .host(HostEvent::ReadyCheck { packet: host_ready })
+            .await;
 
-        handle_host_event(
-            HostEvent::LobbyCountdown { packet: countdown },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward host countdown");
-        handle_client_event(
-            ClientEvent::ReadyCheck { packet: request },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward client ready request");
-        handle_client_event(
-            ClientEvent::ReadyCheck { packet: ready },
-            0,
-            7,
-            &event_tx,
-            &telemetry_tx,
-        )
-        .await
-        .expect("forward client ready reply");
-        handle_host_event(
-            HostEvent::ReadyCheck { packet: host_ready },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut player_info_echo_provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("forward host ready toggle");
-
-        assert_eq!(
-            event_rx.recv().expect("countdown"),
-            NetworkEvent::LobbyCountdown(countdown)
-        );
-        assert_eq!(
-            event_rx.recv().expect("ready request"),
-            NetworkEvent::ReadyCheck(request)
-        );
-        assert_eq!(
-            event_rx.recv().expect("ready reply"),
-            NetworkEvent::ReadyCheck(ready)
-        );
-        assert_eq!(
-            event_rx.recv().expect("host ready toggle"),
-            NetworkEvent::ReadyCheck(host_ready)
-        );
+        assert_eq!(events.recv(), NetworkEvent::LobbyCountdown(countdown));
+        assert_eq!(events.recv(), NetworkEvent::ReadyCheck(request));
+        assert_eq!(events.recv(), NetworkEvent::ReadyCheck(ready));
+        assert_eq!(events.recv(), NetworkEvent::ReadyCheck(host_ready));
         assert!(matches!(
-            telemetry_rx.try_recv(),
+            events._telemetry_receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
     }
@@ -14222,10 +13803,9 @@ Message=Server says Andr\xe9\r\n\
     fn lobby_methods_queue_only_role_appropriate_commands() {
         let countdown = clonk_network::LobbyCountdownPacket::new(30);
         let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
-        host.broadcast_lobby_countdown(countdown)
-            .expect("host countdown");
-        host.request_ready_check().expect("host ready request");
-        host.set_local_ready(true).expect("host ready state");
+        host.broadcast_lobby_countdown(countdown).test_value();
+        host.request_ready_check().test_value();
+        host.set_local_ready(true).test_value();
         assert!(matches!(
             host_commands.command_rx.try_recv(),
             Ok(NetworkCommand::SubmitLobbyCountdown(value)) if value == countdown
@@ -14251,7 +13831,7 @@ Message=Server says Andr\xe9\r\n\
 
         let (client, _events, mut client_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        client.set_local_ready(true).expect("client ready state");
+        client.set_local_ready(true).test_value();
         assert!(client.broadcast_lobby_countdown(countdown).is_err());
         assert!(client.request_ready_check().is_err());
         assert!(matches!(
@@ -14272,7 +13852,7 @@ Message=Server says Andr\xe9\r\n\
         for index in 0..NETWORK_TELEMETRY_CAPACITY {
             event_tx
                 .try_send(NetworkEvent::Error(format!("diagnostic {index}")))
-                .expect("event bridge has advertised capacity");
+                .test_value();
         }
         assert!(matches!(
             event_tx.try_send(NetworkEvent::Error("overflow".to_string())),
@@ -14285,7 +13865,7 @@ Message=Server says Andr\xe9\r\n\
         };
         critical_tx
             .send(NetworkEvent::StatusCommitted(committed))
-            .expect("critical channel remains independent of telemetry");
+            .test_value();
         assert_eq!(
             critical_rx.recv().expect("critical status commit"),
             NetworkEvent::StatusCommitted(committed)
@@ -14304,22 +13884,13 @@ Message=Server says Andr\xe9\r\n\
             by_client: 0,
             ..Default::default()
         };
-        let payload = clonk_network::encode_control_entry_payload(
-            &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
-        )
-        .expect("encode direct PlayerInfo payload");
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
-            .expect("handle direct PlayerInfo");
-
-        let NetworkEvent::DirectControl(NetworkControl::PlayerInfo(actual)) =
-            event_rx.recv().expect("direct control event")
-        else {
+        let NetworkEvent::DirectControl(NetworkControl::PlayerInfo(actual)) = direct_control_event(
+            clonk_network::ControlDelivery::Direct,
+            clonk_engine::ControlPacket::PlayerInfo(info.clone()),
+        ) else {
             panic!("expected one immediate PlayerInfo event");
         };
         assert_eq!(actual, info);
-        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -14332,52 +13903,38 @@ Message=Server says Andr\xe9\r\n\
         let payload = clonk_network::encode_control_entry_payload(
             &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
         )
-        .expect("encode direct PlayerInfo payload");
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let mut provenance = VecDeque::from([PlayerInfoEchoProvenance::Preexecuted {
-            original: info.clone(),
-            join_players_on_echo: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 41,
-                ..Default::default()
-            }],
-        }]);
+        .test_value();
+        let mut events = EventHarness::new();
+        events.player_info_echo_provenance =
+            VecDeque::from([PlayerInfoEchoProvenance::Preexecuted {
+                original: info.clone(),
+                join_players_on_echo: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    ..Default::default()
+                }],
+            }]);
 
-        handle_host_event(
-            HostEvent::Direct {
+        events
+            .host(HostEvent::Direct {
                 client_id: 7,
                 delivery: clonk_network::ControlDelivery::Direct,
                 data: payload.clone(),
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("handle remote PlayerInfo");
-        handle_host_event(
-            HostEvent::Direct {
+            })
+            .await;
+        events
+            .host(HostEvent::Direct {
                 client_id: clonk_network::BROADCAST_CLIENT_ID,
                 delivery: clonk_network::ControlDelivery::Direct,
                 data: payload,
-            },
-            0,
-            &event_tx,
-            &telemetry_tx,
-            &mut provenance,
-            &test_netpuncher_state(),
-        )
-        .await
-        .expect("handle preexecuted PlayerInfo loopback");
+            })
+            .await;
 
         assert_eq!(
-            event_rx.recv().expect("remote direct event"),
+            events.recv(),
             NetworkEvent::DirectControl(NetworkControl::PlayerInfo(info.clone()))
         );
         assert_eq!(
-            event_rx.recv().expect("preexecuted loopback event"),
+            events.recv(),
             NetworkEvent::PreexecutedPlayerInfoEcho {
                 original: info.clone(),
                 info,
@@ -14387,7 +13944,7 @@ Message=Server says Andr\xe9\r\n\
                 }],
             }
         );
-        assert!(provenance.is_empty());
+        assert!(events.player_info_echo_provenance.is_empty());
     }
 
     #[test]
@@ -14398,22 +13955,13 @@ Message=Server says Andr\xe9\r\n\
         // (src/C4MessageInput.cpp:423-426;
         // src/C4GameControlNetwork.cpp:558-566).
         let message = message_control(7);
-        let payload = clonk_network::encode_control_entry_payload(
-            &clonk_engine::ControlPacket::Message(message.clone()),
-        )
-        .expect("encode private CID_Message payload");
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        handle_direct_packet(clonk_network::ControlDelivery::Private, payload, &event_tx)
-            .expect("handle private CID_Message");
-
         assert_eq!(
-            event_rx.recv(),
-            Ok(NetworkEvent::DirectControl(NetworkControl::Message(
-                message
-            )))
+            direct_control_event(
+                clonk_network::ControlDelivery::Private,
+                clonk_engine::ControlPacket::Message(message.clone()),
+            ),
+            NetworkEvent::DirectControl(NetworkControl::Message(message))
         );
-        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -14426,31 +13974,22 @@ Message=Server says Andr\xe9\r\n\
         let join = clonk_engine::ClientJoinControlData {
             core: clonk_engine::ClientCoreControlData {
                 client_id: 7,
-                name: clonk_engine::LegacyCString::from_bytes(b"Client".to_vec()).unwrap(),
+                name: legacy_string(b"Client"),
                 ..Default::default()
             },
             by_client: 0,
         };
-        let payload = clonk_network::encode_control_entry_payload(
-            &clonk_engine::ControlPacket::ClientJoin(join.clone()),
-        )
-        .expect("encode direct ClientJoin payload");
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
-            .expect("handle direct ClientJoin");
-
-        let NetworkEvent::DirectControl(NetworkControl::ClientJoin(actual)) =
-            event_rx.recv().expect("direct control event")
-        else {
+        let NetworkEvent::DirectControl(NetworkControl::ClientJoin(actual)) = direct_control_event(
+            clonk_network::ControlDelivery::Direct,
+            clonk_engine::ControlPacket::ClientJoin(join.clone()),
+        ) else {
             panic!("expected one immediate ClientJoin event");
         };
         let mut expected = join;
         // C4ClientCore's binary reader always runs VAL_NameNoEmpty, including
         // for an explicitly encoded empty Nick.
-        expected.core.nick = clonk_engine::LegacyCString::from_bytes(b"empty".to_vec()).unwrap();
+        expected.core.nick = legacy_string(b"empty");
         assert_eq!(actual, expected);
-        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -14466,19 +14005,13 @@ Message=Server says Andr\xe9\r\n\
             data: 7,
             by_client: 7,
         };
-        let payload =
-            clonk_network::encode_control_entry_payload(&clonk_engine::ControlPacket::Vote(vote))
-                .expect("encode direct Vote payload");
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
-            .expect("handle direct Vote");
-
         assert_eq!(
-            event_rx.recv(),
-            Ok(NetworkEvent::DirectControl(NetworkControl::Vote(vote)))
+            direct_control_event(
+                clonk_network::ControlDelivery::Direct,
+                clonk_engine::ControlPacket::Vote(vote),
+            ),
+            NetworkEvent::DirectControl(NetworkControl::Vote(vote))
         );
-        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -14488,18 +14021,13 @@ Message=Server says Andr\xe9\r\n\
             data: 2,
             by_client: 0,
         };
-        let payload = clonk_network::encode_control_entry_payload(&set.into_control_packet())
-            .expect("encode direct CID_Set payload");
-        let (event_tx, event_rx) = NetworkEventSender::channel();
-
-        handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
-            .expect("handle direct CID_Set");
-
         assert_eq!(
-            event_rx.recv().expect("direct control event"),
+            direct_control_event(
+                clonk_network::ControlDelivery::Direct,
+                set.into_control_packet(),
+            ),
             NetworkEvent::DirectControl(NetworkControl::Set(set))
         );
-        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -14517,7 +14045,7 @@ Message=Server says Andr\xe9\r\n\
             },
             3,
         )
-        .expect("pointer menu controls produce a network packet");
+        .test_value();
         let expected = PlayerControlData {
             player: 7,
             command: i32::from(COM_MENU_SELECT),
@@ -14577,8 +14105,8 @@ Message=Server says Andr\xe9\r\n\
             controls,
         };
 
-        let encoded = encode_control_packet(&frame).expect("encode every InCom byte");
-        let decoded = decode_control_packet(&encoded).expect("decode every InCom byte");
+        let encoded = encode_control_packet(&frame).test_value();
+        let decoded = decode_control_packet(&encoded).test_value();
         for (command, packet) in (1..=u8::MAX).zip(decoded.controls) {
             let expected = PlayerControlData {
                 player: 7,
@@ -14633,8 +14161,7 @@ Message=Server says Andr\xe9\r\n\
         let script = ScriptControlData {
             target_object: clonk_engine::SCRIPT_SCOPE_CONSOLE,
             strictness: clonk_engine::ScriptStrictness::Strict2,
-            script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec())
-                .expect("script is NUL-free"),
+            script: legacy_string(b"1+2"),
             by_client: 4,
         };
         assert_eq!(
@@ -14647,8 +14174,7 @@ Message=Server says Andr\xe9\r\n\
     fn decoded_message_board_answer_is_retained_for_scheduled_execution() {
         let answer = MessageBoardAnswerControlData {
             object: 42,
-            answer: clonk_engine::LegacyCString::from_bytes(b"typed answer".to_vec())
-                .expect("answer is NUL-free"),
+            answer: legacy_string(b"typed answer"),
             player: 3,
             by_client: 4,
         };
@@ -14663,10 +14189,8 @@ Message=Server says Andr\xe9\r\n\
     #[test]
     fn decoded_custom_command_is_retained_for_scheduled_execution() {
         let command = clonk_engine::CustomCommandControlData {
-            command: clonk_engine::LegacyCString::from_bytes(b"push".to_vec())
-                .expect("command is NUL-free"),
-            argument: clonk_engine::LegacyCString::from_bytes(b"arg".to_vec())
-                .expect("argument is NUL-free"),
+            command: legacy_string(b"push"),
+            argument: legacy_string(b"arg"),
             player: 3,
             by_client: 4,
         };
@@ -14687,8 +14211,7 @@ Message=Server says Andr\xe9\r\n\
             target_object: 42,
             objects: vec![7, 9],
             strictness: clonk_engine::ScriptStrictness::Strict2,
-            script: clonk_engine::LegacyCString::from_bytes(b"SetXDir(0)".to_vec())
-                .expect("script is NUL-free"),
+            script: legacy_string(b"SetXDir(0)"),
             by_client: 4,
         };
         assert_eq!(
@@ -14708,10 +14231,8 @@ Message=Server says Andr\xe9\r\n\
             y2: -78,
             grade: 9,
             ift: true,
-            material: clonk_engine::LegacyCString::from_bytes(b"Earth".to_vec())
-                .expect("material is NUL-free"),
-            texture: clonk_engine::LegacyCString::from_bytes(b"Smooth".to_vec())
-                .expect("texture is NUL-free"),
+            material: legacy_string(b"Earth"),
+            texture: legacy_string(b"Smooth"),
             by_client: 4,
         };
         assert_eq!(
@@ -14736,76 +14257,49 @@ Message=Server says Andr\xe9\r\n\
 
     #[test]
     fn decoded_internal_player_scripts_are_retained_for_ordered_execution() {
+        let goal_menu = clonk_engine::ActivateGameGoalMenuControlData {
+            player: 3,
+            by_client: 4,
+        };
+        let hostility = clonk_engine::ToggleHostilityControlData {
+            opponent: 5,
+            player: 3,
+            by_client: 4,
+        };
+        let goal_rule = clonk_engine::ActivateGameGoalRuleControlData {
+            object: 42,
+            player: 3,
+            by_client: 4,
+        };
+        let team = clonk_engine::SetPlayerTeamControlData {
+            team: 6,
+            player: 3,
+            by_client: 4,
+        };
+        let elimination = clonk_engine::EliminatePlayerControlData {
+            player: 3,
+            by_client: 4,
+        };
         let cases = vec![
             (
-                clonk_engine::ControlPacket::ActivateGameGoalMenu(
-                    clonk_engine::ActivateGameGoalMenuControlData {
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
-                NetworkControl::ActivateGameGoalMenu(
-                    clonk_engine::ActivateGameGoalMenuControlData {
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
+                clonk_engine::ControlPacket::ActivateGameGoalMenu(goal_menu),
+                NetworkControl::ActivateGameGoalMenu(goal_menu),
             ),
             (
-                clonk_engine::ControlPacket::ToggleHostility(
-                    clonk_engine::ToggleHostilityControlData {
-                        opponent: 5,
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
-                NetworkControl::ToggleHostility(clonk_engine::ToggleHostilityControlData {
-                    opponent: 5,
-                    player: 3,
-                    by_client: 4,
-                }),
+                clonk_engine::ControlPacket::ToggleHostility(hostility),
+                NetworkControl::ToggleHostility(hostility),
             ),
             (
-                clonk_engine::ControlPacket::ActivateGameGoalRule(
-                    clonk_engine::ActivateGameGoalRuleControlData {
-                        object: 42,
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
-                NetworkControl::ActivateGameGoalRule(
-                    clonk_engine::ActivateGameGoalRuleControlData {
-                        object: 42,
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
+                clonk_engine::ControlPacket::ActivateGameGoalRule(goal_rule),
+                NetworkControl::ActivateGameGoalRule(goal_rule),
             ),
             (
-                clonk_engine::ControlPacket::SetPlayerTeam(
-                    clonk_engine::SetPlayerTeamControlData {
-                        team: 6,
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
-                NetworkControl::SetPlayerTeam(clonk_engine::SetPlayerTeamControlData {
-                    team: 6,
-                    player: 3,
-                    by_client: 4,
-                }),
+                clonk_engine::ControlPacket::SetPlayerTeam(team),
+                NetworkControl::SetPlayerTeam(team),
             ),
             (
-                clonk_engine::ControlPacket::EliminatePlayer(
-                    clonk_engine::EliminatePlayerControlData {
-                        player: 3,
-                        by_client: 4,
-                    },
-                ),
-                NetworkControl::EliminatePlayer(clonk_engine::EliminatePlayerControlData {
-                    player: 3,
-                    by_client: 4,
-                }),
+                clonk_engine::ControlPacket::EliminatePlayer(elimination),
+                NetworkControl::EliminatePlayer(elimination),
             ),
         ];
 
@@ -14818,21 +14312,13 @@ Message=Server says Andr\xe9\r\n\
     fn manager_queues_internal_player_scripts_with_authenticated_local_author() {
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        manager
-            .submit_activate_game_goal_menu(20, 3)
-            .expect("queue goal menu");
-        manager
-            .submit_toggle_hostility(21, 3, 4)
-            .expect("queue hostility toggle");
+        manager.submit_activate_game_goal_menu(20, 3).test_value();
+        manager.submit_toggle_hostility(21, 3, 4).test_value();
         manager
             .submit_activate_game_goal_rule(22, 3, 42)
-            .expect("queue goal/rule activation");
-        manager
-            .submit_set_player_team(23, 3, 5)
-            .expect("queue team switch");
-        manager
-            .submit_eliminate_player(24, 3)
-            .expect("queue elimination");
+            .test_value();
+        manager.submit_set_player_team(23, 3, 5).test_value();
+        manager.submit_eliminate_player(24, 3).test_value();
 
         assert_eq!(
             commands.take_submitted_internal_player_scripts(),
@@ -14892,62 +14378,23 @@ Message=Server says Andr\xe9\r\n\
     #[test]
     fn custom_command_frame_roundtrips_through_the_tick_accumulator() {
         let command = clonk_engine::CustomCommandControlData {
-            command: clonk_engine::LegacyCString::from_bytes(b"push".to_vec())
-                .expect("command is NUL-free"),
-            argument: clonk_engine::LegacyCString::from_bytes(b"arg".to_vec())
-                .expect("argument is NUL-free"),
+            command: legacy_string(b"push"),
+            argument: legacy_string(b"arg"),
             player: 3,
             by_client: 4,
         };
-        let mut accumulator = ControlFrameAccumulator::new(4);
-        accumulator.record_control(
-            12,
-            clonk_engine::ControlPacket::CustomCommand(command.clone()),
-            100,
-        );
-        let frame = accumulator
-            .finalize_tick(12)
-            .expect("custom command produces a control frame");
-
-        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
-        assert_eq!(
-            decode_control_packet(&encoded).expect("decode accumulated frame"),
-            frame
-        );
-        assert_eq!(
-            frame.controls,
-            vec![clonk_engine::ControlPacket::CustomCommand(command)]
-        );
+        assert_accumulator_roundtrip(clonk_engine::ControlPacket::CustomCommand(command));
     }
 
     #[test]
     fn message_board_answer_frame_roundtrips_through_the_tick_accumulator() {
         let answer = MessageBoardAnswerControlData {
             object: 42,
-            answer: clonk_engine::LegacyCString::from_bytes(b"typed answer".to_vec())
-                .expect("answer is NUL-free"),
+            answer: legacy_string(b"typed answer"),
             player: 3,
             by_client: 4,
         };
-        let mut accumulator = ControlFrameAccumulator::new(4);
-        accumulator.record_control(
-            12,
-            clonk_engine::ControlPacket::MessageBoardAnswer(answer.clone()),
-            100,
-        );
-        let frame = accumulator
-            .finalize_tick(12)
-            .expect("message-board answer produces a control frame");
-
-        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
-        assert_eq!(
-            decode_control_packet(&encoded).expect("decode accumulated frame"),
-            frame
-        );
-        assert_eq!(
-            frame.controls,
-            vec![clonk_engine::ControlPacket::MessageBoardAnswer(answer)]
-        );
+        assert_accumulator_roundtrip(clonk_engine::ControlPacket::MessageBoardAnswer(answer));
     }
 
     #[test]
@@ -14955,25 +14402,10 @@ Message=Server says Andr\xe9\r\n\
         let script = ScriptControlData {
             target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
             strictness: clonk_engine::ScriptStrictness::Strict3,
-            script: clonk_engine::LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
-                .expect("script is NUL-free"),
+            script: legacy_string(b"SetGravity(77)"),
             by_client: 4,
         };
-        let mut accumulator = ControlFrameAccumulator::new(4);
-        accumulator.record_control(12, clonk_engine::ControlPacket::Script(script.clone()), 100);
-        let frame = accumulator
-            .finalize_tick(12)
-            .expect("script control produces a control frame");
-
-        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
-        assert_eq!(
-            decode_control_packet(&encoded).expect("decode accumulated frame"),
-            frame
-        );
-        assert_eq!(
-            frame.controls,
-            vec![clonk_engine::ControlPacket::Script(script)]
-        );
+        assert_accumulator_roundtrip(clonk_engine::ControlPacket::Script(script));
     }
 
     #[test]
@@ -14989,21 +14421,7 @@ Message=Server says Andr\xe9\r\n\
             add_mode: 5,
             by_client: 4,
         };
-        let mut accumulator = ControlFrameAccumulator::new(4);
-        accumulator.record_control(12, clonk_engine::ControlPacket::PlayerCommand(command), 100);
-        let frame = accumulator
-            .finalize_tick(12)
-            .expect("player command produces a control frame");
-
-        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
-        assert_eq!(
-            decode_control_packet(&encoded).expect("decode accumulated frame"),
-            frame
-        );
-        assert_eq!(
-            frame.controls,
-            vec![clonk_engine::ControlPacket::PlayerCommand(command)]
-        );
+        assert_accumulator_roundtrip(clonk_engine::ControlPacket::PlayerCommand(command));
     }
 
     #[test]
@@ -15013,32 +14431,14 @@ Message=Server says Andr\xe9\r\n\
             objects: vec![91, 42],
             by_client: 4,
         };
-        let mut accumulator = ControlFrameAccumulator::new(4);
-        accumulator.record_control(
-            12,
-            clonk_engine::ControlPacket::PlayerSelect(selection.clone()),
-            100,
-        );
-        let frame = accumulator
-            .finalize_tick(12)
-            .expect("player selection produces a control frame");
-
-        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
-        assert_eq!(
-            decode_control_packet(&encoded).expect("decode accumulated frame"),
-            frame
-        );
-        assert_eq!(
-            frame.controls,
-            vec![clonk_engine::ControlPacket::PlayerSelect(selection)]
-        );
+        assert_accumulator_roundtrip(clonk_engine::ControlPacket::PlayerSelect(selection));
     }
 
     #[test]
     fn accumulator_batches_controls_for_tick() {
         let mut acc = ControlFrameAccumulator::new(5);
-        let first = control_packet_for_event(1, ControlEvent::Press(ControlButton::Left), 5)
-            .expect("build first control packet");
+        let first =
+            control_packet_for_event(1, ControlEvent::Press(ControlButton::Left), 5).test_value();
         acc.record_control(3, first.clone(), 10);
 
         let second = control_packet_for_event(
@@ -15049,12 +14449,10 @@ Message=Server says Andr\xe9\r\n\
             },
             5,
         )
-        .expect("build second control packet");
+        .test_value();
         acc.record_control(3, second.clone(), 20);
 
-        let frame = acc
-            .finalize_tick(3)
-            .expect("finalizing tick with controls produces frame");
+        let frame = acc.finalize_tick(3).test_value();
         assert_eq!(frame.client_id, 5);
         assert_eq!(frame.tick, 3);
         assert_eq!(frame.controls, vec![first, second]);
@@ -15067,9 +14465,7 @@ Message=Server says Andr\xe9\r\n\
     #[test]
     fn accumulator_emits_empty_frame_without_controls() {
         let mut acc = ControlFrameAccumulator::new(2);
-        let frame = acc
-            .finalize_tick(10)
-            .expect("empty finalize still yields frame");
+        let frame = acc.finalize_tick(10).test_value();
         assert_eq!(frame.client_id, 2);
         assert_eq!(frame.tick, 10);
         assert!(frame.controls.is_empty());
@@ -15163,22 +14559,20 @@ Message=Server says Andr\xe9\r\n\
         };
         drop(queued);
         drop(commands);
-        let manager = caller.join().expect("join game-thread probe");
+        let manager = caller.join().test_value();
         drop(manager);
 
-        let (sample, before, after) =
-            observed.expect("control consumption must not wait for worker command processing");
+        let (sample, before, after) = observed.test_value();
         assert_eq!(
             sample.map(|cost| cost.send_time_ms),
             Some(66),
             "the game thread reads the latest topology snapshot directly"
         );
-        let consumed_at =
-            queued_consumed_at.expect("consumption bookkeeping remains queued in order");
+        let consumed_at = queued_consumed_at.test_value();
         assert!((before..=after).contains(&consumed_at));
 
         let mut clock = NetworkControlClock::new(0, 1);
-        clock.observe_control_send_time_ms(sample.expect("live worker sample").send_time_ms);
+        clock.observe_control_send_time_ms(sample.test_value().send_time_ms);
         // 66ms of link is 2 frames at 38 fps, plus C++'s one-frame floor. The
         // ACT average beside it stays C++'s exact 1/150 EWMA of the same sample.
         assert_eq!(
@@ -15293,9 +14687,7 @@ Message=Server says Andr\xe9\r\n\
 
         clock.observe_control_send_time_ms(20);
         clock.observe_control_lateness_ms(300);
-        let change = clock
-            .calculate_performance_for_mode(2)
-            .expect("an actually slow async client must buy delivery headroom");
+        let change = clock.calculate_performance_for_mode(2).test_value();
 
         assert!(
             change.control_presend > 1,
@@ -15517,9 +14909,7 @@ Message=Server says Andr\xe9\r\n\
     fn control_presend_covers_the_link_from_the_first_sample() {
         let mut clock = NetworkControlClock::new(0, 1);
         clock.observe_control_send_time_ms(300);
-        let change = clock
-            .calculate_performance()
-            .expect("the first sample already re-sizes PreSend");
+        let change = clock.calculate_performance().test_value();
         // 38 fps * 300ms = 11 frames of link, plus C++'s one-frame floor.
         assert_eq!(change.control_presend, 12);
         assert_eq!(clock.control_presend(), 12);
@@ -15658,11 +15048,11 @@ Message=Server says Andr\xe9\r\n\
     #[test]
     fn accumulator_ignores_outdated_ticks() {
         let mut acc = ControlFrameAccumulator::new(1);
-        let control = control_packet_for_event(1, ControlEvent::Press(ControlButton::Right), 1)
-            .expect("build control packet");
+        let control =
+            control_packet_for_event(1, ControlEvent::Press(ControlButton::Right), 1).test_value();
         acc.record_control(2, control.clone(), 30);
 
-        let frame = acc.finalize_tick(2).expect("first finalize produces frame");
+        let frame = acc.finalize_tick(2).test_value();
         assert_eq!(frame.controls, vec![control.clone()]);
 
         // Attempt to record another control for an already-finalized tick.
@@ -15674,23 +15064,19 @@ Message=Server says Andr\xe9\r\n\
 
         // Controls for older ticks are ignored.
         acc.record_control(1, control, 50);
-        let frame = acc
-            .finalize_tick(3)
-            .expect("finalize advances to next tick");
+        let frame = acc.finalize_tick(3).test_value();
         assert!(frame.controls.is_empty());
     }
 
     #[test]
     fn accumulator_rebases_all_held_input_to_the_first_activated_tick() {
-        let control = control_packet_for_event(1, ControlEvent::Press(ControlButton::Right), 1)
-            .expect("build control packet");
+        let control =
+            control_packet_for_event(1, ControlEvent::Press(ControlButton::Right), 1).test_value();
         for queued_tick in [9, 15] {
             let mut held = ControlFrameAccumulator::new(1);
             assert!(held.record_control(queued_tick, control.clone(), 30));
             held.rebase_pending_to_first_activated_tick(13);
-            let frame = held
-                .finalize_tick(13)
-                .expect("activation tick emits held input");
+            let frame = held.finalize_tick(13).test_value();
             assert_eq!(frame.tick, 13);
             assert_eq!(frame.controls, vec![control.clone()]);
         }

@@ -4,10 +4,9 @@
 #[test]
 fn console_lobby_start_is_host_only_and_restarts_countdown() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated console lobby config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "Lobby", "CountdownTime", "7")
-        .expect("configure console lobby countdown");
+    persist_config_value(&paths, "Lobby", "CountdownTime", "7").test_value();
     let mut host = new_menu_app(640, 480);
     host.app_paths = Some(paths);
     let (_events, mut commands) = install_classic_host_network_stub(&mut host);
@@ -16,7 +15,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     // the network control host (oracle src/C4Application.cpp:622-644;
     // src/C4MessageInput.cpp:472-490).
     host.process_console_command("/set maxplayer 24")
-        .expect("console lobby maximum-player command");
+        .test_value();
     assert_eq!(
         commands.take_submitted_control_sets(),
         vec![clonk_network::LegacyControlSet {
@@ -25,14 +24,12 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
             by_client: 0,
         }]
     );
-    host.process_console_command("/start")
-        .expect("start configured-default countdown");
+    host.process_console_command("/start").test_value();
     assert_eq!(
         commands.take_submitted_lobby_countdowns(),
         vec![clonk_network::LobbyCountdownPacket::new(7)]
     );
-    host.process_console_command("/abort")
-        .expect("non-start lobby input routes through MessageInput");
+    host.process_console_command("/abort").test_value();
     assert!(commands.take_submitted_lobby_countdowns().is_empty());
     assert_eq!(
         host.host_lobby_countdown,
@@ -46,8 +43,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
         .logs()
         .last()
         .is_some_and(|line| line.text.contains("Unknown command: \"abort\"")));
-    host.process_console_command("/starter 12junk")
-        .expect("native prefix command replaces countdown");
+    host.process_console_command("/starter 12junk").test_value();
     assert_eq!(
         commands.take_submitted_lobby_countdowns(),
         vec![
@@ -56,8 +52,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
         ]
     );
     host.ui_sound_log.clear();
-    host.process_console_command("/start ")
-        .expect("invalid explicit timeout is consumed");
+    host.process_console_command("/start ").test_value();
     assert!(commands.take_submitted_lobby_countdowns().is_empty());
     assert!(
         host.ui_sound_log.is_empty(),
@@ -73,8 +68,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
             .map(|line| line.text.as_str()),
         Some("Usage: /start [timer]")
     );
-    host.process_console_command("/start 0")
-        .expect("zero remains a one-second console countdown");
+    host.process_console_command("/start 0").test_value();
     assert_eq!(
         commands.take_submitted_lobby_countdowns(),
         vec![
@@ -91,7 +85,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     install_message_fixture(&mut host);
     host.snapshot = host.engine.snapshot();
     host.process_console_command("/private Sender secret")
-        .expect("running-only private syntax is rejected in the lobby");
+        .test_value();
     assert!(commands.take_submitted_messages().is_empty());
     assert!(host
         .classic_host_lobby
@@ -101,8 +95,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
         .logs()
         .last()
         .is_some_and(|line| line.text.contains("Unknown command: \"private\"")));
-    host.process_console_command("\"hello")
-        .expect("leading quote remains an ordinary lobby message");
+    host.process_console_command("\"hello").test_value();
     assert_eq!(
         commands.take_submitted_messages(),
         vec![MessageControlData {
@@ -115,8 +108,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
         }]
     );
     assert!(host.engine.set_team_distribution(4));
-    host.process_console_command("^hidden")
-        .expect("hidden teams reject lobby team messages");
+    host.process_console_command("^hidden").test_value();
     assert!(commands.take_submitted_messages().is_empty());
     assert_eq!(
         host.classic_host_lobby
@@ -132,9 +124,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     let mut client = new_menu_app(640, 480);
     client.startup_view = StartupView::NetworkLobby;
     client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
-    client
-        .process_console_command("/start 3")
-        .expect("client start is consumed");
+    client.process_console_command("/start 3").test_value();
     assert_eq!(
         client
             .network_lobby
@@ -156,9 +146,7 @@ fn muted_loop_releases_channel_but_survives_and_restarts_on_unmute() {
     audio.process_audio(&snapshot, &mut runtime_music_enabled);
     snapshot.audio.clear();
 
-    let original_channel = audio.active_channels[&key]
-        .channel
-        .expect("enabled loop has a mixer channel");
+    let original_channel = audio.active_channels[&key].channel.test_value();
     assert!(audio.system.channel_is_playing(original_channel));
 
     audio.options.sound_enabled = false;
@@ -169,9 +157,7 @@ fn muted_loop_releases_channel_but_survives_and_restarts_on_unmute() {
 
     audio.options.sound_enabled = true;
     audio.process_audio(&snapshot, &mut runtime_music_enabled);
-    let restored_channel = audio.active_channels[&key]
-        .channel
-        .expect("unmuted loop reacquires a mixer channel");
+    let restored_channel = audio.active_channels[&key].channel.test_value();
     assert!(audio.system.channel_is_playing(restored_channel));
 }
 
@@ -235,12 +221,12 @@ fn placeholder_preview_has_expected_dimensions() {
 fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated local-start failure user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let StagedNetworkHostScenario {
         frontend,
@@ -265,10 +251,9 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
         .send(ScenarioLoadingEvent::Finished(Err(
             "controlled local load failure".to_string(),
         )))
-        .expect("queue controlled local load failure");
+        .test_value();
 
-    app.poll_loading()
-        .expect("failed local load restarts the startup selector");
+    app.poll_loading().test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
@@ -294,11 +279,10 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     );
 
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render restored local selector and Error Log");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss local startup Error Log");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::Local);
@@ -354,10 +338,9 @@ fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
         StartupNetworkPurpose::Join,
     ));
 
-    app.poll_startup_network_connection()
-        .expect("disconnected worker restarts startup with retained log");
+    app.poll_startup_network_connection().test_value();
 
-    let info = app.runtime_client_list.as_ref().expect("static Error Log");
+    let info = app.runtime_client_list.test_ref();
     assert!(info.is_static_info_only());
     assert_eq!(
         info.info_lines(),
@@ -365,24 +348,19 @@ fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
     );
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("static InfoDialog geometry");
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let bottom_close = app
         .runtime_client_list
         .as_ref()
         .and_then(|dialog| dialog.info_layout(preferred, line_height))
         .and_then(|layout| layout.bottom_close_button)
-        .expect("bottom Close button");
-    app.handle_cursor_moved(PhysicalPosition::new(
+        .test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(bottom_close.x + bottom_close.w / 2),
         f64::from(bottom_close.y + bottom_close.h / 2),
-    ))
-    .expect("point at bottom Close button");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press bottom Close button");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release bottom Close button");
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(app.runtime_client_list.is_none());
     assert_eq!(
         app.startup_restart_diagnostics,
@@ -395,8 +373,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     app.startup_network_dialog
-        .as_mut()
-        .expect("remembered NetDlg")
+        .test_mut()
         .set_join_address("remembered.example:11112");
     app.status_text = "stale generic status".to_string();
     let mut entries = (0..16)
@@ -409,14 +386,14 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         app.startup_restart_diagnostics.add_log_entry(entry.clone());
     }
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
-        .expect("reconstruct NetDlg and show retained log");
+        .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.startup_network_dialog.is_some());
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
-    let info = app.runtime_client_list.as_ref().expect("Error Log info");
+    let info = app.runtime_client_list.test_ref();
     assert!(info.is_info_only());
     assert!(info.info_is_open());
     assert_eq!(info.info_client_id(), None);
@@ -424,10 +401,8 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     assert_eq!(info.info_requested_line_count(), 10);
     assert_eq!(info.info_lines(), entries);
 
-    let (preferred, _) = app
-        .runtime_client_list_input_geometry()
-        .expect("InfoDialog geometry");
-    let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+    let (preferred, _) = app.runtime_client_list_input_geometry().test_value();
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     assert_eq!(
         app.runtime_client_list
             .as_ref()
@@ -444,12 +419,10 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         .info_scroll_metrics(preferred, &fonts.text)
         .is_some_and(|metrics| metrics.max_scroll > 0));
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render reconstructed NetDlg and Error Log info");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
 
-    app.handle_key(VirtualKeyCode::End, ElementState::Pressed)
-        .expect("scroll retained log to end");
+    app.test_key(VirtualKeyCode::End, ElementState::Pressed);
     assert!(app
         .runtime_client_list
         .as_ref()
@@ -457,15 +430,12 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
         .visible_info_lines(preferred, &fonts.text)
         .last()
         .is_some_and(|line| line.ends_with("TAIL")));
-    app.handle_key(VirtualKeyCode::End, ElementState::Released)
-        .expect("release retained-log scroll key");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("dismiss retained Error Log info");
+    app.test_key(VirtualKeyCode::End, ElementState::Released);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(app.runtime_client_list.is_none());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.startup_network_dialog.is_some());
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("dismissed info owns Return release");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert_eq!(
         app.startup_restart_diagnostics,
@@ -482,7 +452,7 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
 
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.finish_startup_network_restart(StartupNetworkPurpose::StagedHost)
-        .expect("reconstruct host selector and show empty-log fallback");
+        .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
@@ -493,11 +463,10 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
     assert!(app.runtime_client_list.is_none());
     assert_startup_error_log(&app, "(no error)");
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render restored host selector and empty-log fallback");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss empty-log fallback");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert_eq!(
@@ -510,8 +479,7 @@ fn empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
 fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
     let mut app = new_menu_app(640, 480);
     let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
-    chooser.forced_name =
-        LegacyCString::from_bytes(b"Restart Alias".to_vec()).expect("valid forced name");
+    chooser.forced_name = LegacyCString::from_bytes(b"Restart Alias".to_vec()).test_value();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
     app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -554,7 +522,7 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
             },
             ScriptControlPolicy::live(false),
         )
-        .expect("SetRestoreInfos executes");
+        .test_value();
     assert_eq!(app.engine.restart_restore_info_mask(), 2);
     app.retain_restart_restore_mask_for_restart();
 
@@ -622,10 +590,9 @@ fn host_round_restart_returns_to_network_lobby_staging() {
             },
             ScriptControlPolicy::live(false),
         )
-        .expect("SetRestoreInfos executes");
+        .test_value();
 
-    app.restart_current_scenario()
-        .expect("host restart selects network lobby staging");
+    app.restart_current_scenario().test_value();
 
     assert_eq!(
         app.scenario_selector_mode,
@@ -660,8 +627,7 @@ fn host_round_restart_announces_itself_before_tearing_the_session_down() {
     let mut app = new_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 1);
 
-    app.restart_current_scenario()
-        .expect("host restart selects network lobby staging");
+    app.restart_current_scenario().test_value();
 
     assert_eq!(
         commands.take_host_restart_broadcasts(),
@@ -677,20 +643,19 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
     // to reach a lobby it was already entitled to. With a scenario this host can
     // prepare, nothing is torn down but the round.
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated restart user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.active_scenario = Some(tutorial_frontend(repository));
     app.active_definition_load = Some(ScenarioDefinitionLoad::Seed {
         modules: vec!["Objects.c4d".to_string()],
         definition_root: None,
     });
-    let (manager, _events, mut commands) =
-        NetworkManager::test_stub_with_commands_for_client_id(0);
+    let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
@@ -698,8 +663,7 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
         prepared: None,
     }));
 
-    app.restart_current_network_scenario()
-        .expect("host restarts the round on its live session");
+    app.restart_current_network_scenario().test_value();
 
     assert!(
         app.network.is_some(),
@@ -741,8 +705,7 @@ fn a_league_round_restart_still_clears_the_live_session() {
         "a league round must re-host so its registration is released"
     );
 
-    app.restart_current_scenario()
-        .expect("host restart selects network lobby staging");
+    app.restart_current_scenario().test_value();
 
     assert!(
         app.network.is_none(),
@@ -763,8 +726,7 @@ fn host_round_restart_clears_the_live_session_before_staging_the_next_host() {
     let mut app = new_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
 
-    app.restart_current_scenario()
-        .expect("host restart selects network lobby staging");
+    app.restart_current_scenario().test_value();
 
     assert!(
         app.network.is_none(),
@@ -843,34 +805,32 @@ fn restart_restore_team_obeys_mask_user_and_equal_team_guards() {
 #[test]
 fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     let _lock = env_lock().lock();
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let global = dir.path().join("Music.c4g");
-    fs::create_dir_all(&global).expect("create music group");
+    fs::create_dir_all(&global).test_value();
     // The decoder sniffs the payload; naming valid WAV bytes `.mid` lets
     // this test exercise catalog-extension handling without FluidSynth.
-    fs::write(global.join("Frontend.mid"), silent_pcm_wav(1_000))
-        .expect("write frontend MIDI fixture");
+    fs::write(global.join("Frontend.mid"), silent_pcm_wav(1_000)).test_value();
 
     let mut app = new_menu_app(320, 200);
-    let audio = app.audio.as_mut().expect("test audio");
+    let audio = app.audio.test_mut();
     audio.stop_music();
     audio.music_resolver =
-        MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
-            .expect("build music resolver");
+        MusicResolver::with_global_group(Group::open(&global).test_value()).test_value();
     audio.options.menu_music_enabled = false;
     audio.set_scenario_music_level(Some(25));
     let stale_recent = Arc::clone(
         &audio
             .music_resolver
             .resolve("Frontend.mid")
-            .expect("frontend fixture")
+            .test_value()
             .identity,
     );
     lock_unpoisoned(&audio.music_control).most_recently_played = Some(stale_recent);
 
     app.begin_frontend_music_entry();
     assert!(app.frontend_music_attempted_for_entry);
-    let audio = app.audio.as_ref().expect("test audio");
+    let audio = app.audio.test_ref();
     assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
     assert_eq!(
         audio
@@ -886,32 +846,20 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
         .is_none());
     assert!(!audio.music_is_playing());
 
-    app.set_frontend_music_option(true)
-        .expect("enable frontend music");
-    let audio = app.audio.as_ref().expect("test audio");
+    app.set_frontend_music_option(true).test_value();
+    let audio = app.audio.test_ref();
     let first_generation = lock_unpoisoned(&audio.music_control).generation;
 
     let wait_for_mixer_start = |app: &GameApp| {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !app
-            .audio
-            .as_ref()
-            .expect("test audio")
-            .system
-            .music_is_playing()
-            && Instant::now() < deadline
-        {
+        while !app.audio.test_ref().system.music_is_playing() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .system
-            .music_is_playing()
+        app.audio.test_ref().system.music_is_playing()
     };
     assert!(wait_for_mixer_start(&app), "Frontend.mid starts playback");
 
-    let mixer = Arc::clone(app.audio.as_ref().expect("test audio").system.mixer());
+    let mixer = Arc::clone(app.audio.test_ref().system.mixer());
     let mut output = vec![0_i16; mixer.sample_rate() as usize * 2 * 2];
     mixer.mix_i16(&mut output);
     assert!(
@@ -923,7 +871,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
         "draining past the asset end proves frontend music is non-looping"
     );
 
-    app.update().expect("idle frontend update");
+    app.test_update();
     app.ensure_menu_music();
     assert_eq!(
         lock_unpoisoned(&app.audio.as_ref().expect("test audio").music_control).generation,
@@ -938,8 +886,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
         "a new startup entry restarts frontend music"
     );
 
-    app.set_frontend_music_option(false)
-        .expect("disable frontend music");
+    app.set_frontend_music_option(false).test_value();
     assert!(
         !app.audio
             .as_ref()
@@ -953,8 +900,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
         .expect("test audio")
         .system
         .music_is_playing());
-    app.set_frontend_music_option(true)
-        .expect("re-enable frontend music");
+    app.set_frontend_music_option(true).test_value();
     assert!(
         wait_for_mixer_start(&app),
         "FEMusic re-enable restarts the frontend playlist"
@@ -975,15 +921,14 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
 
 #[test]
 fn playlist_restart_selection_randomizes_new_matches_and_named_lookup_bypasses_filter() {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let global = dir.path().join("Music.c4g");
-    fs::create_dir_all(&global).expect("create global music group");
+    fs::create_dir_all(&global).test_value();
     for name in ["A.ogg", "B.ogg", "C.ogg"] {
-        fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
+        fs::write(global.join(name), name.as_bytes()).test_value();
     }
     let mut resolver =
-        MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
-            .expect("build music resolver");
+        MusicResolver::with_global_group(Group::open(&global).test_value()).test_value();
     resolver.set_playlist(Some("B.*;C.*".to_string()));
 
     assert_eq!(
@@ -998,7 +943,7 @@ fn playlist_restart_selection_randomizes_new_matches_and_named_lookup_bypasses_f
             assert_eq!(range, 2);
             1
         })
-        .expect("filtered default selection");
+        .test_value();
     assert_eq!(
         selected.file_name_bytes, b"C.ogg",
         "a restarted playlist uses the random choice instead of its first match"
@@ -1007,19 +952,15 @@ fn playlist_restart_selection_randomizes_new_matches_and_named_lookup_bypasses_f
 
 #[test]
 fn set_music_playlist_command_restarts_only_when_enabled_at_its_event_position() {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let global = dir.path().join("Music.c4g");
-    fs::create_dir_all(&global).expect("create music group");
-    fs::write(global.join("Frontend.ogg"), silent_pcm_wav(20))
-        .expect("write decodable music fixture");
+    fs::create_dir_all(&global).test_value();
+    fs::write(global.join("Frontend.ogg"), silent_pcm_wav(20)).test_value();
 
-    let group = Group::open(&global).expect("open global music");
-    let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-    audio.music_resolver = MusicResolver::with_global_group(group).expect("build music resolver");
-    let fixture = audio
-        .system
-        .load_music(&silent_pcm_wav(20))
-        .expect("predecode controlled music fixture");
+    let group = Group::open(&global).test_value();
+    let mut audio = AudioContext::try_new(AudioOptions::default()).test_value();
+    audio.music_resolver = MusicResolver::with_global_group(group).test_value();
+    let fixture = audio.system.load_music(&silent_pcm_wav(20)).test_value();
     audio.control_music_loads_with(fixture);
     let snapshot = make_snapshot(Vec::new(), Vec::new());
     let event = AudioCommand::SetMusicPlaylist {
@@ -1111,28 +1052,18 @@ fn set_music_playlist_command_restarts_only_when_enabled_at_its_event_position()
 
 #[test]
 fn queued_playlist_restart_uses_its_command_time_filter() {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let global = dir.path().join("Music.c4g");
-    fs::create_dir_all(&global).expect("create global music group");
+    fs::create_dir_all(&global).test_value();
     for name in ["A.ogg", "B.ogg", "C.ogg"] {
-        fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
+        fs::write(global.join(name), name.as_bytes()).test_value();
     }
 
-    let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+    let mut audio = AudioContext::try_new(AudioOptions::default()).test_value();
     audio.music_resolver =
-        MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
-            .expect("build music resolver");
-    let b_identity = Arc::clone(
-        &audio
-            .music_resolver
-            .resolve("B")
-            .expect("resolve B")
-            .identity,
-    );
-    let fixture = audio
-        .system
-        .load_music(&silent_pcm_wav(20))
-        .expect("predecode controlled music fixture");
+        MusicResolver::with_global_group(Group::open(&global).test_value()).test_value();
+    let b_identity = Arc::clone(&audio.music_resolver.resolve("B").test_value().identity);
+    let fixture = audio.system.load_music(&silent_pcm_wav(20)).test_value();
     audio.control_music_loads_with(fixture);
 
     let mut runtime_music_enabled = true;
@@ -1161,10 +1092,7 @@ fn queued_playlist_restart_uses_its_command_time_filter() {
     assert!(audio
         .complete_next_controlled_music_load()
         .expect("complete named predecessor"));
-    let controlled = audio
-        .controlled_music_loads
-        .as_ref()
-        .expect("controlled music loading");
+    let controlled = audio.controlled_music_loads.test_ref();
     assert_eq!(controlled.requests.len(), 1);
     assert!(controlled
         .requests
@@ -1196,7 +1124,7 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
     let mut context = new_running_sandbox_app();
     context
         .open_context_menu_at(Vec::new(), GuiPoint::new(20.0, 20.0))
-        .expect("open running context");
+        .test_value();
     check(context, "running context");
 
     let mut message = new_running_sandbox_app();
@@ -1209,7 +1137,7 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("open running message");
+        .test_value();
     check(message, "running message");
 
     let mut menu = new_running_sandbox_app();
@@ -1220,7 +1148,7 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
     check(menu, "running player menu");
 
     let mut evaluation = new_classic_running_sandbox_app();
-    evaluation.handle_game_over().expect("open evaluation");
+    evaluation.handle_game_over().test_value();
     check(evaluation, "running evaluation");
 }
 
@@ -1228,10 +1156,9 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
 fn abort_action_opens_confirmation_with_control_host_restart() {
     let mut app = new_menu_app(320, 200);
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start explicit test sandbox");
-    app.apply_ingame_menu_action(MenuAction::Abort)
-        .expect("open C4AbortGameDialog confirmation");
-    let dialog = app.message_dialogs.last().expect("abort dialog is visible");
+        .test_value();
+    app.apply_ingame_menu_action(MenuAction::Abort).test_value();
+    let dialog = app.message_dialogs.last().test_value();
     assert_eq!(
         dialog.state.buttons(),
         clonk_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO
@@ -1257,18 +1184,14 @@ fn abort_action_opens_confirmation_with_control_host_restart() {
 fn headless_round_end_quits_instead_of_pausing_behind_an_evaluation_dialog() {
     // The graphical path is the control: it does open the dialog and pause.
     let mut windowed = running_browser_sandbox(ScenarioSelectorMode::Local);
-    windowed
-        .handle_game_over()
-        .expect("open the windowed evaluation dialog");
+    windowed.handle_game_over().test_value();
     assert!(windowed.game_over_dialog.is_some());
     assert!(windowed.runtime_halt_active());
     assert!(!windowed.take_exit_request());
 
     let mut server = running_browser_sandbox(ScenarioSelectorMode::Local);
     server.headless = true;
-    server
-        .handle_game_over()
-        .expect("end the headless round without a dialog");
+    server.handle_game_over().test_value();
     assert!(
         server.game_over_dialog.is_none(),
         "a dedicated server draws no evaluation dialog"
@@ -1287,37 +1210,29 @@ fn local_round_abort_and_evaluation_end_restore_fresh_browser() {
     assert_l038_browser_return(&aborted, ScenarioSelectorMode::Local);
 
     let mut evaluated = running_browser_sandbox(ScenarioSelectorMode::Local);
-    evaluated
-        .handle_game_over()
-        .expect("open local evaluation dialog");
+    evaluated.handle_game_over().test_value();
     assert!(evaluated.game_over_dialog.is_some());
     evaluated
         .handle_game_over_action(GameOverAction::End)
-        .expect("end evaluated local round");
+        .test_value();
     assert_l038_browser_return(&evaluated, ScenarioSelectorMode::Local);
 }
 
 #[test]
 fn reload_button_and_f5_restart_and_repopulate_search() {
     fn exercise(use_f5: bool, title: &str) {
-        let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
-            .expect("bind masterserver fixture");
-        listener
-            .set_nonblocking(true)
-            .expect("make fixture bounded");
-        let master_address = listener.local_addr().expect("fixture address");
+        let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).test_value();
+        listener.set_nonblocking(true).test_value();
+        let master_address = listener.local_addr().test_value();
 
         let discovery_port = std::net::UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0))
             .expect("reserve discovery port")
             .local_addr()
-            .expect("reserved discovery address")
+            .test_value()
             .port();
         let mut app = new_classic_menu_app(800, 600);
         let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
-            app.assets
-                .clonk_fonts
-                .as_deref()
-                .expect("classic startup fonts"),
+            app.assets.clonk_fonts.as_deref().test_value(),
         );
         let layout = clonk_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
         let mut dialog = clonk_frontend::startup_netdlg::NetDlgController::new(
@@ -1337,7 +1252,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
                 master_server_url: format!("http://{master_address}/"),
                 discovery_port,
             })
-            .expect("start network search"),
+            .test_value(),
         );
         app.startup_game_references = vec![clonk_network::NetworkGameReference {
             title: "Stale game".to_string(),
@@ -1377,16 +1292,12 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
                         Err(error) => panic!("accept masterserver request: {error}"),
                     }
                 };
-                stream
-                    .set_nonblocking(false)
-                    .expect("make fixture connection blocking");
+                stream.set_nonblocking(false).test_value();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
-                    .expect("bound fixture request read");
+                    .test_value();
                 let mut request = [0_u8; 4096];
-                let size = stream
-                    .read(&mut request)
-                    .expect("read masterserver request");
+                let size = stream.read(&mut request).test_value();
                 assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET / HTTP/1.1"));
                 let body = format!(
                         "[Reference]\nTitle=\"{server_title}\"\nState=Lobby\nJoinAllowed=1\nAddress=TCP:\"127.0.0.1:31112\"\nGame=LegacyClonk\nVersion=4,9,11,0\nBuild=362\n"
@@ -1396,30 +1307,23 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 )
-                .expect("write fixture response headers");
-                stream
-                    .write_all(body.as_bytes())
-                    .expect("write fixture response body");
+                .test_value();
+                stream.write_all(body.as_bytes()).test_value();
                 true
             })
         };
 
         if use_f5 {
-            app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-                .expect("F5 restarts network search");
-            app.handle_key(VirtualKeyCode::F5, ElementState::Released)
-                .expect("release F5");
+            app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::F5, ElementState::Released);
         } else {
             let reload = layout.buttons[1];
-            app.handle_cursor_moved(PhysicalPosition::new(
+            app.test_cursor(PhysicalPosition::new(
                 f64::from(reload.x + reload.w / 2),
                 f64::from(reload.y + reload.h / 2),
-            ))
-            .expect("move over Reload");
-            app.handle_mouse_button(ElementState::Pressed)
-                .expect("press Reload");
-            app.handle_mouse_button(ElementState::Released)
-                .expect("release Reload");
+            ));
+            app.test_left_button(ElementState::Pressed);
+            app.test_left_button(ElementState::Released);
         }
         // The listener is already bound, so a promptly scheduled client
         // can wait in the kernel backlog. Arm the fixture deadline only
@@ -1448,8 +1352,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
             .any(|reference| reference.title == title)
             && Instant::now() < deadline
         {
-            app.poll_startup_game_search()
-                .expect("apply restarted search event");
+            app.poll_startup_game_search().test_value();
             // Hosts without a usable multicast route report the explicit
             // LAN probe failure in a modal, and the modal's Sec1 timer freeze
             // holds the queued masterserver result until it is dismissed.
@@ -1461,7 +1364,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
                 app.finish_message_dialog(
                     clonk_frontend::message_dialog::MessageDialogResult::Cancel,
                 )
-                .expect("dismiss incidental LAN discovery failure");
+                .test_value();
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1491,18 +1394,14 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
 
 #[test]
 fn subsecond_refresh_only_plays_error_and_preserves_rows() {
-    let sound_root = tempdir().expect("sound fixture");
+    let sound_root = tempdir();
     let scenario = sound_root.path().join("Cooldown.c4s");
-    fs::create_dir(&scenario).expect("create sound fixture");
-    fs::write(scenario.join("Error.wav"), silent_pcm_wav(1_000))
-        .expect("write Error sound fixture");
+    fs::create_dir(&scenario).test_value();
+    fs::write(scenario.join("Error.wav"), silent_pcm_wav(1_000)).test_value();
 
     let mut app = new_classic_menu_app(800, 600);
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
-        app.assets
-            .clonk_fonts
-            .as_deref()
-            .expect("classic startup fonts"),
+        app.assets.clonk_fonts.as_deref().test_value(),
     );
     let mut dialog = clonk_frontend::startup_netdlg::NetDlgController::new(
         clonk_frontend::startup_netdlg::NetDlgConfig::default(),
@@ -1532,16 +1431,16 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     let expected_games = app
         .startup_network_dialog
         .as_ref()
-        .unwrap()
+        .test_value()
         .games()
         .to_vec();
-    let audio = app.audio.as_mut().expect("menu audio context");
+    let audio = app.audio.test_mut();
     audio.options.menu_sound_enabled = true;
     audio.configure_scenario(Some(&scenario));
     audio.missing_sounds.clear();
 
     app.request_startup_network_refresh_at(now + Duration::from_millis(999))
-        .expect("cooldown rejection is nonfatal");
+        .test_value();
 
     assert_eq!(app.startup_network_last_refresh, Some(now));
     assert_eq!(app.startup_game_references, expected_references);
@@ -1553,7 +1452,7 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     assert_eq!(app.status_text, "Retained status");
     assert_eq!(app.netdlg_last_click, Some((0, now)));
     assert!(app.message_dialogs.is_empty());
-    let audio = app.audio.as_ref().unwrap();
+    let audio = app.audio.as_ref().test_value();
     assert!(
         audio
             .loaded_sounds
@@ -1573,7 +1472,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
         Some("Gamepad1"),
         "Button7",
         input::legacy_gamepad_axis_key(1, 0, false)
-            .expect("gamepad-two left-axis key")
+            .test_value()
             .to_string(),
     );
     app.gamepad_bindings = GamepadBindings::from_config(&config);
@@ -1588,8 +1487,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
     });
     app.start_running_chat(RunningChatMode::All);
     app.engine
-        .player_mut(app.local_owner)
-        .expect("local sandbox player")
+        .test_player_mut(app.local_owner)
         .control
         .pressed_coms = 0;
 
@@ -1616,7 +1514,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
         ],
         false,
     )
-    .expect("chat forwards raw input from a non-GUI gamepad above evaluation");
+    .test_value();
 
     assert_ne!(
         app.engine
@@ -1636,28 +1534,23 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
 fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     let config = parse_runtime_key_config(
                 b"[Keys]\nChatOpen=G,Joy2A\nScoreboardToggle=H\nGameAbort=B\nFullscreenMenuDown=J\nKbd1Key1=Shift+T\nKbd1Key2=\\x0042000a\n",
-            )
-            .expect("parse modeled named remaps");
+            ).test_value();
     let mut app = new_running_sandbox_app();
     app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
-        .set(Ok(config))
-        .expect("install per-game key registry");
+    app.runtime_key_config_cache.set(Ok(config)).test_value();
 
     assert!(app.handle_running_chat_open_key(VirtualKeyCode::KeyG, ElementState::Pressed));
     assert!(app.running_chat_active());
-    app.close_running_chat()
-        .expect("close custom keyboard chat through the production lifecycle");
+    app.close_running_chat().test_value();
     assert!(!app.handle_running_chat_open_key(VirtualKeyCode::Enter, ElementState::Pressed,));
     app.handle_gamepad_direction(
         GamepadSlot::new(1),
         ControlButton::Left,
         ElementState::Pressed,
     )
-    .expect("custom Joy spelling reaches the named chat callback");
+    .test_value();
     assert!(app.running_chat_active());
-    app.close_running_chat()
-        .expect("close custom gamepad chat through the production lifecycle");
+    app.close_running_chat().test_value();
 
     assert!(app
         .handle_scoreboard_key(VirtualKeyCode::KeyH, ElementState::Pressed)
@@ -1701,11 +1594,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             &IngameMenuLabels::default(),
         ),
     );
-    let before = app
-        .ingame_menu
-        .get(OWNER_NONE)
-        .expect("ownerless menu")
-        .selection();
+    let before = app.ingame_menu.get(OWNER_NONE).test_value().selection();
     assert!(app
         .handle_runtime_fullscreen_menu_key(VirtualKeyCode::KeyJ, ElementState::Pressed,)
         .expect("custom ownerless menu callback"));
@@ -1718,8 +1607,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
     );
     app.ingame_menu.clear();
 
-    app.handle_key(VirtualKeyCode::KeyB, ElementState::Pressed)
-        .expect("custom abort callback");
+    app.test_key(VirtualKeyCode::KeyB, ElementState::Pressed);
     assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::AbortGame { .. }
@@ -1738,7 +1626,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             b"[Keys]\nScoreboardToggle=Escape,Return,R\n",
         )
         .expect("parse custom scoreboard chord")))
-        .expect("install custom scoreboard chord");
+        .test_value();
     context_priority
         .open_context_menu_at(
             vec![ContextMenuEntry::<AppContextMenuCommand>::new(
@@ -1746,10 +1634,8 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             )],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("open higher-priority context menu");
-    context_priority
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("context Escape precedes custom ScoreboardToggle");
+        .test_value();
+    context_priority.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(context_priority.context_menu.is_none());
     assert!(context_priority.scoreboard_dialog.is_none());
     context_priority
@@ -1759,10 +1645,8 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             )],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("reopen context for Return priority");
-    context_priority
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("context Return precedes custom ScoreboardToggle");
+        .test_value();
+    context_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(context_priority.scoreboard_dialog.is_none());
     context_priority.close_context_menu_silently();
     context_priority
@@ -1770,10 +1654,8 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open").with_hotkey('R')],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("reopen context for hotkey priority");
-    context_priority
-        .handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
-        .expect("context hotkey precedes custom ScoreboardToggle");
+        .test_value();
+    context_priority.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
     assert!(context_priority.scoreboard_dialog.is_none());
 
     let mut gamepad_priority = new_running_sandbox_app();
@@ -1782,13 +1664,13 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(b"[Keys]\nChatOpen=Joy1A\n")
             .expect("parse colliding gamepad chat chord")))
-        .expect("install colliding gamepad chat chord");
+        .test_value();
     let mut gamepad_config = Config::new();
     gamepad_config.set_in(
         Some("Gamepad0"),
         "Button7",
         input::legacy_gamepad_axis_key(0, 0, false)
-            .expect("primary left-axis key")
+            .test_value()
             .to_string(),
     );
     gamepad_priority.gamepad_bindings = GamepadBindings::from_config(&gamepad_config);
@@ -1803,20 +1685,18 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             replay: false,
             disable_mouse: false,
         });
-    gamepad_priority
-        .process_gamepad_event_batch([
-            GamepadEvent::Axis {
-                slot: GamepadSlot::new(0),
-                axis: LegacyGamepadAxis::new(0, false),
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Left,
-                state: ElementState::Pressed,
-            },
-        ])
-        .expect("assigned gamepad player callback precedes custom chat");
+    gamepad_priority.test_gamepad_events([
+        GamepadEvent::Axis {
+            slot: GamepadSlot::new(0),
+            axis: LegacyGamepadAxis::new(0, false),
+            state: ElementState::Pressed,
+        },
+        GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        },
+    ]);
     assert!(!gamepad_priority.running_chat_active());
     assert_ne!(
         gamepad_priority
@@ -1837,11 +1717,9 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             b"[Keys]\nChatOpen2Allies=Up\n",
         )
         .expect("parse chat-history collision")))
-        .expect("install chat-history collision");
+        .test_value();
     chat_priority.start_running_chat(RunningChatMode::All);
-    chat_priority
-        .handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
-        .expect("chat history precedes the remapped global callback");
+    chat_priority.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     assert_eq!(chat_priority.running_chat_text(), Some(""));
 
     let mut game_over_chat = new_game_over_keyboard_app();
@@ -1851,10 +1729,8 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .set(Ok(
             parse_runtime_key_config(b"[Keys]\nChatOpen=G\n").expect("parse game-over chat remap")
         ))
-        .expect("install game-over chat remap");
-    game_over_chat
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("game-over OnEnter opens chat independently of ChatOpen");
+        .test_value();
+    game_over_chat.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(game_over_chat.running_chat_active());
     assert_eq!(game_over_chat.running_chat_text(), Some(""));
 }
@@ -1863,8 +1739,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
 fn observer_and_game_over_use_the_ownerless_fullscreen_camera() {
     let mut observer = new_running_sandbox_app();
     observer.snapshot.hud.local_players.clear();
-    let observer_inputs = collect_viewport_inputs(&observer.snapshot)
-        .expect("ownerless fullscreen viewport is available");
+    let observer_inputs = collect_viewport_inputs(&observer.snapshot).test_value();
     assert_eq!(observer_inputs.len(), 1);
     assert_eq!(observer_inputs[0].owner, OWNER_NONE);
 
@@ -1872,15 +1747,12 @@ fn observer_and_game_over_use_the_ownerless_fullscreen_camera() {
     game_over_observer
         .assets
         .require_classic_game_over_resources()
-        .expect("repository game-over resources are complete");
-    game_over_observer
-        .handle_game_over()
-        .expect("show observer game-over dialog");
+        .test_value();
+    game_over_observer.handle_game_over().test_value();
     game_over_observer.status_text.clear();
     game_over_observer.snapshot.hud.local_players.clear();
     assert!(game_over_observer.game_over_dialog.is_some());
-    let game_over_inputs = collect_viewport_inputs(&game_over_observer.snapshot)
-        .expect("game-over observer keeps the ownerless viewport");
+    let game_over_inputs = collect_viewport_inputs(&game_over_observer.snapshot).test_value();
     assert_eq!(game_over_inputs.len(), 1);
     assert_eq!(game_over_inputs[0].owner, OWNER_NONE);
 }
@@ -1907,7 +1779,7 @@ fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
     );
     let packet = clonk_network::LeagueRoundResultsPacket {
         success: true,
-        result_string: clonk_engine::LegacyCString::from_bytes(b"evaluated".to_vec()).unwrap(),
+        result_string: clonk_engine::LegacyCString::from_bytes(b"evaluated".to_vec()).test_value(),
         players: vec![clonk_network::LeagueRoundResultsPlayer {
             player_info_id: 10,
             total_playing_time: 90,
@@ -1924,12 +1796,11 @@ fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
     };
     event_tx
         .send(NetworkEvent::LeagueRoundResults(packet))
-        .expect("queue league result packet");
+        .test_value();
 
-    app.process_network_events()
-        .expect("apply league result packet");
+    app.test_network_events();
 
-    let info = app.control_player_infos.get(10).unwrap();
+    let info = app.control_player_infos.get(10).test_value();
     assert_eq!(
         (info.league_score, info.league_rank, info.league_rank_symbol),
         (0, 0, 0),
@@ -1953,7 +1824,7 @@ fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
         .players
         .iter()
         .find(|result| result.player_info_id == 10)
-        .unwrap();
+        .test_value();
     assert_eq!((result.score_old, result.score_new), (-1, None));
     assert_eq!(
         (
@@ -1977,7 +1848,7 @@ fn synchronized_activation_restarts_playerless_activity_window() {
     // request time (src/C4Client.cpp:104-110; src/C4Control.cpp:589-602).
     let mut app = new_running_sandbox_app();
     for _ in 0..400 {
-        app.engine.tick().expect("advance before activation");
+        app.engine.test_tick();
     }
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
@@ -1999,18 +1870,16 @@ fn synchronized_activation_restarts_playerless_activity_window() {
             },
         )],
     )
-    .expect("execute synchronized activation at frame 400");
+    .test_value();
 
     for _ in 0..500 {
-        app.engine
-            .tick()
-            .expect("advance to activation delay boundary");
+        app.engine.test_tick();
     }
-    app.update().expect("scan activation age 500");
+    app.test_update();
     assert!(commands.take_submitted_client_updates().is_empty());
 
-    app.engine.tick().expect("advance past activation delay");
-    app.update().expect("scan activation age 501");
+    app.engine.test_tick();
+    app.test_update();
     assert_eq!(
         commands.take_submitted_client_updates(),
         vec![clonk_engine::ClientUpdateControlData {
@@ -2031,8 +1900,7 @@ fn synchronized_activation_restarts_playerless_activity_window() {
 #[test]
 fn game_over_goal_picture_includes_live_goal_object_overlays() {
     let mut app = new_classic_running_sandbox_app();
-    let mut definition =
-        Definition::from_script("GOAL", "Goal", "#strict 3\n").expect("goal definition");
+    let mut definition = test_definition("GOAL", "Goal", "#strict 3\n");
     definition.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -2045,9 +1913,7 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
         pixels: Arc::from([0x11, 0x22, 0x33, 0xff, 0x44, 0x55, 0x66, 0xff]),
         color_mask: None,
     }));
-    app.engine
-        .register_definition(definition)
-        .expect("goal definition registers");
+    app.engine.register_test_definition(definition);
     app.snapshot.round_results.goals = vec!["GOAL".into()];
     app.snapshot.round_results.fulfilled_goals = vec!["GOAL".into()];
 
@@ -2055,7 +1921,7 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
     // definition-only freeze produces nothing to draw.
     app.snapshot.objects.clear();
     assert!(app.engine.definition_picture_image("GOAL").is_none());
-    app.handle_game_over().expect("show goal evaluation");
+    app.handle_game_over().test_value();
     assert!(
         app.game_over_dialog
             .as_ref()
@@ -2071,9 +1937,7 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
 
     // A live goal object draws through its own graphics, which this
     // definition does have.
-    app.engine
-        .spawn_object(SpawnConfig::new("GOAL"))
-        .expect("live goal object");
+    app.engine.spawn_test_object(SpawnConfig::new("GOAL"));
     app.snapshot = app.engine.snapshot();
     app.snapshot.round_results.goals = vec!["GOAL".into()];
     app.snapshot.round_results.fulfilled_goals = vec!["GOAL".into()];
@@ -2082,21 +1946,13 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
         .objects
         .iter()
         .find(|candidate| candidate.definition_id.as_str() == "GOAL")
-        .expect("the goal object is in the live snapshot");
-    let expected = app
-        .engine
-        .object_picture_image(object)
-        .expect("object graphics resolve");
-    app.handle_game_over().expect("show goal evaluation again");
-    let picture = app
-        .game_over_dialog
-        .as_ref()
-        .expect("evaluation dialog")
-        .evaluation()
-        .goals()[0]
+        .test_value();
+    let expected = app.engine.object_picture_image(object).test_value();
+    app.handle_game_over().test_value();
+    let picture = app.game_over_dialog.test_ref().evaluation().goals()[0]
         .picture
         .clone()
-        .expect("the live goal object supplies the picture");
+        .test_value();
     assert_eq!(picture.width(), expected.width());
     assert_eq!(picture.height(), expected.height());
     assert_eq!(picture.pixels(), expected.pixels().as_ref());
@@ -2109,20 +1965,17 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
         ("GFDN", "Build the %s bridge", "Reach the other side"),
         ("GOPN", "Find the gold", "Recover the treasure"),
     ] {
-        let mut definition =
-            Definition::from_script(id, name, "#strict 3\n").expect("goal definition compiles");
+        let mut definition = test_definition(id, name, "#strict 3\n");
         definition.set_description(Some(description.to_string()));
-        app.engine
-            .register_definition(definition)
-            .expect("goal definition registers");
+        app.engine.register_test_definition(definition);
     }
     app.snapshot.round_results.goals = vec!["GFDN".into(), "GOPN".into()];
     app.snapshot.round_results.fulfilled_goals = vec!["GFDN".into()];
-    app.handle_game_over().expect("show goal evaluation");
+    app.handle_game_over().test_value();
 
     let goal_rects = {
         let surface = app.graphics.surface();
-        let dialog = app.game_over_dialog.as_ref().expect("evaluation dialog");
+        let dialog = app.game_over_dialog.test_ref();
         assert_eq!(
             dialog
                 .evaluation()
@@ -2138,7 +1991,7 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
         let layout = dialog.classic_evaluation_layout(
             surface.width(),
             surface.height(),
-            app.assets.clonk_fonts.as_deref().expect("classic fonts"),
+            app.assets.clonk_fonts.as_deref().test_value(),
         );
         layout
             .goals
@@ -2151,11 +2004,10 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
         "Goal Build the %s bridge fulfilled: Reach the other side",
         "Goal Find the gold not fulfilled: Recover the treasure",
     ]) {
-        app.handle_cursor_moved(PhysicalPosition::new(
+        app.test_cursor(PhysicalPosition::new(
             f64::from(rect.x + rect.w / 2),
             f64::from(rect.y + rect.h / 2),
-        ))
-        .expect("hover goal picture");
+        ));
         assert_eq!(
             app.game_over_dialog
                 .as_ref()
@@ -2170,11 +2022,10 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
         (first.x + first.w / 2) as f32,
         (first.y + first.h / 2) as f32,
     );
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(first_center.x),
         f64::from(first_center.y),
-    ))
-    .expect("restore first goal hover");
+    ));
     let started = Instant::now() - clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY;
     app.startup_tooltip = ClassicTooltipTracker::new_at(started);
     app.startup_tooltip
@@ -2212,34 +2063,30 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
         .map(|index| format!("Line {index}"))
         .collect::<Vec<_>>()
         .join("|");
-    app.handle_game_over().expect("show scrollable evaluation");
+    app.handle_game_over().test_value();
     let (width, height) = {
         let surface = app.graphics.surface();
         (surface.width(), surface.height())
     };
     let custom = app
         .game_over_dialog
-        .as_ref()
-        .expect("evaluation dialog")
+        .test_ref()
         .classic_evaluation_layout(
             width,
             height,
             app.assets.clonk_fonts.as_deref().expect("classic fonts"),
         )
         .custom_evaluation
-        .expect("custom text layout");
+        .test_value();
     assert!(custom.scrollable);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(custom.viewport.x + 1),
         f64::from(custom.viewport.y + 1),
-    ))
-    .expect("hover custom evaluation viewport");
+    ));
 
     let mut before = vec![0_u8; (width * height * 4) as usize];
-    app.render(&mut before)
-        .expect("render the unscrolled evaluation");
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("route wheel into evaluation");
+    app.test_render(&mut before);
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert_eq!(
         app.game_over_dialog
             .as_ref()
@@ -2248,20 +2095,17 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
         60
     );
     let mut after = vec![0_u8; (width * height * 4) as usize];
-    app.render(&mut after)
-        .expect("render the scrolled evaluation");
+    app.test_render(&mut after);
     assert_ne!(
         before, after,
         "routing the wheel into the evaluation must change the rendered frame"
     );
 
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open client list above evaluation");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(app.runtime_client_list_owns_game_over());
     app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("newer client list keeps underlying evaluation inactive");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert_eq!(
         app.game_over_dialog
             .as_ref()
@@ -2317,11 +2161,11 @@ fn assert_startup_game_over_boundary(error: &anyhow::Error, view: StartupView) {
 #[test]
 fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
     let mut app = new_game_over_keyboard_app();
-    let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+    let assets = Arc::get_mut(&mut app.assets).test_value();
     assets
         .startup_dialog_images
         .remove("Player.png")
-        .expect("fixture player icon");
+        .test_value();
     let hud = Arc::make_mut(&mut assets.hud_graphics);
     hud.player = None;
     hud.score = None;
@@ -2343,15 +2187,15 @@ fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
 fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
     let mut app = new_game_over_keyboard_app();
     let (gui_icons2, gui_scroll) = {
-        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        let assets = Arc::get_mut(&mut app.assets).test_value();
         let gui_icons2 = assets
             .startup_dialog_images
             .remove("GUIIcons2.png")
-            .expect("fixture extended GUI icon sheet");
+            .test_value();
         let gui_scroll = assets
             .startup_dialog_images
             .remove("GUIScroll.png")
-            .expect("fixture GUI scroll sheet");
+            .test_value();
         Arc::make_mut(&mut assets.hud_graphics).crew = None;
         (gui_icons2, gui_scroll)
     };
@@ -2378,9 +2222,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
     let error = app
         .render(&mut frame)
         .expect_err("global GUI gate must retain boundary precedence");
-    let boundary = error
-        .downcast_ref::<ClassicParityBoundary>()
-        .expect("typed classic boundary");
+    let boundary = error.downcast_ref::<ClassicParityBoundary>().test_value();
     assert!(matches!(
         boundary,
         ClassicParityBoundary::GlobalGuiBootstrapResources { .. }
@@ -2390,7 +2232,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
     // Once the process-global sheets are restored, the recursive child
     // inventory owns Crew and must still fail before any output pixels.
     {
-        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        let assets = Arc::get_mut(&mut app.assets).test_value();
         assets
             .startup_dialog_images
             .insert("GUIIcons2.png".to_string(), gui_icons2);
@@ -2409,8 +2251,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
     let mut app = new_game_over_keyboard_app();
     let invalid = ImageData::new(1, 1, Vec::new());
     app.game_over_dialog
-        .as_mut()
-        .expect("evaluation dialog")
+        .test_mut()
         .set_evaluation(EvaluationViewModel::new(
             vec![EvaluationGoal {
                 definition_id: "MISS".into(),
@@ -2452,12 +2293,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
 fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
     let mut app = new_classic_running_sandbox_app();
     app.display_flags.portraits = false;
-    let player_info_id = app
-        .snapshot
-        .players
-        .first()
-        .expect("sandbox player")
-        .player_info_id;
+    let player_info_id = app.snapshot.players.first().test_value().player_info_id;
     app.snapshot.round_results.players = vec![clonk_engine::RoundResultsPlayerState {
         player_info_id,
         ..clonk_engine::RoundResultsPlayerState::default()
@@ -2503,7 +2339,7 @@ fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
     app.runtime_player_big_icons.clear();
     app.runtime_player_big_icon_misses.clear();
 
-    app.handle_game_over().expect("show evaluation dialog");
+    app.handle_game_over().test_value();
     assert_eq!(
         app.runtime_player_big_icons.get(&player_info_id),
         Some(&icon),
@@ -2531,12 +2367,7 @@ fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
 #[test]
 fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
     let mut app = new_classic_running_sandbox_app();
-    let player_info_id = app
-        .snapshot
-        .players
-        .first()
-        .expect("sandbox player")
-        .player_info_id;
+    let player_info_id = app.snapshot.players.first().test_value().player_info_id;
     let icon = ImageData::new(1, 1, vec![9, 8, 7, 255]);
     let file_name = "Departed.c4p".to_string();
     app.control_player_infos.replace_snapshot(
@@ -2603,7 +2434,7 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
         ..clonk_engine::RoundResultsPlayerState::default()
     }];
 
-    app.handle_game_over().expect("show evaluation dialog");
+    app.handle_game_over().test_value();
     assert_eq!(
         app.game_over_dialog
             .as_ref()
@@ -2621,13 +2452,13 @@ fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
     let mut app = new_game_over_keyboard_app();
     app.assets
         .require_classic_game_over_resources()
-        .expect("repository game-over fixture");
+        .test_value();
 
     let gui_icons = Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .remove("GUIIcons.png")
-        .expect("fixture global GUI icon sheet");
+        .test_value();
     let mut frame = vec![0xa5; 320 * 200 * 4];
     let sentinel = frame.clone();
     let error = app
@@ -2636,22 +2467,19 @@ fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
     assert_global_gui_boundary(&error, vec![ClassicGuiBootstrapIssue::missing("GUIIcons")]);
     assert_eq!(frame, sentinel);
     Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .insert("GUIIcons.png".to_string(), gui_icons);
 
     {
         let name = "Player.png";
         let (image, hud_player) = {
-            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
-            let image = assets
-                .startup_dialog_images
-                .remove(name)
-                .expect("fixture image");
+            let assets = Arc::get_mut(&mut app.assets).test_value();
+            let image = assets.startup_dialog_images.remove(name).test_value();
             let hud_player = Arc::make_mut(&mut assets.hud_graphics)
                 .player
                 .take()
-                .expect("fixture HUD player image");
+                .test_value();
             (image, hud_player)
         };
         let mut frame = vec![0xa5; 320 * 200 * 4];
@@ -2665,17 +2493,17 @@ fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
         assert_hud_resource_boundary(&error, vec![name]);
         assert_eq!(frame, sentinel, "{name} guard must run before pixels");
 
-        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        let assets = Arc::get_mut(&mut app.assets).test_value();
         assets.startup_dialog_images.insert(name.to_string(), image);
         Arc::make_mut(&mut assets.hud_graphics).player = Some(hud_player);
     }
 
     let score = {
-        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        let assets = Arc::get_mut(&mut app.assets).test_value();
         Arc::make_mut(&mut assets.hud_graphics)
             .score
             .take()
-            .expect("fixture score image")
+            .test_value()
     };
     let mut frame = vec![0x3c; 320 * 200 * 4];
     let sentinel = frame.clone();
@@ -2684,7 +2512,7 @@ fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
         .expect_err("missing score source must fail typed");
     assert_hud_resource_boundary(&error, vec!["Score.png"]);
     assert_eq!(frame, sentinel, "Score.png guard must run before pixels");
-    let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+    let assets = Arc::get_mut(&mut app.assets).test_value();
     Arc::make_mut(&mut assets.hud_graphics).score = Some(score);
 }
 
@@ -2693,12 +2521,11 @@ fn game_over_with_complete_classic_resources_renders_without_fallback() {
     let mut app = new_game_over_keyboard_app();
     app.assets
         .require_classic_game_over_resources()
-        .expect("repository game-over fixture");
+        .test_value();
     let mut frame = vec![0x5a; 320 * 200 * 4];
     let sentinel = frame.clone();
 
-    app.render(&mut frame)
-        .expect("complete classic game-over resources render");
+    app.test_render(&mut frame);
 
     assert_ne!(
         frame, sentinel,
@@ -2748,11 +2575,10 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
         clonk_frontend::startup_netdlg::NetDlgMode::Chat
     );
     assert!(app.startup_player_dialog.is_some());
-    app.handle_game_over()
-        .expect("forge stale menu evaluation state");
+    app.handle_game_over().test_value();
     app.assets
         .require_classic_game_over_resources()
-        .expect("fixture has the complete running evaluation bundle");
+        .test_value();
 
     for view in StartupView::ALL {
         // Exhaustive arms force future startup roots into this lifecycle
@@ -2794,7 +2620,7 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
 #[test]
 fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
     let mut app = new_real_classic_menu_app(320, 200);
-    app.handle_game_over().expect("show stale game-over dialog");
+    app.handle_game_over().test_value();
     app.status_text.clear();
     app.assets = Arc::new(FrontendAssets::load(None));
     let mut frame = vec![0xc3; 320 * 200 * 4];
@@ -2820,12 +2646,10 @@ fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
 fn current_scoreboard_test_layout(
     app: &mut GameApp,
 ) -> clonk_frontend::scoreboard::ScoreboardLayout {
-    app.materialize_scoreboard_presentation()
-        .expect("scoreboard presentation resources");
+    app.materialize_scoreboard_presentation().test_value();
     app.scoreboard_runtime
         .presentation
-        .as_ref()
-        .expect("retained scoreboard presentation")
+        .test_ref()
         .layout()
         .clone()
 }
@@ -2842,7 +2666,7 @@ fn install_visible_scoreboard_highlight_fixture(app: &mut GameApp) {
             .collect(),
     );
     Arc::get_mut(&mut app.assets)
-        .expect("scoreboard fixture owns its frontend asset bundle")
+        .test_value()
         .game_over_button_highlight = Some(highlight);
 }
 
@@ -2869,12 +2693,8 @@ fn frames_differ_in_rect(
 fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
     let mut empty = new_scoreboard_test_app("");
     let before_empty = runtime_global_ui_snapshot(&empty);
-    empty
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("empty scoreboard is consumed without opening");
-    empty
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release empty scoreboard key");
+    empty.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    empty.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(runtime_global_ui_snapshot(&empty), before_empty);
 
     let mut dimensionless_positive =
@@ -2888,12 +2708,8 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
         0
     );
     let before_dimensionless = runtime_global_ui_snapshot(&dimensionless_positive);
-    dimensionless_positive
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("a positive empty board still cannot open");
-    dimensionless_positive
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release dimensionless scoreboard key");
+    dimensionless_positive.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    dimensionless_positive.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         runtime_global_ui_snapshot(&dimensionless_positive),
         before_dimensionless
@@ -2915,12 +2731,8 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
     );
     assert_eq!(negative.snapshot.hud.scoreboard.show_count(), -1);
     let before_negative = runtime_global_ui_snapshot(&negative);
-    negative
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("negative refcount disables user opening");
-    negative
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release disabled scoreboard key");
+    negative.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    negative.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(runtime_global_ui_snapshot(&negative), before_negative);
 
     let mut eligible = new_scoreboard_test_app(
@@ -2932,18 +2744,14 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
     eligible.display_flags.scroll_smooth = 1;
     eligible.graphics.set_scroll_smooth(1);
     let mut hidden = vec![0_u8; 320 * 200 * 4];
-    eligible
-        .render(&mut hidden)
-        .expect("render the same live matrix without its dialog");
+    eligible.test_render(&mut hidden);
     toggle_scoreboard(&mut eligible, ModifiersState::empty());
     assert_eq!(
         eligible.scoreboard_dialog,
         Some(eligible.scoreboard_request())
     );
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    eligible
-        .render(&mut frame)
-        .expect("render user-open scoreboard");
+    eligible.test_render(&mut frame);
     let layout = current_scoreboard_test_layout(&mut eligible);
     assert!(frames_differ_in_rect(&hidden, &frame, 320, layout.bounds,));
 
@@ -2970,28 +2778,27 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     install_visible_scoreboard_highlight_fixture(&mut app);
     toggle_scoreboard(&mut app, ModifiersState::empty());
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("lay out the scoreboard");
+    app.test_render(&mut frame);
     let baseline = app.graphics.surface().pixels().to_vec();
     let close = current_scoreboard_test_layout(&mut app)
         .close_button
-        .expect("titled board close button");
+        .test_value();
     let point = PhysicalPosition::new(
         f64::from(close.x + close.w / 2),
         f64::from(close.y + close.h / 2),
     );
-    app.handle_cursor_moved(point).expect("hover close");
+    app.test_cursor(point);
     assert!(app.scoreboard_runtime.close_hovered);
-    app.render(&mut frame).expect("render close hover pass");
+    app.test_render(&mut frame);
     let hovered = app.graphics.surface().pixels().to_vec();
     assert!(frames_differ_in_rect(&baseline, &hovered, 320, close));
     let sounds_before_press = app.ui_sound_log.len();
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press close");
+    app.test_left_button(ElementState::Pressed);
     assert_eq!(
         &app.ui_sound_log[sounds_before_press..],
         &["ArrowHit".to_string()]
     );
-    app.render(&mut frame).expect("render close down pass");
+    app.test_render(&mut frame);
     let down = app.graphics.surface().pixels().to_vec();
     assert!(frames_differ_in_rect(&hovered, &down, 320, close));
     assert!(app.scoreboard_close_pointer_capture);
@@ -2999,34 +2806,28 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
 
     let outside = PhysicalPosition::new(0.0, 199.0);
     let sounds_before_leave = app.ui_sound_log.len();
-    app.handle_cursor_moved(outside)
-        .expect("captured close drag remains in scoreboard");
+    app.test_cursor(outside);
     assert_eq!(
         &app.ui_sound_log[sounds_before_leave..],
         &["ArrowHit".to_string()]
     );
     assert!(app.scoreboard_close_pointer_capture);
     assert!(app.ingame_pointer.is_none());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("outside release clears capture and falls through");
+    app.test_left_button(ElementState::Released);
     assert!(app.scoreboard_dialog.is_some());
     assert!(!app.scoreboard_close_pointer_capture);
 
-    app.handle_cursor_moved(point).expect("hover close again");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press close again");
-    app.handle_cursor_moved(outside)
-        .expect("drag outside before re-entry");
+    app.test_cursor(point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_cursor(outside);
     let sounds_before_reentry = app.ui_sound_log.len();
-    app.handle_cursor_moved(point)
-        .expect("drag back over close");
+    app.test_cursor(point);
     assert_eq!(
         &app.ui_sound_log[sounds_before_reentry..],
         &["ArrowHit".to_string()]
     );
     let sounds_before_click = app.ui_sound_log.len();
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release after re-entering close");
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         &app.ui_sound_log[sounds_before_click..],
         &["Click".to_string()]
@@ -3049,45 +2850,36 @@ fn scoreboard_title_drag_and_cached_placement_survive_frames_until_data_update()
     );
     toggle_scoreboard(&mut app, ModifiersState::empty());
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("materialize scoreboard layout");
+    app.test_render(&mut frame);
     let original = current_scoreboard_test_layout(&mut app);
-    let caption = original.caption.expect("title-bearing scoreboard");
+    let caption = original.caption.test_value();
     let title = PhysicalPosition::new(
         f64::from(caption.x + caption.w / 2),
         f64::from(caption.y + caption.h / 2),
     );
-    app.handle_cursor_moved(title)
-        .expect("hover scoreboard title");
+    app.test_cursor(title);
     assert_eq!(
         app.classic_dialog_title_tooltip_target_at(GuiPoint::new(title.x as f32, title.y as f32,)),
         Some(StartupTooltip::text("A scoreboard title")),
     );
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("start scoreboard title drag");
+    app.test_left_button(ElementState::Pressed);
     let moved_pointer = PhysicalPosition::new(title.x + 35.0, title.y + 22.0);
-    app.handle_cursor_moved(moved_pointer)
-        .expect("move retained scoreboard title drag");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("finish scoreboard title drag");
+    app.test_cursor(moved_pointer);
+    app.test_left_button(ElementState::Released);
     let moved = current_scoreboard_test_layout(&mut app);
     assert_eq!(moved.bounds.x, original.bounds.x + 35);
     assert_eq!(moved.bounds.y, original.bounds.y + 22);
 
-    app.render(&mut frame)
-        .expect("render a subsequent frame without new drag input");
+    app.test_render(&mut frame);
     assert_eq!(current_scoreboard_test_layout(&mut app), moved);
 
-    app.resize(640, 480)
-        .expect("change the live preferred viewport rectangle");
+    app.resize(640, 480).test_value();
     let mut resized_frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut resized_frame)
-        .expect("preferred-only change keeps cached placement");
+    app.test_render(&mut resized_frame);
     assert_eq!(current_scoreboard_test_layout(&mut app), moved);
 
     call_scoreboard_function_and_update(&mut app, "InvalidateLayout");
-    app.render(&mut resized_frame)
-        .expect("data invalidation performs native Update and placement");
+    app.test_render(&mut resized_frame);
     assert_ne!(
         current_scoreboard_test_layout(&mut app).bounds,
         moved.bounds
@@ -3102,21 +2894,18 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                    }"#,
     );
-    app.resize(1024, 768).expect("resize shared running screen");
+    app.resize(1024, 768).test_value();
     toggle_scoreboard(&mut app, ModifiersState::empty());
     let mut frame = vec![0_u8; 1024 * 768 * 4];
-    app.render(&mut frame)
-        .expect("materialize scoreboard layout");
+    app.test_render(&mut frame);
     let before = current_scoreboard_test_layout(&mut app);
-    let caption = before.caption.expect("scoreboard title");
+    let caption = before.caption.test_value();
     let start = PhysicalPosition::new(
         f64::from(caption.x + caption.w / 2),
         f64::from(caption.y + caption.h / 2),
     );
-    app.handle_cursor_moved(start)
-        .expect("hover scoreboard title");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("capture scoreboard title");
+    app.test_cursor(start);
+    app.test_left_button(ElementState::Pressed);
     assert!(app.scoreboard_runtime.title_drag.is_some());
 
     app.push_message_dialog(
@@ -3127,20 +2916,19 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("show a higher dialog during the retained drag");
+    .test_value();
     assert!(matches!(
         app.running_active_dialog,
         Some(RunningDialogStackEntry::Message(_))
     ));
 
     let moved_pointer = PhysicalPosition::new(start.x - 24.0, start.y + 17.0);
-    let message = app.top_message_dialog_layout().expect("message layout");
+    let message = app.top_message_dialog_layout().test_value();
     assert!(!GameApp::point_in_message_dialog_bounds(
         GuiPoint::new(moved_pointer.x as f32, moved_pointer.y as f32),
         &message,
     ));
-    app.handle_cursor_moved(moved_pointer)
-        .expect("global drag updates below the active message");
+    app.test_cursor(moved_pointer);
     let moved = current_scoreboard_test_layout(&mut app);
     assert_eq!(moved.bounds.x, before.bounds.x - 24);
     assert_eq!(moved.bounds.y, before.bounds.y + 17);
@@ -3150,19 +2938,16 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
     ));
     assert!(app.ingame_pointer.is_none());
 
-    app.remove_message_dialog_at(0)
-        .expect("close the asynchronously active message");
+    app.remove_message_dialog_at(0).test_value();
     assert!(app.scoreboard_runtime.title_drag.is_none());
     assert!(app.message_dialogs.is_empty());
     let after_close = current_scoreboard_test_layout(&mut app);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         moved_pointer.x + 31.0,
         moved_pointer.y - 9.0,
-    ))
-    .expect("movement after active close no longer drags the scoreboard");
+    ));
     assert_eq!(current_scoreboard_test_layout(&mut app), after_close);
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release after active close is harmless");
+    app.test_left_button(ElementState::Released);
 }
 
 #[test]
@@ -3179,8 +2964,7 @@ fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
     );
     toggle_scoreboard(&mut app, ModifiersState::empty());
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("materialize initial geometry");
+    app.test_render(&mut frame);
     let initial = current_scoreboard_test_layout(&mut app);
     let initial_revision = app.scoreboard_runtime.layout_revision;
     let point = GuiPoint::new(
@@ -3190,7 +2974,7 @@ fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
 
     app.engine
         .call_scenario_script_function("GrowBetweenFrames", Vec::new())
-        .expect("mutate the live scoreboard between frames");
+        .test_value();
     assert!(app
         .scoreboard_pointer_target(point)
         .expect("pointer route")
@@ -3207,8 +2991,7 @@ fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
         "pointer input retains pre-draw C++ geometry",
     );
 
-    app.render(&mut frame)
-        .expect("the next draw lazily applies the live matrix update");
+    app.test_render(&mut frame);
     assert_eq!(
         app.scoreboard_runtime.layout_revision,
         app.engine.scoreboard_layout_revision(),
@@ -3227,11 +3010,7 @@ fn scoreboard_show_then_grow_keeps_constructor_hit_bounds_until_first_draw() {
                    }"#,
     );
     call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
-    let request_revision = app
-        .scoreboard_dialog
-        .as_ref()
-        .expect("show request opened the dialog")
-        .layout_revision;
+    let request_revision = app.scoreboard_dialog.test_ref().layout_revision;
     assert!(request_revision < app.engine.scoreboard_layout_revision());
 
     let constructor = current_scoreboard_test_layout(&mut app);
@@ -3249,8 +3028,7 @@ fn scoreboard_show_then_grow_keeps_constructor_hit_bounds_until_first_draw() {
     assert_eq!(current_scoreboard_test_layout(&mut app), constructor);
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("first Draw applies the pending SetCell invalidation");
+    app.test_render(&mut frame);
     let updated = current_scoreboard_test_layout(&mut app);
     assert!(updated.bounds.x < late_column_point.x as i32);
     assert!(app
@@ -3269,15 +3047,14 @@ fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
     );
     app.engine
         .call_scenario_script_function("ShowNow", Vec::new())
-        .expect("show scoreboard synchronously");
+        .test_value();
     assert!(app.scoreboard_dialog.is_none());
 
     let point = GuiPoint::new(299.0, 50.0);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
         f64::from(point.y),
-    ))
-    .expect("the first pointer ingress observes the synchronous dialog");
+    ));
 
     assert!(app.scoreboard_dialog.is_some());
     assert!(app.scoreboard_pointer_target_cached(point).is_some());
@@ -3298,18 +3075,16 @@ fn scoreboard_resize_releases_title_drag_without_replacing_cached_geometry() {
     );
     toggle_scoreboard(&mut app, ModifiersState::empty());
     let before = current_scoreboard_test_layout(&mut app);
-    let caption = before.caption.expect("scoreboard title");
+    let caption = before.caption.test_value();
     let start = PhysicalPosition::new(
         f64::from(caption.x + caption.w / 2),
         f64::from(caption.y + caption.h / 2),
     );
-    app.handle_cursor_moved(start)
-        .expect("hover scoreboard title");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("capture scoreboard title");
+    app.test_cursor(start);
+    app.test_left_button(ElementState::Pressed);
     assert!(app.scoreboard_runtime.title_drag.is_some());
 
-    app.resize(360, 220).expect("resize running screen");
+    app.resize(360, 220).test_value();
     assert!(app.scoreboard_runtime.title_drag.is_none());
     assert!(app.scoreboard_runtime.pointer.is_none());
     assert!(!app.scoreboard_runtime.close_hovered);
@@ -3317,8 +3092,7 @@ fn scoreboard_resize_releases_title_drag_without_replacing_cached_geometry() {
     let cached = current_scoreboard_test_layout(&mut app);
     assert_eq!(cached, before);
 
-    app.handle_cursor_moved(PhysicalPosition::new(start.x + 30.0, start.y + 20.0))
-        .expect("movement after resize does not continue the old drag");
+    app.test_cursor(PhysicalPosition::new(start.x + 30.0, start.y + 20.0));
     assert_eq!(current_scoreboard_test_layout(&mut app), cached);
 }
 
@@ -3340,52 +3114,45 @@ fn scoreboard_touch_capture_is_released_when_a_new_message_owns_end_or_cancel() 
     toggle_scoreboard(&mut close, ModifiersState::empty());
     let close_button = current_scoreboard_test_layout(&mut close)
         .close_button
-        .expect("scoreboard close button");
+        .test_value();
     let close_point = GuiPoint::new(
         (close_button.x + close_button.w / 2) as f32,
         (close_button.y + close_button.h / 2) as f32,
     );
-    close
-        .handle_touch(TouchPhase::Started, close_point)
-        .expect("capture scoreboard close touch");
+    close.test_touch(TouchPhase::Started, close_point);
     assert!(close.scoreboard_close_pointer_capture);
     close
         .push_message_dialog(notice(), MessageDialogContinuation::None)
-        .expect("show higher message");
-    let message = close.top_message_dialog_layout().expect("message layout");
+        .test_value();
+    let message = close.top_message_dialog_layout().test_value();
     let message_point = GuiPoint::new(
         (message.bounds.x + message.bounds.w / 2) as f32,
         (message.bounds.y + message.bounds.h / 2) as f32,
     );
-    close
-        .handle_touch(TouchPhase::Ended, message_point)
-        .expect("message owns release-time hit");
+    close.test_touch(TouchPhase::Ended, message_point);
     assert!(close.scoreboard_dialog.is_some());
     assert!(!close.scoreboard_close_pointer_capture);
 
     let mut drag = new_scoreboard_test_app(board);
     toggle_scoreboard(&mut drag, ModifiersState::empty());
     let layout = current_scoreboard_test_layout(&mut drag);
-    let caption = layout.caption.expect("scoreboard title");
+    let caption = layout.caption.test_value();
     let title_point = GuiPoint::new(
         (caption.x + caption.w / 2) as f32,
         (caption.y + caption.h / 2) as f32,
     );
-    drag.handle_touch(TouchPhase::Started, title_point)
-        .expect("capture scoreboard title touch");
+    drag.test_touch(TouchPhase::Started, title_point);
     assert!(drag.scoreboard_runtime.title_drag.is_some());
     drag.push_message_dialog(notice(), MessageDialogContinuation::None)
-        .expect("show higher message during title drag");
-    drag.handle_touch(TouchPhase::Cancelled, title_point)
-        .expect("cancel the screen-global touch");
+        .test_value();
+    drag.test_touch(TouchPhase::Cancelled, title_point);
     assert!(drag.scoreboard_runtime.title_drag.is_none());
     assert!(!drag.scoreboard_close_pointer_capture);
     let after_cancel = current_scoreboard_test_layout(&mut drag);
-    drag.handle_cursor_moved(PhysicalPosition::new(
+    drag.test_cursor(PhysicalPosition::new(
         f64::from(title_point.x + 30.0),
         f64::from(title_point.y + 20.0),
-    ))
-    .expect("movement after cancellation cannot resume the drag");
+    ));
     assert_eq!(current_scoreboard_test_layout(&mut drag), after_cancel);
 }
 
@@ -3404,49 +3171,42 @@ fn scoreboard_bounds_consume_secondary_middle_wheel_and_touch_input() {
         (layout.client.x + layout.client.w / 2) as f32,
         (layout.client.y + layout.client.h / 2) as f32,
     );
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
         f64::from(point.y),
-    ))
-    .expect("move over scoreboard client");
+    ));
     app.ingame_mouse_init_centered = false;
 
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("scoreboard consumes right down");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("scoreboard consumes right up");
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
     assert!(!app.ingame_mouse_init_centered);
     assert!(commands.take_submitted_local().is_empty());
 
     app.handle_other_mouse_button(ElementState::Pressed)
-        .expect("scoreboard consumes middle down");
+        .test_value();
     app.handle_other_mouse_button(ElementState::Released)
-        .expect("scoreboard consumes middle up");
+        .test_value();
     assert!(!app.ingame_mouse_init_centered);
     assert!(commands.take_submitted_local().is_empty());
 
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("scoreboard consumes wheel");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert!(!app.ingame_mouse_init_centered);
     assert!(commands.take_submitted_local().is_empty());
 
     let before_touch = current_scoreboard_test_layout(&mut app);
-    let caption = before_touch.caption.expect("scoreboard title");
+    let caption = before_touch.caption.test_value();
     let touch_title = GuiPoint::new(
         (caption.x + caption.w / 2) as f32,
         (caption.y + caption.h / 2) as f32,
     );
     let touch_moved = GuiPoint::new(touch_title.x + 12.0, touch_title.y + 9.0);
-    app.handle_touch(TouchPhase::Started, touch_title)
-        .expect("scoreboard consumes touch start");
+    app.test_touch(TouchPhase::Started, touch_title);
     assert!(app.scoreboard_runtime.title_drag.is_some());
-    app.handle_touch(TouchPhase::Moved, touch_moved)
-        .expect("scoreboard consumes touch move");
+    app.test_touch(TouchPhase::Moved, touch_moved);
     let after_touch_move = current_scoreboard_test_layout(&mut app);
     assert_eq!(after_touch_move.bounds.x, before_touch.bounds.x + 12);
     assert_eq!(after_touch_move.bounds.y, before_touch.bounds.y + 9);
-    app.handle_touch(TouchPhase::Ended, touch_moved)
-        .expect("scoreboard consumes touch end");
+    app.test_touch(TouchPhase::Ended, touch_moved);
     assert!(app.scoreboard_runtime.title_drag.is_none());
     assert_eq!(current_scoreboard_test_layout(&mut app), after_touch_move);
     assert!(commands.take_submitted_local().is_empty());
@@ -3462,18 +3222,15 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
             }"#;
 
     let mut overlap = new_scoreboard_test_app(BOARD);
-    overlap
-        .resize(1024, 768)
-        .expect("resize shared running screen");
+    overlap.resize(1024, 768).test_value();
     toggle_scoreboard(&mut overlap, ModifiersState::empty());
     let mut frame = vec![0_u8; 1024 * 768 * 4];
-    overlap.render(&mut frame).expect("materialize scoreboard");
+    overlap.test_render(&mut frame);
     let bounds = current_scoreboard_test_layout(&mut overlap).bounds;
     overlap
         .scoreboard_runtime
         .presentation
-        .as_mut()
-        .expect("scoreboard presentation")
+        .test_mut()
         .layout_mut()
         .translate(40 - bounds.x, 40 - bounds.y);
     overlap
@@ -3485,21 +3242,14 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("show message above scoreboard");
+        .test_value();
     overlap
         .open_context_menu_at(
             vec![ContextMenuEntry::<AppContextMenuCommand>::new("Popup row")],
             GuiPoint::new(48.0, 48.0),
         )
-        .expect("open popup over scoreboard");
-    let popup_row = overlap
-        .context_menu
-        .as_ref()
-        .expect("context menu")
-        .layout()
-        .panels[0]
-        .rows[0]
-        .rect;
+        .test_value();
+    let popup_row = overlap.context_menu.test_ref().layout().panels[0].rows[0].rect;
     let popup_point = GuiPoint::new(
         (popup_row.x + popup_row.w / 2) as f32,
         (popup_row.y + popup_row.h / 2) as f32,
@@ -3511,24 +3261,18 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
         popup_point,
         &overlap.top_message_dialog_layout().expect("message layout"),
     ));
-    overlap
-        .handle_cursor_moved(PhysicalPosition::new(
-            f64::from(popup_point.x),
-            f64::from(popup_point.y),
-        ))
-        .expect("popup owns overlapping movement");
-    overlap
-        .handle_mouse_button(ElementState::Pressed)
-        .expect("popup owns overlapping press");
+    overlap.test_cursor(PhysicalPosition::new(
+        f64::from(popup_point.x),
+        f64::from(popup_point.y),
+    ));
+    overlap.test_left_button(ElementState::Pressed);
     assert!(overlap.context_menu.is_some());
     assert!(!overlap.scoreboard_close_pointer_capture);
     assert!(matches!(
         overlap.running_active_dialog,
         Some(RunningDialogStackEntry::Message(_))
     ));
-    overlap
-        .handle_mouse_button(ElementState::Released)
-        .expect("release popup row");
+    overlap.test_left_button(ElementState::Released);
 
     let mut outside = new_scoreboard_test_app(BOARD);
     toggle_scoreboard(&mut outside, ModifiersState::empty());
@@ -3537,7 +3281,7 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
             vec![ContextMenuEntry::<AppContextMenuCommand>::new("Popup row")],
             GuiPoint::new(10.0, 10.0),
         )
-        .expect("open popup away from scoreboard");
+        .test_value();
     let scoreboard = current_scoreboard_test_layout(&mut outside);
     let body = GuiPoint::new(
         (scoreboard.client.x + scoreboard.client.w / 2) as f32,
@@ -3548,13 +3292,9 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
         .as_ref()
         .expect("context menu")
         .captures_point(body));
-    outside
-        .handle_cursor_moved(PhysicalPosition::new(f64::from(body.x), f64::from(body.y)))
-        .expect("move outside popup over scoreboard");
+    outside.test_cursor(PhysicalPosition::new(f64::from(body.x), f64::from(body.y)));
     outside.ingame_mouse_init_centered = false;
-    outside
-        .handle_right_mouse_button(ElementState::Pressed)
-        .expect("outside right down closes popup then reaches scoreboard");
+    outside.test_right_button(ElementState::Pressed);
     assert!(outside.context_menu.is_none());
     assert!(!outside.ingame_mouse_init_centered);
 }
@@ -3567,30 +3307,25 @@ fn scoreboard_wheel_does_not_scroll_an_overlapped_lower_f4_dialog() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                    }"#,
     );
-    app.resize(1024, 768).expect("resize shared running screen");
+    app.resize(1024, 768).test_value();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot((0..40).map(|client_id| message_client(client_id, b"Remote")));
     toggle_scoreboard(&mut app, ModifiersState::empty());
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open F4 above the scoreboard");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     app.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
 
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("F4 geometry");
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let f4_layout = app
         .runtime_client_list
-        .as_ref()
-        .expect("F4 dialog")
+        .test_ref()
         .layout(preferred, line_height);
     let scoreboard = current_scoreboard_test_layout(&mut app);
     let dx = f4_layout.list.x + 8 - scoreboard.client.x;
     let dy = f4_layout.list.y + 8 - scoreboard.client.y;
     app.scoreboard_runtime
         .presentation
-        .as_mut()
-        .expect("scoreboard presentation")
+        .test_mut()
         .layout_mut()
         .translate(dx, dy);
     let scoreboard = current_scoreboard_test_layout(&mut app);
@@ -3600,22 +3335,18 @@ fn scoreboard_wheel_does_not_scroll_an_overlapped_lower_f4_dialog() {
     );
     assert!(point.x < (f4_layout.list.x + f4_layout.list.w) as f32);
     assert!(point.y < (f4_layout.list.y + f4_layout.list.h) as f32);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
         f64::from(point.y),
-    ))
-    .expect("hover the overlapping scoreboard and F4 list");
+    ));
     let before = app
         .runtime_client_list
-        .as_ref()
-        .expect("F4 dialog")
+        .test_ref()
         .scroll_row(preferred, line_height);
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("top scoreboard consumes wheel");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     let after = app
         .runtime_client_list
-        .as_ref()
-        .expect("F4 remains open")
+        .test_ref()
         .scroll_row(preferred, line_height);
     assert_eq!(after, before, "wheel cannot fall through to lower F4");
 }
@@ -3629,7 +3360,7 @@ fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
                    }"#,
     );
     install_visible_scoreboard_highlight_fixture(&mut app);
-    app.resize(1024, 768).expect("resize shared running screen");
+    app.resize(1024, 768).test_value();
     toggle_scoreboard(&mut app, ModifiersState::empty());
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -3639,44 +3370,39 @@ fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("show ordinary shared message dialog");
+    .test_value();
 
     let close = current_scoreboard_test_layout(&mut app)
         .close_button
-        .expect("titled board close button");
+        .test_value();
     let point = GuiPoint::new(
         (close.x + close.w / 2) as f32,
         (close.y + close.h / 2) as f32,
     );
-    let message_layout = app.top_message_dialog_layout().expect("message layout");
+    let message_layout = app.top_message_dialog_layout().test_value();
     assert!(!GameApp::point_in_message_dialog_bounds(
         point,
         &message_layout,
     ));
 
     let mut frame = vec![0_u8; 1024 * 768 * 4];
-    app.render(&mut frame)
-        .expect("render inactive scoreboard below message");
+    app.test_render(&mut frame);
     let baseline = app.graphics.surface().pixels().to_vec();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
         f64::from(point.y),
-    ))
-    .expect("route outside-dialog hover to the exposed scoreboard");
+    ));
     assert!(matches!(
         app.running_active_dialog,
         Some(RunningDialogStackEntry::Message(_))
     ));
     assert!(app.scoreboard_runtime.close_hovered);
-    app.render(&mut frame)
-        .expect("shared inactive scoreboard still draws mouse hover");
+    app.test_render(&mut frame);
     let hovered = app.graphics.surface().pixels().to_vec();
     assert!(frames_differ_in_rect(&baseline, &hovered, 1024, close));
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press exposed scoreboard close button");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release exposed scoreboard close button");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.message_dialogs.len(), 1);
     assert!(app.scoreboard_dialog.is_none());
 }
@@ -3692,18 +3418,15 @@ fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
     let (_events, _commands) = install_running_network_stub(&mut f4, 0, 40, 4);
     f4.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
-    f4.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("show equal-z F4 list first");
+    f4.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     toggle_scoreboard(&mut f4, ModifiersState::empty());
     assert!(f4.scoreboard_is_above_runtime_client_list());
-    f4.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("close F4 list");
-    f4.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("show F4 list after scoreboard");
+    f4.test_key(VirtualKeyCode::F4, ElementState::Pressed);
+    f4.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(!f4.scoreboard_is_above_runtime_client_list());
 
     let mut messages = new_scoreboard_test_app(BOARD);
-    messages.resize(1024, 768).expect("resize shared screen");
+    messages.resize(1024, 768).test_value();
     toggle_scoreboard(&mut messages, ModifiersState::empty());
     messages
         .push_message_dialog(
@@ -3714,7 +3437,7 @@ fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("show message after scoreboard");
+        .test_value();
     assert!(!messages.scoreboard_is_above_all_messages());
     let layout = current_scoreboard_test_layout(&mut messages);
     let point = GuiPoint::new(
@@ -3727,18 +3450,12 @@ fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
             .top_message_dialog_layout()
             .expect("message layout"),
     ));
-    messages
-        .handle_cursor_moved(PhysicalPosition::new(
-            f64::from(point.x),
-            f64::from(point.y),
-        ))
-        .expect("hover exposed scoreboard");
-    messages
-        .handle_mouse_button(ElementState::Pressed)
-        .expect("left activation moves default-z scoreboard last");
-    messages
-        .handle_mouse_button(ElementState::Released)
-        .expect("release scoreboard body");
+    messages.test_cursor(PhysicalPosition::new(
+        f64::from(point.x),
+        f64::from(point.y),
+    ));
+    messages.test_left_button(ElementState::Pressed);
+    messages.test_left_button(ElementState::Released);
     assert!(messages.scoreboard_is_above_all_messages());
 
     messages
@@ -3750,7 +3467,7 @@ fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("later z+1 show overtakes activated scoreboard");
+        .test_value();
     assert!(!messages.scoreboard_is_above_all_messages());
     assert!(matches!(
         messages.running_dialog_stack.last(),
@@ -3775,17 +3492,14 @@ fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
         f64::from(layout.client.x + layout.client.w / 2),
         f64::from(layout.client.y + layout.client.h / 2),
     );
-    let chat = app.game_option_input_layout().expect("chat layout");
+    let chat = app.game_option_input_layout().test_value();
     assert!(!GameApp::point_in_input_dialog_bounds(
         GuiPoint::new(body.x as f32, body.y as f32),
         &chat,
     ));
-    app.handle_cursor_moved(body)
-        .expect("hover the exposed scoreboard body");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("activate scoreboard over chat");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release scoreboard activation");
+    app.test_cursor(body);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(!app.running_chat_active());
     assert_eq!(
         app.running_active_dialog,
@@ -3794,16 +3508,13 @@ fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
 
     let close = current_scoreboard_test_layout(&mut app)
         .close_button
-        .expect("scoreboard close button");
-    app.handle_cursor_moved(PhysicalPosition::new(
+        .test_value();
+    app.test_cursor(PhysicalPosition::new(
         f64::from(close.x + close.w / 2),
         f64::from(close.y + close.h / 2),
-    ))
-    .expect("hover scoreboard close");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press scoreboard close");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("close scoreboard and expose chat");
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(app.scoreboard_dialog.is_none());
     assert!(app.running_chat_active());
     assert_eq!(
@@ -3828,28 +3539,22 @@ fn activated_chat_under_list_top_scoreboard_does_not_gain_keyboard_focus() {
         f64::from(scoreboard.client.x + scoreboard.client.w / 2),
         f64::from(scoreboard.client.y + scoreboard.client.h / 2),
     );
-    app.handle_cursor_moved(scoreboard_body)
-        .expect("hover exposed scoreboard body");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("move default-z scoreboard to list top");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release scoreboard activation");
+    app.test_cursor(scoreboard_body);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
 
-    let chat = app.game_option_input_layout().expect("chat layout");
+    let chat = app.game_option_input_layout().test_value();
     let chat_point = GuiPoint::new(
         (chat.bounds.x + chat.bounds.w / 2) as f32,
         (chat.bounds.y + chat.bounds.h / 2) as f32,
     );
     assert!(app.scoreboard_pointer_target_cached(chat_point).is_none());
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(chat_point.x),
         f64::from(chat_point.y),
-    ))
-    .expect("hover exposed chat");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("activate z+2 chat without reordering it");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release chat activation");
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(app.running_chat_active());
     assert!(!app.running_chat_keyboard_active());
     assert_eq!(
@@ -3857,14 +3562,12 @@ fn activated_chat_under_list_top_scoreboard_does_not_gain_keyboard_focus() {
         Some(&RunningDialogStackEntry::Scoreboard),
     );
 
-    app.handle_text_input('x')
-        .expect("list-top nonexclusive dialog suppresses GUI text");
+    app.test_text_input('x');
     assert_eq!(app.running_chat_text(), Some(""));
 
     assert!(app.close_scoreboard_dialog());
     assert!(app.running_chat_keyboard_active());
-    app.handle_text_input('x')
-        .expect("chat accepts text once it is list-top again");
+    app.test_text_input('x');
     assert_eq!(app.running_chat_text(), Some("x"));
 }
 
@@ -3886,7 +3589,7 @@ fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("show ordinary shared-screen message");
+    .test_value();
     app.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
     assert_eq!(
         app.running_dialog_stack.last(),
@@ -3894,7 +3597,7 @@ fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
     );
     assert!(!app.message_dialog_owns_gamepad_input());
 
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::Axis {
             slot: GamepadSlot::new(0),
             axis: LegacyGamepadAxis::new(0, true),
@@ -3905,8 +3608,7 @@ fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
             button: ControlButton::Right,
             state: ElementState::Pressed,
         },
-    ])
-    .expect("list-top nonexclusive scoreboard leaves gameplay in scope");
+    ]);
 
     assert_ne!(
         app.engine
@@ -3928,30 +3630,24 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                    }"#,
     );
-    app.resize(1024, 768).expect("resize shared running screen");
+    app.resize(1024, 768).test_value();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
     toggle_scoreboard(&mut app, ModifiersState::empty());
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("show F4 above scoreboard");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
 
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("F4 geometry");
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let close = app
         .runtime_client_list
-        .as_ref()
-        .expect("F4 dialog")
+        .test_ref()
         .layout(preferred, line_height)
         .close_button;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(close.x + close.w / 2),
         f64::from(close.y + close.h / 2),
-    ))
-    .expect("hover F4 close");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("capture F4 close");
+    ));
+    app.test_left_button(ElementState::Pressed);
     assert!(app
         .runtime_client_list
         .as_ref()
@@ -3961,8 +3657,7 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
     let scoreboard = current_scoreboard_test_layout(&mut app);
     app.scoreboard_runtime
         .presentation
-        .as_mut()
-        .expect("scoreboard presentation")
+        .test_mut()
         .layout_mut()
         .translate(900 - scoreboard.client.x, 50 - scoreboard.client.y);
     let scoreboard = current_scoreboard_test_layout(&mut app);
@@ -3970,10 +3665,8 @@ fn scoreboard_release_clears_an_occluded_f4_button_capture() {
         f64::from(scoreboard.client.x + 4),
         f64::from(scoreboard.client.y + 4),
     );
-    app.handle_cursor_moved(release)
-        .expect("F4 capture retains held move over lower scoreboard");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release routes by actual scoreboard hit");
+    app.test_cursor(release);
+    app.test_left_button(ElementState::Released);
     assert!(app.runtime_client_list.is_some());
     assert!(!app
         .runtime_client_list
@@ -3999,12 +3692,9 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         ModifiersState::SHIFT,
         ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("modified Tab has no exact C4 binding");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release modified Tab");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         assert!(app.ingame_menu.is_none());
         assert!(app.message_dialogs.is_empty());
         assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
@@ -4014,14 +3704,11 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
     app.engine
-        .player_mut(app.local_owner)
-        .expect("local player")
+        .test_player_mut(app.local_owner)
         .control
         .control_style = true;
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("set keyboard modifiers");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("bare rebound Tab uses PRIO_PlrControl");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     assert_ne!(
         app.engine
@@ -4038,11 +3725,9 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         )],
         GuiPoint::new(20.0, 20.0),
     )
-    .expect("open context before the modified release");
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("set keyboard modifiers");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("modified release is not the bare control binding");
+    .test_value();
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
     assert_ne!(
         app.engine
@@ -4067,19 +3752,12 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
     exclusive_release
         .engine
-        .player_mut(exclusive_release.local_owner)
-        .expect("local player")
+        .test_player_mut(exclusive_release.local_owner)
         .control
         .control_style = true;
-    exclusive_release
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("bare rebound press reaches the player control");
-    exclusive_release
-        .handle_game_over()
-        .expect("open an exclusive dialog between key edges");
-    exclusive_release
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("exclusive dialog owns the bare release scope");
+    exclusive_release.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    exclusive_release.handle_game_over().test_value();
+    exclusive_release.test_key(VirtualKeyCode::Tab, ElementState::Released);
     exclusive_release.dismiss_game_over_dialog();
     assert!(!exclusive_release
         .pressed_engine_keys
@@ -4107,16 +3785,11 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
     dialog_press
         .engine
-        .player_mut(dialog_press.local_owner)
-        .expect("local player")
+        .test_player_mut(dialog_press.local_owner)
         .control
         .control_style = true;
-    dialog_press
-        .handle_game_over()
-        .expect("show exclusive dialog before raw press");
-    dialog_press
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("exclusive dialog owns the initial raw press");
+    dialog_press.handle_game_over().test_value();
+    dialog_press.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert_eq!(
         dialog_press
             .game_over_dialog
@@ -4129,9 +3802,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .pressed_engine_keys
         .contains(&VirtualKeyCode::Tab));
     dialog_press.dismiss_game_over_dialog();
-    dialog_press
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("held bare repeat enters player scope");
+    dialog_press.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert_eq!(
         dialog_press
             .engine
@@ -4143,9 +3814,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         0,
         "AutoStopControl consumes a repeat first seen in another scope",
     );
-    dialog_press
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("eventual raw release clears both latches");
+    dialog_press.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(!dialog_press.scoreboard_tab_raw_pressed);
     assert!(!dialog_press
         .pressed_engine_keys
@@ -4173,28 +3842,18 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("push running message dialog");
-    message
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("shared message dialog leaves ScoreboardToggle in scope");
-    message
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release scoreboard Tab under shared message dialog");
+        .test_value();
+    message.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    message.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(message.message_dialogs.len(), 1);
     assert!(message.scoreboard_dialog.is_some());
     assert_eq!(
         message.message_dialogs[0].state.focused_button(),
         Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),
     );
-    message
-        .handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("set modified shared-screen Tab");
-    message
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("modified Tab is inert outside KEYSCOPE_Gui");
-    message
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release inert modified Tab");
+    message.test_modifiers(ModifiersState::SHIFT);
+    message.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    message.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         message.message_dialogs[0].state.focused_button(),
         Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),
@@ -4202,15 +3861,9 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     assert!(message.message_dialog_consumed_keys.is_empty());
 
     let mut game_over = new_classic_scoreboard_test_app(BOARD);
-    game_over
-        .handle_game_over()
-        .expect("show game-over focus dialog");
-    game_over
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("game-over owns Tab focus traversal");
-    game_over
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("game-over owns the Tab release");
+    game_over.handle_game_over().test_value();
+    game_over.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    game_over.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         game_over
             .game_over_dialog
@@ -4228,7 +3881,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
             )],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("open context menu");
+        .test_value();
     toggle_scoreboard(&mut context, ModifiersState::empty());
     assert!(context.context_menu.is_some());
     assert!(context.scoreboard_dialog.is_some());
@@ -4241,23 +3894,17 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
             )],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("open rebound context menu");
+        .test_value();
     rebound_context
         .bindings
         .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
-    rebound_context
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("PRIO_PlrControl precedes the context callback");
-    rebound_context
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release rebound context Tab");
+    rebound_context.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    rebound_context.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(rebound_context.context_menu.is_some());
     assert!(rebound_context.ingame_menu.is_some());
 
     let mut game_over_context = new_classic_scoreboard_test_app(BOARD);
-    game_over_context
-        .handle_game_over()
-        .expect("show game-over context dialog");
+    game_over_context.handle_game_over().test_value();
     game_over_context
         .open_context_menu_at(
             vec![ContextMenuEntry::<AppContextMenuCommand>::new(
@@ -4265,17 +3912,13 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
             )],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("open context over evaluation");
+        .test_value();
     game_over_context
         .bindings
         .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
     let before_game_over_context = runtime_global_ui_snapshot(&game_over_context);
-    game_over_context
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("game-over context leaves only the suppressed generic route");
-    game_over_context
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release suppressed game-over context Tab");
+    game_over_context.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    game_over_context.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         runtime_global_ui_snapshot(&game_over_context),
         before_game_over_context
@@ -4288,7 +3931,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     assert!(object.scoreboard_dialog.is_some());
 
     let mut player = new_scoreboard_test_app(BOARD);
-    player.open_ingame_menu().expect("open player menu");
+    player.open_ingame_menu().test_value();
     toggle_scoreboard(&mut player, ModifiersState::empty());
     assert!(player.ingame_menu.is_some());
     assert!(player.scoreboard_dialog.is_some());
@@ -4297,8 +3940,8 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
 fn call_scoreboard_function_and_update(app: &mut GameApp, function: &str) {
     app.engine
         .call_scenario_script_function(function, Vec::new())
-        .expect("call runtime scoreboard fixture");
-    app.update().expect("apply runtime scoreboard request");
+        .test_value();
+    app.test_update();
     app.snapshot.hud.messages.clear();
 }
 
@@ -4317,13 +3960,11 @@ fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_ti
     render_app
         .engine
         .call_scenario_script_function("ShowNow", Vec::new())
-        .expect("synchronous callback shows scoreboard");
+        .test_value();
     assert!(render_app.scoreboard_dialog.is_none());
     let mut frame = vec![0x5a; 320 * 200 * 4];
     let sentinel = frame.clone();
-    render_app
-        .render(&mut frame)
-        .expect("render drains and draws a synchronous presentation request");
+    render_app.test_render(&mut frame);
     assert_ne!(frame, sentinel);
     assert!(render_app.scoreboard_dialog.is_some());
 
@@ -4331,19 +3972,13 @@ fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_ti
     tab_app
         .engine
         .call_scenario_script_function("ShowNow", Vec::new())
-        .expect("synchronous callback shows scoreboard");
+        .test_value();
     assert!(tab_app.scoreboard_dialog.is_none());
-    tab_app
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Tab first drains and then closes the live pDlg");
-    tab_app
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release close toggle");
+    tab_app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    tab_app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(tab_app.scoreboard_dialog.is_none());
     assert_eq!(tab_app.snapshot.hud.scoreboard.show_count(), 1);
-    tab_app
-        .render(&mut frame)
-        .expect("the consumed request cannot reopen after the user close");
+    tab_app.test_render(&mut frame);
 }
 
 #[test]
@@ -4359,28 +3994,19 @@ fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
 
     let mut positive = new_scoreboard_test_app(RESTORE_BOARD);
     call_scoreboard_function_and_update(&mut positive, "ShowNow");
-    positive
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("user hides the positive-refcount dialog before save");
-    positive
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release user hide");
+    positive.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    positive.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(positive.scoreboard_dialog.is_none());
     let saved_positive = positive.engine.capture_state();
     assert_eq!(saved_positive.scoreboard.show_count(), 1);
 
-    positive
-        .engine
-        .restore_state(&saved_positive)
-        .expect("restore positive scoreboard state");
+    positive.engine.restore_state(&saved_positive).test_value();
     positive.snapshot = positive.engine.snapshot();
     positive.arm_initial_scoreboard_reconcile();
     let before_surface = positive.graphics.surface().pixels().to_vec();
     let mut frame = vec![0x4c; 320 * 200 * 4];
     let sentinel = frame.clone();
-    positive
-        .render(&mut frame)
-        .expect("load-time DoDlgShow(0) reopens and renders saved positive refcount");
+    positive.test_render(&mut frame);
     assert_ne!(frame, sentinel);
     assert_ne!(
         positive.graphics.surface().pixels(),
@@ -4400,14 +4026,11 @@ fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
     let saved_zero = zero.engine.capture_state();
     assert_eq!(saved_zero.scoreboard.show_count(), 0);
 
-    zero.engine
-        .restore_state(&saved_zero)
-        .expect("restore zero-refcount scoreboard state");
+    zero.engine.restore_state(&saved_zero).test_value();
     zero.snapshot = zero.engine.snapshot();
     zero.arm_initial_scoreboard_reconcile();
     assert!(zero.scoreboard_dialog.is_none());
-    zero.render(&mut frame)
-        .expect("NO-SAVE user-open pDlg does not survive restoration");
+    zero.test_render(&mut frame);
     assert!(zero.scoreboard_dialog.is_none());
     assert_eq!(zero.engine.scoreboard_snapshot(), saved_zero.scoreboard);
 }
@@ -4428,9 +4051,7 @@ fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
         "SetCell cannot retroactively open an earlier empty request"
     );
     let mut ordinary = vec![0_u8; 320 * 200 * 4];
-    empty_then_cell
-        .render(&mut ordinary)
-        .expect("a positive final state alone does not imply pDlg");
+    empty_then_cell.test_render(&mut ordinary);
 
     let mut open_then_close = new_scoreboard_test_app(
         r#"global func OpenThenClose()
@@ -4443,9 +4064,7 @@ fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
     call_scoreboard_function_and_update(&mut open_then_close, "OpenThenClose");
     assert_eq!(open_then_close.snapshot.hud.scoreboard.show_count(), 0);
     assert!(open_then_close.scoreboard_dialog.is_none());
-    open_then_close
-        .render(&mut ordinary)
-        .expect("open then close in one tick leaves no render boundary");
+    open_then_close.test_render(&mut ordinary);
 }
 
 #[test]
@@ -4459,10 +4078,7 @@ fn later_data_update_collapses_request_time_allocated_empty_title_margin() {
                    }"#,
     );
     call_scoreboard_function_and_update(&mut app, "ShowEmptyThenInvalidate");
-    let request = app
-        .scoreboard_dialog
-        .as_ref()
-        .expect("request opened scoreboard");
+    let request = app.scoreboard_dialog.test_ref();
     assert!(!request.title_widget_present);
     assert!(request.layout_revision < app.engine.scoreboard_layout_revision());
 
@@ -4471,8 +4087,7 @@ fn later_data_update_collapses_request_time_allocated_empty_title_margin() {
     assert!(constructor_layout.client.y > constructor_layout.bounds.y);
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("Draw applies the invalidated empty-title Update");
+    app.test_render(&mut frame);
     let updated_layout = current_scoreboard_test_layout(&mut app);
     assert!(updated_layout.caption.is_none());
     assert_eq!(updated_layout.client.y, updated_layout.bounds.y);
@@ -4506,22 +4121,17 @@ fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
     let mut frame = vec![0x6d; 320 * 200 * 4];
     let sentinel = frame.clone();
     for _ in 0..2 {
-        app.render(&mut frame)
-            .expect("visible scoreboard draws its current live matrix");
+        app.test_render(&mut frame);
         assert_ne!(frame, sentinel);
         assert_ne!(app.graphics.surface().pixels(), before_surface.as_slice());
         assert_eq!(runtime_global_ui_snapshot(&app), before_ui);
     }
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("set keyboard modifiers");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Tab closes an existing pDlg without needing its renderer");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release close toggle");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(app.scoreboard_dialog.is_none());
-    app.render(&mut frame)
-        .expect("positive refcount does not reopen after a user close");
+    app.test_render(&mut frame);
 }
 
 #[test]
@@ -4571,12 +4181,11 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
             }"#;
     let mut app = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
     app.engine
-        .player_mut(app.local_owner)
-        .expect("local player")
+        .test_player_mut(app.local_owner)
         .control
         .control_style = true;
     app.dispatch_control_event(ControlEvent::Press(ControlButton::Left))
-        .expect("hold a player control under the fullscreen menu");
+        .test_value();
     assert_ne!(
         app.engine
             .player(app.local_owner)
@@ -4586,7 +4195,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
             & (1 << clonk_engine::COM_LEFT),
         0,
     );
-    app.open_ingame_menu().expect("open fullscreen player menu");
+    app.open_ingame_menu().test_value();
     call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
     assert!(app.game_over_dialog.is_some());
     assert!(app.scoreboard_dialog.is_none());
@@ -4602,28 +4211,23 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
         "game-over player-menu close synchronizes ClearPressedComs once",
     );
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("evaluation suppresses same-tick scoreboard creation");
+    app.test_render(&mut frame);
 
     app.engine
         .call_scenario_script_function("Recheck", Vec::new())
-        .expect("runtime reconciliation while evaluation is exclusive");
+        .test_value();
     app.handle_game_over_action(GameOverAction::Continue)
-        .expect("continue evaluation");
+        .test_value();
     assert!(app.game_over_dialog.is_none());
     assert!(app.scoreboard_dialog.is_none());
-    app.render(&mut frame)
-        .expect("Continue does not implicitly reconcile the positive count");
+    app.test_render(&mut frame);
 
     call_scoreboard_function_and_update(&mut app, "Recheck");
     assert!(app.scoreboard_dialog.is_some());
-    app.render(&mut frame)
-        .expect("a later runtime DoDlgShow may reopen and render after Continue");
+    app.test_render(&mut frame);
 
     let mut save_browser = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
-    save_browser
-        .open_save_browser()
-        .expect("open fullscreen save-browser descendant");
+    save_browser.open_save_browser().test_value();
     assert!(save_browser.save_browser.is_some());
     call_scoreboard_function_and_update(&mut save_browser, "ShowAndEnd");
     assert!(save_browser.game_over_dialog.is_some());
@@ -4654,10 +4258,8 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         ),
     ] {
         let mut app = new_game_over_keyboard_app();
-        app.handle_modifiers_changed(modifiers)
-            .expect("set chat shortcut modifiers");
-        app.handle_key(key, ElementState::Pressed)
-            .expect("open the real running-chat controller");
+        app.test_modifiers(modifiers);
+        app.test_key(key, ElementState::Pressed);
         assert_eq!(app.running_chat_text(), Some(expected_text));
         assert!(app.game_over_dialog.is_some());
     }
@@ -4668,10 +4270,8 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         ModifiersState::SUPER | ModifiersState::ALT,
     ] {
         let mut app = new_game_over_keyboard_app();
-        app.handle_modifiers_changed(modifiers)
-            .expect("set mnemonic modifiers");
-        app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-            .expect("localized Continue mnemonic activates directly");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
         assert!(app.game_over_dialog.is_none());
         assert_eq!(app.mode, AppMode::Running);
         assert!(!app
@@ -4681,18 +4281,13 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
     }
 
     let mut say = new_game_over_keyboard_app();
-    say.game_over_dialog
-        .as_mut()
-        .expect("evaluation dialog")
-        .set_button_content(
-            GameOverAction::Restart,
-            "Play again".to_string(),
-            "Restart without an R mnemonic".to_string(),
-        );
-    say.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("set Say modifiers");
-    say.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("unmatched Alt+Return falls through to Say chat");
+    say.game_over_dialog.test_mut().set_button_content(
+        GameOverAction::Restart,
+        "Play again".to_string(),
+        "Restart without an R mnemonic".to_string(),
+    );
+    say.test_modifiers(ModifiersState::ALT);
+    say.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert_eq!(say.running_chat_text(), Some("\""));
     assert!(say.game_over_dialog.is_some());
 
@@ -4703,12 +4298,9 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         ),
         (VirtualKeyCode::Escape, ModifiersState::ALT),
     ] {
-        say.handle_modifiers_changed(modifiers)
-            .expect("set an unmatched active-chat hotkey");
-        say.handle_key(key, ElementState::Pressed)
-            .expect("active chat keeps the evaluation callbacks inactive");
-        say.handle_key(key, ElementState::Released)
-            .expect("active chat owns the matching release");
+        say.test_modifiers(modifiers);
+        say.test_key(key, ElementState::Pressed);
+        say.test_key(key, ElementState::Released);
         assert!(say.game_over_dialog.is_some());
         assert_eq!(say.running_chat_text(), Some("\""));
     }
@@ -4720,49 +4312,36 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         ModifiersState::CONTROL | ModifiersState::ALT,
         ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
     ] {
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-            .expect("combined Return has no exact C++ chat binding");
-        app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-            .expect("combined Return release is consumed");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     }
     for modifiers in [
         ModifiersState::CONTROL,
         ModifiersState::SHIFT,
         ModifiersState::CONTROL | ModifiersState::ALT,
     ] {
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-            .expect("modified F2 has no exact C++ chat binding");
-        app.handle_key(VirtualKeyCode::F2, ElementState::Released)
-            .expect("modified F2 release is consumed");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::F2, ElementState::Released);
     }
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("set keyboard modifiers");
-    app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
-        .expect("the macOS SDL oracle does not register keypad Enter here");
-    app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Released)
-        .expect("keypad Enter release is consumed");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Released);
     assert!(app.game_over_dialog.is_some());
 }
 
 #[test]
 fn game_over_mnemonics_use_active_language_resources() {
-    let user_data = tempdir().expect("localized game-over user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "General", "LanguageEx", "DE").expect("select German resources");
+    persist_config_value(&paths, "General", "LanguageEx", "DE").test_value();
     let mut app = new_classic_running_sandbox_app();
     app.app_paths = Some(paths);
-    app.reload_application_language_resources()
-        .expect("reload German resources after replacing fixture paths");
-    app.handle_game_over()
-        .expect("show localized evaluation dialog");
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::KeyW, ElementState::Pressed)
-        .expect("German &Weiterspielen mnemonic invokes Continue");
+    app.reload_application_language_resources().test_value();
+    app.handle_game_over().test_value();
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::KeyW, ElementState::Pressed);
 
     assert_eq!(app.mode, AppMode::Running);
     assert!(app.game_over_dialog.is_none());
@@ -4777,12 +4356,8 @@ fn game_over_mnemonics_use_active_language_resources() {
 fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
     let mut list_focus = new_game_over_keyboard_app();
     for _ in 0..2 {
-        list_focus
-            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("advance to the player list");
-        list_focus
-            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release focus traversal key");
+        list_focus.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        list_focus.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
     assert_eq!(
         list_focus
@@ -4791,20 +4366,14 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
             .and_then(GameOverState::focused),
         Some(GameOverFocus::PlayerList(0))
     );
-    list_focus
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("player-list Return falls through to All chat");
+    list_focus.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert_eq!(list_focus.running_chat_text(), Some(""));
     assert!(list_focus.game_over_dialog.is_some());
 
     let mut keyboard = new_game_over_keyboard_app();
     for _ in 0..4 {
-        keyboard
-            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("advance to Continue");
-        keyboard
-            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release focus traversal key");
+        keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        keyboard.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
     assert_eq!(
         keyboard
@@ -4813,13 +4382,9 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
             .and_then(GameOverState::focused_action),
         Some(GameOverAction::Continue)
     );
-    keyboard
-        .handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("depress focused Continue");
+    keyboard.test_key(VirtualKeyCode::Space, ElementState::Pressed);
     assert!(keyboard.game_over_dialog.is_some());
-    keyboard
-        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("any shared activation-key release activates Continue");
+    keyboard.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert!(keyboard.game_over_dialog.is_none());
     assert!(keyboard
         .ui_sound_log
@@ -4829,29 +4394,23 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
 
     let mut gamepad = new_game_over_keyboard_app();
     for _ in 0..4 {
-        gamepad
-            .process_gamepad_event_batch([GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Right,
-                state: ElementState::Pressed,
-            }])
-            .expect("advance gamepad focus to Continue");
-    }
-    gamepad
-        .process_gamepad_event_batch([GamepadEvent::GuiButton {
+        gamepad.test_gamepad_events([GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
-            class: GuiButtonClass::Low,
+            button: ControlButton::Right,
             state: ElementState::Pressed,
-        }])
-        .expect("depress focused Continue with gamepad Low");
+        }]);
+    }
+    gamepad.test_gamepad_events([GamepadEvent::GuiButton {
+        slot: GamepadSlot::new(0),
+        class: GuiButtonClass::Low,
+        state: ElementState::Pressed,
+    }]);
     assert!(gamepad.game_over_dialog.is_some());
-    gamepad
-        .process_gamepad_event_batch([GamepadEvent::GuiButton {
-            slot: GamepadSlot::new(0),
-            class: GuiButtonClass::Low,
-            state: ElementState::Released,
-        }])
-        .expect("activate focused Continue with gamepad Low");
+    gamepad.test_gamepad_events([GamepadEvent::GuiButton {
+        slot: GamepadSlot::new(0),
+        class: GuiButtonClass::Low,
+        state: ElementState::Released,
+    }]);
     assert!(gamepad.game_over_dialog.is_none());
 }
 
@@ -4865,7 +4424,7 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
     let mut continue_point = None;
     'find_button: for y in 0..height {
         for x in 0..width {
-            let dialog = app.game_over_dialog.as_mut().expect("evaluation dialog");
+            let dialog = app.game_over_dialog.test_mut();
             dialog.handle_pointer_move(x as f32, y as f32, width, height);
             if dialog.hovered_action() == Some(GameOverAction::Continue) {
                 continue_point = Some(PhysicalPosition::new(f64::from(x), f64::from(y)));
@@ -4873,9 +4432,8 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
             }
         }
     }
-    let continue_point = continue_point.expect("find the Continue button on the dialog");
-    app.handle_cursor_moved(continue_point)
-        .expect("hover Continue through the application input path");
+    let continue_point = continue_point.test_value();
+    app.test_cursor(continue_point);
     assert_eq!(
         app.game_over_dialog
             .as_ref()
@@ -4897,12 +4455,9 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
             ModifiersState::CONTROL | ModifiersState::ALT,
             ModifiersState::SUPER,
         ] {
-            app.handle_modifiers_changed(modifiers)
-                .expect("set keyboard modifiers");
-            app.handle_key(key, ElementState::Pressed)
-                .expect("unfocused game-over navigation key is a no-op");
-            app.handle_key(key, ElementState::Released)
-                .expect("unfocused game-over navigation release is consumed");
+            app.test_modifiers(modifiers);
+            app.test_key(key, ElementState::Pressed);
+            app.test_key(key, ElementState::Released);
             assert_eq!(
                 app.game_over_dialog
                     .as_ref()
@@ -4922,7 +4477,7 @@ fn hover_game_over_action_for_test(app: &mut GameApp, action: GameOverAction) {
     };
     for y in 0..height {
         for x in 0..width {
-            let dialog = app.game_over_dialog.as_mut().expect("evaluation dialog");
+            let dialog = app.game_over_dialog.test_mut();
             dialog.handle_pointer_move(x as f32, y as f32, width, height);
             if dialog.hovered_action() == Some(action) {
                 return;
@@ -4963,7 +4518,7 @@ fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("open message over evaluation");
+        .test_value();
         let before = runtime_global_ui_snapshot(&app);
         let source = |cluster, event| SourcedGamepadEvent {
             gamepad,
@@ -5025,7 +4580,7 @@ fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
             ],
             gate,
         )
-        .expect("disabled or non-primary evaluation GUI input is inert");
+        .test_value();
 
         assert_no_global_ui_change(before, &app);
         assert_eq!(app.message_dialogs.len(), 1);
@@ -5043,9 +4598,9 @@ fn closed_exclusive_message_alias_cluster_yields_later_direction_to_game_over() 
         ),
         MessageDialogContinuation::LeagueSurrender,
     )
-    .expect("open message over evaluation");
+    .test_value();
 
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::GuiButton {
             slot: GamepadSlot::new(0),
             class: GuiButtonClass::High,
@@ -5061,8 +4616,7 @@ fn closed_exclusive_message_alias_cluster_yields_later_direction_to_game_over() 
             button: ControlButton::Left,
             state: ElementState::Pressed,
         },
-    ])
-    .expect("a later raw direction begins a new receiver cluster");
+    ]);
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
         app.game_over_dialog
@@ -5081,7 +4635,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
             )],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("open context over evaluation");
+        .test_value();
     };
 
     let mut axis_transition = new_game_over_keyboard_app();
@@ -5128,7 +4682,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
             ],
             true,
         )
-        .expect("axis release and opposite press re-resolve separate receivers");
+        .test_value();
     assert!(axis_transition.context_menu.is_some());
     assert!(axis_transition.game_over_dialog.is_some());
     assert_eq!(
@@ -5141,13 +4695,11 @@ fn context_fences_game_over_until_a_post_close_cluster() {
 
     let mut pass_through = new_game_over_keyboard_app();
     open_context(&mut pass_through);
-    pass_through
-        .process_gamepad_event_batch([GamepadEvent::Direction {
-            slot: GamepadSlot::new(0),
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        }])
-        .expect("root context Left remains fenced from Dialog traversal");
+    pass_through.test_gamepad_events([GamepadEvent::Direction {
+        slot: GamepadSlot::new(0),
+        button: ControlButton::Left,
+        state: ElementState::Pressed,
+    }]);
     assert!(pass_through.context_menu.is_some());
     assert_eq!(
         pass_through
@@ -5159,25 +4711,23 @@ fn context_fences_game_over_until_a_post_close_cluster() {
 
     let mut closed = new_game_over_keyboard_app();
     open_context(&mut closed);
-    closed
-        .process_gamepad_event_batch([
-            GamepadEvent::GuiButton {
-                slot: GamepadSlot::new(0),
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Action {
-                slot: GamepadSlot::new(0),
-                action: GamepadActionType::Cancel,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Right,
-                state: ElementState::Pressed,
-            },
-        ])
-        .expect("a later raw cluster outlives the closed context menu");
+    closed.test_gamepad_events([
+        GamepadEvent::GuiButton {
+            slot: GamepadSlot::new(0),
+            class: GuiButtonClass::High,
+            state: ElementState::Pressed,
+        },
+        GamepadEvent::Action {
+            slot: GamepadSlot::new(0),
+            action: GamepadActionType::Cancel,
+            state: ElementState::Pressed,
+        },
+        GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Right,
+            state: ElementState::Pressed,
+        },
+    ]);
     assert!(closed.context_menu.is_none());
     assert_eq!(
         closed
@@ -5205,7 +4755,7 @@ fn game_over_raw_low_opens_all_chat_for_south_and_east_aliases() {
         let mut app = new_game_over_keyboard_app();
         hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
         assert_game_over_fixture_has_no_sound_activity(&app);
-        app.process_gamepad_event_batch([
+        app.test_gamepad_events([
             GamepadEvent::GuiButton {
                 slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
@@ -5221,8 +4771,7 @@ fn game_over_raw_low_opens_all_chat_for_south_and_east_aliases() {
                 button,
                 state: ElementState::Pressed,
             },
-        ])
-        .expect("raw Low opens the classic all-chat child");
+        ]);
         assert_eq!(app.running_chat_text(), Some(""));
         assert!(
             app.game_over_dialog.is_some(),
@@ -5240,12 +4789,11 @@ fn game_over_raw_left_and_right_reach_exact_focus_targets() {
     ] {
         let mut app = new_game_over_keyboard_app();
         hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
-        app.process_gamepad_event_batch([GamepadEvent::Direction {
+        app.test_gamepad_events([GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button,
             state: ElementState::Pressed,
-        }])
-        .expect("horizontal D-pad traverses native focus");
+        }]);
         assert_eq!(
             app.game_over_dialog
                 .as_ref()
@@ -5261,7 +4809,7 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
     hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
     let before = runtime_global_ui_snapshot(&app);
 
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
             button: ControlButton::Up,
@@ -5317,15 +4865,13 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
             button: LegacyGamepadButton::new(0),
             state: ElementState::Released,
         },
-    ])
-    .expect("non-binding game-over controller events are consumed");
+    ]);
     assert_no_global_ui_change(before, &app);
 
     let clear_before = runtime_global_ui_snapshot(&app);
-    app.process_gamepad_event_batch([GamepadEvent::Clear {
+    app.test_gamepad_events([GamepadEvent::Clear {
         slot: GamepadSlot::new(0),
-    }])
-    .expect("standalone Clear is inert while game over owns the screen");
+    }]);
     assert_no_global_ui_change(clear_before, &app);
 
     let direct_before = runtime_global_ui_snapshot(&app);
@@ -5335,14 +4881,14 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
         GamepadActionType::MenuToggle,
     ] {
         app.handle_gamepad_action(GamepadSlot::new(0), action, ElementState::Pressed)
-            .expect("abstract gamepad actions cannot activate evaluation buttons");
+            .test_value();
     }
     app.handle_gamepad_button(
         GamepadSlot::new(0),
         LegacyGamepadButton::new(0),
         ElementState::Pressed,
     )
-    .expect("abstract commands are swallowed by game over");
+    .test_value();
     for button in [
         ControlButton::Left,
         ControlButton::Right,
@@ -5350,28 +4896,24 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
         ControlButton::Down,
     ] {
         app.handle_gamepad_direction(GamepadSlot::new(0), button, ElementState::Pressed)
-            .expect("only the raw batch route owns game-over directions");
+            .test_value();
     }
     assert_eq!(runtime_global_ui_snapshot(&app), direct_before);
     assert_game_over_fixture_has_no_sound_activity(&app);
 
     let mut cancelled = new_game_over_keyboard_app();
     for _ in 0..4 {
-        cancelled
-            .process_gamepad_event_batch([GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Right,
-                state: ElementState::Pressed,
-            }])
-            .expect("focus Continue before cancellation");
-    }
-    cancelled
-        .process_gamepad_event_batch([GamepadEvent::GuiButton {
+        cancelled.test_gamepad_events([GamepadEvent::Direction {
             slot: GamepadSlot::new(0),
-            class: GuiButtonClass::Low,
+            button: ControlButton::Right,
             state: ElementState::Pressed,
-        }])
-        .expect("depress focused Continue");
+        }]);
+    }
+    cancelled.test_gamepad_events([GamepadEvent::GuiButton {
+        slot: GamepadSlot::new(0),
+        class: GuiButtonClass::Low,
+        state: ElementState::Pressed,
+    }]);
     assert_eq!(
         cancelled
             .ui_sound_log
@@ -5380,18 +4922,14 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
             .count(),
         1
     );
-    cancelled
-        .process_gamepad_event_batch([GamepadEvent::Clear {
-            slot: GamepadSlot::new(0),
-        }])
-        .expect("Clear cancels the retained button latch");
-    cancelled
-        .process_gamepad_event_batch([GamepadEvent::GuiButton {
-            slot: GamepadSlot::new(0),
-            class: GuiButtonClass::Low,
-            state: ElementState::Released,
-        }])
-        .expect("the post-Clear release cannot activate Continue");
+    cancelled.test_gamepad_events([GamepadEvent::Clear {
+        slot: GamepadSlot::new(0),
+    }]);
+    cancelled.test_gamepad_events([GamepadEvent::GuiButton {
+        slot: GamepadSlot::new(0),
+        class: GuiButtonClass::Low,
+        state: ElementState::Released,
+    }]);
     assert!(cancelled.game_over_dialog.is_some());
     assert!(!cancelled.ui_sound_log.iter().any(|sound| sound == "Click"));
 }
@@ -5401,7 +4939,7 @@ fn game_over_raw_high_ends_and_consumes_aliases_after_dialog_close() {
     let mut app = new_game_over_keyboard_app();
     assert_game_over_fixture_has_no_sound_activity(&app);
 
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::GuiButton {
             slot: GamepadSlot::new(0),
             class: GuiButtonClass::High,
@@ -5425,8 +4963,7 @@ fn game_over_raw_high_ends_and_consumes_aliases_after_dialog_close() {
         GamepadEvent::Clear {
             slot: GamepadSlot::new(0),
         },
-    ])
-    .expect("raw High ends the round and owns its contiguous aliases");
+    ]);
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::MainMenu);
@@ -5545,20 +5082,19 @@ fn game_over_high_capture_ends_at_the_next_raw_physical_cluster() {
         .chain(activate_network_game(21)),
         true,
     )
-    .expect("raw High returns to startup and the fade owns later clusters");
+    .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(app.startup_dialog_fade_active());
     let mut frame = vec![0_u8; 320 * 200 * 4];
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
-        app.render(&mut frame)
-            .expect("complete the post-round startup fade");
+        app.test_render(&mut frame);
     }
     assert!(!app.startup_dialog_fade_active());
 
     app.process_sourced_gamepad_event_batch(activate_network_game(24), true)
-        .expect("later physical clusters route to the newly exposed main menu");
+        .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -5579,11 +5115,11 @@ fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
             ),
             MessageDialogContinuation::LeagueSurrender,
         )
-        .expect("open message above evaluation");
+        .test_value();
     };
 
     open_message(&mut app, "Low");
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::GuiButton {
             slot: GamepadSlot::new(0),
             class: GuiButtonClass::Low,
@@ -5614,12 +5150,11 @@ fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
             button: LegacyGamepadButton::new(0),
             state: ElementState::Released,
         },
-    ])
-    .expect("message Low activates the top overlay, not game-over chat");
+    ]);
     assert!(app.message_dialogs.is_empty());
 
     open_message(&mut app, "High");
-    app.process_gamepad_event_batch([
+    app.test_gamepad_events([
         GamepadEvent::GuiButton {
             slot: GamepadSlot::new(0),
             class: GuiButtonClass::High,
@@ -5650,8 +5185,7 @@ fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
             button: LegacyGamepadButton::new(1),
             state: ElementState::Released,
         },
-    ])
-    .expect("message High closes only the top overlay");
+    ]);
 
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.mode, AppMode::Running);
@@ -5678,12 +5212,9 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         ),
     ] {
         let mut app = new_game_over_keyboard_app();
-        app.handle_modifiers_changed(modifiers)
-            .expect("set focus modifiers");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("traverse native evaluation focus");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release evaluation traversal key");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         assert_eq!(
             app.game_over_dialog
                 .as_ref()
@@ -5698,12 +5229,9 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
     ] {
         let mut app = new_game_over_keyboard_app();
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("other-modified Tab has no exact C++ focus binding");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("other-modified Tab release is consumed");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         assert_eq!(
             app.game_over_dialog
                 .as_ref()
@@ -5719,27 +5247,18 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
         let mut app = new_game_over_keyboard_app();
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .expect("game-over releases are inert");
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("modified Escape has no exact C++ End binding");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+        app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         assert!(app.game_over_dialog.is_some());
     }
 
     for modifiers in [ModifiersState::empty(), ModifiersState::SUPER] {
         let mut ending_app = new_game_over_keyboard_app();
-        ending_app
-            .handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        ending_app
-            .handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .expect("Escape release cannot end evaluation");
+        ending_app.test_modifiers(modifiers);
+        ending_app.test_key(VirtualKeyCode::Escape, ElementState::Released);
         assert!(ending_app.game_over_dialog.is_some());
-        ending_app
-            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("bare Escape invokes End");
+        ending_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         assert!(ending_app.game_over_dialog.is_none());
         assert!(matches!(ending_app.mode, AppMode::Menu));
     }
@@ -5751,36 +5270,30 @@ fn game_over_pending_network_result_preserves_cpp_button_and_escape_latches() {
         let mut app = new_classic_running_sandbox_app();
         configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
         app.network_is_league = true;
-        app.handle_game_over()
-            .expect("show pending host evaluation");
+        app.handle_game_over().test_value();
         app
     };
 
     let mut host = pending_host();
-    let dialog = host.game_over_dialog.as_ref().expect("host evaluation");
+    let dialog = host.game_over_dialog.test_ref();
     assert_eq!(dialog.network_result_label(), Some(""));
     assert!(!dialog.is_net_done());
     assert!(!dialog.allows_escape_close());
     assert!(dialog.actions().contains(&GameOverAction::End));
     assert!(dialog.actions().contains(&GameOverAction::Continue));
-    host.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("pending host Escape is consumed");
+    host.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(host.game_over_dialog.is_some());
     host.handle_game_over_gamepad_event(GamepadEvent::GuiButton {
         slot: GamepadSlot::new(0),
         class: GuiButtonClass::High,
         state: ElementState::Pressed,
     })
-    .expect("pending host High is consumed");
+    .test_value();
     assert!(host.game_over_dialog.is_some());
 
     let mut clickable = pending_host();
-    clickable
-        .handle_modifiers_changed(ModifiersState::ALT)
-        .expect("enable native mnemonic mask");
-    clickable
-        .handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-        .expect("visible pending Continue remains clickable like C++");
+    clickable.test_modifiers(ModifiersState::ALT);
+    clickable.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     assert!(clickable.game_over_dialog.is_none());
     assert_eq!(clickable.mode, AppMode::Running);
 
@@ -5789,31 +5302,22 @@ fn game_over_pending_network_result_preserves_cpp_button_and_escape_latches() {
         Some(clonk_engine::RoundResultsNetworkResult::LeagueOk);
     resolved.snapshot.round_results.network_result_message = b"evaluated".to_vec();
     assert!(resolved.sec1_timer().expect("refresh final network result"));
-    let dialog = resolved
-        .game_over_dialog
-        .as_ref()
-        .expect("resolved host evaluation");
+    let dialog = resolved.game_over_dialog.test_ref();
     assert_eq!(dialog.network_result_label(), Some("evaluated"));
     assert!(dialog.is_net_done());
     assert!(dialog.allows_escape_close());
-    resolved
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("resolved host Escape ends the round");
+    resolved.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(resolved.game_over_dialog.is_none());
 
     let mut client = new_classic_running_sandbox_app();
     configure_runtime_network_role(&mut client, RuntimeNetworkRole::Client);
     client.network_is_league = true;
-    client
-        .handle_game_over()
-        .expect("show pending client evaluation");
+    client.handle_game_over().test_value();
     assert!(client
         .game_over_dialog
         .as_ref()
         .is_some_and(GameOverState::allows_escape_close));
-    client
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("pending client Escape is allowed");
+    client.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(client.game_over_dialog.is_none());
 }
 
@@ -5826,20 +5330,18 @@ fn game_over_show_and_continue_use_offline_pause_lifecycle() {
     let mut app = new_classic_running_sandbox_app();
     assert_eq!(app.offline_halt_count, 0);
 
-    app.handle_game_over().expect("show offline evaluation");
+    app.handle_game_over().test_value();
     assert_eq!(
         app.offline_halt_count, 1,
         "OnShown acquires the native offline game halt"
     );
     app.handle_game_over_action(GameOverAction::Continue)
-        .expect("continue the evaluated round");
+        .test_value();
     assert_eq!(app.offline_halt_count, 0);
     assert!(app.game_over_dialog.is_none());
 
     let mut raw_teardown = new_classic_running_sandbox_app();
-    raw_teardown
-        .handle_game_over()
-        .expect("show evaluation before raw teardown");
+    raw_teardown.handle_game_over().test_value();
     raw_teardown.dismiss_game_over_dialog();
     assert_eq!(
         raw_teardown.offline_halt_count, 1,
@@ -5857,7 +5359,7 @@ fn game_over_network_pause_lifecycle_is_host_authoritative() {
     let mut host = new_classic_running_sandbox_app();
     let (_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 2);
 
-    host.handle_game_over().expect("show host evaluation");
+    host.handle_game_over().test_value();
     let pause_changes = host_commands
         .take_runtime_status_commands()
         .into_iter()
@@ -5870,7 +5372,7 @@ fn game_over_network_pause_lifecycle_is_host_authoritative() {
     assert_eq!(pause_changes[0].state, clonk_network::NETWORK_STATE_PAUSE);
 
     host.handle_game_over_action(GameOverAction::Continue)
-        .expect("continue host evaluation");
+        .test_value();
     let go_changes = host_commands
         .take_runtime_status_commands()
         .into_iter()
@@ -5884,7 +5386,7 @@ fn game_over_network_pause_lifecycle_is_host_authoritative() {
 
     let mut client = new_classic_running_sandbox_app();
     let (_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 2);
-    client.handle_game_over().expect("show client evaluation");
+    client.handle_game_over().test_value();
     assert!(client_commands.take_runtime_status_commands().is_empty());
 
     // Model the host's committed Pause. Closing the local dialog must not
@@ -5892,7 +5394,7 @@ fn game_over_network_pause_lifecycle_is_host_authoritative() {
     client.network_control_running = false;
     client
         .handle_game_over_action(GameOverAction::Continue)
-        .expect("close client evaluation");
+        .test_value();
     assert!(client_commands.take_runtime_status_commands().is_empty());
     assert!(!client.network_control_running);
 }
@@ -5905,13 +5407,10 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
     player
         .engine
-        .player_mut(player.local_owner)
-        .expect("local player")
+        .test_player_mut(player.local_owner)
         .control
         .control_style = true;
-    player
-        .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("PRIO_PlrControl owns bare F3");
+    player.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert!(player.runtime_flash_message.is_none());
     assert_ne!(
         player
@@ -5936,32 +5435,17 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         modified
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
-        modified
-            .handle_modifiers_changed(modifiers)
-            .expect("set F3 modifiers");
+        modified.test_modifiers(modifiers);
         let before = runtime_global_ui_snapshot(&modified);
-        modified
-            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-            .expect("modified F3 falls through without player dispatch");
-        modified
-            .handle_key(VirtualKeyCode::F3, ElementState::Released)
-            .expect("modified F3 release falls through");
+        modified.test_key(VirtualKeyCode::F3, ElementState::Pressed);
+        modified.test_key(VirtualKeyCode::F3, ElementState::Released);
         assert_eq!(runtime_global_ui_snapshot(&modified), before);
     }
 
     let mut logo_music = new_running_sandbox_app();
-    let configured_before_logo = logo_music
-        .audio
-        .as_ref()
-        .expect("test audio")
-        .options
-        .music_enabled;
-    logo_music
-        .handle_modifiers_changed(ModifiersState::SUPER)
-        .expect("set Logo");
-    logo_music
-        .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("Logo is absent from C4KeyCodeEx modifier masks");
+    let configured_before_logo = logo_music.audio.test_ref().options.music_enabled;
+    logo_music.test_modifiers(ModifiersState::SUPER);
+    logo_music.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert!(logo_music.runtime_flash_message.is_some());
     assert_eq!(
         logo_music
@@ -5974,18 +5458,9 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
     );
 
     let mut logo_sound = new_running_sandbox_app();
-    let sound_before_logo = logo_sound
-        .audio
-        .as_ref()
-        .expect("test audio")
-        .options
-        .sound_enabled;
-    logo_sound
-        .handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::SUPER)
-        .expect("set Ctrl+Logo");
-    logo_sound
-        .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("Ctrl+Logo retains exact Ctrl+F3");
+    let sound_before_logo = logo_sound.audio.test_ref().options.sound_enabled;
+    logo_sound.test_modifiers(ModifiersState::CONTROL | ModifiersState::SUPER);
+    logo_sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert_eq!(
         logo_sound
             .audio
@@ -6002,24 +5477,17 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
         .audio
         .as_ref()
         .map(|audio| audio.options.sound_enabled);
-    sound
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set Ctrl+F3");
-    sound
-        .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("Ctrl+F3 uses SoundToggle, not flash");
+    sound.test_modifiers(ModifiersState::CONTROL);
+    sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert!(sound.runtime_flash_message.is_none());
     if let (Some(before), Some(audio)) = (before_sound, sound.audio.as_ref()) {
         assert_eq!(audio.options.sound_enabled, !before);
     }
 
     let mut existing_sound = new_running_sandbox_app();
-    let audio = existing_sound.audio.as_mut().expect("test audio");
-    let handle = audio
-        .system
-        .load_sound(&silent_pcm_wav(1_000))
-        .expect("test sound handle");
-    let duration_ms = handle.duration_ms().expect("test sound duration");
+    let audio = existing_sound.audio.test_mut();
+    let handle = audio.system.load_sound(&silent_pcm_wav(1_000)).test_value();
+    let duration_ms = handle.duration_ms().test_value();
     audio.active_channels.insert(
         SoundInstanceKey::new("Loop", None),
         ChannelInfo {
@@ -6038,12 +5506,8 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
             detached_mix: None,
         },
     );
-    existing_sound
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set Ctrl+F3");
-    existing_sound
-        .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("disable future effects only");
+    existing_sound.test_modifiers(ModifiersState::CONTROL);
+    existing_sound.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert!(
         existing_sound
             .audio
@@ -6058,9 +5522,7 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
     game_over
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
-    game_over
-        .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("exclusive GUI suppresses Control but retains Generic music");
+    game_over.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert!(game_over.runtime_flash_message.is_some());
 
     let mut custom = new_running_sandbox_app();
@@ -6068,7 +5530,7 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
     custom
         .runtime_key_config_cache
         .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
-        .expect("empty key-config cache");
+        .test_value();
     for state in [ElementState::Pressed, ElementState::Released] {
         let error = custom
             .handle_key(VirtualKeyCode::F3, state)
@@ -6082,14 +5544,12 @@ fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
 fn older_runtime_f4_dialog_renders_inactive_below_new_game_over_dialog() {
     let mut app = new_classic_running_sandbox_app();
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open F4 before evaluation");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(app.runtime_client_list_mouse_active());
     assert!(!app.runtime_client_list_keyboard_active());
     assert!(app.runtime_client_list_draw_active());
 
-    app.handle_game_over()
-        .expect("show newer game-over dialog above F4");
+    app.handle_game_over().test_value();
     assert!(app.runtime_client_list.is_some());
     assert!(app.game_over_dialog.is_some());
     assert!(!app.runtime_client_list_above_game_over);
@@ -6103,49 +5563,33 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     let mut game_over = new_game_over_keyboard_app();
     let (_events, mut game_over_commands) = install_running_network_stub(&mut game_over, 0, 40, 4);
     route_primary_gamepad_to_local_owner(&mut game_over);
-    game_over
-        .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("F4 opens above the older equal-z game-over dialog");
+    game_over.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(game_over.runtime_client_list.is_some());
     assert!(game_over.game_over_dialog.is_some());
     assert!(game_over.runtime_client_list_above_game_over);
-    game_over
-        .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("client list keeps evaluation traversal inactive");
-    game_over
-        .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("client list owns the traversal release");
-    game_over
-        .handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt over the client list");
-    game_over
-        .handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
-        .expect("client list keeps the Restart mnemonic inactive");
-    game_over
-        .handle_key(VirtualKeyCode::KeyR, ElementState::Released)
-        .expect("client list owns the mnemonic release");
-    game_over
-        .handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Alt");
-    game_over
-        .process_gamepad_event_batch([
-            GamepadEvent::Axis {
-                slot: GamepadSlot::new(0),
-                axis: LegacyGamepadAxis::new(0, true),
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Right,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::GuiButton {
-                slot: GamepadSlot::new(0),
-                class: GuiButtonClass::Low,
-                state: ElementState::Pressed,
-            },
-        ])
-        .expect("client-list gamepad input cannot reach evaluation");
+    game_over.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    game_over.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    game_over.test_modifiers(ModifiersState::ALT);
+    game_over.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
+    game_over.test_key(VirtualKeyCode::KeyR, ElementState::Released);
+    game_over.test_modifiers(ModifiersState::empty());
+    game_over.test_gamepad_events([
+        GamepadEvent::Axis {
+            slot: GamepadSlot::new(0),
+            axis: LegacyGamepadAxis::new(0, true),
+            state: ElementState::Pressed,
+        },
+        GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Right,
+            state: ElementState::Pressed,
+        },
+        GamepadEvent::GuiButton {
+            slot: GamepadSlot::new(0),
+            class: GuiButtonClass::Low,
+            state: ElementState::Pressed,
+        },
+    ]);
     assert_eq!(
         game_over
             .game_over_dialog
@@ -6161,9 +5605,7 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     ));
     assert!(game_over.running_chat_text().is_none());
     assert!(game_over.runtime_client_list.is_some());
-    game_over
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("active client-list Escape closes only the client list");
+    game_over.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(game_over.runtime_client_list.is_none());
     assert!(game_over.game_over_dialog.is_some());
 
@@ -6178,19 +5620,15 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("push running modal");
-    message
-        .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("F4 opens below existing message dialog");
+        .test_value();
+    message.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(message.runtime_client_list.is_some());
     assert_eq!(message.message_dialogs.len(), 1);
 
     let mut ingame = new_running_sandbox_app();
     configure_runtime_network_role(&mut ingame, RuntimeNetworkRole::Host);
-    ingame.open_ingame_menu().expect("open in-game menu");
-    ingame
-        .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("F4 opens over in-game menu");
+    ingame.open_ingame_menu().test_value();
+    ingame.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(ingame.runtime_client_list.is_some());
     assert!(ingame.ingame_menu.is_some());
 }
@@ -6198,18 +5636,14 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
 #[test]
 fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
     let mut game_over = new_game_over_keyboard_app();
-    game_over
-        .handle_modifiers_changed(ModifiersState::SUPER)
-        .expect("set keyboard modifiers");
+    game_over.test_modifiers(ModifiersState::SUPER);
     let before_game_over = runtime_global_ui_snapshot(&game_over);
     for state in [
         ElementState::Pressed,
         ElementState::Pressed,
         ElementState::Released,
     ] {
-        game_over
-            .handle_key(VirtualKeyCode::Pause, state)
-            .expect("C4 disables Pause throughout round evaluation");
+        game_over.test_key(VirtualKeyCode::Pause, state);
         assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
         assert_eq!(
             game_over.offline_halt_count, 1,
@@ -6227,18 +5661,14 @@ fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("push running modal");
-    message
-        .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
-        .expect("Pause precedes an ordinary running modal");
+        .test_value();
+    message.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     assert_ne!(message.offline_halt_count, 0);
     assert_eq!(message.message_dialogs.len(), 1);
 
     let mut ingame = new_running_sandbox_app();
-    ingame.open_ingame_menu().expect("open in-game menu");
-    ingame
-        .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
-        .expect("Pause precedes the fullscreen in-game menu");
+    ingame.open_ingame_menu().test_value();
+    ingame.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     assert_ne!(ingame.offline_halt_count, 0);
     assert!(ingame.ingame_menu.is_some());
 }
@@ -6250,10 +5680,8 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
         ModifiersState::SUPER | ModifiersState::ALT,
     ] {
         let mut app = new_game_over_keyboard_app();
-        app.handle_modifiers_changed(modifiers)
-            .expect("set mnemonic modifiers");
-        app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-            .expect("Continue mnemonic precedes the runtime Alt+C owner");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
         assert!(app.game_over_dialog.is_none());
         assert_eq!(app.mode, AppMode::Running);
         assert!(app.running_chat_text().is_none());
@@ -6269,10 +5697,8 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
             ModifiersState::SUPER | ModifiersState::ALT,
         ] {
             let mut app = new_game_over_keyboard_app();
-            app.handle_modifiers_changed(modifiers)
-                .expect("set unmatched mnemonic modifiers");
-            app.handle_key(key, ElementState::Pressed)
-                .expect("exclusive evaluation swallows lower runtime globals");
+            app.test_modifiers(modifiers);
+            app.test_key(key, ElementState::Pressed);
             assert!(app.game_over_dialog.is_some());
             assert!(app.running_chat_text().is_none());
             assert!(!app.runtime_help_visible);
@@ -6284,18 +5710,11 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
 #[test]
 fn abort_confirmation_declines_confirms_and_restarts() {
     let mut declined = new_running_sandbox_app();
-    declined.update().expect("advance round before declining");
+    declined.test_update();
     let declined_frame = declined.engine.frame();
     assert!(declined_frame > 0);
-    let declined_scenario = declined
-        .active_scenario
-        .as_ref()
-        .expect("active sandbox scenario")
-        .identifier
-        .clone();
-    declined
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("open abort confirmation for decline");
+    let declined_scenario = declined.active_scenario.test_ref().identifier.clone();
+    declined.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     finish_abort_dialog(
         &mut declined,
         clonk_frontend::message_dialog::MessageDialogResult::No,
@@ -6313,9 +5732,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     assert_eq!(declined.engine.frame(), declined_frame);
 
     let mut confirmed = new_running_sandbox_app();
-    confirmed
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("open abort confirmation for Yes");
+    confirmed.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     finish_abort_dialog(
         &mut confirmed,
         clonk_frontend::message_dialog::MessageDialogResult::Yes,
@@ -6325,17 +5742,10 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     assert!(confirmed.ingame_menu.is_none());
 
     let mut restarted = new_running_sandbox_app();
-    restarted.update().expect("advance round before restarting");
+    restarted.test_update();
     assert!(restarted.engine.frame() > 0);
-    let scenario = restarted
-        .active_scenario
-        .as_ref()
-        .expect("active sandbox scenario")
-        .identifier
-        .clone();
-    restarted
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("open abort confirmation for restart");
+    let scenario = restarted.active_scenario.test_ref().identifier.clone();
+    restarted.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     finish_abort_dialog(
         &mut restarted,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
@@ -6357,10 +5767,8 @@ fn abort_confirmation_declines_confirms_and_restarts() {
 fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     let mut client = new_running_sandbox_app();
     client.engine.set_control_host(false);
-    client
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("open client abort confirmation");
-    let client_dialog = client.message_dialogs.last().expect("client abort dialog");
+    client.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    let client_dialog = client.message_dialogs.last().test_value();
     assert_eq!(
         client_dialog.state.buttons(),
         clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
@@ -6374,13 +5782,8 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     film_client.engine.set_control_host(false);
     set_test_scenario_head_flags(&mut film_client, 0, 2);
     let (_film_events, _film_commands) = install_running_network_stub(&mut film_client, 7, 0, 1);
-    film_client
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Film2 client opens abort confirmation");
-    let film_dialog = film_client
-        .message_dialogs
-        .last()
-        .expect("Film2 abort dialog");
+    film_client.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    let film_dialog = film_client.message_dialogs.last().test_value();
     assert_eq!(
         film_dialog.state.buttons(),
         clonk_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO
@@ -6404,7 +5807,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     let mut game_over = new_game_over_keyboard_app();
     game_over
         .apply_ingame_menu_action(MenuAction::Abort)
-        .expect("suppressed abort request is non-fatal");
+        .test_value();
     assert!(game_over.game_over_dialog.is_some());
     assert!(game_over.message_dialogs.is_empty());
     assert!(matches!(game_over.mode, AppMode::Running));
@@ -6420,26 +5823,20 @@ fn modified_escape_does_not_match_the_abort_binding() {
         ModifiersState::SHIFT,
         ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT,
     ] {
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("modified Escape has no default C++ binding");
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .expect("release modified Escape");
+        app.test_modifiers(modifiers);
+        app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Escape, ElementState::Released);
         assert!(app.ingame_menu.is_none());
         assert!(app.object_menu.is_none());
         assert!(app.status_text.is_empty());
     }
-    app.handle_modifiers_changed(ModifiersState::SUPER)
-        .expect("set keyboard modifiers");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
+    app.test_modifiers(ModifiersState::SUPER);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::AbortGame { .. }
     )));
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("set keyboard modifiers");
+    app.test_modifiers(ModifiersState::empty());
 }
 
 #[test]
@@ -6539,7 +5936,7 @@ fn set_next_mission_omitted_labels_use_active_runtime_resources() {
                 },
                 ScriptControlPolicy::live(false),
             )
-            .expect("SetNextMission executes");
+            .test_value();
     };
 
     // Omitted arguments take the active language table.
@@ -6579,29 +5976,29 @@ fn next_mission_action_launches_the_catalog_target() {
     // C4GameOverDlg's Next button passes Game.NextMission through
     // C4Application::SetNextMission/QuitGame and starts that scenario
     // (C4GameOverDlg.cpp:335-382; C4Application.cpp:373-399).
-    let fixture = tempdir().expect("next-mission fixture");
-    let user_data = tempdir().expect("isolated user data");
+    let fixture = tempdir();
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     configure_test_startup_participant(&paths, user_data.path());
     let mut app = new_menu_app_with_paths(320, 200, &paths);
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start sandbox scenario");
+        .test_value();
     wait_for_running(&mut app);
     let target_path = fixture.path().join("Tutorial02.c4s");
     let carried_definition = fixture.path().join("Carry.c4d");
-    fs::create_dir_all(&target_path).expect("target scenario");
-    fs::create_dir_all(&carried_definition).expect("carried definition");
+    fs::create_dir_all(&target_path).test_value();
+    fs::create_dir_all(&carried_definition).test_value();
     fs::write(
         target_path.join("Scenario.txt"),
         "[Head]\nTitle=The First Hut\n",
     )
-    .expect("target Scenario.txt");
+    .test_value();
     fs::write(
         carried_definition.join("DefCore.txt"),
         "[DefCore]\nid=CARY\nName=Carry\nCategory=1\n",
     )
-    .expect("carried DefCore.txt");
-    fs::write(carried_definition.join("Script.c"), "// carried\n").expect("carried Script.c");
+    .test_value();
+    fs::write(carried_definition.join("Script.c"), "// carried\n").test_value();
     write_test_definition_graphics(&carried_definition);
     let mut target = FrontendScenario::fallback();
     target.identifier = "Tutorial.c4f/Tutorial02.c4s".to_string();
@@ -6620,10 +6017,10 @@ fn next_mission_action_launches_the_catalog_target() {
         text: "Next tutorial".to_string(),
         description: "Continue learning".to_string(),
     };
-    app.engine.restore_state(&state).expect("state restores");
+    app.engine.restore_state(&state).test_value();
 
     app.handle_game_over_action(GameOverAction::NextMission)
-        .expect("next mission starts");
+        .test_value();
     wait_for_running(&mut app);
 
     assert_eq!(
@@ -6655,9 +6052,7 @@ fn game_over_restart_and_next_mission_follow_control_host_film_policy() {
         text: "Next tutorial".into(),
         description: "Continue learning".into(),
     };
-    app.engine
-        .restore_state(&state)
-        .expect("restore next mission");
+    app.engine.restore_state(&state).test_value();
 
     for (control_host, film, width, expected) in [
         (
@@ -6716,11 +6111,10 @@ fn game_over_restart_and_next_mission_follow_control_host_film_policy() {
         ),
     ] {
         app.dismiss_game_over_dialog();
-        app.resize(width, 720).expect("resize evaluation fixture");
+        app.resize(width, 720).test_value();
         set_test_scenario_head_flags(&mut app, 0, film);
         app.engine.set_control_host(control_host);
-        app.finish_game_over_after_league()
-            .expect("construct evaluation dialog");
+        app.finish_game_over_after_league().test_value();
         assert_eq!(
             app.game_over_dialog
                 .as_ref()
@@ -6841,10 +6235,7 @@ fn evaluation_dialog_joins_frozen_results_by_player_info_id() {
         goal.picture.as_ref().map(|image| image.pixels().to_vec()),
         Some(vec![12, 34, 56, 255])
     );
-    let player = dialog
-        .evaluation()
-        .player_by_info_id(41)
-        .expect("result joins the profile ID");
+    let player = dialog.evaluation().player_by_info_id(41).test_value();
     assert_eq!(player.name, "Player");
     assert!(player.won, "won comes from frozen player info, not Active");
     assert_eq!(player.color_dw, 0x00e8_0000);
@@ -6875,10 +6266,7 @@ fn evaluation_dialog_joins_frozen_results_by_player_info_id() {
         |_player_info_id| None,
         false,
     );
-    let player = hidden
-        .evaluation()
-        .player_by_info_id(41)
-        .expect("hidden result still joins the profile");
+    let player = hidden.evaluation().player_by_info_id(41).test_value();
     assert_eq!(
         (player.score_old, player.score_new),
         (-1, None),
@@ -6976,7 +6364,7 @@ fn evaluation_dialog_sources_global_text_and_fixed_team_context() {
         .assets
         .clonk_fonts
         .clone()
-        .expect("classic fonts");
+        .test_value();
     let split_layout = dialog.classic_evaluation_layout(1024, 600, &fonts);
     assert_eq!(split_layout.player_lists.len(), 2);
     assert_eq!(

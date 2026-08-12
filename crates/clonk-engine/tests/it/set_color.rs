@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use clonk_engine::{Engine, SpawnConfig};
 use clonk_script::Value;
 
@@ -15,15 +16,9 @@ func ApplyWithNilTarget(int color)
 }
 "#;
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("SCLR", "SetColor probe", script)
-        .expect("SetColor probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("SCLR"))
-        .expect("SetColor probe spawns");
-    let probe_index = engine
-        .find_object_index(probe)
-        .expect("SetColor probe remains live");
+    engine.register_test_script_definition("SCLR", "SetColor probe", script);
+    let probe = engine.spawn_test_object(SpawnConfig::new("SCLR"));
+    let probe_index = engine.test_object_index(probe);
 
     for (color_index, expected) in [
         0x0000e8, 0xf40000, 0x00c800, 0xfcf41c, 0xdc9850, 0x784830, 0xb05000, 0xfcb490, 0x747474,
@@ -33,9 +28,11 @@ func ApplyWithNilTarget(int color)
     .enumerate()
     {
         assert_eq!(
-            engine
-                .call_object_function(probe_index, "Apply", vec![Value::Int(color_index as i32)])
-                .expect("SetColor executes"),
+            engine.call_test_object_function(
+                probe_index,
+                "Apply",
+                vec![Value::Int(color_index as i32)]
+            ),
             Value::Array(vec![Value::Int(1), Value::Int(expected)]),
             "legacy color index {color_index}"
         );
@@ -43,27 +40,17 @@ func ApplyWithNilTarget(int color)
 
     for invalid in [-1, 12, i32::MAX] {
         assert_eq!(
-            engine
-                .call_object_function(probe_index, "Apply", vec![Value::Int(invalid)])
-                .expect("out-of-range SetColor executes"),
+            engine.call_test_object_function(probe_index, "Apply", vec![Value::Int(invalid)]),
             Value::Array(vec![Value::Int(0), Value::Int(0xbc00c0)]),
             "out-of-range index {invalid} leaves the previous color unchanged"
         );
     }
 
     assert_eq!(
-        engine
-            .call_object_function(probe_index, "ApplyWithNilTarget", vec![Value::Int(1)],)
-            .expect("nil target falls back to the calling object"),
+        engine.call_test_object_function(probe_index, "ApplyWithNilTarget", vec![Value::Int(1)],),
         Value::Array(vec![Value::Int(1), Value::Int(0xf40000)])
     );
-    assert_eq!(
-        engine
-            .object_snapshot(probe)
-            .expect("SetColor probe remains live")
-            .color,
-        0xf40000
-    );
+    assert_eq!(engine.test_object_snapshot(probe).color, 0xf40000);
 }
 
 #[test]
@@ -75,41 +62,19 @@ func ApplyTo(int color, object target)
 }
 "#;
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("SCLR", "SetColor probe", script)
-        .expect("SetColor probe registers");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("SCLR"))
-        .expect("SetColor caller spawns");
-    let target = engine
-        .spawn_object(SpawnConfig::new("SCLR"))
-        .expect("SetColor target spawns");
-    let caller_index = engine
-        .find_object_index(caller)
-        .expect("SetColor caller remains live");
+    engine.register_test_script_definition("SCLR", "SetColor probe", script);
+    let caller = engine.spawn_test_object(SpawnConfig::new("SCLR"));
+    let target = engine.spawn_test_object(SpawnConfig::new("SCLR"));
+    let caller_index = engine.test_object_index(caller);
 
     assert_eq!(
-        engine
-            .call_object_function(
-                caller_index,
-                "ApplyTo",
-                vec![Value::Int(3), Value::Object(target.as_u64())],
-            )
-            .expect("explicit-target SetColor executes"),
+        engine.call_test_object_function(
+            caller_index,
+            "ApplyTo",
+            vec![Value::Int(3), Value::Object(target.as_u64())],
+        ),
         Value::Array(vec![Value::Int(1), Value::Int(0)])
     );
-    assert_eq!(
-        engine
-            .object_snapshot(target)
-            .expect("SetColor target remains live")
-            .color,
-        0xfcf41c
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(caller)
-            .expect("SetColor caller remains live")
-            .color,
-        0
-    );
+    assert_eq!(engine.test_object_snapshot(target).color, 0xfcf41c);
+    assert_eq!(engine.test_object_snapshot(caller).color, 0);
 }

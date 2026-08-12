@@ -70,9 +70,7 @@ where
     );
 
     let playback = Playback::from_recording(baseline);
-    playback
-        .validate_sequence(actual.into_frames())
-        .expect("engine output should match baseline");
+    crate::support::TestValueExt::test_value(playback.validate_sequence(actual.into_frames()));
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use clonk_engine::{Definition, Engine, ObjectId, SpawnConfig};
 use clonk_script::Value;
 
@@ -66,38 +67,26 @@ fn caller_source(strict: bool) -> String {
 fn fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
     let mut engine = Engine::new();
 
-    let mut target = Definition::from_script("TARG", "Created target", TARGET_SCRIPT)
-        .expect("target script compiles");
+    let mut target = crate::support::TestValueExt::test_value(Definition::from_script(
+        "TARG",
+        "Created target",
+        TARGET_SCRIPT,
+    ));
     target.set_constructable(true);
-    engine
-        .register_definition(target)
-        .expect("target definition registers");
-    engine
-        .register_script_definition("STRC", "Strict creator", &caller_source(true))
-        .expect("strict caller registers");
-    engine
-        .register_script_definition("NSTR", "Nonstrict creator", &caller_source(false))
-        .expect("nonstrict caller registers");
-    engine
-        .register_definition(
-            Definition::from_script(
-                "RECV",
-                "Arrow receiver",
-                "#strict 3\npublic func CaptureOwner(owner) { return 1; }\n",
-            )
-            .expect("receiver script compiles"),
-        )
-        .expect("receiver registers");
+    engine.register_test_definition(target);
+    engine.register_test_script_definition("STRC", "Strict creator", &caller_source(true));
+    engine.register_test_script_definition("NSTR", "Nonstrict creator", &caller_source(false));
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "RECV",
+            "Arrow receiver",
+            "#strict 3\npublic func CaptureOwner(owner) { return 1; }\n",
+        ),
+    ));
 
-    let strict = engine
-        .spawn_object(SpawnConfig::new("STRC").with_owner(CALLER_OWNER))
-        .expect("strict caller spawns");
-    let nonstrict = engine
-        .spawn_object(SpawnConfig::new("NSTR").with_owner(CALLER_OWNER))
-        .expect("nonstrict caller spawns");
-    let receiver = engine
-        .spawn_object(SpawnConfig::new("RECV").with_owner(RECEIVER_OWNER))
-        .expect("arrow receiver spawns");
+    let strict = engine.spawn_test_object(SpawnConfig::new("STRC").with_owner(CALLER_OWNER));
+    let nonstrict = engine.spawn_test_object(SpawnConfig::new("NSTR").with_owner(CALLER_OWNER));
+    let receiver = engine.spawn_test_object(SpawnConfig::new("RECV").with_owner(RECEIVER_OWNER));
     (engine, strict, nonstrict, receiver)
 }
 
@@ -113,8 +102,7 @@ fn call(engine: &mut Engine, caller: ObjectId, function: &str, args: Vec<Value>)
 fn assert_observed_owner(engine: &Engine, caller: ObjectId, expected: i32) {
     assert_eq!(
         engine
-            .object_snapshot(caller)
-            .expect("caller remains active")
+            .test_object_snapshot(caller)
             .local_vars
             .get("observed"),
         Some(&Value::Int(expected))
@@ -126,10 +114,7 @@ fn assert_created_owner(engine: &Engine, value: Value, expected: i32) {
         panic!("creation should return an object, got {value:?}");
     };
     assert_eq!(
-        engine
-            .object_snapshot(ObjectId::new(raw_id))
-            .expect("created object survives")
-            .owner,
+        engine.test_object_snapshot(ObjectId::new(raw_id)).owner,
         expected
     );
 }

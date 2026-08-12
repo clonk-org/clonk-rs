@@ -82,6 +82,81 @@ mod tests {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
     }
 
+    #[track_caller]
+    fn test_tempdir() -> tempfile::TempDir {
+        tempdir().expect("test directory builds")
+    }
+
+    #[track_caller]
+    fn write_test_file(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
+        std::fs::write(path, contents).expect("test file writes");
+    }
+
+    fn test_resolver(roots: Vec<PathBuf>) -> FileSystemResolver {
+        FileSystemResolver { roots }
+    }
+
+    trait TestValueExt<T> {
+        fn test_value(self) -> T;
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            self.expect("scenario-test value exists")
+        }
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            self.expect("scenario-test operation succeeds")
+        }
+    }
+
+    #[track_caller]
+    fn load_test_scenario<R: LegacyDefinitionResolver>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+    ) -> Scenario {
+        Scenario::load_from_path_with(path, resolver).expect("test scenario loads")
+    }
+
+    #[track_caller]
+    fn apply_test_scenario(scenario: &Scenario, engine: &mut Engine) -> Vec<ObjectId> {
+        scenario.apply(engine).expect("test scenario applies")
+    }
+
+    trait TestEngineExt {
+        fn register_test_definition(&mut self, definition: Definition);
+        fn register_test_player(&mut self, player: crate::PlayerConfig);
+        fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
+        fn test_object_index(&self, object: ObjectId) -> usize;
+    }
+
+    impl TestEngineExt for Engine {
+        #[track_caller]
+        fn register_test_definition(&mut self, definition: Definition) {
+            self.register_definition(definition)
+                .expect("definition registers");
+        }
+
+        #[track_caller]
+        fn register_test_player(&mut self, player: crate::PlayerConfig) {
+            self.register_player(player).expect("player registers");
+        }
+
+        #[track_caller]
+        fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
+            self.spawn_object(config).expect("object spawns")
+        }
+
+        #[track_caller]
+        fn test_object_index(&self, object: ObjectId) -> usize {
+            self.find_object_index(object).expect("object exists")
+        }
+    }
+
     #[test]
     fn initial_network_scenario_matches_pristine_cpp_tutorial01_differential() {
         // C4GameSave::SaveCore + C4GameSaveNetwork::AdjustCore and

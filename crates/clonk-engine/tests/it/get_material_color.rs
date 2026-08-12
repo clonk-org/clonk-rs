@@ -8,41 +8,37 @@ pub(super) fn get_material_color_reads_earth_palette_and_system_rgb_wrapper(
 ) {
     let mut engine = prepared.instantiate();
     assert!(engine.debug_global_has_function("GetMaterialColorX"));
-    engine
-        .register_definition(
-            Definition::from_script(
-                "MCOL",
-                "Material color probe",
-                r#"#strict
-local result;
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_script(
+            "MCOL",
+            "Material color probe",
+            r#"#strict
+                local result;
 
-public func Probe()
-{
-    var earth = Material("Earth");
-    var ore = Material("Ore");
-    var brick = Material("Brick");
-    result = [
-        GetMaterialColor(earth, 0, 0),
-        GetMaterialColor(earth, 0, 1),
-        GetMaterialColor(earth, 0, 2),
-        GetMaterialColor(-1, 0, 0),
-        GetMaterialColorX(earth, 0),
-        GetMaterialColor(ore, 0, 0),
-        GetMaterialColor(brick, 1, 0),
-        GetMaterialColor(earth, 3, 0),
-        GetMaterialColor(earth, 0, 3)
-    ];
-    return(result);
-}
-"#,
-            )
-            .expect("the material color probe compiles"),
-        )
-        .expect("the material color probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("MCOL"))
-        .expect("the material color probe spawns");
-    let index = engine.find_object_index(probe).expect("the probe exists");
+                public func Probe()
+                {
+                var earth = Material("Earth");
+                var ore = Material("Ore");
+                var brick = Material("Brick");
+                result = [
+                    GetMaterialColor(earth, 0, 0),
+                    GetMaterialColor(earth, 0, 1),
+                    GetMaterialColor(earth, 0, 2),
+                    GetMaterialColor(-1, 0, 0),
+                    GetMaterialColorX(earth, 0),
+                    GetMaterialColor(ore, 0, 0),
+                    GetMaterialColor(brick, 1, 0),
+                    GetMaterialColor(earth, 3, 0),
+                    GetMaterialColor(earth, 0, 3)
+                ];
+                return(result);
+                }
+                "#,
+        )),
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("MCOL")));
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(probe));
 
     let expected = Value::Array(vec![
         Value::Int(127),

@@ -10,10 +10,9 @@
         // NO_OWNER (C4Game.cpp:2980-3022).
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        )
-        .expect("earth material parses");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth material exists");
+        let earth = materials.id_of("Earth").test_value();
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
         landscape.set_world_height(300);
         let definitions = HashMap::from([(
@@ -127,20 +126,18 @@ public func SeedFull()
 "#;
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        )
-        .expect("earth material parses");
+        ).test_value();
         let mut engine = crate::Engine::with_seed(17);
         engine.configure_materials_from_library(&library);
         let earth = engine
             .materials()
-            .id_of("Earth")
-            .expect("earth material exists");
+            .id_of("Earth").test_value();
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
         landscape.set_world_height(300);
         engine.set_landscape(landscape);
 
         let mut tree =
-            crate::Definition::from_script("TREE", "Tree", script).expect("tree script compiles");
+            test_definition("TREE", "Tree", script);
         tree.set_category(crate::CATEGORY_STATIC_BACK);
         tree.set_shape_rect(Some(DefinitionRect::new(-20, -28, 40, 56)));
         tree.set_placement(0);
@@ -150,20 +147,15 @@ public func SeedFull()
             id: "ROCK".to_owned(),
             count: 100,
         }]);
-        engine.register_definition(tree).expect("tree registers");
-        let caller = engine
-            .spawn_object(
-                SpawnConfig::new("TREE")
-                    .with_position(Vector2::new(200, 160))
-                    .with_category(crate::CATEGORY_STATIC_BACK),
-            )
-            .expect("caller tree spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine.register_test_definition(tree);
+        let caller = engine.spawn_test_object(SpawnConfig::new("TREE")
+            .with_position(Vector2::new(200, 160))
+            .with_category(crate::CATEGORY_STATIC_BACK));
+        let caller_index = engine.find_object_index(caller).test_value();
         let value = engine
-            .call_object_function(caller_index, "Seed", Vec::new())
-            .expect("Seed runs");
-        let child_id = object_id_from_value(&value).expect("Seed returns child");
-        let child_index = engine.find_object_index(child_id).expect("child exists");
+            .call_object_function(caller_index, "Seed", Vec::new()).test_value();
+        let child_id = object_id_from_value(&value).test_value();
+        let child_index = engine.find_object_index(child_id).test_value();
         let child = &engine.objects[child_index].state;
 
         assert_eq!(
@@ -178,7 +170,7 @@ public func SeedFull()
         assert_eq!(child.local_vars.get("iCompletion"), Some(&Value::Nil));
         assert_eq!(child.local_vars.get("iInitialized"), Some(&Value::Nil));
         assert_eq!(child.components.get("ROCK"), Some(&1));
-        let caller_index = engine.find_object_index(caller).expect("caller remains");
+        let caller_index = engine.find_object_index(caller).test_value();
         assert_eq!(
             engine.objects[caller_index]
                 .state
@@ -189,12 +181,10 @@ public func SeedFull()
         );
 
         let value = engine
-            .call_object_function(caller_index, "SeedFull", Vec::new())
-            .expect("SeedFull runs");
-        let full_child = object_id_from_value(&value).expect("SeedFull returns child");
+            .call_object_function(caller_index, "SeedFull", Vec::new()).test_value();
+        let full_child = object_id_from_value(&value).test_value();
         let full_index = engine
-            .find_object_index(full_child)
-            .expect("full child exists");
+            .find_object_index(full_child).test_value();
         let full = &engine.objects[full_index].state;
         assert_eq!(full.construction, FULL_CON);
         assert_eq!(
@@ -226,11 +216,10 @@ public func SeedFull()
             Name=Water
             Density=25
             "#,
-        )
-        .expect("materials parse");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let rock = materials.id_of("Rock").expect("rock exists");
-        let water = materials.id_of("Water").expect("water exists");
+        let rock = materials.id_of("Rock").test_value();
+        let water = materials.id_of("Water").test_value();
         let mut landscape = Landscape::flat_with_material(100, 200, Some(rock));
         landscape.set_world_height(300);
         for x in 20..80 {
@@ -286,10 +275,9 @@ public func SeedFull()
         // (C4Game.cpp:2988-2992), before the placement-point draws.
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        )
-        .expect("earth material parses");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth exists");
+        let earth = materials.id_of("Earth").test_value();
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
         landscape.set_world_height(300);
         let definitions = HashMap::from([(
@@ -377,7 +365,7 @@ public func SeedFull()
         let mut densities = vec![0; 2];
         densities[1] = 100;
         let mut landscape =
-            Landscape::new(WIDTH, vec![0; WIDTH as usize]).expect("Tutorial06 cave fixture builds");
+            Landscape::new(WIDTH, vec![0; WIDTH as usize]).test_value();
         landscape.set_world_height(HEIGHT as i32);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             WIDTH,
@@ -467,7 +455,7 @@ public func SeedFull()
         ];
         let (result, outcome) =
             with_effect_context(None, &[], world, 1, || create_construction(&args));
-        let value = result.expect("CreateConstruction succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(ObjectId::new(1)));
         assert_eq!(outcome.spawns.len(), 1);
         let spawn = &outcome.spawns[0];
@@ -480,8 +468,7 @@ public func SeedFull()
             .other_objects
             .iter()
             .find(|nested| nested.object_id == ObjectId::new(1))
-            .and_then(|nested| nested.update.as_ref())
-            .expect("initial DoCon stages the construction components");
+            .and_then(|nested| nested.update.as_ref()).test_value();
         assert_eq!(
             component_update
                 .components
@@ -550,10 +537,9 @@ public func SeedFull()
             Density=100
             DigFree=0
             "#,
-        )
-        .expect("materials parse");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let mut landscape = Landscape::new(40, vec![0; 40]).expect("landscape builds");
+        let mut landscape = Landscape::new(40, vec![0; 40]).test_value();
         landscape.set_world_height(40);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             40,
@@ -567,47 +553,27 @@ public func SeedFull()
         let mut engine = crate::Engine::with_seed(5);
         engine.set_materials(materials);
         engine.set_landscape(landscape);
-        let mut structure = crate::Definition::from_script(
-            "HUT1",
-            "Hut",
-            r#"#strict
-local saw_clear_footprint, saw_granite_basement;
-protected func Construction()
-{
-    saw_clear_footprint = GBackSky(0, -4);
-    saw_granite_basement = GetMaterial(0, 0) == Material("Granite");
-}
-"#,
-        )
-        .expect("structure script compiles");
+        let mut structure = test_definition("HUT1", "Hut", r#"#strict
+        local saw_clear_footprint, saw_granite_basement;
+        protected func Construction()
+        {
+            saw_clear_footprint = GBackSky(0, -4);
+            saw_granite_basement = GetMaterial(0, 0) == Material("Granite");
+        }
+        "#);
         structure.set_category(crate::CATEGORY_STRUCTURE);
         structure.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 8)));
         structure.set_basement(1);
-        engine
-            .register_definition(structure)
-            .expect("structure registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script(
-                    "CALL",
-                    "Builder",
-                    "#strict\npublic func Build() { return CreateConstruction(HUT1, 0, 0, -1, 100, true, false); }",
-                )
-                .expect("builder script compiles"),
-            )
-            .expect("builder registers");
-        let builder = engine
-            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(20, 30)))
-            .expect("builder spawns");
-        let builder_index = engine.find_object_index(builder).expect("builder exists");
+        engine.register_test_definition(structure);
+        engine.register_test_definition(test_definition("CALL", "Builder", "#strict\npublic func Build() { return CreateConstruction(HUT1, 0, 0, -1, 100, true, false); }"));
+        let builder = engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(20, 30)));
+        let builder_index = engine.find_object_index(builder).test_value();
 
         let structure = engine
-            .call_object_function(builder_index, "Build", Vec::new())
-            .expect("construction succeeds");
-        let structure = object_id_from_value(&structure).expect("structure returned");
+            .call_object_function(builder_index, "Build", Vec::new()).test_value();
+        let structure = object_id_from_value(&structure).test_value();
         let structure = engine
-            .object_snapshot(structure)
-            .expect("structure survives");
+            .object_snapshot(structure).test_value();
 
         assert_eq!(
             structure.local_vars.get("saw_clear_footprint"),
@@ -716,7 +682,7 @@ protected func Construction()
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || create_construction(&args));
-        let value = result.expect("CreateConstruction completes");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
         assert!(outcome.spawns.is_empty());
         assert_eq!(outcome.next_object_id, 1);
@@ -734,7 +700,7 @@ protected func Construction()
             Value::Int(60),
         ];
         let (result, outcome) = with_object_host_context(|| create_particle(&args));
-        let value = result.expect("CreateParticle succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
@@ -768,7 +734,7 @@ protected func Construction()
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || create_particle(&args));
-        let value = result.expect("CreateParticle succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
@@ -795,7 +761,7 @@ protected func Construction()
             object_reference_value(ObjectId::new(99)),
         ];
         let (result, outcome) = with_object_host_context(|| create_particle(&args));
-        let value = result.expect("CreateParticle handles missing object");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.particles.is_empty());
     }
@@ -814,39 +780,22 @@ protected func Construction()
         // C4Game.cpp:3732-3744). Runtime stMain insertion puts the newest
         // same-definition object first in that FORWARD master-list walk
         // (C4ObjectList.cpp:110-180).
-        let definition = crate::Definition::from_script("HUT1", "Hut", "#strict\n")
-            .expect("definition compiles");
+        let definition = test_definition("HUT1", "Hut", "#strict\n");
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+        engine.register_test_definition(definition);
 
-        let older = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1"))
-            .expect("older hut spawns");
-        let newer = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1"))
-            .expect("newer hut spawns");
-        let owned_non_base = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1").with_owner(0))
-            .expect("owned non-base hut spawns");
-        let deleted_base = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1"))
-            .expect("deleted base hut spawns");
-        let inactive_base = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1"))
-            .expect("inactive base hut spawns");
-        let older_index = engine.find_object_index(older).expect("older exists");
-        let newer_index = engine.find_object_index(newer).expect("newer exists");
+        let older = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
+        let newer = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
+        let owned_non_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT1").with_owner(0));
+        let deleted_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
+        let inactive_base = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
+        let older_index = engine.find_object_index(older).test_value();
+        let newer_index = engine.find_object_index(newer).test_value();
         let deleted_index = engine
-            .find_object_index(deleted_base)
-            .expect("deleted base exists");
+            .find_object_index(deleted_base).test_value();
         let inactive_index = engine
-            .find_object_index(inactive_base)
-            .expect("inactive base exists");
+            .find_object_index(inactive_base).test_value();
         engine.objects[older_index].state.base = 0;
         engine.objects[newer_index].state.base = 0;
         engine.objects[deleted_index].state.base = 0;
@@ -861,8 +810,7 @@ protected func Construction()
         let world = engine.host_world_context();
         let call = |args: Vec<Value>| {
             with_object_host_context_with_world(world.clone(), || find_base(&args))
-                .0
-                .expect("FindBase succeeds")
+                .0.test_value()
         };
         let first = call(vec![Value::Int(0)]);
         let second = call(vec![Value::Int(0), Value::Int(1)]);
@@ -900,19 +848,12 @@ protected func Construction()
         // FnGetBase returns pObj->Base and falls back to the calling object;
         // without either object it returns NO_OWNER (C4Script.cpp:1406-1410).
         // Tutorial01 Script120 calls this global form with FindObject(HUT2).
-        let definition = crate::Definition::from_script("HUT1", "Hut", "#strict\n")
-            .expect("definition compiles");
+        let definition = test_definition("HUT1", "Hut", "#strict\n");
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let hut = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1"))
-            .expect("hut spawns");
-        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+        engine.register_test_definition(definition);
+        let hut = engine.spawn_test_object(crate::SpawnConfig::new("HUT1"));
+        let hut_index = engine.find_object_index(hut).test_value();
         engine.objects[hut_index].state.base = 0;
 
         let world = engine.host_world_context();
@@ -942,32 +883,21 @@ protected func Construction()
         // to reconstruct the same master list (C4ObjectList.cpp:507-529).
         // Therefore a save/restore must preserve both Base and the forward
         // FindBase traversal order (C4Game.cpp:3732-3744).
-        let definition = crate::Definition::from_script("HUT1", "Hut", "#strict\n")
-            .expect("definition compiles");
+        let definition = test_definition("HUT1", "Hut", "#strict\n");
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("player registers");
-        engine
-            .register_definition(definition.clone())
-            .expect("definition registers");
-        let older = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1").with_loaded(true))
-            .expect("older loaded hut spawns");
-        let newer = engine
-            .spawn_object(crate::SpawnConfig::new("HUT1").with_loaded(true))
-            .expect("newer loaded hut spawns");
-        let older_index = engine.find_object_index(older).expect("older exists");
-        let newer_index = engine.find_object_index(newer).expect("newer exists");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+        engine.register_test_definition(definition.clone());
+        let older = engine.spawn_test_object(crate::SpawnConfig::new("HUT1").with_loaded(true));
+        let newer = engine.spawn_test_object(crate::SpawnConfig::new("HUT1").with_loaded(true));
+        let older_index = engine.find_object_index(older).test_value();
+        let newer_index = engine.find_object_index(newer).test_value();
         engine.objects[older_index].state.base = 0;
         engine.objects[newer_index].state.base = 0;
 
         let state = engine.capture_state();
         let mut restored = crate::Engine::with_seed(0);
-        restored
-            .register_definition(definition)
-            .expect("definition registers for restore");
-        restored.restore_state(&state).expect("state restores");
+        restored.register_test_definition(definition);
+        restored.restore_state(&state).test_value();
         let world = restored.host_world_context();
         let (first, _) = with_object_host_context_with_world(world, || find_base(&[Value::Int(0)]));
 
@@ -998,7 +928,7 @@ protected func Construction()
             ];
             let (result, _) =
                 with_object_host_context_with_world(world.clone(), || find_objects2(&args));
-            let Value::Array(values) = result.expect("FindObjects succeeds") else {
+            let Value::Array(values) = result.test_value() else {
                 panic!("FindObjects should return an array");
             };
             assert_eq!(
@@ -1038,8 +968,7 @@ protected func Construction()
                         Find_ID(ROCK), Find_ID(ROCK), Find_Category(2));
                 }
                 "#,
-            )
-            .expect("criterion conversion probes compile");
+            ).test_value();
 
         let call = |function: &str| {
             with_object_host_context_with_world(world.clone(), || {
@@ -1091,33 +1020,19 @@ protected func Construction()
         // C4FindObject::Check nodes all read the same C4Object pointer; only
         // C4FindObjectFunc may mutate it between sibling checks
         // (oracle-src-pinned src/C4FindObject.cpp:390-679).
-        let target = crate::Definition::from_script("ROCK", "Rock", "#strict")
-            .expect("target definition compiles");
-        let caller = crate::Definition::from_script(
-            "CALL",
-            "Caller",
-            r#"#strict
-public func Probe()
-{
-    return ObjectCount2([20, ROCK], [10, 0, 0, 30, 40], [40, 0]);
-}
-"#,
-        )
-        .expect("caller definition compiles");
+        let target = test_definition("ROCK", "Rock", "#strict");
+        let caller = test_definition("CALL", "Caller", r#"#strict
+        public func Probe()
+        {
+            return ObjectCount2([20, ROCK], [10, 0, 0, 30, 40], [40, 0]);
+        }
+        "#);
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(target)
-            .expect("target definition registers");
-        engine
-            .register_definition(caller)
-            .expect("caller definition registers");
-        engine
-            .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(10, 20)))
-            .expect("target spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let caller = engine.find_object_index(caller).expect("caller exists");
+        engine.register_test_definition(target);
+        engine.register_test_definition(caller);
+        engine.spawn_test_object(SpawnConfig::new("ROCK").with_position(Vector2::new(10, 20)));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let caller = engine.find_object_index(caller).test_value();
 
         FIND_CONDITION_OBJECT_REFRESHES.with(|count| count.set(0));
         assert_eq!(
@@ -1138,48 +1053,27 @@ public func Probe()
         // C4ObjectList::Contents changes only through the native list-link
         // operations; unrelated nested calls do not scan all live objects
         // (oracle-src-pinned src/C4Object.cpp:1529-1605).
-        let stippel = crate::Definition::from_script(
-            "STIP",
-            "Stippel",
-            r#"#strict
-protected func Initialize() { GameCallEx("ReportCreation", this); }
-"#,
-        )
-        .expect("stippel definition compiles");
-        let mut rule = crate::Definition::from_script(
-            "RULE",
-            "Rule",
-            r#"#strict
-public func ReportCreation(object created) { return !!created; }
-"#,
-        )
-        .expect("rule definition compiles");
+        let stippel = test_definition("STIP", "Stippel", r#"#strict
+        protected func Initialize() { GameCallEx("ReportCreation", this); }
+        "#);
+        let mut rule = test_definition("RULE", "Rule", r#"#strict
+        public func ReportCreation(object created) { return !!created; }
+        "#);
         rule.set_category(1 << 19);
-        let caller = crate::Definition::from_script(
-            "CALL",
-            "Caller",
-            r#"#strict
-public func Trigger()
-{
-    for (var i = 0; i < 8; i++) CreateObject(STIP);
-    return ObjectCount2([20, STIP]);
-}
-"#,
-        )
-        .expect("caller definition compiles");
+        let caller = test_definition("CALL", "Caller", r#"#strict
+        public func Trigger()
+        {
+            for (var i = 0; i < 8; i++) CreateObject(STIP);
+            return ObjectCount2([20, STIP]);
+        }
+        "#);
         let mut engine = crate::Engine::with_seed(0);
         for definition in [stippel, rule, caller] {
-            engine
-                .register_definition(definition)
-                .expect("definition registers");
+            engine.register_test_definition(definition);
         }
-        engine
-            .spawn_object(SpawnConfig::new("RULE"))
-            .expect("rule spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL"))
-            .expect("caller spawns");
-        let caller = engine.find_object_index(caller).expect("caller exists");
+        engine.spawn_test_object(SpawnConfig::new("RULE"));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+        let caller = engine.find_object_index(caller).test_value();
 
         CONTENTS_SCOPE_GROWTH_VISITS.with(|count| count.set(0));
         assert_eq!(
@@ -1356,7 +1250,7 @@ public func Trigger()
         objects: Vec<HostWorldObject>,
         definitions: HashMap<DefinitionId, DefinitionMetadata>,
     ) -> HostWorldContext {
-        let landscape = Landscape::new(150, vec![120; 150]).expect("landscape builds");
+        let landscape = Landscape::new(150, vec![120; 150]).test_value();
         HostWorldContext::with_landscape(
             objects,
             Some(landscape),
@@ -1417,26 +1311,14 @@ public func Trigger()
 
         let mut engine = crate::Engine::with_seed(0);
         engine
-            .set_landscape(Landscape::new(200, vec![120; 200]).expect("sectored landscape builds"));
-        let mut target_definition = crate::Definition::from_script("TARG", "Target", target_script)
-            .expect("target definition compiles");
+            .set_landscape(Landscape::new(200, vec![120; 200]).test_value());
+        let mut target_definition = test_definition("TARG", "Target", target_script);
         target_definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
-        engine
-            .register_definition(target_definition)
-            .expect("target definition registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("CALL", "Caller", caller_script)
-                    .expect("caller definition compiles"),
-            )
-            .expect("caller definition registers");
-        let target = engine
-            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(75, 25)))
-            .expect("target spawns");
-        let caller = engine
-            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 100)))
-            .expect("caller spawns");
-        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine.register_test_definition(target_definition);
+        engine.register_test_definition(test_definition("CALL", "Caller", caller_script));
+        let target = engine.spawn_test_object(SpawnConfig::new("TARG").with_position(Vector2::new(75, 25)));
+        let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 100)));
+        let caller_index = engine.find_object_index(caller).test_value();
 
         let before = Value::Array(vec![
             Value::Int(0),
@@ -1471,7 +1353,7 @@ public func Trigger()
             Some(DefinitionRect::new(60, -5, 10, 10))
         );
 
-        let caller_index = engine.find_object_index(caller).expect("caller remains");
+        let caller_index = engine.find_object_index(caller).test_value();
         assert_eq!(
             engine
                 .call_object_function(caller_index, "VerifyPersistedShape", Vec::new())
@@ -1582,7 +1464,7 @@ public func Trigger()
 
         let snapshot_objects = objects();
         let snapshot_landscape =
-            Landscape::new(150, vec![120; 150]).expect("snapshot landscape builds");
+            Landscape::new(150, vec![120; 150]).test_value();
         let definitions = HashMap::new();
         let (width, height) = crate::compat::landscape_extent(&snapshot_landscape);
         let mut sectors = build_host_sector_map(
@@ -1600,7 +1482,7 @@ public func Trigger()
             .with_master_order([ObjectId::new(3), ObjectId::new(2), ObjectId::new(1)])
             .with_sector_map(Some(sectors));
         let (result, _) = with_object_host_context_with_world(world, || find_objects2(&bounded));
-        let Value::Array(values) = result.expect("bounded sector query succeeds") else {
+        let Value::Array(values) = result.test_value() else {
             panic!("FindObjects returns array");
         };
         assert_eq!(
@@ -1619,7 +1501,7 @@ public func Trigger()
             ObjectId::new(1),
         ]);
         let (result, _) = with_object_host_context_with_world(fallback, || find_objects2(&bounded));
-        let Value::Array(values) = result.expect("fallback sector query succeeds") else {
+        let Value::Array(values) = result.test_value() else {
             panic!("FindObjects returns array");
         };
         assert_eq!(
@@ -2071,7 +1953,7 @@ public func Trigger()
         let (result, _) = with_object_host_context_with_world(world, || {
             HOST_CONTEXT.with(|cell| {
                 let borrow = cell.borrow();
-                let context = borrow.as_ref().expect("host context installed");
+                let context = borrow.as_ref().test_value();
                 let (objects, _, _, _) = context.command_runtime_data(&HashMap::new(), None);
                 assert_eq!(objects[&ObjectId::new(12)].master_list_order, 0);
                 assert_eq!(objects[&ObjectId::new(11)].master_list_order, 1);
@@ -2079,7 +1961,7 @@ public func Trigger()
             });
             Ok(())
         });
-        result.expect("command runtime rank probe succeeds");
+        result.test_value();
     }
 
     #[test]
@@ -2394,7 +2276,7 @@ public func Trigger()
     #[test]
     fn clear_particles_registers_command() {
         let (result, outcome) = with_object_host_context(|| clear_particles(&[]));
-        let value = result.expect("ClearParticles succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
@@ -2422,7 +2304,7 @@ public func Trigger()
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || clear_particles(&args));
-        let value = result.expect("ClearParticles succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.particles.len(), 1);
         match &outcome.particles[0] {
@@ -2440,7 +2322,7 @@ public func Trigger()
     #[test]
     fn contained_returns_nil_when_object_has_no_container() {
         let (result, _) = with_object_host_context(|| contained(&[]));
-        let value = result.expect("Contained without container succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
     }
 
@@ -2461,7 +2343,7 @@ public func Trigger()
             ..idle_object_context()
         };
         let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
-        let value = result.expect("Contained with container succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(container_id));
     }
 
@@ -2517,7 +2399,7 @@ public func Trigger()
                 with_effect_context(Some(context.clone()), &[], world.clone(), 200, || {
                     contents(&args)
                 });
-            result.expect("Contents succeeds")
+            result.test_value()
         };
 
         // C++ first indexes [attached, first, second] after filtering only
@@ -2573,7 +2455,7 @@ public func Trigger()
 
         let args = [Value::Nil, Value::Nil, Value::Bool(true)];
         let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&args));
-        let value = result.expect("Contents with attachments succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(attached_id));
     }
 
@@ -2607,14 +2489,14 @@ public func Trigger()
         let (result, _) = with_effect_context(Some(context_all), &[], world.clone(), 300, || {
             contents_count(&[])
         });
-        let value = result.expect("ContentsCount without filter succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(2));
 
         let args = [Value::C4Id("GEM1".into())];
         let (filtered, _) = with_effect_context(Some(context_filtered), &[], world, 300, || {
             contents_count(&args)
         });
-        let filtered_value = filtered.expect("ContentsCount with filter succeeds");
+        let filtered_value = filtered.test_value();
         assert_eq!(filtered_value, Value::Int(1));
     }
 
@@ -2644,7 +2526,7 @@ public func Trigger()
         let args = [Value::C4Id("GEM1".into())];
         let (result, _) =
             with_effect_context(Some(context), &[], world, 400, || find_contents(&args));
-        let value = result.expect("FindContents succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(gem_id));
     }
 
@@ -2686,7 +2568,7 @@ public func Trigger()
             with_effect_context(Some(context.clone()), &[], world.clone(), 500, || {
                 find_other_contents(&args)
             });
-        let value = result.expect("FindOtherContents succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(hammer_id));
 
         let (same_call, _) = with_effect_context(Some(context), &[], world, 500, || {
@@ -2728,32 +2610,15 @@ public func MoveThenRemove()
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("BOX1", "Container", container_script)
-                    .expect("container script compiles"),
-            )
-            .expect("container registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("ITEM", "Item", "#strict\n")
-                    .expect("item script compiles"),
-            )
-            .expect("item registers");
+        engine.register_test_definition(test_definition("BOX1", "Container", container_script));
+        engine.register_test_definition(test_definition("ITEM", "Item", "#strict\n"));
 
-        let container = engine
-            .spawn_object(SpawnConfig::new("BOX1").with_position(Vector2::new(120, 80)))
-            .expect("container spawns");
-        let child = engine
-            .spawn_object(
-                SpawnConfig::new("ITEM")
-                    .with_position(Vector2::new(7, 11))
-                    .with_container(container),
-            )
-            .expect("contained child spawns");
+        let container = engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(Vector2::new(120, 80)));
+        let child = engine.spawn_test_object(SpawnConfig::new("ITEM")
+            .with_position(Vector2::new(7, 11))
+            .with_container(container));
         let container_index = engine
-            .find_object_index(container)
-            .expect("container exists");
+            .find_object_index(container).test_value();
 
         assert_eq!(
             engine
@@ -2762,8 +2627,7 @@ public func MoveThenRemove()
             Value::Bool(true)
         );
         let child = engine
-            .object_snapshot(child)
-            .expect("ejected child survives");
+            .object_snapshot(child).test_value();
         assert_eq!(child.container, None);
         assert_eq!(
             child.position,
@@ -2811,46 +2675,22 @@ public func GetCalcCalls() { return calc_calls; }
 "#;
 
         let mut engine = crate::Engine::with_seed(0);
-        let mut grand = crate::Definition::from_script("GRND", "Grand", "#strict 2\n")
-            .expect("grand container compiles");
+        let mut grand = test_definition("GRND", "Grand", "#strict 2\n");
         grand.set_category(crate::CATEGORY_STRUCTURE);
-        engine.register_definition(grand).expect("grand registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("ACTR", "Actor", actor_script)
-                    .expect("actor compiles"),
-            )
-            .expect("actor registers");
-        let mut victim = crate::Definition::from_script("VICT", "Victim", victim_script)
-            .expect("victim compiles");
+        engine.register_test_definition(grand);
+        engine.register_test_definition(test_definition("ACTR", "Actor", actor_script));
+        let mut victim = test_definition("VICT", "Victim", victim_script);
         victim.set_category(crate::CATEGORY_OBJECT);
-        engine
-            .register_definition(victim)
-            .expect("victim registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("CHLD", "Child", child_script)
-                    .expect("child compiles"),
-            )
-            .expect("child registers");
+        engine.register_test_definition(victim);
+        engine.register_test_definition(test_definition("CHLD", "Child", child_script));
 
-        let grand = engine
-            .spawn_object(SpawnConfig::new("GRND"))
-            .expect("grand spawns");
-        let actor = engine
-            .spawn_object(SpawnConfig::new("ACTR").with_container(grand))
-            .expect("actor spawns contained");
-        let victim = engine
-            .spawn_object(SpawnConfig::new("VICT").with_container(grand))
-            .expect("victim spawns contained");
-        let child = engine
-            .spawn_object(SpawnConfig::new("CHLD").with_container(victim))
-            .expect("child spawns nested");
-        let witness = engine
-            .spawn_object(SpawnConfig::new("VICT"))
-            .expect("definition-static witness spawns");
+        let grand = engine.spawn_test_object(SpawnConfig::new("GRND"));
+        let actor = engine.spawn_test_object(SpawnConfig::new("ACTR").with_container(grand));
+        let victim = engine.spawn_test_object(SpawnConfig::new("VICT").with_container(grand));
+        let child = engine.spawn_test_object(SpawnConfig::new("CHLD").with_container(victim));
+        let witness = engine.spawn_test_object(SpawnConfig::new("VICT"));
 
-        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let actor_index = engine.find_object_index(actor).test_value();
         assert_eq!(
             engine
                 .call_object_function(
@@ -2864,7 +2704,7 @@ public func GetCalcCalls() { return calc_calls; }
                 .expect("nested removal returns"),
             Value::Bool(true)
         );
-        let witness_index = engine.find_object_index(witness).expect("witness remains");
+        let witness_index = engine.find_object_index(witness).test_value();
         assert_eq!(
             engine
                 .call_object_function(witness_index, "GetCalcCalls", Vec::new())
@@ -2883,33 +2723,16 @@ public func RemoveSelfWithFalse() { return RemoveObject(0, false); }
 public func RemoveSelfWithoutEject() { return RemoveObject(); }
 "#;
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_definition(
-                crate::Definition::from_script("BOX1", "Container", container_script)
-                    .expect("container script compiles"),
-            )
-            .expect("container registers");
-        engine
-            .register_definition(
-                crate::Definition::from_script("ITEM", "Item", "#strict\n")
-                    .expect("item script compiles"),
-            )
-            .expect("item registers");
+        engine.register_test_definition(test_definition("BOX1", "Container", container_script));
+        engine.register_test_definition(test_definition("ITEM", "Item", "#strict\n"));
 
         let self_position = Vector2::new(120, 80);
-        let self_container = engine
-            .spawn_object(SpawnConfig::new("BOX1").with_position(self_position))
-            .expect("self container spawns");
-        let self_child = engine
-            .spawn_object(
-                SpawnConfig::new("ITEM")
-                    .with_position(Vector2::new(7, 11))
-                    .with_container(self_container),
-            )
-            .expect("self child spawns");
+        let self_container = engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(self_position));
+        let self_child = engine.spawn_test_object(SpawnConfig::new("ITEM")
+            .with_position(Vector2::new(7, 11))
+            .with_container(self_container));
         let self_index = engine
-            .find_object_index(self_container)
-            .expect("self container exists");
+            .find_object_index(self_container).test_value();
 
         assert_eq!(
             engine
@@ -2925,27 +2748,18 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             ObjectStatus::Deleted
         );
         let self_child = engine
-            .object_snapshot(self_child)
-            .expect("ejected child survives");
+            .object_snapshot(self_child).test_value();
         assert_eq!(self_child.status, ObjectStatus::Normal);
         assert_eq!(self_child.container, None);
         assert_eq!(self_child.position, self_position);
 
-        let caller = engine
-            .spawn_object(SpawnConfig::new("BOX1"))
-            .expect("foreign remover spawns");
+        let caller = engine.spawn_test_object(SpawnConfig::new("BOX1"));
         let foreign_position = Vector2::new(300, 160);
-        let foreign_container = engine
-            .spawn_object(SpawnConfig::new("BOX1").with_position(foreign_position))
-            .expect("foreign container spawns");
-        let foreign_child = engine
-            .spawn_object(
-                SpawnConfig::new("ITEM")
-                    .with_position(Vector2::new(19, 23))
-                    .with_container(foreign_container),
-            )
-            .expect("foreign child spawns");
-        let caller_index = engine.find_object_index(caller).expect("remover exists");
+        let foreign_container = engine.spawn_test_object(SpawnConfig::new("BOX1").with_position(foreign_position));
+        let foreign_child = engine.spawn_test_object(SpawnConfig::new("ITEM")
+            .with_position(Vector2::new(19, 23))
+            .with_container(foreign_container));
+        let caller_index = engine.find_object_index(caller).test_value();
 
         assert_eq!(
             engine
@@ -2965,25 +2779,17 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             ObjectStatus::Deleted
         );
         let foreign_child = engine
-            .object_snapshot(foreign_child)
-            .expect("foreign child survives");
+            .object_snapshot(foreign_child).test_value();
         assert_eq!(foreign_child.status, ObjectStatus::Normal);
         assert_eq!(foreign_child.container, None);
         assert_eq!(foreign_child.position, foreign_position);
 
         for function in ["RemoveSelfWithFalse", "RemoveSelfWithoutEject"] {
-            let recursive_container = engine
-                .spawn_object(SpawnConfig::new("BOX1"))
-                .expect("recursive container spawns");
-            let recursive_child = engine
-                .spawn_object(SpawnConfig::new("ITEM").with_container(recursive_container))
-                .expect("recursive child spawns");
-            let recursive_grandchild = engine
-                .spawn_object(SpawnConfig::new("ITEM").with_container(recursive_child))
-                .expect("recursive grandchild spawns");
+            let recursive_container = engine.spawn_test_object(SpawnConfig::new("BOX1"));
+            let recursive_child = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(recursive_container));
+            let recursive_grandchild = engine.spawn_test_object(SpawnConfig::new("ITEM").with_container(recursive_child));
             let recursive_index = engine
-                .find_object_index(recursive_container)
-                .expect("recursive container exists");
+                .find_object_index(recursive_container).test_value();
 
             assert_eq!(
                 engine
@@ -3014,7 +2820,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
         let args = [Value::C4Id("FLAG".into())];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        let value = result.expect("FindObject succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(ObjectId::new(1)));
     }
 
@@ -3044,7 +2850,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             Value::Int(2),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        let value = result.expect("FindObject succeeds");
+        let value = result.test_value();
         assert_eq!(
             value,
             object_reference_value(ObjectId::new(10)),
@@ -3069,7 +2875,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         ];
         let (first_result, _) =
             with_effect_context(None, &[], world.clone(), 1, || find_object(&args));
-        let first_value = first_result.expect("FindObject closest succeeds");
+        let first_value = first_result.test_value();
         assert_eq!(first_value, object_reference_value(ObjectId::new(20)));
 
         let mut find_next = ValueMap::new();
@@ -3089,7 +2895,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         ];
         let (second_result, _) =
             with_effect_context(None, &[], world, 1, || find_object(&args_with_next));
-        let second_value = second_result.expect("FindObject closest with next succeeds");
+        let second_value = second_result.test_value();
         assert_eq!(second_value, object_reference_value(ObjectId::new(21)));
     }
 
@@ -3140,7 +2946,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             Value::Int(ocf::AVAILABLE as i32),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        let value = result.expect("FindObject succeeds");
+        let value = result.test_value();
         assert_eq!(value, object_reference_value(matching_id));
     }
 
@@ -3213,7 +3019,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             Value::Int(20),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_objects(&args));
-        let value = result.expect("FindObjects succeeds");
+        let value = result.test_value();
         match value {
             Value::Array(entries) => {
                 assert_eq!(
@@ -3265,7 +3071,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         .with_ocf(ocf_mask);
 
         let (result, _) = with_effect_context(Some(object_context), &[], world, 2, || get_ocf(&[]));
-        let value = result.expect("GetOCF succeeds");
+        let value = result.test_value();
         let Value::Int(raw) = value else {
             panic!("expected integer mask, got {value:?}");
         };
@@ -3301,10 +3107,9 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         );
 
         assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("object update expected");
+        let update = outcome.object_update.test_value();
         let overlays = update
-            .graphics_overlays
-            .expect("graphics overlay update expected");
+            .graphics_overlays.test_value();
         assert_eq!(overlays.len(), 1);
         let overlay = &overlays[0];
         assert_eq!(overlay.id, 1);
@@ -3375,12 +3180,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let overlays = outcome
             .object_update
             .expect("object update expected")
-            .graphics_overlays
-            .expect("graphics overlay update expected");
+            .graphics_overlays.test_value();
         let overlay = overlays
             .iter()
-            .find(|overlay| overlay.id == 1)
-            .expect("overlay 1 survives the re-set");
+            .find(|overlay| overlay.id == 1).test_value();
         assert_eq!(overlay.mode, GraphicsOverlayMode::IngamePicture);
         assert_eq!(
             overlay.transform,
@@ -3428,7 +3231,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             || -> Result<Vec<Value>, RuntimeError> { Ok(vec![call()?, call()?]) },
         );
 
-        let results = results.expect("SetGraphics succeeds");
+        let results = results.test_value();
         assert_eq!(
             results,
             vec![Value::Bool(true), Value::Bool(true)],
@@ -3462,10 +3265,9 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         );
 
         assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("object update expected");
+        let update = outcome.object_update.test_value();
         let overlays = update
-            .graphics_overlays
-            .expect("graphics overlay update expected");
+            .graphics_overlays.test_value();
         assert!(overlays.is_empty());
     }
 
@@ -3507,11 +3309,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         );
 
         assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("object update expected");
+        let update = outcome.object_update.test_value();
         let base = update
             .base_graphics
-            .expect("base graphics update expected")
-            .expect("base graphics set");
+            .expect("base graphics update expected").test_value();
         assert_eq!(base.definition, "BRIK");
         assert_eq!(base.graphics_name.as_deref(), Some("Alt"));
         assert_eq!(base.blit_mode, 0);
@@ -3550,8 +3351,8 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         });
 
         assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
-        let update = outcome.object_update.expect("object update expected");
-        let base = update.base_graphics.expect("base graphics update expected");
+        let update = outcome.object_update.test_value();
+        let base = update.base_graphics.test_value();
         assert!(base.is_none());
     }
 
@@ -3583,11 +3384,10 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             result.expect("SetObjDrawTransform succeeds"),
             Value::Bool(true)
         );
-        let update = outcome.object_update.expect("object update expected");
+        let update = outcome.object_update.test_value();
         let transform = update
             .draw_transform
-            .expect("transform update expected")
-            .expect("transform set");
+            .expect("transform update expected").test_value();
         assert_eq!(
             transform.matrix(),
             [
@@ -3684,15 +3484,13 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             result.expect("SetObjDrawTransform succeeds"),
             (Value::Bool(true), Value::Bool(true))
         );
-        let update = outcome.object_update.expect("object update expected");
+        let update = outcome.object_update.test_value();
         let overlays = update
-            .graphics_overlays
-            .expect("graphics overlay update expected");
+            .graphics_overlays.test_value();
         let overlay = overlays
             .iter()
-            .find(|overlay| overlay.id == -2)
-            .expect("overlay present");
-        let transform = overlay.transform.expect("overlay transform set");
+            .find(|overlay| overlay.id == -2).test_value();
+        let transform = overlay.transform.test_value();
         assert_eq!(
             transform.matrix(),
             [
@@ -3709,8 +3507,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         );
         let zero_overlay = overlays
             .iter()
-            .find(|overlay| overlay.id == -3)
-            .expect("zero overlay present");
+            .find(|overlay| overlay.id == -3).test_value();
         assert_eq!(
             zero_overlay
                 .transform
@@ -3783,8 +3580,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .object_update
             .expect("object update expected")
             .draw_transform
-            .expect("transform update expected")
-            .expect("transform set");
+            .expect("transform update expected").test_value();
         assert_eq!(
             transform.matrix(),
             [49.0, 59.0, 74.0, 142.0, 173.0, 217.0, 254.0, 313.0, 395.0]
@@ -3867,8 +3663,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let overlays = outcome
             .object_update
             .expect("object update expected")
-            .graphics_overlays
-            .expect("overlay update expected");
+            .graphics_overlays.test_value();
         assert_eq!(overlays[0].transform, Some(DrawTransform::identity()));
 
         let (result, _) = with_effect_context(
@@ -3922,7 +3717,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         ]);
         let args = [Value::C4Id("DUMY".into())];
         let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
-        let value = result.expect("ObjectCount succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(2));
     }
 
@@ -3950,7 +3745,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             Value::Int(2),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
-        let value = result.expect("ObjectCount owner succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
     }
 
@@ -3980,7 +3775,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             Value::Int(ANY_CONTAINER_SENTINEL),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_objects(&args));
-        let value = result.expect("FindObjects succeeds");
+        let value = result.test_value();
         match value {
             Value::Array(entries) => {
                 assert_eq!(entries.len(), 2);
@@ -4059,7 +3854,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
             });
 
-        let value = result.expect("AddEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
         assert!(outcome.object.is_empty());
         assert_eq!(outcome.global.len(), 1);
@@ -4090,7 +3885,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             },
         );
 
-        let value = result.expect("GetEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::String("Glow".into()));
     }
 
@@ -4100,7 +3895,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             remove_effect(&[Value::Nil, Value::Nil, Value::Int(0)])
         });
 
-        let value = result.expect("RemoveEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Bool(false));
     }
 
@@ -4252,8 +4047,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .find_map(|command| match command {
                 EffectCommand::Update(effect) if effect.name == crate::C4FX_FIRE => Some(effect),
                 _ => None,
-            })
-            .expect("FxFireStart writes the live Fire effect vars");
+            }).test_value();
         assert_eq!(effect.var(1), EffectVarValue::Int(2));
         assert_eq!(
             effect.var(2),

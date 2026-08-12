@@ -62,9 +62,7 @@ fn attach_procedure_synchronizes_position_and_container() -> Result<(), Box<dyn 
 
     let snapshot = engine.tick()?;
 
-    let attached = snapshot
-        .object(attached_id)
-        .expect("attached object must exist after tick");
+    let attached = crate::support::TestValueExt::test_value(snapshot.object(attached_id));
     // DFA_ATTACH ForcePositions to the vertex-aligned spot in ExecAction
     // (C4Object.cpp:5330-5336), but the same frame's ExecMovement runs
     // CopyMotion for contained objects (C4Movement.cpp:556-561), which
@@ -75,9 +73,7 @@ fn attach_procedure_synchronizes_position_and_container() -> Result<(), Box<dyn 
     assert_eq!(attached.velocity, Vector2::new(0, 0));
     assert_eq!(attached.container, Some(chest_id));
 
-    let chest_snapshot = snapshot
-        .object(chest_id)
-        .expect("chest must exist after tick");
+    let chest_snapshot = crate::support::TestValueExt::test_value(snapshot.object(chest_id));
     assert!(chest_snapshot.contents.contains(&anchor_id));
     assert!(chest_snapshot.contents.contains(&attached_id));
 
@@ -124,9 +120,7 @@ fn attach_procedure_positions_by_vertices_when_uncontained(
     // ForcePosition math (C4Object.cpp:5330-5336): target pos + target
     // vertex - own vertex = (100+6-2, 80-4-3); nothing overrides it for
     // an uncontained attach.
-    let attached = snapshot
-        .object(attached_id)
-        .expect("attached object must exist after tick");
+    let attached = crate::support::TestValueExt::test_value(snapshot.object(attached_id));
     assert_eq!(attached.position, Vector2::new(104, 73));
     assert_eq!(attached.velocity, Vector2::new(0, 0));
     assert_eq!(attached.container, None);

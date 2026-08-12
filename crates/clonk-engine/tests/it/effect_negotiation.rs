@@ -1,4 +1,5 @@
 use crate::support::real_scenario::content_root;
+use crate::support::EngineTestExt;
 use clonk_engine::{Definition, Engine, SpawnConfig};
 use clonk_resources::Group;
 use clonk_script::Value;
@@ -37,16 +38,10 @@ global func FxBirthGlobalStart(object target, int number, int temp)
 "#;
 
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("BORN", "Construction effect target", script)
-        .expect("construction effect definition registers");
+    engine.register_test_script_definition("BORN", "Construction effect target", script);
 
-    let object = engine
-        .spawn_object(SpawnConfig::new("BORN"))
-        .expect("construction effect object spawns");
-    let snapshot = engine
-        .object_snapshot(object)
-        .expect("construction effect object remains");
+    let object = engine.spawn_test_object(SpawnConfig::new("BORN"));
+    let snapshot = engine.test_object_snapshot(object);
 
     assert_eq!(snapshot.rotation, 37);
     assert_eq!(
@@ -178,30 +173,18 @@ func FxStartDeniedStop() { ++iDeniedStops; }
 "#;
 
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("FXCK", "Effect checker", script)
-        .expect("effect checker definition registers");
+    engine.register_test_script_definition("FXCK", "Effect checker", script);
 
-    let denied = engine
-        .spawn_object(SpawnConfig::new("FXCK"))
-        .expect("denial probe spawns");
-    let denied_index = engine
-        .find_object_index(denied)
-        .expect("denial probe remains live");
-    let checker = engine
-        .call_object_function(denied_index, "Install", Vec::new())
-        .expect("checker installs");
+    let denied = engine.spawn_test_object(SpawnConfig::new("FXCK"));
+    let denied_index = engine.test_object_index(denied);
+    let checker = engine.call_test_object_function(denied_index, "Install", Vec::new());
     assert!(matches!(checker, Value::Int(number) if number > 0));
     assert_eq!(
-        engine
-            .call_object_function(denied_index, "AddDenied", Vec::new())
-            .expect("denied AddEffect completes"),
+        engine.call_test_object_function(denied_index, "AddDenied", Vec::new()),
         Value::Int(0),
         "C4Fx_Effect_Deny maps to AddEffect's zero return"
     );
-    let denied = engine
-        .object_snapshot(denied)
-        .expect("denial probe remains live");
+    let denied = engine.test_object_snapshot(denied);
     assert_eq!(
         denied
             .effects
@@ -219,24 +202,15 @@ func FxStartDeniedStop() { ++iDeniedStops; }
     assert_eq!(denied.local_vars.get("iChecks"), Some(&Value::Int(1)));
     assert_eq!(denied.local_vars.get("iDenyExact"), Some(&Value::Int(1)));
 
-    let allowed = engine
-        .spawn_object(SpawnConfig::new("FXCK"))
-        .expect("passing probe spawns");
-    let allowed_index = engine
-        .find_object_index(allowed)
-        .expect("passing probe remains live");
-    engine
-        .call_object_function(allowed_index, "Install", Vec::new())
-        .expect("checker installs");
+    let allowed = engine.spawn_test_object(SpawnConfig::new("FXCK"));
+    let allowed_index = engine.test_object_index(allowed);
+    engine.call_test_object_function(allowed_index, "Install", Vec::new());
     assert!(matches!(
         engine
-            .call_object_function(allowed_index, "AddAllowed", Vec::new())
-            .expect("passing AddEffect completes"),
+            .call_test_object_function(allowed_index, "AddAllowed", Vec::new()),
         Value::Int(number) if number > 0
     ));
-    let allowed = engine
-        .object_snapshot(allowed)
-        .expect("passing probe remains live");
+    let allowed = engine.test_object_snapshot(allowed);
     assert_eq!(
         allowed.local_vars.get("iChecks"),
         Some(&Value::Int(1)),
@@ -259,11 +233,12 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         Some(&Value::Int(1)),
         "the passing effect still receives exactly one Start callback"
     );
-    let allowed_effect = allowed
-        .effects
-        .iter()
-        .find(|effect| effect.name == "Allowed")
-        .expect("Allowed effect survives");
+    let allowed_effect = crate::support::TestValueExt::test_value(
+        allowed
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Allowed"),
+    );
     assert_eq!(
         allowed_effect.vars(),
         &[
@@ -274,46 +249,30 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         "only the explicit EffectVar write persists"
     );
 
-    let reentrant = engine
-        .spawn_object(SpawnConfig::new("FXCK"))
-        .expect("reentrant-number probe spawns");
-    let reentrant_index = engine
-        .find_object_index(reentrant)
-        .expect("reentrant-number probe remains live");
-    engine
-        .call_object_function(reentrant_index, "Install", Vec::new())
-        .expect("checker installs");
+    let reentrant = engine.spawn_test_object(SpawnConfig::new("FXCK"));
+    let reentrant_index = engine.test_object_index(reentrant);
+    engine.call_test_object_function(reentrant_index, "Install", Vec::new());
     assert_eq!(
         engine
-            .call_object_function(
+            .call_test_object_function(
                 reentrant_index,
                 "AddReentrantDeniedThenAfter",
                 Vec::new(),
-            )
-            .expect("reentrant denial completes"),
+            ),
         Value::Int(405),
         "the pending outer node consumes #3 before Check, so its nested and subsequent adds get #4 and #5"
     );
 
-    let start_denied = engine
-        .spawn_object(SpawnConfig::new("FXCK"))
-        .expect("Start-denial probe spawns");
-    let start_denied_index = engine
-        .find_object_index(start_denied)
-        .expect("Start-denial probe remains live");
-    engine
-        .call_object_function(start_denied_index, "Install", Vec::new())
-        .expect("checker installs");
+    let start_denied = engine.spawn_test_object(SpawnConfig::new("FXCK"));
+    let start_denied_index = engine.test_object_index(start_denied);
+    engine.call_test_object_function(start_denied_index, "Install", Vec::new());
     assert_eq!(
         engine
-            .call_object_function(start_denied_index, "AddStartDeniedThenAfter", Vec::new(),)
-            .expect("Start-denied AddEffect completes"),
+            .call_test_object_function(start_denied_index, "AddStartDeniedThenAfter", Vec::new(),),
         Value::Int(304),
         "the denied #3 remains linked through the script call, so the next add gets #4"
     );
-    let start_denied = engine
-        .object_snapshot(start_denied)
-        .expect("Start-denial probe remains live");
+    let start_denied = engine.test_object_snapshot(start_denied);
     assert!(
         start_denied
             .effects
@@ -376,26 +335,17 @@ func FxUpperStart(object target, int number, int temp)
 "#;
 
     let mut engine = Engine::with_seed(7);
-    engine
-        .register_script_definition("FXRM", "Inline effect remover", script)
-        .expect("effect remover definition registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("FXRM"))
-        .expect("effect remover spawns");
-    let target_index = engine
-        .find_object_index(target)
-        .expect("effect remover remains live");
-    engine
-        .call_object_function(target_index, "Install", Vec::new())
-        .expect("effects install");
+    engine.register_test_script_definition("FXRM", "Inline effect remover", script);
+    let target = engine.spawn_test_object(SpawnConfig::new("FXRM"));
+    let target_index = engine.test_object_index(target);
+    engine.call_test_object_function(target_index, "Install", Vec::new());
 
     let mut expected_rng = engine.debug_rng_clone();
     let expected_stop = expected_rng.random(100);
     let expected_after = expected_rng.random(100);
     assert_eq!(
         engine
-            .call_object_function(target_index, "RemoveInline", Vec::new())
-            .expect("inline removal completes"),
+            .call_test_object_function(target_index, "RemoveInline", Vec::new()),
         Value::Array(vec![
             Value::Bool(true),
             Value::Int(expected_stop),
@@ -408,8 +358,7 @@ func FxUpperStart(object target, int number, int temp)
 
     assert_eq!(
         engine
-            .object_snapshot(target)
-            .expect("denied target remains live")
+            .test_object_snapshot(target)
             .effects
             .iter()
             .map(|effect| effect.name.as_str())
@@ -468,23 +417,13 @@ func FxUpperStop(object target, int number, int reason, bool temp)
 "#;
 
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("FXTR", "Temp-removed effect killer", script)
-        .expect("effect killer definition registers");
-    let target = engine
-        .spawn_object(SpawnConfig::new("FXTR"))
-        .expect("effect killer spawns");
-    let target_index = engine
-        .find_object_index(target)
-        .expect("effect killer remains live");
-    engine
-        .call_object_function(target_index, "Install", Vec::new())
-        .expect("upper effect installs");
+    engine.register_test_script_definition("FXTR", "Temp-removed effect killer", script);
+    let target = engine.spawn_test_object(SpawnConfig::new("FXTR"));
+    let target_index = engine.test_object_index(target);
+    engine.call_test_object_function(target_index, "Install", Vec::new());
 
     assert_eq!(
-        engine
-            .call_object_function(target_index, "Trigger", Vec::new())
-            .expect("nested inactive removal completes"),
+        engine.call_test_object_function(target_index, "Trigger", Vec::new()),
         Value::Array(vec![Value::Int(12), Value::Int(2), Value::Int(0)]),
         "the inactive upper effect receives Start(2) before Stop(0)"
     );
@@ -492,54 +431,46 @@ func FxUpperStop(object target, int number, int reason, bool temp)
 
 #[test]
 fn shipped_hazard_jumper_bite_check_uses_strict1_raw_string_identity() {
-    let group = Group::open(content_root().join("Hazard.c4d/Enemies.c4d/Jumper.c4d"))
-        .expect("shipped Hazard Jumper group opens");
-    let resource = clonk_resources::definition::Definition::load(&group)
-        .expect("shipped Hazard Jumper definition loads");
+    let group = crate::support::TestValueExt::test_value(Group::open(
+        content_root().join("Hazard.c4d/Enemies.c4d/Jumper.c4d"),
+    ));
+    let resource = crate::support::TestValueExt::test_value(
+        clonk_resources::definition::Definition::load(&group),
+    );
 
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_resource(&resource).expect("Hazard Jumper script compiles"),
-        )
-        .expect("Hazard Jumper registers");
-    engine
-        .register_definition(
-            Definition::from_script(
-                "FXDR",
-                "Effect driver",
-                r#"#strict 3
-func Probe(object target)
-{
-  AddEffect("Bite", target, 99, 1, target);
-  return AddEffect("Bite", target, 99, 1, target);
-}
-"#,
-            )
-            .expect("effect driver compiles"),
-        )
-        .expect("effect driver registers");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_resource(&resource),
+    ));
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        Definition::from_script(
+            "FXDR",
+            "Effect driver",
+            r#"#strict 3
+        func Probe(object target)
+        {
+          AddEffect("Bite", target, 99, 1, target);
+          return AddEffect("Bite", target, 99, 1, target);
+        }
+        "#,
+        ),
+    ));
 
-    let jumper = engine
-        .spawn_object(SpawnConfig::new("ALN2").with_loaded(true))
-        .expect("loaded Hazard Jumper spawns without Initialize dependencies");
-    let driver = engine
-        .spawn_object(SpawnConfig::new("FXDR"))
-        .expect("effect driver spawns");
-    let driver_index = engine
-        .find_object_index(driver)
-        .expect("driver remains live");
+    let jumper = engine.spawn_test_object(SpawnConfig::new("ALN2").with_loaded(true));
+    let driver = engine.spawn_test_object(SpawnConfig::new("FXDR"));
+    let driver_index = engine.test_object_index(driver);
     assert_eq!(
-        engine
-            .call_object_function(driver_index, "Probe", vec![Value::Object(jumper.as_u64())])
-            .expect("two same-frame Bite additions complete"),
+        engine.call_test_object_function(
+            driver_index,
+            "Probe",
+            vec![Value::Object(jumper.as_u64())]
+        ),
         Value::Int(2),
         "fresh FxBiteEffect name must not raw-equal its interned strict1 literal"
     );
 
     let mut bite_numbers = engine
-        .object_snapshot(jumper)
-        .expect("Hazard Jumper remains live")
+        .test_object_snapshot(jumper)
         .effects
         .iter()
         .filter(|effect| effect.name == "Bite")

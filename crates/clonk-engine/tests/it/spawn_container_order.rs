@@ -24,37 +24,43 @@ public func CreateThenContain()
 fn enter_binds_a_container_created_after_its_content() {
     let mut engine = Engine::new();
     for (id, name) in [("CNTT", "Contained object"), ("BOXX", "Container")] {
-        engine
-            .register_script_definition(id, name, "#strict\n")
-            .expect("fixture definition registers");
+        crate::support::TestValueExt::test_value(engine.register_script_definition(
+            id,
+            name,
+            "#strict\n",
+        ));
     }
-    engine
-        .register_script_definition("MAKR", "Creator", CREATOR_SCRIPT)
-        .expect("creator registers");
-    let creator = engine
-        .spawn_object(SpawnConfig::new("MAKR"))
-        .expect("creator spawns");
-    let creator_index = engine.find_object_index(creator).expect("creator index");
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "MAKR",
+        "Creator",
+        CREATOR_SCRIPT,
+    ));
+    let creator =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("MAKR")));
+    let creator_index = crate::support::TestValueExt::test_value(engine.find_object_index(creator));
 
-    let content = match engine
-        .call_object_function(creator_index, "CreateThenContain", Vec::new())
-        .expect("the create-then-enter call completes like C++")
-    {
+    let content = match crate::support::TestValueExt::test_value(engine.call_object_function(
+        creator_index,
+        "CreateThenContain",
+        Vec::new(),
+    )) {
         Value::Object(id) => id,
         other => panic!("CreateObject must return the new object: {other:?}"),
     };
 
     let snapshot = engine.snapshot();
-    let container = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "BOXX")
-        .expect("the container materializes");
-    let content = snapshot
-        .objects
-        .iter()
-        .find(|object| object.id.as_u64() == content)
-        .expect("the contained object materializes");
+    let container = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BOXX"),
+    );
+    let content = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.id.as_u64() == content),
+    );
     assert_eq!(
         content.container,
         Some(container.id),
@@ -93,25 +99,31 @@ protected func Initialize()
 fn scenario_script_enter_binds_a_container_created_after_its_content() {
     let mut engine = Engine::new();
     for (id, name) in [("CNTT", "Contained object"), ("BOXX", "Container")] {
-        engine
-            .register_script_definition(id, name, "#strict\n")
-            .expect("fixture definition registers");
+        crate::support::TestValueExt::test_value(engine.register_script_definition(
+            id,
+            name,
+            "#strict\n",
+        ));
     }
-    engine
-        .install_scenario_script_with_convention("Script.c", SCENARIO_SCRIPT, true)
-        .expect("the create-then-enter scenario Initialize completes like C++");
+    crate::support::TestValueExt::test_value(engine.install_scenario_script_with_convention(
+        "Script.c",
+        SCENARIO_SCRIPT,
+        true,
+    ));
 
     let snapshot = engine.snapshot();
-    let container = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "BOXX")
-        .expect("the container materializes");
-    let content = snapshot
-        .objects
-        .iter()
-        .find(|object| object.definition_id == "CNTT")
-        .expect("the contained object materializes");
+    let container = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BOXX"),
+    );
+    let content = crate::support::TestValueExt::test_value(
+        snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CNTT"),
+    );
     assert_eq!(
         content.container,
         Some(container.id),

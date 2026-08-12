@@ -9,8 +9,9 @@ fn control(
     ScriptControlData {
         target_object,
         strictness,
-        script: LegacyCString::from_bytes(source.as_bytes().to_vec())
-            .expect("fixture script contains no NUL"),
+        script: crate::TestValueExt::test_value(LegacyCString::from_bytes(
+            source.as_bytes().to_vec(),
+        )),
         by_client,
     }
 }
@@ -30,12 +31,7 @@ fn engine_with_probe() -> Engine {
 }
 
 fn global_value(engine: &Engine, name: &str) -> Value {
-    let cell = engine
-        .script_globals
-        .borrow()
-        .get(name)
-        .cloned()
-        .expect("fixture global is registered");
+    let cell = crate::TestValueExt::test_value(engine.script_globals.borrow().get(name).cloned());
     let value = cell.borrow().clone();
     value
 }
@@ -47,17 +43,15 @@ fn run_gate_case(
 ) -> (Option<Value>, Value) {
     let mut engine = engine_with_probe();
     engine.set_league_game(league);
-    let result = engine
-        .execute_script_control(
-            &control(
-                SCRIPT_SCOPE_GLOBAL,
-                ScriptStrictness::Strict3,
-                "ControlProbe = 17",
-                by_client,
-            ),
-            policy,
-        )
-        .expect("script-control gate is not an engine error");
+    let result = crate::TestValueExt::test_value(engine.execute_script_control(
+        &control(
+            SCRIPT_SCOPE_GLOBAL,
+            ScriptStrictness::Strict3,
+            "ControlProbe = 17",
+            by_client,
+        ),
+        policy,
+    ));
     (result, global_value(&engine, "ControlProbe"))
 }
 
@@ -126,12 +120,12 @@ fn script_control_uses_packet_strictness_for_direct_exec() {
     }
 
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_script_definition("STC3", "Strict target", "#strict 3")
-        .expect("strict target registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("STC3"))
-        .expect("strict target spawns");
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "STC3",
+        "Strict target",
+        "#strict 3",
+    ));
+    let object = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("STC3")));
     assert_eq!(
         engine
             .execute_script_control(
@@ -155,14 +149,14 @@ fn script_control_preserves_native_packet_source_bytes() {
     let control = ScriptControlData {
         target_object: SCRIPT_SCOPE_GLOBAL,
         strictness: ScriptStrictness::Strict3,
-        script: LegacyCString::from_bytes(vec![b'"', 0xe9, 0xff, b'"'])
-            .expect("raw script packet is NUL-free"),
+        script: crate::TestValueExt::test_value(LegacyCString::from_bytes(vec![
+            b'"', 0xe9, 0xff, b'"',
+        ])),
         by_client: 0,
     };
-    let value = engine
-        .execute_script_control(&control, ScriptControlPolicy::live(false))
-        .expect("raw packet executes")
-        .expect("host packet is accepted");
+    let value = crate::TestValueExt::test_value(crate::TestValueExt::test_value(
+        engine.execute_script_control(&control, ScriptControlPolicy::live(false)),
+    ));
     assert_eq!(
         value,
         Value::String(clonk_script::c4_string_from_bytes(&[0xe9, 0xff]).into())
@@ -172,30 +166,21 @@ fn script_control_preserves_native_packet_source_bytes() {
 #[test]
 fn script_control_distinguishes_console_global_and_safe_object_scopes() {
     let mut engine = engine_with_probe();
-    engine
-        .install_scenario_script("Scenario", "#strict 3\nfunc ScenarioOnly() { return 41; }")
-        .expect("scenario script installs");
-    engine
-        .register_definition(
-            Definition::from_script(
-                "TARG",
-                "Target",
-                "#strict 3\nlocal Marker;\nfunc ReadMarker() { return Marker; }",
-            )
-            .expect("target definition compiles"),
-        )
-        .expect("target definition registers");
+    crate::TestValueExt::test_value(
+        engine.install_scenario_script("Scenario", "#strict 3\nfunc ScenarioOnly() { return 41; }"),
+    );
+    crate::TestValueExt::test_value(engine.register_definition(test_definition(
+        "TARG",
+        "Target",
+        "#strict 3\nlocal Marker;\nfunc ReadMarker() { return Marker; }",
+    )));
 
-    let normal = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("normal object spawns");
-    let inactive = engine
-        .spawn_object(SpawnConfig::new("TARG").with_status(ObjectStatus::Inactive))
-        .expect("inactive object spawns");
-    let deleted = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("deleted fixture initially spawns");
-    let deleted_index = engine.find_object_index(deleted).expect("object exists");
+    let normal = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("TARG")));
+    let inactive = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TARG").with_status(ObjectStatus::Inactive)),
+    );
+    let deleted = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("TARG")));
+    let deleted_index = crate::TestValueExt::test_value(engine.find_object_index(deleted));
     engine.objects[deleted_index].mark_destroyed();
 
     assert_eq!(
@@ -259,9 +244,7 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
                 .expect("object scope executes"),
             Some(Value::Int(marker)),
         );
-        let index = engine
-            .find_object_index(object)
-            .expect("object remains present");
+        let index = crate::TestValueExt::test_value(engine.find_object_index(object));
         assert_eq!(
             engine
                 .call_object_function(index, "ReadMarker", Vec::new())
@@ -274,7 +257,7 @@ fn script_control_distinguishes_console_global_and_safe_object_scopes() {
     for (target, value) in [
         (999_999, 21),
         (
-            i32::try_from(deleted.as_u64()).expect("fixture id fits i32"),
+            crate::TestValueExt::test_value(i32::try_from(deleted.as_u64())),
             22,
         ),
     ] {
@@ -304,35 +287,33 @@ fn script_control_matches_cpp_global_and_object_state_differential() {
     // identical expressions through Rust pins both scope and host-effect
     // folding without modifying the read-only C++ oracle.
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_script_definition("DIFF", "Differential target", "#strict 3")
-        .expect("target definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("DIFF").with_position(Vector2::new(1, 2)))
-        .expect("target object spawns");
+    crate::TestValueExt::test_value(engine.register_script_definition(
+        "DIFF",
+        "Differential target",
+        "#strict 3",
+    ));
+    let object = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("DIFF").with_position(Vector2::new(1, 2))),
+    );
 
-    engine
-        .execute_script_control(
-            &control(
-                SCRIPT_SCOPE_GLOBAL,
-                ScriptStrictness::Strict3,
-                "SetGravity(77)",
-                0,
-            ),
-            ScriptControlPolicy::live(false),
-        )
-        .expect("global control executes");
-    engine
-        .execute_script_control(
-            &control(
-                i32::try_from(object.as_u64()).expect("fixture id fits i32"),
-                ScriptStrictness::Strict3,
-                "SetPosition(12,34)",
-                0,
-            ),
-            ScriptControlPolicy::live(false),
-        )
-        .expect("object control executes");
+    crate::TestValueExt::test_value(engine.execute_script_control(
+        &control(
+            SCRIPT_SCOPE_GLOBAL,
+            ScriptStrictness::Strict3,
+            "SetGravity(77)",
+            0,
+        ),
+        ScriptControlPolicy::live(false),
+    ));
+    crate::TestValueExt::test_value(engine.execute_script_control(
+        &control(
+            crate::TestValueExt::test_value(i32::try_from(object.as_u64())),
+            ScriptStrictness::Strict3,
+            "SetPosition(12,34)",
+            0,
+        ),
+        ScriptControlPolicy::live(false),
+    ));
 
     assert_eq!(engine.physics().gravity, 77);
     assert_eq!(

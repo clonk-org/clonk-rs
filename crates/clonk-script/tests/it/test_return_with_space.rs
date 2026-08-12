@@ -1,39 +1,34 @@
 // Test for return with empty parentheses and space
 
-#[test]
-fn return_empty_parens_with_space() {
-    // return ();
-    let source = r#"func Test() { return (); }"#;
-    crate::support::assert_compiles(source);
-}
+// return ();
+crate::support::compile_case!(
+    return_empty_parens_with_space,
+    r#"func Test() { return (); }"#
+);
 
-#[test]
-fn return_empty_parens_with_space_in_if() {
-    // if condition with return ();
-    let source = r#"func Test() { var x; if (x == 1) return (); }"#;
-    crate::support::assert_compiles(source);
-}
+// if condition with return ();
+crate::support::compile_case!(
+    return_empty_parens_with_space_in_if,
+    r#"func Test() { var x; if (x == 1) return (); }"#
+);
 
-#[test]
-fn return_empty_parens_with_space_nested_if() {
-    // Nested if with return ();
-    let source = r#"func Test() { var x; if (x) if (x == 2) return (); }"#;
-    crate::support::assert_compiles(source);
-}
+// Nested if with return ();
+crate::support::compile_case!(
+    return_empty_parens_with_space_nested_if,
+    r#"func Test() { var x; if (x) if (x == 2) return (); }"#
+);
 
-#[test]
-fn oilp_line_8_pattern() {
-    // Exact pattern from OILP line 8
-    let source = r#"func Test() { var OilCnt; if (OilCnt == -1) return (); }"#;
-    crate::support::assert_compiles(source);
-}
+// Exact pattern from OILP line 8
+crate::support::compile_case!(
+    oilp_line_8_pattern,
+    r#"func Test() { var OilCnt; if (OilCnt == -1) return (); }"#
+);
 
-#[test]
-fn oilp_line_9_pattern() {
-    // Exact pattern from OILP line 9
-    let source = r#"func Test() { var OilCnt; if (OilCnt >= 100) return (); }"#;
-    crate::support::assert_compiles(source);
-}
+// Exact pattern from OILP line 9
+crate::support::compile_case!(
+    oilp_line_9_pattern,
+    r#"func Test() { var OilCnt; if (OilCnt >= 100) return (); }"#
+);
 
 #[test]
 fn return_with_space_vs_without_space() {
@@ -65,22 +60,20 @@ fn return_with_space_vs_without_space() {
     assert!(result2.is_ok());
 }
 
-#[test]
-fn return_with_space_and_expression_after() {
-    // Make sure we don't break: return (expr) + other
-    let source = r#"func Test() { return (42) + 10; }"#;
-    crate::support::assert_compiles(source);
-}
+// Make sure we don't break: return (expr) + other
+crate::support::compile_case!(
+    return_with_space_and_expression_after,
+    r#"func Test() { return (42) + 10; }"#
+);
 
-#[test]
-fn multiple_return_empty_with_space() {
-    // Multiple return () in same function
-    let source = r#"
+// Multiple return () in same function
+crate::support::compile_case!(
+    multiple_return_empty_with_space,
+    r#"
     func Test() {
         var x;
         if (x == 1) return ();
         if (x == 2) return ();
         return ();
-    }"#;
-    crate::support::assert_compiles(source);
-}
+    }"#,
+);

@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use clonk_engine::math::{itofix_prec, C4Fixed, FixedVec2};
 use clonk_engine::{Definition, Engine, SpawnConfig};
 use clonk_script::Value;
@@ -74,70 +75,53 @@ func FxCheckClonksTimer(pTarget, iEffectNumber)
 "#,
     );
 
-    let mage = engine
-        .spawn_object(
-            SpawnConfig::new("MAG2")
-                .with_owner(1)
-                .with_alive(true)
-                .with_crew_member(true),
-        )
-        .expect("BlobbySoccer mage spawns");
-    let shield = engine
-        .spawn_object(SpawnConfig::new("MSHS"))
-        .expect("BlobbySoccer shield spawns");
-    let ball = engine
-        .spawn_object(
-            SpawnConfig::new("BALL")
-                .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix_prec(-40, 10))),
-        )
-        .expect("BlobbySoccer ball spawns");
+    let mage = engine.spawn_test_object(
+        SpawnConfig::new("MAG2")
+            .with_owner(1)
+            .with_alive(true)
+            .with_crew_member(true),
+    );
+    let shield = engine.spawn_test_object(SpawnConfig::new("MSHS"));
+    let ball = engine.spawn_test_object(
+        SpawnConfig::new("BALL")
+            .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix_prec(-40, 10))),
+    );
 
-    let shield_index = engine
-        .find_object_index(shield)
-        .expect("shield remains live during activation");
+    let shield_index = engine.test_object_index(shield);
     assert_eq!(
-        engine
-            .call_object_function(
-                shield_index,
-                "Activate",
-                vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64())],
-            )
-            .expect("MSHS::Activate executes"),
+        engine.call_test_object_function(
+            shield_index,
+            "Activate",
+            vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64())],
+        ),
         Value::Int(1)
     );
 
-    let mage_snapshot = engine.object_snapshot(mage).expect("mage remains live");
-    let shield_effect = mage_snapshot
-        .effects
-        .iter()
-        .find(|effect| effect.name == "IntShield")
-        .expect("MSHS::Activate attaches IntShield to the mage");
+    let mage_snapshot = engine.test_object_snapshot(mage);
+    let shield_effect = crate::support::TestValueExt::test_value(
+        mage_snapshot
+            .effects
+            .iter()
+            .find(|effect| effect.name == "IntShield"),
+    );
     assert_eq!(shield_effect.command_id.as_deref(), Some("MSHS"));
 
-    let ball_index = engine
-        .find_object_index(ball)
-        .expect("ball remains live before its aura timer");
+    let ball_index = engine.test_object_index(ball);
     assert_eq!(
-        engine
-            .call_object_function(
-                ball_index,
-                "SetShieldedMage",
-                vec![Value::Object(mage.as_u64())],
-            )
-            .expect("BALL remembers the shielded mage"),
+        engine.call_test_object_function(
+            ball_index,
+            "SetShieldedMage",
+            vec![Value::Object(mage.as_u64())],
+        ),
         Value::Int(1)
     );
-    engine
-        .call_object_function(
-            ball_index,
-            "FxCheckClonksTimer",
-            vec![Value::Object(ball.as_u64()), Value::Int(1)],
-        )
-        .expect("BALL::FxCheckClonksTimer executes");
+    engine.call_test_object_function(
+        ball_index,
+        "FxCheckClonksTimer",
+        vec![Value::Object(ball.as_u64()), Value::Int(1)],
+    );
 
-    let ball_snapshot = engine
-        .object_snapshot(ball)
-        .expect("aura callback keeps the ball live");
+    let ball_snapshot = engine.test_object_snapshot(ball);
     let fixed_velocity = ball_snapshot.fixed_velocity.unwrap_or_else(|| {
         FixedVec2::from_ints(ball_snapshot.velocity.x, ball_snapshot.velocity.y)
     });

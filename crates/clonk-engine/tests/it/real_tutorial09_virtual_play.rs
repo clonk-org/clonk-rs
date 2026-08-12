@@ -10,26 +10,24 @@ use clonk_engine::{
 
 fn load_tutorial09() -> (Engine, i32) {
     let mut engine = load_tutorial(9, 0);
-    let owner = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial 9 virtual player".to_owned(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: true,
-            startup_player_count: 1,
-        })
-        .expect("local Tutorial09 virtual player joins")
-        .number();
+    let owner = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial 9 virtual player".to_owned(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: true,
+        startup_player_count: 1,
+    }))
+    .number();
     (engine, owner)
 }
 
@@ -96,18 +94,14 @@ fn swim_until_fish_count(
         if carried_definition_count(player.engine(), clonk, "FISH") >= target_count {
             return Ok(());
         }
-        let clonk_position = player
-            .engine()
-            .object_snapshot(clonk)
-            .expect("Tutorial09 Clonk survives the fish chase")
-            .position;
-        let fish = closest_free_fish(player.engine(), clonk)
-            .expect("Tutorial09 retains a free FISH until the target is reached");
-        let fish_position = player
-            .engine()
-            .object_snapshot(fish)
-            .expect("selected Tutorial09 FISH survives the observation")
-            .position;
+        let clonk_position =
+            crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk))
+                .position;
+        let fish =
+            crate::support::TestValueExt::test_value(closest_free_fish(player.engine(), clonk));
+        let fish_position =
+            crate::support::TestValueExt::test_value(player.engine().object_snapshot(fish))
+                .position;
         let horizontal = ((fish_position.x - clonk_position.x).abs() > 3).then_some(
             if fish_position.x < clonk_position.x {
                 COM_LEFT
@@ -148,10 +142,7 @@ fn swim_to_x(
     clonk: ObjectId,
     target_x: i32,
 ) -> Result<(), Box<dyn Error>> {
-    let x = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("Tutorial09 Clonk survives the return swim")
+    let x = crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk))
         .position
         .x;
     if x < target_x - 4 {
@@ -208,10 +199,8 @@ fn resurface_near_western_shore(
     clonk: ObjectId,
 ) -> Result<(), Box<dyn Error>> {
     for _ in 0..200 {
-        let object = player
-            .engine()
-            .object_snapshot(clonk)
-            .expect("Tutorial09 Clonk survives resurfacing");
+        let object =
+            crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk));
         if object.action.name != "Swim" || (object.position.x <= 195 && object.position.y <= 190) {
             return Ok(());
         }
@@ -347,8 +336,8 @@ fn catch_and_deposit_another_fish(
         Err(error) => return Err(Box::new(error)),
     }
 
-    let fish = carried_object(player.engine(), clonk, "FISH")
-        .expect("the newly caught FISH is in the real inventory");
+    let fish =
+        crate::support::TestValueExt::test_value(carried_object(player.engine(), clonk, "FISH"));
     player.wait_until("IGLO opens context for another FISH", 20, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
     })?;
@@ -382,9 +371,7 @@ fn object_menu_identification(engine: &Engine, owner: i32) -> Option<clonk_scrip
 #[test]
 fn tutorial09_real_ocean_consumes_and_restores_extended_breath() -> Result<(), Box<dyn Error>> {
     let (mut engine, owner) = load_tutorial09();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial09 joins one selected CLNK");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     // Tutorial09/Script.c:25-26 gives the real crew AquaClonk-class Swim and
@@ -399,11 +386,8 @@ fn tutorial09_real_ocean_consumes_and_restores_extended_breath() -> Result<(), B
                 .is_some_and(|object| object.breath == 250_000)
         },
     )?;
-    let full_energy = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("Tutorial09 Clonk exists")
-        .energy;
+    let full_energy =
+        crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk)).energy;
 
     player.hold_until(
         COM_LEFT,
@@ -427,10 +411,8 @@ fn tutorial09_real_ocean_consumes_and_restores_extended_breath() -> Result<(), B
     )?;
     player.release(COM_DOWN)?;
 
-    let submerged = player
-        .engine()
-        .object_snapshot(clonk)
-        .expect("submerged Tutorial09 Clonk survives");
+    let submerged =
+        crate::support::TestValueExt::test_value(player.engine().object_snapshot(clonk));
     assert_eq!(
         submerged.breath, 248_000,
         "C++ consumes 2*C4MaxPhysical/100 on the first submerged Tick5 (C4Object.cpp:901-910)"
@@ -466,9 +448,7 @@ fn tutorial09_real_ocean_consumes_and_restores_extended_breath() -> Result<(), B
 fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial09();
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial09 joins one selected CLNK");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     player.wait_until("Tutorial09 asks for an igloo", 240, |engine| {
@@ -499,18 +479,24 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("CNKT opens the real CXCN menu", 20, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::C4Id("CXCN".into()))
     })?;
-    let igloo_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "IGLO"))
-        .expect("Tutorial09 gives the player IGLO knowledge");
+    let igloo_index = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "IGLO")),
+    );
     player.menu_navigate_to_index(igloo_index)?;
     player.menu_enter()?;
     let igloo = player
         .wait_until("the IGLO construction site is created", 30, |engine| {
             object_with_definition(engine, "IGLO").is_some()
         })
-        .map(|_| object_with_definition(player.engine(), "IGLO").expect("IGLO exists"))?;
+        .map(|_| {
+            crate::support::TestValueExt::test_value(object_with_definition(
+                player.engine(),
+                "IGLO",
+            ))
+        })?;
     player.tap(COM_DOWN)?;
     player.wait_until("the Clonk starts building IGLO", 30, |engine| {
         engine
@@ -623,7 +609,8 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .object_snapshot(clonk)
             .is_some_and(|object| object.container == Some(igloo))
     })?;
-    let fish = carried_object(player.engine(), clonk, "FISH").expect("caught FISH is carried");
+    let fish =
+        crate::support::TestValueExt::test_value(carried_object(player.engine(), clonk, "FISH"));
     player.wait_until("IGLO opens context with a Put row", 20, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(14))
     })?;
@@ -646,16 +633,17 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("IGLO opens the real Sell menu", 20, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(5))
     })?;
-    let initial_fish_count = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| {
-            menu.items
-                .iter()
-                .find(|item| item.item_id == "FISH")
-                .map(|item| item.count)
-        })
-        .expect("IGLO Sell menu offers the deposited FISH");
+    let initial_fish_count = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| {
+                menu.items
+                    .iter()
+                    .find(|item| item.item_id == "FISH")
+                    .map(|item| item.count)
+            }),
+    );
     assert_eq!(initial_fish_count, 1);
 
     // Keep the first FISH in IGLO and physically catch/deposit another. FISH
@@ -669,22 +657,23 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("IGLO opens its stacked FISH Sell row", 20, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(5))
     })?;
-    let (fish_index, stacked_count, representative) = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| {
-            let fish_rows = menu
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| item.item_id == "FISH")
-                .collect::<Vec<_>>();
-            (fish_rows.len() == 1).then(|| {
-                let (index, item) = fish_rows[0];
-                (index, item.count, item.picture_object)
-            })
-        })
-        .expect("two real FISH concatenate into one C++ Sell row");
+    let (fish_index, stacked_count, representative) = crate::support::TestValueExt::test_value(
+        player
+            .engine()
+            .cursor_object_menu(owner)
+            .and_then(|(_, menu)| {
+                let fish_rows = menu
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| item.item_id == "FISH")
+                    .collect::<Vec<_>>();
+                (fish_rows.len() == 1).then(|| {
+                    let (index, item) = fish_rows[0];
+                    (index, item.count, item.picture_object)
+                })
+            }),
+    );
     assert_eq!(stacked_count, 2);
     assert_eq!(
         representative,
@@ -728,11 +717,12 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         player.wait_until("IGLO restores the real Sell menu", 20, |engine| {
             object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(5))
         })?;
-        let fish_index = player
-            .engine()
-            .cursor_object_menu(owner)
-            .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "FISH"))
-            .expect("IGLO offers the newly deposited FISH for sale");
+        let fish_index = crate::support::TestValueExt::test_value(
+            player
+                .engine()
+                .cursor_object_menu(owner)
+                .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "FISH")),
+        );
         player.menu_navigate_to_index(fish_index)?;
         player.menu_enter()?;
         player.wait_until("selling FISH raises wealth", 40, |engine| {

@@ -9,7 +9,7 @@ fn exec_action_set_dir_respects_signed_directions_gate() -> Result<(), EngineErr
         (2, Direction::Right),
     ] {
         let id = format!("D{:03}", raw_directions + 2);
-        let mut definition = Definition::from_script(id.as_str(), "Direction gate", "")?;
+        let mut definition = test_definition(id.as_str(), "Direction gate", "");
         definition.configure_actions(
             None,
             HashMap::from([(
@@ -26,7 +26,7 @@ fn exec_action_set_dir_respects_signed_directions_gate() -> Result<(), EngineErr
                 .with_action(ActionState::new("Walk"))
                 .with_direction(Direction::Left),
         )?;
-        let index = engine.find_object_index(object).expect("object exists");
+        let index = crate::TestValueExt::test_value(engine.find_object_index(object));
         let definition_id = engine.objects[index].definition_id.clone();
 
         engine.set_exec_action_direction(index, &definition_id, Direction::Right)?;

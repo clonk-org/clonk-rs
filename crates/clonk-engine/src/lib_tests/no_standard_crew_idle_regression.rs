@@ -13,15 +13,10 @@ fn idle_crew(id: &str, name: &str, experience: i32) -> player_file::CrewInfo {
 #[test]
 fn empty_id_get_idle_excludes_no_standard_crew_definitions() {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("STND", "Standard crew", "")
-        .expect("standard definition registers");
-    let mut excluded =
-        Definition::from_script("SPEC", "Special crew", "").expect("special definition compiles");
+    crate::TestValueExt::test_value(engine.register_script_definition("STND", "Standard crew", ""));
+    let mut excluded = test_definition("SPEC", "Special crew", "");
     excluded.no_standard_crew = -2;
-    engine
-        .register_definition(excluded)
-        .expect("special definition registers");
+    crate::TestValueExt::test_value(engine.register_definition(excluded));
 
     engine.crew_rosters.insert(
         4,
@@ -35,16 +30,12 @@ fn empty_id_get_idle_excludes_no_standard_crew_definitions() {
     assert_eq!(engine.idle_crew_info_index(4, ""), Some(0));
     assert_eq!(engine.idle_crew_info_index(4, "SPEC"), Some(1));
 
-    let (standard_index, _) = engine
-        .recruit_crew_info(4, "")
-        .expect("empty id recruits standard crew");
+    let (standard_index, _) = crate::TestValueExt::test_value(engine.recruit_crew_info(4, ""));
     assert_eq!(standard_index, 0);
     assert!(engine.crew_rosters[&4][0].in_action);
     assert!(!engine.crew_rosters[&4][1].in_action);
 
-    let (special_index, _) = engine
-        .recruit_crew_info(4, "SPEC")
-        .expect("explicit id recruits special crew");
+    let (special_index, _) = crate::TestValueExt::test_value(engine.recruit_crew_info(4, "SPEC"));
     assert_eq!(special_index, 1);
     assert!(engine.crew_rosters[&4][1].in_action);
 }

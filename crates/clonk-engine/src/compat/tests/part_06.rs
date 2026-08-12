@@ -73,7 +73,7 @@
             assert_eq!(get_score(&[Value::Int(4)])?, Value::Int(-100_000));
             Ok::<Value, RuntimeError>(Value::Nil)
         });
-        result.expect("DoScore calls succeed");
+        result.test_value();
         assert!(matches!(
             outcome.player_commands.as_slice(),
             [
@@ -334,8 +334,7 @@
             (Some(Value::Int(42)), Some("0042")),
             (Some(Value::Int(9999)), Some("9999")),
         ] {
-            let parsed = parse_native_c4id_argument(value.as_ref(), "FindObject")
-                .expect("valid C4ID conversion");
+            let parsed = parse_native_c4id_argument(value.as_ref(), "FindObject").test_value();
             assert_eq!(parsed.as_deref(), expected);
         }
 
@@ -369,8 +368,7 @@
                     func FalseID() {{ return ScoreboardCol(false); }}
                     func PassedID(value) {{ return ScoreboardCol(value); }}
                     "#
-                ))
-                .expect("legacy C4ID conversion probe compiles");
+                )).test_value();
 
             assert_eq!(
                 script
@@ -397,8 +395,7 @@
                 func FalseID() { return ScoreboardCol(false); }
                 func PassedID(value) { return ScoreboardCol(value); }
                 "#,
-            )
-            .expect("strict-3 C4ID conversion probe compiles");
+            ).test_value();
 
         for function in ["NilID", "ZeroID"] {
             assert_eq!(
@@ -589,14 +586,13 @@
         engine
             .load_script(
                 r#"#strict 2
-func Sawable(obj) {
-  return GetID(obj) != WOOD && GetComponent(WOOD, 0, obj)
+        func Sawable(obj) {
+          return GetID(obj) != WOOD && GetComponent(WOOD, 0, obj)
          && ComponentAll(obj, WOOD);
-}
-func Missing() { return ComponentAll(0, WOOD); }
-"#,
-            )
-            .expect("sawmill predicate compiles");
+        }
+        func Missing() { return ComponentAll(0, WOOD); }
+        "#,
+            ).test_value();
 
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             assert_eq!(
@@ -628,10 +624,9 @@ func Missing() { return ComponentAll(0, WOOD); }
         // FnMaterial (C4Script.cpp:2488-2491): Game.Material.Get — the
         // material number, -1 for unknown names.
         let library =
-            clonk_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=50\n")
-                .expect("library builds");
+            clonk_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=50\n").test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let expected = materials.get("Earth").expect("earth exists").id().index() as i32;
+        let expected = materials.get("Earth").test_value().id().index() as i32;
         let world = world_with(Vec::<HostWorldObject>::new(), None, HashMap::new(), HashMap::new())
         .with_materials(Some(Rc::new(materials)));
         let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
@@ -653,12 +648,10 @@ func Missing() { return ComponentAll(0, WOOD); }
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material Glow]\nName=GlowingRock\nDensity=50\n\n\
              [Material Water]\nName=Water\nDensity=25\n",
-        )
-        .expect("material library builds");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
         let glowing = materials
-            .get("GlowingRock")
-            .expect("glowing rock exists")
+            .get("GlowingRock").test_value()
             .id()
             .index() as i32;
         let world = HostWorldContext::default().with_materials(Some(Rc::new(materials)));
@@ -690,10 +683,9 @@ func Missing() { return ComponentAll(0, WOOD); }
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material Oil]\nName=Oil\nDensity=60\nMinHeightCount=4\n\n\
              [Material Gold]\nName=Gold\nDensity=50\n",
-        )
-        .expect("oil library builds");
+        ).test_value();
         let materials = MaterialSet::from_resource_library(&library);
-        let oil = materials.id_of("Oil").expect("oil exists");
+        let oil = materials.id_of("Oil").test_value();
         assert_eq!(
             oil.index(),
             0,
@@ -706,7 +698,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         densities[1] = 60;
         densities[2] = 50;
         let names = vec![None, Some("Oil".to_string()), Some("Gold".to_string())];
-        let mut landscape = Landscape::new(3, vec![0; 3]).expect("landscape builds");
+        let mut landscape = Landscape::new(3, vec![0; 3]).test_value();
         landscape.set_world_height(6);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             3,
@@ -738,8 +730,7 @@ func Missing() { return ComponentAll(0, WOOD); }
                  GetMaterialCount(2),\n\
                  GetMaterialCount(Material(\"Oil\"), false, 99)\n\
                  ]; }",
-            )
-            .expect("material-count probe compiles");
+            ).test_value();
 
         let (result, _) = with_effect_context(None, &[], world, 1, || engine.call("Probe", &[]));
         assert_eq!(
@@ -783,7 +774,7 @@ func Missing() { return ComponentAll(0, WOOD); }
             ])));
             let (result, _) =
                 with_effect_context(None, &[], world, 1, || get_hi_rank(&[Value::Int(1)]));
-            result.expect("GetHiRank succeeds")
+            result.test_value()
         };
 
         assert_eq!(
@@ -936,18 +927,16 @@ func Missing() { return ComponentAll(0, WOOD); }
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
         script
-            .load_script("#strict 3\nfunc Probe() { return EditCursor(); }")
-            .expect("EditCursor probe compiles");
+            .load_script("#strict 3\nfunc Probe() { return EditCursor(); }").test_value();
 
         let query = |world| {
             let (result, _) = with_effect_context(None, &[], world, 1, || {
                 Ok::<_, RuntimeError>(
                     script
-                        .call("Probe", &[])
-                        .expect("EditCursor probe executes"),
+                        .call("Probe", &[]).test_value(),
                 )
             });
-            result.expect("EditCursor host context succeeds")
+            result.test_value()
         };
 
         assert_eq!(
@@ -1126,8 +1115,7 @@ func Missing() { return ComponentAll(0, WOOD); }
                  return [GetViewCursor(15), SetViewCursor(15, next),\n\
                          GetViewCursor(15), SetViewCursor(15),\n\
                          GetViewCursor(15), SetViewCursor(99, next)];\n}",
-            )
-            .expect("SetViewCursor probe compiles");
+            ).test_value();
 
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             script.call("Probe", &[Value::Object(new_focus.as_u64())])
@@ -1173,7 +1161,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         let query = |world: HostWorldContext, player_id| {
             let args = [Value::Int(player_id)];
             let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_view_mode(&args));
-            result.expect("GetPlrViewMode succeeds")
+            result.test_value()
         };
 
         assert_eq!(
@@ -1218,8 +1206,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
         script
-            .load_script("#strict 3\nfunc Probe() { return GetTime(); }")
-            .expect("GetTime probe compiles");
+            .load_script("#strict 3\nfunc Probe() { return GetTime(); }").test_value();
 
         assert_eq!(
             script.call("Probe", &[]).expect("CM_None probe executes"),
@@ -1231,10 +1218,10 @@ func Missing() { return ComponentAll(0, WOOD); }
             let (result, _) =
                 with_effect_context(None, &[], engine.host_world_context(), 1, || {
                     Ok::<_, RuntimeError>(
-                        script.call("Probe", &[]).expect("GetTime probe executes"),
+                        script.call("Probe", &[]).test_value(),
                     )
                 });
-            result.expect("GetTime host context succeeds")
+            result.test_value()
         };
 
         let mut engine = crate::Engine::new();
@@ -1295,8 +1282,7 @@ func Missing() { return ComponentAll(0, WOOD); }
                          SetViewCursor(15, next), GetViewCursor(15),\n\
                          GetPlrView(15), GetPlrViewMode(15),\n\
                          SetPlrView(99, target), GetPlrView(99)];\n}",
-            )
-            .expect("SetPlrView probe compiles");
+            ).test_value();
 
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             let result = script.call(
@@ -1310,13 +1296,12 @@ func Missing() { return ComponentAll(0, WOOD); }
                 cell.borrow()
                     .as_ref()
                     .and_then(|context| context.player_state(15))
-                    .cloned()
-                    .expect("player remains in host context")
+                    .cloned().test_value()
             });
             result.map(|result| (result, state))
         });
 
-        let (result, state) = result.expect("SetPlrView calls succeed");
+        let (result, state) = result.test_value();
         assert_eq!(
             result,
             Value::Array(vec![
@@ -1409,8 +1394,7 @@ func Missing() { return ComponentAll(0, WOOD); }
                  RemoveObject();\n\
                  return [old_cursor, GetViewCursor(15),\n\
                          old_target, GetPlrView(15)];\n}",
-            )
-            .expect("pointer-clear probe compiles");
+            ).test_value();
         let object = HostObjectContext {
             id: removed,
             owner: 15,
@@ -1423,18 +1407,17 @@ func Missing() { return ComponentAll(0, WOOD); }
             let result = script.call("Probe", &[Value::Object(removed.as_u64())]);
             let (state, retained_fow_link) = HOST_CONTEXT.with(|cell| {
                 let borrow = cell.borrow();
-                let context = borrow.as_ref().expect("host context remains");
+                let context = borrow.as_ref().test_value();
                 (
                     context
                         .player_state(15)
-                        .cloned()
-                        .expect("player remains in host context"),
+                        .cloned().test_value(),
                     context.world.player_has_fow_view_object(15, removed),
                 )
             });
             result.map(|result| (result, state, retained_fow_link))
         });
-        let (result, state, retained_fow_link) = result.expect("pointer-clear probe succeeds");
+        let (result, state, retained_fow_link) = result.test_value();
 
         assert_eq!(
             result,
@@ -1481,34 +1464,20 @@ func Missing() { return ComponentAll(0, WOOD); }
         // owner's non-death FoW removal before RemoveObject returns
         // (oracle-src-pinned src/C4Object.cpp:240-320;
         // src/C4Player.cpp:57-77; src/C4Script.cpp:456-460).
-        let definition = crate::Definition::from_script(
-            "RFOW",
-            "Removed FoW object",
-            r#"#strict
-public func Trigger()
-{
-    return RemoveObject();
-}
-"#,
-        )
-        .expect("removed-FoW script compiles");
+        let definition = test_definition("RFOW", "Removed FoW object", r#"#strict
+        public func Trigger()
+        {
+            return RemoveObject();
+        }
+        "#);
         let mut engine = crate::Engine::with_seed(0);
-        engine
-            .register_player(crate::PlayerConfig::new(0, "Player"))
-            .expect("removed-FoW player registers");
-        engine
-            .register_definition(definition)
-            .expect("removed-FoW definition registers");
-        let target = engine
-            .spawn_object(
-                SpawnConfig::new("RFOW")
-                    .with_owner(0)
-                    .with_plr_view_range(500),
-            )
-            .expect("removed-FoW object spawns");
+        engine.register_test_player(crate::PlayerConfig::new(0, "Player"));
+        engine.register_test_definition(definition);
+        let target = engine.spawn_test_object(SpawnConfig::new("RFOW")
+            .with_owner(0)
+            .with_plr_view_range(500));
         let index = engine
-            .find_object_index(target)
-            .expect("removed-FoW object exists");
+            .find_object_index(target).test_value();
         assert!(engine
             .player(0)
             .is_some_and(|player| player.has_fow_view_object(target)));
@@ -1557,7 +1526,7 @@ public func Trigger()
             );
             Ok::<Value, RuntimeError>(Value::Nil)
         });
-        result.expect("local SetViewOffset calls succeed");
+        result.test_value();
         assert!(outcome.player_commands.is_empty());
         assert_eq!(
             *local_requests.borrow(),
@@ -1644,8 +1613,7 @@ public func Trigger()
                    return [ok, P(\"LastCom\"), P(\"LastComDel\"),\n\
                            P(\"LastComDownDouble\"), P(\"PressedComs\"),\n\
                            ClearLastPlrCom(99)];\n}",
-            )
-            .expect("ClearLastPlrCom probe compiles");
+            ).test_value();
 
         let (result, outcome) =
             with_effect_context(None, &[], world, 1, || script.call("Probe", &[]));
@@ -2211,7 +2179,7 @@ public func Trigger()
                 Value::Int(3),
             ])
         });
-        let value = result.expect("AddEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
         assert_eq!(outcome.object.len(), 1);
         match &outcome.object[0] {
@@ -2244,7 +2212,7 @@ public func Trigger()
             ])
         });
 
-        let value = result.expect("AddEffect succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(1));
         assert_eq!(outcome.object.len(), 1);
         match &outcome.object[0] {
@@ -2260,7 +2228,7 @@ public func Trigger()
     fn set_gravity_records_physics_update() {
         let (result, delta) =
             with_physics_context(PhysicsSettings::default(), || set_gravity(&[Value::Int(5)]));
-        let value = result.expect("SetGravity succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Nil);
         assert_eq!(delta.gravity, Some(5));
     }
@@ -2281,7 +2249,7 @@ public func Trigger()
     fn get_gravity_returns_current_value() {
         let settings = PhysicsSettings::new(6, 20, -30);
         let (result, _) = with_physics_context(settings, || get_gravity(&[]));
-        let value = result.expect("GetGravity succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(6));
     }
 
@@ -2294,8 +2262,7 @@ public func Trigger()
             ENVIRONMENT_CONTEXT.with(|cell| {
                 let context = cell.borrow();
                 let settings = context
-                    .as_ref()
-                    .expect("environment context exists")
+                    .as_ref().test_value()
                     .settings
                     .borrow();
                 assert_eq!((settings.wind, settings.wind_target), (75, 75));
@@ -2304,7 +2271,7 @@ public func Trigger()
             get_wind(&[])
         });
 
-        let value = result.expect("SetWind/GetWind succeeds");
+        let value = result.test_value();
         assert_eq!(value, Value::Int(75));
         assert_eq!(delta.wind, Some(75));
 
@@ -2339,6 +2306,6 @@ public func Trigger()
             });
             inner
         });
-        result.expect("GetWind positional succeeds");
+        result.test_value();
     }
 

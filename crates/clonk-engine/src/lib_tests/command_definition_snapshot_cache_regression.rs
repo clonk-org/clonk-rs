@@ -3,13 +3,13 @@ use super::*;
 #[test]
 fn late_definition_registration_invalidates_the_shared_command_table() -> Result<(), EngineError> {
     let mut engine = Engine::new();
-    engine.register_definition(Definition::from_script("BASE", "Base", "")?)?;
+    engine.register_definition(test_definition("BASE", "Base", ""))?;
 
     let first = engine.command_definition_snapshot_table();
     let reused = engine.command_definition_snapshot_table();
     assert!(Rc::ptr_eq(&first, &reused));
 
-    let mut chopper = Definition::from_script("CHOP", "Chopper", "")?;
+    let mut chopper = test_definition("CHOP", "Chopper", "");
     chopper.configure_actions(
         None,
         HashMap::from([(
@@ -21,7 +21,7 @@ fn late_definition_registration_invalidates_the_shared_command_table() -> Result
 
     let rebuilt = engine.command_definition_snapshot_table();
     assert!(!Rc::ptr_eq(&first, &rebuilt));
-    let snapshot = rebuilt.get("CHOP").expect("late definition is visible");
+    let snapshot = crate::TestValueExt::test_value(rebuilt.get("CHOP"));
     assert!(snapshot.can_chop);
     assert_eq!(snapshot.chop_action.as_deref(), Some("ChopWood"));
     Ok(())
@@ -30,12 +30,12 @@ fn late_definition_registration_invalidates_the_shared_command_table() -> Result
 #[test]
 fn definition_and_script_boundaries_invalidate_shared_host_tables() -> Result<(), EngineError> {
     let mut engine = Engine::new();
-    engine.register_definition(Definition::from_script("BASE", "Base", "")?)?;
+    engine.register_definition(test_definition("BASE", "Base", ""))?;
 
     let first = engine.host_definition_tables();
     assert!(Rc::ptr_eq(&first, &engine.host_definition_tables()));
 
-    engine.register_definition(Definition::from_script("LATE", "Late", "")?)?;
+    engine.register_definition(test_definition("LATE", "Late", ""))?;
     let after_definition = engine.host_definition_tables();
     assert!(!Rc::ptr_eq(&first, &after_definition));
 

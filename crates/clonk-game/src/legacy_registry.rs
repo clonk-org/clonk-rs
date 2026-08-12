@@ -56,125 +56,47 @@ const fn field(name: &'static str, kind: FieldKind) -> FieldSchema {
     FieldSchema { name, kind }
 }
 
+#[rustfmt::skip]
 const GENERAL_FIELDS: &[FieldSchema] = &[
-    field("Version", FieldKind::UnsignedDword),
-    field("Name", FieldKind::String),
-    field("Language", FieldKind::String),
-    field("LanguageEx", FieldKind::String),
-    field("LanguageCharset", FieldKind::String),
-    field("Definitions", FieldKind::String),
-    field("Participants", FieldKind::String),
-    field("LogPath", FieldKind::String),
-    field("PlayerPath", FieldKind::String),
-    field("DefinitionPath", FieldKind::String),
-    field("UserPath", FieldKind::String),
-    field("SaveGameFolder", FieldKind::String),
-    field("SaveDemoFolder", FieldKind::String),
-    field("MissionAccess", FieldKind::String),
-    field("FPS", FieldKind::Bool),
-    field("Record", FieldKind::Bool),
-    field("ScreenshotFolder", FieldKind::String),
-    field("NoCrew", FieldKind::Bool),
-    field("DefCrewStrength", FieldKind::SignedDword),
-    field("ScrollSmooth", FieldKind::SignedDword),
-    field("DebugMode", FieldKind::Bool),
-    field("AllowScriptingInReplays", FieldKind::Bool),
-    field("FontName", FieldKind::String),
-    field("FontSize", FieldKind::SignedDword),
-    field("GamepadEnabled", FieldKind::Bool),
-    field("FirstStart", FieldKind::Bool),
-    field("UserPortraitsWritten", FieldKind::Bool),
-    field("ConfigResetSafety", FieldKind::SignedDword),
-    field("UseWhiteIngameChat", FieldKind::Bool),
-    field("UseWhiteLobbyChat", FieldKind::Bool),
-    field("ShowLogTimestamps", FieldKind::Bool),
-    field("Preloading", FieldKind::Bool),
+    field("Version", FieldKind::UnsignedDword), field("Name", FieldKind::String), field("Language", FieldKind::String), field("LanguageEx", FieldKind::String),
+    field("LanguageCharset", FieldKind::String), field("Definitions", FieldKind::String), field("Participants", FieldKind::String), field("LogPath", FieldKind::String),
+    field("PlayerPath", FieldKind::String), field("DefinitionPath", FieldKind::String), field("UserPath", FieldKind::String), field("SaveGameFolder", FieldKind::String),
+    field("SaveDemoFolder", FieldKind::String), field("MissionAccess", FieldKind::String), field("FPS", FieldKind::Bool), field("Record", FieldKind::Bool),
+    field("ScreenshotFolder", FieldKind::String), field("NoCrew", FieldKind::Bool), field("DefCrewStrength", FieldKind::SignedDword), field("ScrollSmooth", FieldKind::SignedDword),
+    field("DebugMode", FieldKind::Bool), field("AllowScriptingInReplays", FieldKind::Bool), field("FontName", FieldKind::String), field("FontSize", FieldKind::SignedDword),
+    field("GamepadEnabled", FieldKind::Bool), field("FirstStart", FieldKind::Bool), field("UserPortraitsWritten", FieldKind::Bool),
+    field("ConfigResetSafety", FieldKind::SignedDword), field("UseWhiteIngameChat", FieldKind::Bool), field("UseWhiteLobbyChat", FieldKind::Bool),
+    field("ShowLogTimestamps", FieldKind::Bool), field("Preloading", FieldKind::Bool),
 ];
 
+#[rustfmt::skip]
 const CONTROLS_FIELDS: &[FieldSchema] = &[
-    field("Kbd1Key1", FieldKind::SignedDword),
-    field("Kbd1Key2", FieldKind::SignedDword),
-    field("Kbd1Key3", FieldKind::SignedDword),
-    field("Kbd1Key4", FieldKind::SignedDword),
-    field("Kbd1Key5", FieldKind::SignedDword),
-    field("Kbd1Key6", FieldKind::SignedDword),
-    field("Kbd1Key7", FieldKind::SignedDword),
-    field("Kbd1Key8", FieldKind::SignedDword),
-    field("Kbd1Key9", FieldKind::SignedDword),
-    field("Kbd1Key10", FieldKind::SignedDword),
-    field("Kbd1Key11", FieldKind::SignedDword),
-    field("Kbd1Key12", FieldKind::SignedDword),
-    field("Kbd2Key1", FieldKind::SignedDword),
-    field("Kbd2Key2", FieldKind::SignedDword),
-    field("Kbd2Key3", FieldKind::SignedDword),
-    field("Kbd2Key4", FieldKind::SignedDword),
-    field("Kbd2Key5", FieldKind::SignedDword),
-    field("Kbd2Key6", FieldKind::SignedDword),
-    field("Kbd2Key7", FieldKind::SignedDword),
-    field("Kbd2Key8", FieldKind::SignedDword),
-    field("Kbd2Key9", FieldKind::SignedDword),
-    field("Kbd2Key10", FieldKind::SignedDword),
-    field("Kbd2Key11", FieldKind::SignedDword),
-    field("Kbd2Key12", FieldKind::SignedDword),
-    field("Kbd3Key1", FieldKind::SignedDword),
-    field("Kbd3Key2", FieldKind::SignedDword),
-    field("Kbd3Key3", FieldKind::SignedDword),
-    field("Kbd3Key4", FieldKind::SignedDword),
-    field("Kbd3Key5", FieldKind::SignedDword),
-    field("Kbd3Key6", FieldKind::SignedDword),
-    field("Kbd3Key7", FieldKind::SignedDword),
-    field("Kbd3Key8", FieldKind::SignedDword),
-    field("Kbd3Key9", FieldKind::SignedDword),
-    field("Kbd3Key10", FieldKind::SignedDword),
-    field("Kbd3Key11", FieldKind::SignedDword),
-    field("Kbd3Key12", FieldKind::SignedDword),
-    field("Kbd4Key1", FieldKind::SignedDword),
-    field("Kbd4Key2", FieldKind::SignedDword),
-    field("Kbd4Key3", FieldKind::SignedDword),
-    field("Kbd4Key4", FieldKind::SignedDword),
-    field("Kbd4Key5", FieldKind::SignedDword),
-    field("Kbd4Key6", FieldKind::SignedDword),
-    field("Kbd4Key7", FieldKind::SignedDword),
-    field("Kbd4Key8", FieldKind::SignedDword),
-    field("Kbd4Key9", FieldKind::SignedDword),
-    field("Kbd4Key10", FieldKind::SignedDword),
-    field("Kbd4Key11", FieldKind::SignedDword),
-    field("Kbd4Key12", FieldKind::SignedDword),
-    field("MouseAutoScroll", FieldKind::SignedDword),
-    field("GamepadGuiControl", FieldKind::SignedDword),
+    field("Kbd1Key1", FieldKind::SignedDword), field("Kbd1Key2", FieldKind::SignedDword), field("Kbd1Key3", FieldKind::SignedDword), field("Kbd1Key4", FieldKind::SignedDword),
+    field("Kbd1Key5", FieldKind::SignedDword), field("Kbd1Key6", FieldKind::SignedDword), field("Kbd1Key7", FieldKind::SignedDword), field("Kbd1Key8", FieldKind::SignedDword),
+    field("Kbd1Key9", FieldKind::SignedDword), field("Kbd1Key10", FieldKind::SignedDword), field("Kbd1Key11", FieldKind::SignedDword), field("Kbd1Key12", FieldKind::SignedDword),
+    field("Kbd2Key1", FieldKind::SignedDword), field("Kbd2Key2", FieldKind::SignedDword), field("Kbd2Key3", FieldKind::SignedDword), field("Kbd2Key4", FieldKind::SignedDword),
+    field("Kbd2Key5", FieldKind::SignedDword), field("Kbd2Key6", FieldKind::SignedDword), field("Kbd2Key7", FieldKind::SignedDword), field("Kbd2Key8", FieldKind::SignedDword),
+    field("Kbd2Key9", FieldKind::SignedDword), field("Kbd2Key10", FieldKind::SignedDword), field("Kbd2Key11", FieldKind::SignedDword), field("Kbd2Key12", FieldKind::SignedDword),
+    field("Kbd3Key1", FieldKind::SignedDword), field("Kbd3Key2", FieldKind::SignedDword), field("Kbd3Key3", FieldKind::SignedDword), field("Kbd3Key4", FieldKind::SignedDword),
+    field("Kbd3Key5", FieldKind::SignedDword), field("Kbd3Key6", FieldKind::SignedDword), field("Kbd3Key7", FieldKind::SignedDword), field("Kbd3Key8", FieldKind::SignedDword),
+    field("Kbd3Key9", FieldKind::SignedDword), field("Kbd3Key10", FieldKind::SignedDword), field("Kbd3Key11", FieldKind::SignedDword), field("Kbd3Key12", FieldKind::SignedDword),
+    field("Kbd4Key1", FieldKind::SignedDword), field("Kbd4Key2", FieldKind::SignedDword), field("Kbd4Key3", FieldKind::SignedDword), field("Kbd4Key4", FieldKind::SignedDword),
+    field("Kbd4Key5", FieldKind::SignedDword), field("Kbd4Key6", FieldKind::SignedDword), field("Kbd4Key7", FieldKind::SignedDword), field("Kbd4Key8", FieldKind::SignedDword),
+    field("Kbd4Key9", FieldKind::SignedDword), field("Kbd4Key10", FieldKind::SignedDword), field("Kbd4Key11", FieldKind::SignedDword), field("Kbd4Key12", FieldKind::SignedDword),
+    field("MouseAutoScroll", FieldKind::SignedDword), field("GamepadGuiControl", FieldKind::SignedDword),
 ];
 
+#[rustfmt::skip]
 const GAMEPAD_FIELDS: &[FieldSchema] = &[
-    field("Axis0Min", FieldKind::UnsignedDword),
-    field("Axis0Max", FieldKind::UnsignedDword),
-    field("Axis0Calibrated", FieldKind::Bool),
-    field("Axis1Min", FieldKind::UnsignedDword),
-    field("Axis1Max", FieldKind::UnsignedDword),
-    field("Axis1Calibrated", FieldKind::Bool),
-    field("Axis2Min", FieldKind::UnsignedDword),
-    field("Axis2Max", FieldKind::UnsignedDword),
-    field("Axis2Calibrated", FieldKind::Bool),
-    field("Axis3Min", FieldKind::UnsignedDword),
-    field("Axis3Max", FieldKind::UnsignedDword),
-    field("Axis3Calibrated", FieldKind::Bool),
-    field("Axis4Min", FieldKind::UnsignedDword),
-    field("Axis4Max", FieldKind::UnsignedDword),
-    field("Axis4Calibrated", FieldKind::Bool),
-    field("Axis5Min", FieldKind::UnsignedDword),
-    field("Axis5Max", FieldKind::UnsignedDword),
-    field("Axis5Calibrated", FieldKind::Bool),
-    field("Button1", FieldKind::SignedDword),
-    field("Button2", FieldKind::SignedDword),
-    field("Button3", FieldKind::SignedDword),
-    field("Button4", FieldKind::SignedDword),
-    field("Button5", FieldKind::SignedDword),
-    field("Button6", FieldKind::SignedDword),
-    field("Button7", FieldKind::SignedDword),
-    field("Button8", FieldKind::SignedDword),
-    field("Button9", FieldKind::SignedDword),
-    field("Button10", FieldKind::SignedDword),
-    field("Button11", FieldKind::SignedDword),
-    field("Button12", FieldKind::SignedDword),
+    field("Axis0Min", FieldKind::UnsignedDword), field("Axis0Max", FieldKind::UnsignedDword), field("Axis0Calibrated", FieldKind::Bool),
+    field("Axis1Min", FieldKind::UnsignedDword), field("Axis1Max", FieldKind::UnsignedDword), field("Axis1Calibrated", FieldKind::Bool),
+    field("Axis2Min", FieldKind::UnsignedDword), field("Axis2Max", FieldKind::UnsignedDword), field("Axis2Calibrated", FieldKind::Bool),
+    field("Axis3Min", FieldKind::UnsignedDword), field("Axis3Max", FieldKind::UnsignedDword), field("Axis3Calibrated", FieldKind::Bool),
+    field("Axis4Min", FieldKind::UnsignedDword), field("Axis4Max", FieldKind::UnsignedDword), field("Axis4Calibrated", FieldKind::Bool),
+    field("Axis5Min", FieldKind::UnsignedDword), field("Axis5Max", FieldKind::UnsignedDword), field("Axis5Calibrated", FieldKind::Bool), field("Button1", FieldKind::SignedDword),
+    field("Button2", FieldKind::SignedDword), field("Button3", FieldKind::SignedDword), field("Button4", FieldKind::SignedDword), field("Button5", FieldKind::SignedDword),
+    field("Button6", FieldKind::SignedDword), field("Button7", FieldKind::SignedDword), field("Button8", FieldKind::SignedDword), field("Button9", FieldKind::SignedDword),
+    field("Button10", FieldKind::SignedDword), field("Button11", FieldKind::SignedDword), field("Button12", FieldKind::SignedDword),
 ];
 
 const UPPER_BOARD_VALUES: &[&str] = &["Hide", "Full", "Small", "Mini"];
@@ -182,130 +104,68 @@ const DISPLAY_MODE_VALUES: &[&str] = &["Fullscreen", "Window"];
 const STRICTNESS_VALUES: &[&str] = &["NonStrict", "Strict1", "Strict2", "Strict3", "MaxStrict"];
 const LOG_LEVEL_VALUES: &[&str] = &["trace", "debug", "info", "warn", "error", "critical", "off"];
 
+#[rustfmt::skip]
 const GRAPHICS_FIELDS: &[FieldSchema] = &[
-    field("ResolutionX", FieldKind::SignedDword),
-    field("ResolutionY", FieldKind::SignedDword),
-    field("Scale", FieldKind::SignedDword),
-    field("SplitscreenDividers", FieldKind::SignedDword),
-    field("ShowPlayerHUDAlways", FieldKind::Bool),
-    field("ShowPortraits", FieldKind::Bool),
-    field("AddNewCrewPortraits", FieldKind::Bool),
-    field("SaveDefaultPortraits", FieldKind::Bool),
-    field("ShowCommands", FieldKind::Bool),
-    field("ShowCommandKeys", FieldKind::Bool),
-    field("ColorAnimation", FieldKind::Bool),
-    field("SmokeLevel", FieldKind::SignedDword),
-    field("VerboseObjectLoading", FieldKind::SignedDword),
-    field("UpperBoard", FieldKind::Enum(UPPER_BOARD_VALUES)),
-    field("ShowClock", FieldKind::Bool),
-    field("ShowCrewNames", FieldKind::Bool),
-    field("ShowCrewCNames", FieldKind::Bool),
-    field("MsgBoard", FieldKind::Bool),
-    field("PXSGfx", FieldKind::Bool),
-    field("Engine", FieldKind::SignedDword),
-    field("NoAlphaAdd", FieldKind::Bool),
-    field("PointFiltering", FieldKind::Bool),
-    field("NoBoxFades", FieldKind::Bool),
-    field("NoAcceleration", FieldKind::Bool),
-    field("TexIndent", FieldKind::SignedDword),
-    field("BlitOffset", FieldKind::SignedDword),
-    field("AllowedBlitModes", FieldKind::UnsignedDword),
-    field("Gamma1", FieldKind::SignedDword),
-    field("Gamma2", FieldKind::SignedDword),
-    field("Gamma3", FieldKind::SignedDword),
-    field("RenderInactive", FieldKind::UnsignedDword),
-    field("DisableGamma", FieldKind::Bool),
-    field("Monitor", FieldKind::SignedDword),
-    field("FireParticles", FieldKind::Bool),
-    field("MaxRefreshDelay", FieldKind::SignedDword),
-    field("Shader", FieldKind::Bool),
-    field("AutoFrameSkip", FieldKind::Bool),
-    field("CacheTexturesInRAM", FieldKind::SignedDword),
-    field("DisplayMode", FieldKind::Enum(DISPLAY_MODE_VALUES)),
-    field("Maximized", FieldKind::Bool),
-    field("PositionX", FieldKind::SignedDword),
-    field("PositionY", FieldKind::SignedDword),
-    field("ShowFolderMaps", FieldKind::Bool),
-    field("UseShaderGamma", FieldKind::Bool),
+    field("ResolutionX", FieldKind::SignedDword), field("ResolutionY", FieldKind::SignedDword), field("Scale", FieldKind::SignedDword),
+    field("SplitscreenDividers", FieldKind::SignedDword), field("ShowPlayerHUDAlways", FieldKind::Bool), field("ShowPortraits", FieldKind::Bool),
+    field("AddNewCrewPortraits", FieldKind::Bool), field("SaveDefaultPortraits", FieldKind::Bool), field("ShowCommands", FieldKind::Bool),
+    field("ShowCommandKeys", FieldKind::Bool), field("ColorAnimation", FieldKind::Bool), field("SmokeLevel", FieldKind::SignedDword),
+    field("VerboseObjectLoading", FieldKind::SignedDword), field("UpperBoard", FieldKind::Enum(UPPER_BOARD_VALUES)), field("ShowClock", FieldKind::Bool),
+    field("ShowCrewNames", FieldKind::Bool), field("ShowCrewCNames", FieldKind::Bool), field("MsgBoard", FieldKind::Bool), field("PXSGfx", FieldKind::Bool),
+    field("Engine", FieldKind::SignedDword), field("NoAlphaAdd", FieldKind::Bool), field("PointFiltering", FieldKind::Bool), field("NoBoxFades", FieldKind::Bool),
+    field("NoAcceleration", FieldKind::Bool), field("TexIndent", FieldKind::SignedDword), field("BlitOffset", FieldKind::SignedDword),
+    field("AllowedBlitModes", FieldKind::UnsignedDword), field("Gamma1", FieldKind::SignedDword), field("Gamma2", FieldKind::SignedDword), field("Gamma3", FieldKind::SignedDword),
+    field("RenderInactive", FieldKind::UnsignedDword), field("DisableGamma", FieldKind::Bool), field("Monitor", FieldKind::SignedDword), field("FireParticles", FieldKind::Bool),
+    field("MaxRefreshDelay", FieldKind::SignedDword), field("Shader", FieldKind::Bool), field("AutoFrameSkip", FieldKind::Bool),
+    field("CacheTexturesInRAM", FieldKind::SignedDword), field("DisplayMode", FieldKind::Enum(DISPLAY_MODE_VALUES)), field("Maximized", FieldKind::Bool),
+    field("PositionX", FieldKind::SignedDword), field("PositionY", FieldKind::SignedDword), field("ShowFolderMaps", FieldKind::Bool), field("UseShaderGamma", FieldKind::Bool),
 ];
 
+#[rustfmt::skip]
 const SOUND_FIELDS: &[FieldSchema] = &[
-    field("Sound", FieldKind::Bool),
-    field("Music", FieldKind::Bool),
-    field("MenuMusic", FieldKind::Bool),
-    field("MenuSound", FieldKind::Bool),
-    field("MusicVolume", FieldKind::SignedDword),
-    field("SoundVolume", FieldKind::SignedDword),
-    field("MaxChannels", FieldKind::SignedDword),
-    field("PreferLinearResampling", FieldKind::Bool),
-    field("MuteSoundCommand", FieldKind::Bool),
+    field("Sound", FieldKind::Bool), field("Music", FieldKind::Bool), field("MenuMusic", FieldKind::Bool), field("MenuSound", FieldKind::Bool),
+    field("MusicVolume", FieldKind::SignedDword), field("SoundVolume", FieldKind::SignedDword), field("MaxChannels", FieldKind::SignedDword),
+    field("PreferLinearResampling", FieldKind::Bool), field("MuteSoundCommand", FieldKind::Bool),
 ];
 
+#[rustfmt::skip]
 const NETWORK_FIELDS: &[FieldSchema] = &[
-    field("ControlRate", FieldKind::SignedDword),
-    field("WorkPath", FieldKind::String),
-    field("NoRuntimeJoin", FieldKind::Bool),
-    field("MaxResSearchRecursion", FieldKind::SignedDword),
-    field("Comment", FieldKind::String),
-    field("PortTCP", FieldKind::SignedDword),
-    field("PortUDP", FieldKind::SignedDword),
-    field("PortDiscovery", FieldKind::SignedDword),
-    field("PortRefServer", FieldKind::SignedDword),
-    field("ControlMode", FieldKind::SignedDword),
-    field("LocalName", FieldKind::String),
-    field("Nick", FieldKind::String),
-    field("MaxLoadFileSize", FieldKind::SignedDword),
-    field("MasterServerSignUp", FieldKind::Bool),
-    field("MasterReferencePeriod", FieldKind::SignedDword),
-    field("LeagueServerSignUp", FieldKind::Bool),
-    field("ServerAddress", FieldKind::String),
-    field("UseAlternateServer", FieldKind::Bool),
-    field("AlternateServerAddress", FieldKind::String),
-    field("UpdateServerAddress", FieldKind::String),
-    field("LastPassword", FieldKind::String),
-    field("EnableAutomaticUpdate", FieldKind::Bool),
-    field("LastUpdateTime", FieldKind::UnsignedQword),
-    field("AsyncMaxWait", FieldKind::SignedDword),
-    field("PuncherAddress", FieldKind::String),
-    field("LeagueNick", FieldKind::String),
-    field("LeagueAutoLogin", FieldKind::Bool),
-    field("UseCurl", FieldKind::Bool),
-    field("EnableUPnP", FieldKind::Bool),
+    field("ControlRate", FieldKind::SignedDword), field("WorkPath", FieldKind::String), field("NoRuntimeJoin", FieldKind::Bool),
+    field("MaxResSearchRecursion", FieldKind::SignedDword), field("Comment", FieldKind::String), field("PortTCP", FieldKind::SignedDword), field("PortUDP", FieldKind::SignedDword),
+    field("PortDiscovery", FieldKind::SignedDword), field("PortRefServer", FieldKind::SignedDword), field("ControlMode", FieldKind::SignedDword),
+    field("LocalName", FieldKind::String), field("Nick", FieldKind::String), field("MaxLoadFileSize", FieldKind::SignedDword), field("MasterServerSignUp", FieldKind::Bool),
+    field("MasterReferencePeriod", FieldKind::SignedDword), field("LeagueServerSignUp", FieldKind::Bool), field("ServerAddress", FieldKind::String),
+    field("UseAlternateServer", FieldKind::Bool), field("AlternateServerAddress", FieldKind::String), field("UpdateServerAddress", FieldKind::String),
+    field("LastPassword", FieldKind::String), field("EnableAutomaticUpdate", FieldKind::Bool), field("LastUpdateTime", FieldKind::UnsignedQword),
+    field("AsyncMaxWait", FieldKind::SignedDword), field("PuncherAddress", FieldKind::String), field("LeagueNick", FieldKind::String), field("LeagueAutoLogin", FieldKind::Bool),
+    field("UseCurl", FieldKind::Bool), field("EnableUPnP", FieldKind::Bool),
 ];
 
+#[rustfmt::skip]
 const LOBBY_FIELDS: &[FieldSchema] = &[
-    field("AllowPlayerSave", FieldKind::Bool),
-    field("CountdownTime", FieldKind::SignedDword),
+    field("AllowPlayerSave", FieldKind::Bool), field("CountdownTime", FieldKind::SignedDword),
 ];
 
+#[rustfmt::skip]
 const IRC_FIELDS: &[FieldSchema] = &[
-    field("Server2", FieldKind::String),
-    field("Nick", FieldKind::String),
-    field("RealName", FieldKind::String),
-    field("Channel", FieldKind::String),
+    field("Server2", FieldKind::String), field("Nick", FieldKind::String), field("RealName", FieldKind::String), field("Channel", FieldKind::String),
 ];
 
+#[rustfmt::skip]
 const DEVELOPER_FIELDS: &[FieldSchema] = &[
-    field("AutoFileReload", FieldKind::Bool),
-    field(
-        "ConsoleScriptStrictness",
-        FieldKind::Enum(STRICTNESS_VALUES),
-    ),
+    field("AutoFileReload", FieldKind::Bool), field( "ConsoleScriptStrictness", FieldKind::Enum(STRICTNESS_VALUES), ),
 ];
 
+#[rustfmt::skip]
 const STARTUP_FIELDS: &[FieldSchema] = &[
-    field("HideMsgStartDedicated", FieldKind::Bool),
-    field("HideMsgPlrTakeOver", FieldKind::Bool),
-    field("HideMsgPlrNoTakeOver", FieldKind::Bool),
-    field("HideMsgNoOfficialLeague", FieldKind::Bool),
-    field("HideMsgIRCDangerous", FieldKind::Bool),
-    field("AlphabeticalSorting", FieldKind::Bool),
+    field("HideMsgStartDedicated", FieldKind::Bool), field("HideMsgPlrTakeOver", FieldKind::Bool), field("HideMsgPlrNoTakeOver", FieldKind::Bool),
+    field("HideMsgNoOfficialLeague", FieldKind::Bool), field("HideMsgIRCDangerous", FieldKind::Bool), field("AlphabeticalSorting", FieldKind::Bool),
     field("LastPortraitFolderIdx", FieldKind::SignedDword),
 ];
 
+#[rustfmt::skip]
 const COOLDOWN_FIELDS: &[FieldSchema] = &[
-    field("SoundCommand", FieldKind::SignedQword),
-    field("ReadyCheck", FieldKind::SignedQword),
+    field("SoundCommand", FieldKind::SignedQword), field("ReadyCheck", FieldKind::SignedQword),
 ];
 
 const TOAST_FIELDS: &[FieldSchema] = &[field("ReadyCheck", FieldKind::Bool)];
@@ -313,126 +173,42 @@ const TOAST_FIELDS: &[FieldSchema] = &[field("ReadyCheck", FieldKind::Bool)];
 const LOGGING_FIELDS: &[FieldSchema] =
     &[field("LogLevelStdout", FieldKind::Enum(LOG_LEVEL_VALUES))];
 
+#[rustfmt::skip]
 const LOGGER_FIELDS: &[FieldSchema] = &[
-    field("LogLevel", FieldKind::Enum(LOG_LEVEL_VALUES)),
-    field("GuiLogLevel", FieldKind::Enum(LOG_LEVEL_VALUES)),
-    field("ShowLoggerNameInGui", FieldKind::Bool),
+    field("LogLevel", FieldKind::Enum(LOG_LEVEL_VALUES)), field("GuiLogLevel", FieldKind::Enum(LOG_LEVEL_VALUES)), field("ShowLoggerNameInGui", FieldKind::Bool),
 ];
 
+#[rustfmt::skip]
 const SCHEMA: &[KeySchema] = &[
-    KeySchema {
-        path: &["General"],
-        fields: GENERAL_FIELDS,
-    },
-    KeySchema {
-        path: &["Controls"],
-        fields: CONTROLS_FIELDS,
-    },
-    KeySchema {
-        path: &["Gamepad0"],
-        fields: GAMEPAD_FIELDS,
-    },
-    KeySchema {
-        path: &["Gamepad1"],
-        fields: GAMEPAD_FIELDS,
-    },
-    KeySchema {
-        path: &["Gamepad2"],
-        fields: GAMEPAD_FIELDS,
-    },
-    KeySchema {
-        path: &["Gamepad3"],
-        fields: GAMEPAD_FIELDS,
-    },
-    KeySchema {
-        path: &["Graphics"],
-        fields: GRAPHICS_FIELDS,
-    },
-    KeySchema {
-        path: &["Sound"],
-        fields: SOUND_FIELDS,
-    },
-    KeySchema {
-        path: &["Network"],
-        fields: NETWORK_FIELDS,
-    },
-    KeySchema {
-        path: &["Lobby"],
-        fields: LOBBY_FIELDS,
-    },
-    KeySchema {
-        path: &["IRC"],
-        fields: IRC_FIELDS,
-    },
-    KeySchema {
-        path: &["Developer"],
-        fields: DEVELOPER_FIELDS,
-    },
-    KeySchema {
-        path: &["Startup"],
-        fields: STARTUP_FIELDS,
-    },
-    KeySchema {
-        path: &["Cooldowns"],
-        fields: COOLDOWN_FIELDS,
-    },
-    KeySchema {
-        path: &["Toasts"],
-        fields: TOAST_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging"],
-        fields: LOGGING_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4AudioSystem"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4AulExec"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4AulProfiler"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "CStdDDraw"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4GameControl"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "Network"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4Network2IO"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4Network2HTTPClient"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4Network2UPnP"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "C4Playback"],
-        fields: LOGGER_FIELDS,
-    },
-    KeySchema {
-        path: &["Logging", "CPNGFile"],
-        fields: LOGGER_FIELDS,
-    },
+    KeySchema { path: &["General"], fields: GENERAL_FIELDS, },
+    KeySchema { path: &["Controls"], fields: CONTROLS_FIELDS, },
+    KeySchema { path: &["Gamepad0"], fields: GAMEPAD_FIELDS, },
+    KeySchema { path: &["Gamepad1"], fields: GAMEPAD_FIELDS, },
+    KeySchema { path: &["Gamepad2"], fields: GAMEPAD_FIELDS, },
+    KeySchema { path: &["Gamepad3"], fields: GAMEPAD_FIELDS, },
+    KeySchema { path: &["Graphics"], fields: GRAPHICS_FIELDS, },
+    KeySchema { path: &["Sound"], fields: SOUND_FIELDS, },
+    KeySchema { path: &["Network"], fields: NETWORK_FIELDS, },
+    KeySchema { path: &["Lobby"], fields: LOBBY_FIELDS, },
+    KeySchema { path: &["IRC"], fields: IRC_FIELDS, },
+    KeySchema { path: &["Developer"], fields: DEVELOPER_FIELDS, },
+    KeySchema { path: &["Startup"], fields: STARTUP_FIELDS, },
+    KeySchema { path: &["Cooldowns"], fields: COOLDOWN_FIELDS, },
+    KeySchema { path: &["Toasts"], fields: TOAST_FIELDS, },
+    KeySchema { path: &["Logging"], fields: LOGGING_FIELDS, },
+    KeySchema { path: &["Logging", "C4AudioSystem"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4AulExec"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4AulProfiler"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "CStdDDraw"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4GameControl"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "Network"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4Network2IO"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4Network2HTTPClient"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4Network2UPnP"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "C4Playback"], fields: LOGGER_FIELDS, },
+    KeySchema { path: &["Logging", "CPNGFile"], fields: LOGGER_FIELDS, },
     // Present only in legacy builds compiled WITH_GLIB, but harmless to recognize when found.
-    KeySchema {
-        path: &["Logging", "GLib"],
-        fields: LOGGER_FIELDS,
-    },
+    KeySchema { path: &["Logging", "GLib"], fields: LOGGER_FIELDS, },
 ];
 
 struct RenderedKey<'a> {

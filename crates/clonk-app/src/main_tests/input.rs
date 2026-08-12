@@ -1,6 +1,11 @@
 // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
+use clonk_frontend::startup_plrproperties::PlayerPropertiesController;
+use clonk_frontend::startup_portraitsel::{
+    PortraitFileEntry, PortraitLocation, PortraitSelController,
+};
+
 #[test]
 fn mouse_drag_starts_only_after_cpp_five_pixel_sensitivity() {
     // DragNone uses `Abs(delta) > C4MC_DragSensitivity` with sensitivity
@@ -42,31 +47,116 @@ fn mouse_test_drop_geometry_fast_path_keeps_the_exact_cpp_ground_band() {
     ));
 }
 
+fn move_cursor(app: &mut GameApp, point: GuiPoint, _expectation: &str) {
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(point.x),
+        f64::from(point.y),
+    ));
+}
+
+fn move_cursor_to(app: &mut GameApp, position: PhysicalPosition<f64>, _expectation: &str) {
+    app.test_cursor(position);
+}
+
+fn pressed_direction(slot: GamepadSlot, button: ControlButton) -> GamepadEvent {
+    GamepadEvent::Direction {
+        slot,
+        button,
+        state: ElementState::Pressed,
+    }
+}
+
+fn process_primary_direction(app: &mut GameApp, button: ControlButton, _expectation: &str) {
+    app.test_gamepad_events([pressed_direction(GamepadSlot::new(0), button)]);
+}
+
+fn pressed_gui_button(slot: GamepadSlot, class: GuiButtonClass) -> GamepadEvent {
+    GamepadEvent::GuiButton {
+        slot,
+        class,
+        state: ElementState::Pressed,
+    }
+}
+
+fn pressed_gamepad_action(slot: GamepadSlot, action: GamepadActionType) -> GamepadEvent {
+    GamepadEvent::Action {
+        slot,
+        action,
+        state: ElementState::Pressed,
+    }
+}
+
+fn pressed_gamepad_button(slot: GamepadSlot, button: LegacyGamepadButton) -> GamepadEvent {
+    GamepadEvent::Button {
+        slot,
+        button,
+        state: ElementState::Pressed,
+    }
+}
+
+fn sourced_gamepad_event(gamepad: usize, cluster: u64, event: GamepadEvent) -> SourcedGamepadEvent {
+    SourcedGamepadEvent {
+        gamepad,
+        cluster,
+        event,
+    }
+}
+
+fn open_player_properties<'a>(
+    app: &'a mut GameApp,
+    _expectation: &str,
+) -> &'a mut PlayerPropertiesController {
+    app.open_new_startup_player_properties();
+    &mut app.startup_player_properties_dialog.test_mut().controller
+}
+
+fn open_portrait_selector<'a>(
+    app: &'a mut GameApp,
+    expectation: &str,
+    locations: Vec<PortraitLocation>,
+    entries: Vec<PortraitFileEntry>,
+) -> &'a mut PlayerPropertiesController {
+    let controller = open_player_properties(app, expectation);
+    controller.open_portrait_selector(locations, 0, entries);
+    controller
+}
+
+fn open_default_portrait_selector<'a>(
+    app: &'a mut GameApp,
+    expectation: &str,
+) -> &'a mut PlayerPropertiesController {
+    let controller = open_player_properties(app, expectation);
+    open_default_portrait_selector_on(controller);
+    controller
+}
+
+fn open_default_portrait_selector_on(controller: &mut PlayerPropertiesController) {
+    controller.open_portrait_selector(
+        vec![PortraitLocation::new("User", PathBuf::from("."))],
+        0,
+        Vec::new(),
+    );
+}
+
+fn portrait_selector<'a>(app: &'a GameApp, _expectation: &str) -> &'a PortraitSelController {
+    app.startup_player_properties_dialog
+        .as_ref()
+        .and_then(|pending| pending.controller.portrait_selector())
+        .test_value()
+}
+
 fn physical_left_drag(app: &mut GameApp, start: GuiPoint, end: GuiPoint) {
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(start.x),
-        f64::from(start.y),
-    ))
-    .expect("move to left-drag start");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("physical left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)))
-        .expect("move physical left drag");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("physical left-up");
+    move_cursor(app, start, "move to left-drag start");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(app, end, "move physical left drag");
+    app.test_left_button(ElementState::Released);
 }
 
 fn physical_right_click(app: &mut GameApp, point: GuiPoint) {
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(point.x),
-        f64::from(point.y),
-    ))
-    .expect("move to right-click point");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("physical right-down");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("physical right-up");
+    move_cursor(app, point, "move to right-click point");
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
 }
 
 fn install_l067_context_stack(
@@ -79,7 +169,7 @@ fn install_l067_context_stack(
         .engine
         .crew_cursor(owner)
         .and_then(|cursor| app.engine.object_snapshot(cursor))
-        .expect("sandbox cursor remains live");
+        .test_value();
     let position = Vector2::new(cursor.position.x - 60, cursor.position.y);
     let layer = cursor.layer;
     let mut registered = Vec::new();
@@ -87,8 +177,7 @@ fn install_l067_context_stack(
         if registered.contains(definition_id) {
             continue;
         }
-        let mut definition = Definition::from_script(*definition_id, *definition_id, "#strict\n")
-            .expect("context definition compiles");
+        let mut definition = test_definition(definition_id, definition_id, "#strict\n");
         definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-5, -5, 10, 10)));
         match *definition_id {
             "WWNG" => {
@@ -116,9 +205,7 @@ fn install_l067_context_stack(
             }
             unexpected => panic!("unexpected definition {unexpected}"),
         }
-        app.engine
-            .register_definition(definition)
-            .expect("register context definition");
+        app.engine.register_test_definition(definition);
         registered.push(*definition_id);
     }
 
@@ -132,13 +219,11 @@ fn install_l067_context_stack(
                         .with_layer(layer)
                 })
                 .unwrap_or_else(|| SpawnConfig::new(*definition_id).with_position(position));
-            app.engine
-                .spawn_object(spawn)
-                .expect("spawn context object")
+            app.engine.spawn_test_object(spawn)
         })
         .collect::<Vec<_>>();
     render_mouse_test_app(app);
-    let front = *objects.last().expect("stack is nonempty");
+    let front = *objects.last().test_value();
     let point = mouse_test_object_point(app, owner, front);
     assert_eq!(
         app.ingame_primary_mouse_target(owner, point),
@@ -185,7 +270,7 @@ fn right_click_lone_wwng_falls_through_to_select_next() {
     let expected_next = app
         .engine
         .player_mouse_select_next_object(owner)
-        .expect("sandbox has a next crew selection");
+        .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
     physical_right_click(&mut app, point);
@@ -237,7 +322,7 @@ fn selectable_wwng_selects_before_falling_through_to_select_next() {
     let expected_next = app
         .engine
         .player_mouse_select_next_object(owner)
-        .expect("sandbox has a next crew selection");
+        .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
     physical_right_click(&mut app, point);
@@ -337,7 +422,7 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
         .iter()
         .flat_map(|batch| &batch.text)
         .find(|command| command.text == expected)
-        .expect("Help caption reaches ordered native text");
+        .test_value();
     assert_eq!(
         caption.role,
         clonk_graphics::clonk_font::ClonkFontRole::GuiTooltip,
@@ -345,26 +430,16 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     );
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(point.x),
-        f64::from(point.y),
-    ))
-    .expect("move back onto help target");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("help drag left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(empty.x),
-        f64::from(empty.y),
-    ))
-    .expect("move beyond drag sensitivity in Help");
-    let state = app.mouse_state.expect("Help retains DragNone state");
+    move_cursor(&mut app, point, "move back onto help target");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(&mut app, empty, "move beyond drag sensitivity in Help");
+    let state = app.mouse_state.test_value();
     assert!(state.down_cursor_help);
     assert!(state.motion.moved);
     assert!(!state.motion.world_drag_started);
     assert!(!state.motion.region_drag_started);
     assert!(!state.motion.selection_frame);
-    app.handle_mouse_button(ElementState::Released)
-        .expect("help drag left-up");
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         commands.take_submitted_mouse_controls(),
         (Vec::new(), Vec::new(), Vec::new()),
@@ -406,8 +481,7 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
         })
     );
     for remaining in (0..keep).rev() {
-        app.update_ingame_pointer(point)
-            .expect("advance help caption move");
+        app.update_ingame_pointer(point).test_value();
         assert_eq!(
             app.ingame_mouse_help_caption
                 .as_ref()
@@ -416,16 +490,14 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
             "caption survives the move that decrements KeepCaption to zero"
         );
     }
-    app.update_ingame_pointer(point)
-        .expect("clear expired help caption");
+    app.update_ingame_pointer(point).test_value();
     assert!(app.ingame_mouse_help_caption.is_none());
 
     app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
         text: "wheel".to_string(),
         keep_moves: 2,
     });
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
-        .expect("wheel runs a native mouse Move");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
     assert_eq!(
         app.ingame_mouse_help_caption
             .as_ref()
@@ -439,7 +511,7 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
     });
     app.ingame_ignore_left_up = true;
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("ignored post-double LeftUp still runs Move");
+        .test_value();
     assert!(!app.ingame_ignore_left_up);
     assert_eq!(
         app.ingame_mouse_help_caption
@@ -453,7 +525,7 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
         keep_moves: 2,
     });
     app.handle_other_mouse_button(ElementState::Pressed)
-        .expect("middle-down runs a native mouse Move");
+        .test_value();
     assert_eq!(
         app.ingame_mouse_help_caption
             .as_ref()
@@ -466,9 +538,9 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
 fn shift_left_clicks_append_and_sample_release_modifiers() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let cursor = app.engine.test_crew_cursor(owner);
     render_mouse_test_app(&mut app);
-    let viewport = app.graphics.viewport_rect(owner).expect("sandbox viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let mut clicks = Vec::new();
     'rows: for y in viewport.y..viewport.y + viewport.height as i32 {
         for x in viewport.x..viewport.x + viewport.width as i32 {
@@ -517,8 +589,7 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
     );
     let appended = app
         .engine
-        .object_snapshot(cursor)
-        .expect("cursor survives Shift waypoints")
+        .test_object_snapshot(cursor)
         .command_stack
         .command_views();
     assert_eq!(
@@ -549,8 +620,7 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
     );
     let replaced = app
         .engine
-        .object_snapshot(cursor)
-        .expect("cursor survives plain waypoint")
+        .test_object_snapshot(cursor)
         .command_stack
         .command_views();
     assert_eq!(replaced.len(), 1);
@@ -565,19 +635,13 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
 fn shift_double_get_samples_the_second_press_event() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    let crew_state = app
-        .engine
-        .object_snapshot(crew)
-        .expect("sandbox cursor survives");
-    let mut item = Definition::from_script("M43G", "Shift Get target", "#strict\n")
-        .expect("carryable definition compiles");
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew_state = app.engine.test_object_snapshot(crew);
+    let mut item = test_definition("M43G", "Shift Get target", "#strict\n");
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
     item.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-4, -4, 8, 8)));
-    app.engine
-        .register_definition(item)
-        .expect("register carryable definition");
+    app.engine.register_test_definition(item);
     let mut spawn = SpawnConfig::new("M43G").with_position(Vector2::new(
         crew_state.position.x - 60,
         crew_state.position.y,
@@ -585,10 +649,7 @@ fn shift_double_get_samples_the_second_press_event() {
     if let Some(layer) = crew_state.layer {
         spawn = spawn.with_layer(layer);
     }
-    let target = app
-        .engine
-        .spawn_object(spawn)
-        .expect("spawn carryable target");
+    let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
     assert_eq!(
@@ -598,26 +659,15 @@ fn shift_double_get_samples_the_second_press_event() {
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("start without Shift");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("move over carryable target");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("first left-down");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("first left-up queues MoveTo");
+    app.test_modifiers(ModifiersState::empty());
+    move_cursor(&mut app, target_point, "move over carryable target");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
 
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("press Shift for LeftDouble");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("second left-down becomes Shift-LeftDouble");
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Shift after the triggering event");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("post-double left-up is ignored");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_left_button(ElementState::Pressed);
+    app.test_modifiers(ModifiersState::empty());
+    app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
@@ -640,26 +690,14 @@ fn configure_mouse_fog(
     range: i32,
 ) -> (i32, ObjectId, Vector2, Option<ObjectId>) {
     let owner = app.local_owner;
-    let cursor = app
-        .engine
-        .crew_cursor(owner)
-        .expect("mouse fog fixture has cursor crew");
+    let cursor = app.engine.test_crew_cursor(owner);
     // The fixture's own repeller is added below through the ordinary
     // SetPlrViewRange path, so the enabling edge's rebuild is a no-op here.
-    let _ = app
-        .engine
-        .player_mut(owner)
-        .expect("mouse fog fixture has local player")
-        .set_fog_of_war(true);
+    let _ = app.engine.test_player_mut(owner).set_fog_of_war(true);
     let mut update = ObjectUpdate::new();
     update.plr_view_range = Some(range);
-    app.engine
-        .apply_object_update(cursor, update)
-        .expect("set exact mouse visibility radius");
-    let cursor = app
-        .engine
-        .object_snapshot(cursor)
-        .expect("cursor remains live");
+    app.engine.apply_object_update(cursor, update).test_value();
+    let cursor = app.engine.test_object_snapshot(cursor);
     (owner, cursor.id, cursor.position, cursor.layer)
 }
 
@@ -670,14 +708,11 @@ fn spawn_mouse_fog_target(
     layer: Option<ObjectId>,
     category: i32,
 ) -> ObjectId {
-    let mut definition =
-        Definition::from_script(id, id, "#strict\n").expect("mouse fog target definition compiles");
+    let mut definition = test_definition(id, id, "#strict\n");
     definition.set_category(category);
     definition.set_collectible(true);
     definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-3, -3, 6, 6)));
-    app.engine
-        .register_definition(definition)
-        .expect("register mouse fog target");
+    app.engine.register_test_definition(definition);
     let spawn = layer
         .map(|layer| {
             SpawnConfig::new(id)
@@ -685,9 +720,7 @@ fn spawn_mouse_fog_target(
                 .with_layer(layer)
         })
         .unwrap_or_else(|| SpawnConfig::new(id).with_position(position));
-    app.engine
-        .spawn_object(spawn)
-        .expect("spawn mouse fog target")
+    app.engine.spawn_test_object(spawn)
 }
 
 #[test]
@@ -719,41 +752,29 @@ fn mouse_fog_blocks_hidden_left_click_and_cycles_hidden_right_target() {
                 && app.ingame_viewport_region(owner, point).is_none())
             .then_some(point)
         })
-        .expect("viewport has an empty fog-covered point");
+        .test_value();
     let target_point = mouse_test_object_point(&app, owner, target);
     let target_pointer = app
         .graphics
         .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
-        .expect("hidden target point maps into viewport");
+        .test_value();
     assert!(app.ingame_pointer_fog_blocked(target_pointer));
     assert_eq!(app.ingame_primary_mouse_target(owner, target_point), None);
     let expected_next = app
         .engine
         .player_mouse_select_next_object(owner)
-        .expect("sandbox crew cycle has a next object");
+        .test_value();
     assert_eq!(expected_next, cursor);
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(hidden_empty.x),
-        f64::from(hidden_empty.y),
-    ))
-    .expect("move to hidden empty point");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("hidden left-down");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("hidden left-up");
+    move_cursor(&mut app, hidden_empty, "move to hidden empty point");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("move onto hidden target");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("hidden right-down");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("hidden right-up");
+    move_cursor(&mut app, target_point, "move onto hidden target");
+    app.test_right_button(ElementState::Pressed);
+    app.test_right_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
@@ -784,7 +805,7 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
     let target_pointer = app
         .graphics
         .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
-        .expect("IgnoreFoW target point maps into viewport");
+        .test_value();
     assert!(app.ingame_pointer_fog_blocked(target_pointer));
     assert_eq!(
         app.ingame_mouse_select_target(owner, target_point),
@@ -793,15 +814,9 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("move onto IgnoreFoW target");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("IgnoreFoW left-down");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("IgnoreFoW left-up");
+    move_cursor(&mut app, target_point, "move onto IgnoreFoW target");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
@@ -827,10 +842,7 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
 
     let target_point = mouse_test_object_point(&app, owner, target);
     let target_point = GuiPoint::new(target_point.x.ceil(), target_point.y.ceil());
-    let target_pointer = app
-        .graphics
-        .viewport_point_at(target_point)
-        .expect("IgnoreFoW caption point maps into viewport");
+    let target_pointer = app.graphics.viewport_point_at(target_point).test_value();
     assert!(app.ingame_pointer_fog_blocked(target_pointer));
     assert_eq!(
         app.ingame_primary_mouse_target(owner, target_point),
@@ -846,16 +858,12 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
 
     let move_stably = |app: &mut GameApp, point: GuiPoint| {
         for _ in 0..=INGAME_MOUSE_CAPTION_DELAY {
-            app.handle_cursor_moved(PhysicalPosition::new(
-                f64::from(point.x),
-                f64::from(point.y),
-            ))
-            .expect("route stable fog-covered hover move");
+            move_cursor(app, point, "route stable fog-covered hover move");
         }
     };
     let expected = app
         .ingame_world_cursor_caption(target_cursor, ingame_pointer_world_pixel(target_pointer))
-        .expect("Select has a caption");
+        .test_value();
     move_stably(&mut app, target_point);
     assert_eq!(
         app.ingame_mouse_caption
@@ -867,15 +875,9 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
     );
 
     let jump = Vector2::new(cursor_position.x + 8, cursor_position.y - 15);
-    let (jump_x, jump_y) = app
-        .graphics
-        .world_to_screen(owner, jump)
-        .expect("jump zone maps into viewport");
+    let (jump_x, jump_y) = app.graphics.world_to_screen(owner, jump).test_value();
     let jump_point = GuiPoint::new(jump_x.ceil(), jump_y.ceil());
-    let jump_pointer = app
-        .graphics
-        .viewport_point_at(jump_point)
-        .expect("jump caption point maps into viewport");
+    let jump_pointer = app.graphics.viewport_point_at(jump_point).test_value();
     let jump = ingame_pointer_world_pixel(jump_pointer);
     assert!(app.ingame_pointer_fog_blocked(jump_pointer));
     let jump_cursor = app.engine.mouse_world_cursor(
@@ -888,7 +890,7 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
 
     let expected = app
         .ingame_world_cursor_caption(jump_cursor, jump)
-        .expect("Jump has a caption");
+        .test_value();
     move_stably(&mut app, jump_point);
     assert_eq!(
         app.ingame_mouse_caption
@@ -913,10 +915,7 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
     );
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
-    let start = app
-        .graphics
-        .viewport_point_at(target_point)
-        .expect("visible drag source maps into the viewport");
+    let start = app.graphics.viewport_point_at(target_point).test_value();
     assert!(!app.ingame_pointer_fog_blocked(start));
     assert_eq!(
         app.engine
@@ -924,13 +923,10 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
         Some(MouseDragSource::Carryable)
     );
 
-    let landscape = app.snapshot.landscape.as_ref().expect("sandbox landscape");
-    let width = i32::try_from(landscape.width()).expect("landscape width fits i32");
+    let landscape = app.snapshot.landscape.test_ref();
+    let width = i32::try_from(landscape.width()).test_value();
     let height = landscape.estimated_height();
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("mouse fog fixture has a local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let visible_drag_point = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
@@ -950,7 +946,7 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
         })
-        .expect("sandbox has a visible point where DragMoving can begin");
+        .test_value();
     let (hidden_point, hidden) = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
@@ -974,30 +970,20 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
                 && app.ingame_viewport_region(owner, point).is_none())
             .then_some((point, world))
         })
-        .expect("sandbox has an in-bounds fog-covered drag endpoint");
+        .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("move to visible drag source");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("visible object left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(visible_drag_point.x),
-        f64::from(visible_drag_point.y),
-    ))
-    .expect("begin DragMoving in visible terrain");
+    move_cursor(&mut app, target_point, "move to visible drag source");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(
+        &mut app,
+        visible_drag_point,
+        "begin DragMoving in visible terrain",
+    );
     assert!(app.mouse_state.is_some_and(|state| state.motion.moved));
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(hidden_point.x),
-        f64::from(hidden_point.y),
-    ))
-    .expect("continue DragMoving into fog");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("fog-covered moving release is consumed");
+    move_cursor(&mut app, hidden_point, "continue DragMoving into fog");
+    app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
@@ -1032,10 +1018,7 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
     );
     render_mouse_test_app(&mut app);
     let to_screen = |app: &GameApp, world: Vector2| {
-        let (x, y) = app
-            .graphics
-            .world_to_screen(owner, world)
-            .expect("selection point maps into viewport");
+        let (x, y) = app.graphics.world_to_screen(owner, world).test_value();
         GuiPoint::new(x.ceil(), y.ceil())
     };
     let start = to_screen(
@@ -1066,37 +1049,18 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
         .viewport_point_at(hidden_end)
         .is_some_and(|pointer| app.ingame_pointer_fog_blocked(pointer)));
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(start.x),
-        f64::from(start.y),
-    ))
-    .expect("move to selection start");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("selection right-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(visible_end.x),
-        f64::from(visible_end.y),
-    ))
-    .expect("move to visible selection endpoint");
-    let visible_motion = app
-        .ingame_right_mouse_state
-        .expect("visible selection remains active")
-        .motion;
+    move_cursor(&mut app, start, "move to selection start");
+    app.test_right_button(ElementState::Pressed);
+    move_cursor(&mut app, visible_end, "move to visible selection endpoint");
+    let visible_motion = app.ingame_right_mouse_state.test_value().motion;
     assert_eq!(
         visible_motion.selection_kind,
         IngameDragSelectionKind::Objects
     );
     assert_eq!(app.ingame_selection_candidates(visible_motion), vec![first]);
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(hidden_end.x),
-        f64::from(hidden_end.y),
-    ))
-    .expect("move selection endpoint into fog");
-    let hidden_motion = app
-        .ingame_right_mouse_state
-        .expect("fogged selection remains active")
-        .motion;
+    move_cursor(&mut app, hidden_end, "move selection endpoint into fog");
+    let hidden_motion = app.ingame_right_mouse_state.test_value().motion;
     assert_eq!(hidden_motion.last.screen, hidden_end);
     assert_eq!(app.ingame_selection_candidates(hidden_motion), vec![first]);
     assert_ne!(
@@ -1111,14 +1075,14 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
             ObjectUpdate::new()
                 .with_position(Vector2::new(cursor_position.x + 90, cursor_position.y)),
         )
-        .expect("move the cached member out while the endpoint is fogged");
+        .test_value();
     app.engine
         .apply_object_update(
             second,
             ObjectUpdate::new()
                 .with_position(Vector2::new(cursor_position.x + 24, cursor_position.y)),
         )
-        .expect("move an uncached member into the frozen rectangle");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     assert_eq!(
         app.engine.mouse_drag_carryables_in_rect(
@@ -1134,8 +1098,7 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
         "fog must freeze object identity, not only rectangle coordinates"
     );
 
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("finish fogged selection frame");
+    app.test_right_button(ElementState::Released);
     assert_eq!(app.ingame_dragged_objects, vec![first]);
 }
 
@@ -1144,10 +1107,7 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
     let mut app = new_running_sandbox_app();
     let (owner, _cursor, _cursor_position, _layer) = configure_mouse_fog(&mut app, 40);
     render_mouse_test_app(&mut app);
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("mouse fog fixture has a local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let points = || {
         (viewport.y..viewport.y + viewport.height as i32).flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
@@ -1170,7 +1130,7 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
                     .engine
                     .mouse_jump_zone(owner, ingame_pointer_world_pixel(pointer))
         })
-        .expect("viewport has visible empty terrain without a Jump cursor");
+        .test_value();
     let hidden = points()
         .find(|point| {
             let Some(pointer) = app.graphics.viewport_point_at(*point) else {
@@ -1185,33 +1145,21 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
         })
-        .expect("viewport has fog-covered empty terrain away from the release point");
+        .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(hidden.x),
-        f64::from(hidden.y),
-    ))
-    .expect("move to fog-covered press point");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("fog-covered left-down");
+    move_cursor(&mut app, hidden, "move to fog-covered press point");
+    app.test_left_button(ElementState::Pressed);
     assert!(app
         .mouse_state
         .is_some_and(|state| state.down_cursor_nothing));
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(visible.x),
-        f64::from(visible.y),
-    ))
-    .expect("move held pointer into visible terrain");
-    let release = app
-        .ingame_pointer
-        .expect("visible release pointer remains routed");
+    move_cursor(&mut app, visible, "move held pointer into visible terrain");
+    let release = app.ingame_pointer.test_value();
     assert!(app.mouse_state.is_some_and(|state| {
         !state.motion.moved && state.motion.last.screen == release.screen
     }));
-    app.handle_mouse_button(ElementState::Released)
-        .expect("visible left-up uses the current cursor");
+    app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
@@ -1230,14 +1178,10 @@ fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
     let mut app = new_state_only_running_sandbox_app();
     let owner = app.local_owner;
     // Disabling never owes the repeller rebuild.
-    let _ = app
-        .engine
-        .player_mut(owner)
-        .expect("sandbox local player")
-        .set_fog_of_war(false);
+    let _ = app.engine.test_player_mut(owner).set_fog_of_war(false);
     app.snapshot = app.engine.snapshot();
-    let landscape = app.snapshot.landscape.as_ref().expect("sandbox landscape");
-    let width = i32::try_from(landscape.width()).expect("landscape width fits i32");
+    let landscape = app.snapshot.landscape.test_ref();
+    let width = i32::try_from(landscape.width()).test_value();
     let height = landscape.estimated_height();
     let valid_x = width / 2;
     let valid_y = height / 2;
@@ -1258,8 +1202,7 @@ fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
     let mut commands = install_mouse_network_capture(&mut app);
 
     for pointer in pointers {
-        app.handle_ingame_mouse_click(pointer)
-            .expect("out-of-bounds click is consumed");
+        app.handle_ingame_mouse_click(pointer).test_value();
     }
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
@@ -1277,31 +1220,17 @@ fn physical_left_drag_carryable_queues_object_drop_without_direct_controls() {
     // 833-891,1171-1201).
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
+    let crew = app.engine.test_crew_cursor(owner);
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(200);
     app.engine.set_landscape(landscape);
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
-    let mut item = Definition::from_script("MLCI", "Mouse left item", "#strict\n")
-        .expect("carryable definition compiles");
+    let crew_position = app.engine.test_object_snapshot(crew).position;
+    let mut item = test_definition("MLCI", "Mouse left item", "#strict\n");
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
     item.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-4, -4, 8, 8)));
-    app.engine
-        .register_definition(item)
-        .expect("register carryable definition");
-    let layer = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .layer;
+    app.engine.register_test_definition(item);
+    let layer = app.engine.test_object_snapshot(crew).layer;
     let target_spawn = layer
         .map(|layer| {
             SpawnConfig::new("MLCI")
@@ -1312,13 +1241,9 @@ fn physical_left_drag_carryable_queues_object_drop_without_direct_controls() {
             SpawnConfig::new("MLCI")
                 .with_position(Vector2::new(crew_position.x - 60, crew_position.y))
         });
-    let target = app
-        .engine
-        .spawn_object(target_spawn)
-        .expect("spawn world carryable");
+    let target = app.engine.spawn_test_object(target_spawn);
     app.engine
-        .spawn_object(SpawnConfig::new("MLCI").with_container(crew))
-        .expect("put decoy carryable in cursor inventory");
+        .spawn_test_object(SpawnConfig::new("MLCI").with_container(crew));
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
     let (drop_point, drop_world) =
@@ -1356,37 +1281,20 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     // 1171-1201).
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
-    let layer = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .layer;
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew_position = app.engine.test_object_snapshot(crew).position;
+    let layer = app.engine.test_object_snapshot(crew).layer;
 
-    let mut vehicle = Definition::from_script("MLVH", "Mouse left vehicle", "#strict\n")
-        .expect("vehicle definition compiles");
+    let mut vehicle = test_definition("MLVH", "Mouse left vehicle", "#strict\n");
     vehicle.set_category(clonk_engine::CATEGORY_VEHICLE);
     vehicle.set_grab(1);
     vehicle.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-5, -5, 10, 10)));
-    app.engine
-        .register_definition(vehicle)
-        .expect("register vehicle definition");
-    let mut container = Definition::from_script("MLCT", "Mouse left container", "#strict\n")
-        .expect("container definition compiles");
+    app.engine.register_test_definition(vehicle);
+    let mut container = test_definition("MLCT", "Mouse left container", "#strict\n");
     container.set_category(clonk_engine::CATEGORY_STRUCTURE);
     container.set_grab_put_get(clonk_engine::GRAB_PUT_GET_PUT);
     container.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
-    app.engine
-        .register_definition(container)
-        .expect("register container definition");
+    app.engine.register_test_definition(container);
     let spawn_at = |definition: &str, position: Vector2| {
         layer
             .map(|layer| {
@@ -1396,20 +1304,14 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
             })
             .unwrap_or_else(|| SpawnConfig::new(definition).with_position(position))
     };
-    let vehicle = app
-        .engine
-        .spawn_object(spawn_at(
-            "MLVH",
-            Vector2::new(crew_position.x - 60, crew_position.y),
-        ))
-        .expect("spawn vehicle");
-    let container = app
-        .engine
-        .spawn_object(spawn_at(
-            "MLCT",
-            Vector2::new(crew_position.x + 60, crew_position.y),
-        ))
-        .expect("spawn container");
+    let vehicle = app.engine.spawn_test_object(spawn_at(
+        "MLVH",
+        Vector2::new(crew_position.x - 60, crew_position.y),
+    ));
+    let container = app.engine.spawn_test_object(spawn_at(
+        "MLCT",
+        Vector2::new(crew_position.x + 60, crew_position.y),
+    ));
     render_mouse_test_app(&mut app);
     let vehicle_point = mouse_test_object_point(&app, owner, vehicle);
     let container_point = mouse_test_object_point(&app, owner, container);
@@ -1417,7 +1319,7 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
         .graphics
         .viewport_point_at(vehicle_point)
         .map(ingame_pointer_world_pixel)
-        .expect("vehicle point maps into world");
+        .test_value();
     assert_eq!(
         app.engine
             .mouse_world_drag_source(owner, vehicle, start_world),
@@ -1448,11 +1350,9 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     assert_eq!((open.x, open.y), (open_world.x, open_world.y));
     assert_eq!(open.add_mode, 1);
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("press Control for VehiclePut");
+    app.test_modifiers(ModifiersState::CONTROL);
     physical_left_drag(&mut app, vehicle_point, container_point);
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Control");
+    app.test_modifiers(ModifiersState::empty());
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
     assert!(selections.is_empty());
@@ -1466,7 +1366,7 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
             container_point.y.ceil(),
         ))
         .map(ingame_pointer_world_pixel)
-        .expect("container point maps into world");
+        .test_value();
     assert_eq!(put.command, CommandId::PushTo as i32);
     assert_eq!(put.target, vehicle.as_u64() as i32);
     assert_eq!(put.target2, container.as_u64() as i32);
@@ -1482,22 +1382,16 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     // (C4MouseControl.cpp:626-645,795-817,1158-1201).
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
+    let crew = app.engine.test_crew_cursor(owner);
     let mut landscape = Landscape::flat(480, 180);
     landscape.set_world_height(200);
     app.engine.set_landscape(landscape);
-    let crew_snapshot = app.engine.object_snapshot(crew).expect("crew remains live");
-    let mut item = Definition::from_script("MLGR", "Mouse left group item", "#strict\n")
-        .expect("group carryable definition compiles");
+    let crew_snapshot = app.engine.test_object_snapshot(crew);
+    let mut item = test_definition("MLGR", "Mouse left group item", "#strict\n");
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
     item.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-3, -3, 6, 6)));
-    app.engine
-        .register_definition(item)
-        .expect("register group carryable definition");
+    app.engine.register_test_definition(item);
     let spawn_at = |position: Vector2| {
         crew_snapshot
             .layer
@@ -1510,14 +1404,8 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     };
     let first_position = Vector2::new(crew_snapshot.position.x - 70, crew_snapshot.position.y - 10);
     let second_position = Vector2::new(first_position.x + 24, first_position.y);
-    let first = app
-        .engine
-        .spawn_object(spawn_at(first_position))
-        .expect("spawn first grouped carryable");
-    let second = app
-        .engine
-        .spawn_object(spawn_at(second_position))
-        .expect("spawn second grouped carryable");
+    let first = app.engine.spawn_test_object(spawn_at(first_position));
+    let second = app.engine.spawn_test_object(spawn_at(second_position));
     render_mouse_test_app(&mut app);
     let first_point = mouse_test_object_point(&app, owner, first);
     let second_point = mouse_test_object_point(&app, owner, second);
@@ -1544,12 +1432,12 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
         .graphics
         .viewport_point_at(frame_start)
         .map(ingame_pointer_world_pixel)
-        .expect("frame start maps into world");
+        .test_value();
     let second_world = app
         .graphics
         .viewport_point_at(frame_end)
         .map(ingame_pointer_world_pixel)
-        .expect("frame end maps into world");
+        .test_value();
     let expected_selection = app
         .engine
         .mouse_drag_carryables_in_rect(first_world, second_world);
@@ -1557,18 +1445,9 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(frame_start.x),
-        f64::from(frame_start.y),
-    ))
-    .expect("move to object-frame start");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("physical frame left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(frame_end.x),
-        f64::from(frame_end.y),
-    ))
-    .expect("drag frame over both carryables");
+    move_cursor(&mut app, frame_start, "move to object-frame start");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(&mut app, frame_end, "drag frame over both carryables");
     assert_eq!(
         app.mouse_state
             .expect("left object frame remains live")
@@ -1576,8 +1455,7 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
             .selection_kind,
         IngameDragSelectionKind::Objects
     );
-    app.handle_mouse_button(ElementState::Released)
-        .expect("left-up retains object frame");
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.ingame_dragged_objects, expected_selection);
     assert!(
         app.ingame_last_left_down.is_none(),
@@ -1591,20 +1469,10 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     let member_point = mouse_test_object_point(&app, owner, first);
     let (drop_point, drop_world) =
         mouse_test_empty_point(&mut app, owner, member_point, Some(CommandId::Drop));
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(member_point.x),
-        f64::from(member_point.y),
-    ))
-    .expect("move over selected group member");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("immediate group left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_point.x),
-        f64::from(drop_point.y),
-    ))
-    .expect("drag selected group to Drop cursor");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("group left-up sends object commands");
+    move_cursor(&mut app, member_point, "move over selected group member");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(&mut app, drop_point, "drag selected group to Drop cursor");
+    app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
@@ -1643,20 +1511,14 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
     // (C4MouseControl.cpp:893-980,1158-1201).
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
-    let crew_snapshot = app.engine.object_snapshot(crew).expect("crew remains live");
-    let mut hybrid = Definition::from_script("MLEN", "Mouse left entrance", "#strict\n")
-        .expect("entrance definition compiles");
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew_snapshot = app.engine.test_object_snapshot(crew);
+    let mut hybrid = test_definition("MLEN", "Mouse left entrance", "#strict\n");
     hybrid.set_category(clonk_engine::CATEGORY_STRUCTURE);
     hybrid.set_collectible(true);
     hybrid.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
     hybrid.set_entrance_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
-    app.engine
-        .register_definition(hybrid)
-        .expect("register entrance definition");
+    app.engine.register_test_definition(hybrid);
     let entrance_spawn = crew_snapshot
         .layer
         .map(|layer| {
@@ -1673,18 +1535,11 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
                 crew_snapshot.position.y,
             ))
         });
-    let entrance = app
-        .engine
-        .spawn_object(entrance_spawn)
-        .expect("spawn entrance hybrid");
+    let entrance = app.engine.spawn_test_object(entrance_spawn);
     app.engine
-        .spawn_object(SpawnConfig::new("MLEN").with_container(crew))
-        .expect("put direct-control decoy in cursor inventory");
+        .spawn_test_object(SpawnConfig::new("MLEN").with_container(crew));
     render_mouse_test_app(&mut app);
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("sandbox has local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let (empty_start, empty_end) = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32 - 8).map(move |x| {
@@ -1726,22 +1581,13 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
                     .mouse_drag_carryables_in_rect(first_world, second_world)
                     .is_empty()
         })
-        .expect("viewport has an empty eight-pixel selection frame");
+        .test_value();
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.ingame_last_left_down = None;
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(empty_start.x),
-        f64::from(empty_start.y),
-    ))
-    .expect("move to empty frame start");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("empty frame left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(empty_end.x),
-        f64::from(empty_end.y),
-    ))
-    .expect("move empty frame");
+    move_cursor(&mut app, empty_start, "move to empty frame start");
+    app.test_left_button(ElementState::Pressed);
+    move_cursor(&mut app, empty_end, "move empty frame");
     assert_eq!(
         app.mouse_state
             .expect("empty frame remains live")
@@ -1749,8 +1595,7 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
             .selection_kind,
         IngameDragSelectionKind::Unknown
     );
-    app.handle_mouse_button(ElementState::Released)
-        .expect("empty frame left-up");
+    app.test_left_button(ElementState::Released);
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     assert!(direct.is_empty());
     assert!(player_commands.is_empty());
@@ -1762,7 +1607,7 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
         .graphics
         .viewport_point_at(entrance_point)
         .map(ingame_pointer_world_pixel)
-        .expect("entrance point maps into world");
+        .test_value();
     assert_eq!(
         app.ingame_primary_mouse_target(owner, entrance_point),
         Some(entrance)
@@ -1790,40 +1635,22 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
     // 882-890,1171-1227).
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
+    let crew = app.engine.test_crew_cursor(owner);
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("establish sandbox viewport");
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
+    app.test_render(&mut frame);
+    let crew_position = app.engine.test_object_snapshot(crew).position;
     let vehicle_position = Vector2::new(crew_position.x - 60, crew_position.y);
 
-    let mut vehicle =
-        Definition::from_script("MVEH", "Mouse vehicle", "#strict\n").expect("vehicle compiles");
+    let mut vehicle = test_definition("MVEH", "Mouse vehicle", "#strict\n");
     vehicle.set_category(clonk_engine::CATEGORY_VEHICLE);
     vehicle.set_grab(1);
     vehicle.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-4, -4, 8, 8)));
-    app.engine
-        .register_definition(vehicle)
-        .expect("register vehicle");
+    app.engine.register_test_definition(vehicle);
     let mut vehicle_spawn = SpawnConfig::new("MVEH").with_position(vehicle_position);
-    if let Some(layer) = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .layer
-    {
+    if let Some(layer) = app.engine.test_object_snapshot(crew).layer {
         vehicle_spawn = vehicle_spawn.with_layer(layer);
     }
-    let vehicle = app
-        .engine
-        .spawn_object(vehicle_spawn)
-        .expect("spawn vehicle");
+    let vehicle = app.engine.spawn_test_object(vehicle_spawn);
     app.snapshot = app.engine.snapshot();
     assert_ne!(
         app.engine
@@ -1834,16 +1661,12 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
         0,
         "Grab=1 vehicle exposes OCF_Grab"
     );
-    app.render(&mut frame).expect("render vehicle");
-    let vehicle_snapshot = app
-        .snapshot
-        .object(vehicle)
-        .cloned()
-        .expect("vehicle is present in app snapshot");
+    app.test_render(&mut frame);
+    let vehicle_snapshot = app.snapshot.object(vehicle).cloned().test_value();
     let (vehicle_x, vehicle_y) = app
         .graphics
         .world_to_screen(owner, vehicle_snapshot.position)
-        .expect("vehicle position maps into the local viewport");
+        .test_value();
     let direct_pick = app.graphics.object_at_point_with_ocf(
         &app.snapshot,
         owner,
@@ -1870,32 +1693,21 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
                 .viewport_point_at(*point)
                 .is_some_and(|pointer| pointer.owner == owner)
         })
-        .expect("vehicle has a release point in the viewport");
+        .test_value();
     let release_world = app
         .graphics
         .viewport_point_at(release_point)
         .map(ingame_pointer_world_pixel)
-        .expect("release world point");
+        .test_value();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(vehicle_point.x),
-        f64::from(vehicle_point.y),
-    ))
-    .expect("move over vehicle");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("physical right-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(release_point.x),
-        f64::from(release_point.y),
-    ))
-    .expect("drag vehicle");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("physical right-up");
+    move_cursor(&mut app, vehicle_point, "move over vehicle");
+    app.test_right_button(ElementState::Pressed);
+    move_cursor(&mut app, release_point, "drag vehicle");
+    app.test_right_button(ElementState::Released);
 
     let commands = app
         .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
+        .test_object_snapshot(crew)
         .command_stack
         .command_views();
     assert_eq!(commands.len(), 1, "Set replaces the previous command stack");
@@ -1910,34 +1722,22 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
 fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
-    let crew = app
-        .engine
-        .object_snapshot(crew)
-        .expect("cursor crew member remains live");
-    let mut vehicle = Definition::from_script("MHOV", "Hover wagon", "#strict\n")
-        .expect("hover vehicle definition compiles");
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew = app.engine.test_object_snapshot(crew);
+    let mut vehicle = test_definition("MHOV", "Hover wagon", "#strict\n");
     vehicle.set_category(clonk_engine::CATEGORY_VEHICLE);
     vehicle.set_grab(1);
     vehicle.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-5, -5, 10, 10)));
-    app.engine
-        .register_definition(vehicle)
-        .expect("register hover vehicle definition");
+    app.engine.register_test_definition(vehicle);
     let mut spawn =
         SpawnConfig::new("MHOV").with_position(Vector2::new(crew.position.x - 60, crew.position.y));
     if let Some(layer) = crew.layer {
         spawn = spawn.with_layer(layer);
     }
-    let target = app.engine.spawn_object(spawn).expect("spawn hover vehicle");
+    let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
-    let pointer = app
-        .graphics
-        .viewport_point_at(target_point)
-        .expect("hover vehicle point maps into its viewport");
+    let pointer = app.graphics.viewport_point_at(target_point).test_value();
     let world = ingame_pointer_world_pixel(pointer);
     assert_eq!(
         app.engine
@@ -1946,11 +1746,7 @@ fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     );
 
     let move_to = |app: &mut GameApp, point: GuiPoint| {
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(point.x),
-            f64::from(point.y),
-        ))
-        .expect("route physical hover move");
+        move_cursor(app, point, "route physical hover move");
     };
     move_to(&mut app, target_point);
     assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Grab);
@@ -1968,12 +1764,8 @@ fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     move_to(&mut app, target_point);
     let expected = app
         .ingame_world_cursor_caption(MouseWorldCursor::Grab(target), world)
-        .expect("Grab has a localized caption");
-    let caption = app
-        .ingame_mouse_caption
-        .caption
-        .as_ref()
-        .expect("tenth stable Grab move shows the caption");
+        .test_value();
+    let caption = app.ingame_mouse_caption.caption.test_ref();
     assert_eq!(caption.text, expected);
     assert!(caption.text.contains('|'));
 
@@ -1988,24 +1780,13 @@ fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
 #[test]
 fn inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
     let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("inventory test has a local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let (_, region) = app
         .ingame_inventory_region_hit(owner, region_point)
-        .expect("inventory point retains its region geometry");
+        .test_value();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("move over inventory region");
-    let caption = app
-        .ingame_mouse_caption
-        .caption
-        .as_ref()
-        .expect("inventory region installs its caption immediately");
+    move_cursor(&mut app, region_point, "move over inventory region");
+    let caption = app.ingame_mouse_caption.caption.test_ref();
     assert_eq!(
         caption.text,
         app.ingame_object_caption_name(target).unwrap()
@@ -2017,8 +1798,7 @@ fn inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
     );
 
     let (miss, _) = mouse_test_empty_point(&mut app, owner, region_point, None);
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(miss.x), f64::from(miss.y)))
-        .expect("move away from inventory region");
+    move_cursor(&mut app, miss, "move away from inventory region");
     assert!(app.ingame_mouse_caption.caption.is_none());
 }
 
@@ -2027,15 +1807,9 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
     for vehicle_drag in [false, true] {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
-        let crew = app
-            .engine
-            .crew_cursor(owner)
-            .expect("sandbox has a cursor crew member");
-        let crew_state = app
-            .engine
-            .object_snapshot(crew)
-            .expect("cursor crew member remains live");
-        let mut dragged = Definition::from_script(
+        let crew = app.engine.test_crew_cursor(owner);
+        let crew_state = app.engine.test_object_snapshot(crew);
+        let mut dragged = test_definition(
             "M54D",
             if vehicle_drag {
                 "Caption wagon"
@@ -2043,8 +1817,7 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
                 "Caption item"
             },
             "#strict\n",
-        )
-        .expect("dragged definition compiles");
+        );
         if vehicle_drag {
             dragged.set_category(clonk_engine::CATEGORY_VEHICLE);
             dragged.set_grab(1);
@@ -2052,22 +1825,16 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
             dragged.set_category(clonk_engine::CATEGORY_OBJECT);
             dragged.set_collectible(true);
         }
-        app.engine
-            .register_definition(dragged)
-            .expect("register dragged definition");
+        app.engine.register_test_definition(dragged);
         let dragged = app
             .engine
-            .spawn_object(SpawnConfig::new("M54D").with_container(crew))
-            .expect("put dragged object in cursor inventory");
+            .spawn_test_object(SpawnConfig::new("M54D").with_container(crew));
 
-        let mut container = Definition::from_script("M54C", "Caption container", "#strict\n")
-            .expect("container definition compiles");
+        let mut container = test_definition("M54C", "Caption container", "#strict\n");
         container.set_category(clonk_engine::CATEGORY_STRUCTURE);
         container.set_grab_put_get(clonk_engine::GRAB_PUT_GET_PUT);
         container.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
-        app.engine
-            .register_definition(container)
-            .expect("register caption container");
+        app.engine.register_test_definition(container);
         let mut container_spawn = SpawnConfig::new("M54C").with_position(Vector2::new(
             crew_state.position.x + 60,
             crew_state.position.y,
@@ -2075,19 +1842,13 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
         if let Some(layer) = crew_state.layer {
             container_spawn = container_spawn.with_layer(layer);
         }
-        let container = app
-            .engine
-            .spawn_object(container_spawn)
-            .expect("spawn caption container");
+        let container = app.engine.spawn_test_object(container_spawn);
         while app.engine.frame() % 5 != 4 {
-            app.update().expect("align the next update to native Tick5");
+            app.test_update();
         }
         render_mouse_test_app(&mut app);
 
-        let viewport = app
-            .graphics
-            .viewport_rect(owner)
-            .expect("caption drag has a local viewport");
+        let viewport = app.graphics.viewport_rect(owner).test_value();
         let inventory_point = GuiPoint::new(
             (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + clonk_frontend::hud::SYMBOL_SIZE / 2)
                 as f32,
@@ -2127,26 +1888,24 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
         };
         app.startup_tooltip_resources
             .insert(key.to_string(), template.to_string());
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(inventory_point.x),
-            f64::from(inventory_point.y),
-        ))
-        .expect("move onto dragged inventory object");
+        move_cursor(
+            &mut app,
+            inventory_point,
+            "move onto dragged inventory object",
+        );
         app.handle_ingame_mouse_button(ElementState::Pressed)
-            .expect("press inventory object");
-        app.handle_modifiers_changed(ModifiersState::CONTROL)
-            .expect("hold Control for put targeting");
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(container_point.x),
-            f64::from(container_point.y),
-        ))
-        .expect("cross moving-drag threshold over container");
+            .test_value();
+        app.test_modifiers(ModifiersState::CONTROL);
+        move_cursor(
+            &mut app,
+            container_point,
+            "cross moving-drag threshold over container",
+        );
         assert!(
             app.ingame_mouse_caption.caption.is_none(),
             "DragNone starts the moving drag but does not run DragMoving yet"
         );
-        app.update()
-            .expect("run the stationary native Tick5 DragMoving update");
+        app.test_update();
 
         assert_eq!(app.ingame_mouse_caption.cursor, expected_kind);
         assert_eq!(
@@ -2154,11 +1913,7 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
                 .and_then(|state| state.motion.region_drag_cursor),
             Some(expected_cursor)
         );
-        let caption = app
-            .ingame_mouse_caption
-            .caption
-            .as_ref()
-            .expect("Control drag installs a put caption");
+        let caption = app.ingame_mouse_caption.caption.test_ref();
         let expected_subject = if vehicle_drag {
             "Caption wagon"
         } else {
@@ -2179,20 +1934,13 @@ fn group_put_caption_uses_remaining_live_selection() {
     let (mut app, owner, crew, _first, _second, region_point) = inventory_region_fixture();
     let newest = app
         .engine
-        .spawn_object(SpawnConfig::new("MITM").with_container(crew))
-        .expect("add a third grouped inventory item");
-    let crew_state = app
-        .engine
-        .object_snapshot(crew)
-        .expect("cursor remains live");
-    let mut container = Definition::from_script("M54G", "Group container", "#strict\n")
-        .expect("group container compiles");
+        .spawn_test_object(SpawnConfig::new("MITM").with_container(crew));
+    let crew_state = app.engine.test_object_snapshot(crew);
+    let mut container = test_definition("M54G", "Group container", "#strict\n");
     container.set_category(clonk_engine::CATEGORY_STRUCTURE);
     container.set_grab_put_get(clonk_engine::GRAB_PUT_GET_PUT);
     container.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
-    app.engine
-        .register_definition(container)
-        .expect("register group container");
+    app.engine.register_test_definition(container);
     let mut spawn = SpawnConfig::new("M54G").with_position(Vector2::new(
         crew_state.position.x + 60,
         crew_state.position.y,
@@ -2200,10 +1948,7 @@ fn group_put_caption_uses_remaining_live_selection() {
     if let Some(layer) = crew_state.layer {
         spawn = spawn.with_layer(layer);
     }
-    let target = app
-        .engine
-        .spawn_object(spawn)
-        .expect("spawn group container");
+    let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
     assert_eq!(
         app.ingame_inventory_region_target(owner, region_point),
@@ -2215,20 +1960,14 @@ fn group_put_caption_uses_remaining_live_selection() {
     app.startup_tooltip_resources
         .insert("IDS_CON_PUT".to_owned(), "PUT <%s> INTO <%s>".to_owned());
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("hover grouped inventory region");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("start all-of-ID drag");
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold Control for put targeting");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("cross grouped moving-drag threshold");
+    move_cursor(&mut app, region_point, "hover grouped inventory region");
+    app.test_right_button(ElementState::Pressed);
+    app.test_modifiers(ModifiersState::CONTROL);
+    move_cursor(
+        &mut app,
+        target_point,
+        "cross grouped moving-drag threshold",
+    );
     assert_eq!(app.ingame_dragged_objects.len(), 3);
 
     app.engine
@@ -2236,13 +1975,9 @@ fn group_put_caption_uses_remaining_live_selection() {
             newest,
             ObjectUpdate::new().with_status(clonk_engine::ObjectStatus::Deleted),
         )
-        .expect("delete the original down target");
+        .test_value();
     app.snapshot = app.engine.snapshot();
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("refresh DragMoving after deletion");
+    move_cursor(&mut app, target_point, "refresh DragMoving after deletion");
 
     assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Put);
     assert_eq!(
@@ -2259,19 +1994,13 @@ fn group_put_caption_uses_remaining_live_selection() {
 fn world_origin_put_caption_uses_dragged_object_name() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    let crew_state = app
-        .engine
-        .object_snapshot(crew)
-        .expect("cursor remains live");
-    let mut item = Definition::from_script("M54W", "World parcel", "#strict\n")
-        .expect("world parcel compiles");
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew_state = app.engine.test_object_snapshot(crew);
+    let mut item = test_definition("M54W", "World parcel", "#strict\n");
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
     item.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-5, -5, 10, 10)));
-    app.engine
-        .register_definition(item)
-        .expect("register world parcel");
+    app.engine.register_test_definition(item);
     let mut item_spawn = SpawnConfig::new("M54W").with_position(Vector2::new(
         crew_state.position.x - 60,
         crew_state.position.y,
@@ -2279,19 +2008,13 @@ fn world_origin_put_caption_uses_dragged_object_name() {
     if let Some(layer) = crew_state.layer {
         item_spawn = item_spawn.with_layer(layer);
     }
-    let item = app
-        .engine
-        .spawn_object(item_spawn)
-        .expect("spawn world parcel");
+    let item = app.engine.spawn_test_object(item_spawn);
 
-    let mut container =
-        Definition::from_script("M54T", "World bin", "#strict\n").expect("world bin compiles");
+    let mut container = test_definition("M54T", "World bin", "#strict\n");
     container.set_category(clonk_engine::CATEGORY_STRUCTURE);
     container.set_grab_put_get(clonk_engine::GRAB_PUT_GET_PUT);
     container.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
-    app.engine
-        .register_definition(container)
-        .expect("register world bin");
+    app.engine.register_test_definition(container);
     let mut target_spawn = SpawnConfig::new("M54T").with_position(Vector2::new(
         crew_state.position.x + 60,
         crew_state.position.y,
@@ -2299,39 +2022,23 @@ fn world_origin_put_caption_uses_dragged_object_name() {
     if let Some(layer) = crew_state.layer {
         target_spawn = target_spawn.with_layer(layer);
     }
-    let target = app
-        .engine
-        .spawn_object(target_spawn)
-        .expect("spawn world bin");
+    let target = app.engine.spawn_test_object(target_spawn);
     render_mouse_test_app(&mut app);
     let item_point = mouse_test_object_point(&app, owner, item);
     let target_point = mouse_test_object_point(&app, owner, target);
     app.startup_tooltip_resources
         .insert("IDS_CON_PUT".to_owned(), "PUT <%s> INTO <%s>".to_owned());
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(item_point.x),
-        f64::from(item_point.y),
-    ))
-    .expect("hover world parcel");
+    move_cursor(&mut app, item_point, "hover world parcel");
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("press world parcel");
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold Control for put targeting");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("cross world moving-drag threshold");
+        .test_value();
+    app.test_modifiers(ModifiersState::CONTROL);
+    move_cursor(&mut app, target_point, "cross world moving-drag threshold");
     assert!(
         app.ingame_mouse_caption.caption.is_none(),
         "the threshold move only enters DragMoving"
     );
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(target_point.x),
-        f64::from(target_point.y),
-    ))
-    .expect("run DragMoving over world bin");
+    move_cursor(&mut app, target_point, "run DragMoving over world bin");
 
     assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Put);
     assert_eq!(
@@ -2347,21 +2054,14 @@ fn world_origin_put_caption_uses_dragged_object_name() {
 #[test]
 fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     let (mut app, owner, crew, _first, target, region_point) = inventory_region_fixture();
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
-    let landscape = app.engine.landscape().expect("sandbox landscape");
+    let crew_position = app.engine.test_object_snapshot(crew).position;
+    let landscape = app.engine.landscape().test_value();
     let drop_x = crew_position.x + 30;
     let ground_y = (0..landscape.estimated_height())
         .find(|y| landscape.is_solid_at(drop_x, *y))
-        .expect("sandbox ground");
+        .test_value();
     let drop_world = Vector2::new(drop_x, ground_y - 1);
-    let (drop_x, drop_y) = app
-        .graphics
-        .world_to_screen(owner, drop_world)
-        .expect("drop point maps into viewport");
+    let (drop_x, drop_y) = app.graphics.world_to_screen(owner, drop_world).test_value();
     let drop_point = GuiPoint::new(drop_x, drop_y);
     assert_eq!(
         app.engine.mouse_drag_carryable_command(owner, drop_world),
@@ -2372,23 +2072,15 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("move onto inventory region");
+    move_cursor(&mut app, region_point, "move onto inventory region");
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("region left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_point.x),
-        f64::from(drop_point.y),
-    ))
-    .expect("cross drag threshold");
+        .test_value();
+    move_cursor(&mut app, drop_point, "cross drag threshold");
     assert!(app.mouse_state.is_some_and(|state| {
         state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()
     }));
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("release before DragMoving update");
+        .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     assert!(controls.is_empty());
     assert_eq!(
@@ -2413,24 +2105,16 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     app.network = None;
     app.ingame_last_left_down = None;
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("move onto inventory region");
+    move_cursor(&mut app, region_point, "move onto inventory region");
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("region left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_point.x),
-        f64::from(drop_point.y),
-    ))
-    .expect("cross drag threshold");
+        .test_value();
+    move_cursor(&mut app, drop_point, "cross drag threshold");
     assert!(app
         .mouse_state
         .is_some_and(|state| state.motion.region_drag_started));
     assert_eq!(app.ingame_dragged_objects, vec![target]);
     for _ in 0..5 {
-        app.update().expect("advance periodic mouse execution");
+        app.test_update();
     }
     assert_eq!(
         app.mouse_state
@@ -2439,12 +2123,9 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
         "the Tick5 C4MouseControl::Execute equivalent refreshes a stationary drag"
     );
 
-    let mut inert = Definition::from_script("MNOC", "No longer carryable", "#strict\n")
-        .expect("inert definition compiles");
+    let mut inert = test_definition("MNOC", "No longer carryable", "#strict\n");
     inert.set_category(clonk_engine::CATEGORY_OBJECT);
-    app.engine
-        .register_definition(inert)
-        .expect("register inert replacement");
+    app.engine.register_test_definition(inert);
     app.engine
         .apply_object_update(
             target,
@@ -2453,14 +2134,14 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
                 ..ObjectUpdate::default()
             },
         )
-        .expect("remove carryable definition after drag start");
+        .test_value();
     assert_eq!(app.engine.mouse_region_drag_source(target), None);
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("finish latched region drag");
+        .test_value();
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     assert!(controls.is_empty());
@@ -2488,41 +2169,28 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
 fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    let mut vehicle = Definition::from_script("MIVH", "Inventory vehicle", "#strict\n")
-        .expect("vehicle definition compiles");
+    let crew = app.engine.test_crew_cursor(owner);
+    let mut vehicle = test_definition("MIVH", "Inventory vehicle", "#strict\n");
     vehicle.set_category(clonk_engine::CATEGORY_VEHICLE);
     vehicle.set_grab(1);
-    app.engine
-        .register_definition(vehicle)
-        .expect("register vehicle");
+    app.engine.register_test_definition(vehicle);
     let vehicle = app
         .engine
-        .spawn_object(SpawnConfig::new("MIVH").with_container(crew))
-        .expect("put vehicle in cursor contents");
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
+        .spawn_test_object(SpawnConfig::new("MIVH").with_container(crew));
+    let crew_position = app.engine.test_object_snapshot(crew).position;
     let destination = Vector2::new(crew_position.x + 40, crew_position.y);
-    let mut container = Definition::from_script("MIPC", "Put target", "#strict\n")
-        .expect("container definition compiles");
+    let mut container = test_definition("MIPC", "Put target", "#strict\n");
     container.set_category(clonk_engine::CATEGORY_OBJECT);
     container.set_grab_put_get(clonk_engine::GRAB_PUT_GET_PUT);
     container.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-6, -6, 12, 12)));
-    app.engine
-        .register_definition(container)
-        .expect("register put target");
+    app.engine.register_test_definition(container);
     let put_target = app
         .engine
-        .spawn_object(SpawnConfig::new("MIPC").with_position(destination))
-        .expect("spawn put target");
+        .spawn_test_object(SpawnConfig::new("MIPC").with_position(destination));
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("render vehicle inventory region");
-    let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+    app.test_render(&mut frame);
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let region_point = GuiPoint::new(
         (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + 1) as f32,
         (viewport.y + viewport.height as i32
@@ -2541,36 +2209,24 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     let (x, y) = app
         .graphics
         .world_to_screen(owner, destination)
-        .expect("vehicle destination is visible");
+        .test_value();
     let destination_point = GuiPoint::new(x, y);
     let destination = app
         .graphics
         .viewport_point_at(destination_point)
         .map(ingame_pointer_world_pixel)
-        .expect("destination maps to local viewport");
+        .test_value();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("move onto vehicle region");
+    move_cursor(&mut app, region_point, "move onto vehicle region");
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("vehicle region left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(destination_point.x),
-        f64::from(destination_point.y),
-    ))
-    .expect("cross vehicle drag threshold");
+        .test_value();
+    move_cursor(&mut app, destination_point, "cross vehicle drag threshold");
     assert_eq!(app.ingame_dragged_objects, vec![vehicle]);
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(destination_point.x),
-        f64::from(destination_point.y),
-    ))
-    .expect("resolve vehicle moving cursor");
+    move_cursor(&mut app, destination_point, "resolve vehicle moving cursor");
     assert_eq!(
         app.mouse_state
             .and_then(|state| state.motion.region_drag_cursor),
@@ -2578,19 +2234,16 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     );
     // Model the last DragMoving update having resolved Ctrl+container;
     // ClearPointers may delete that stored target before button-up.
-    app.mouse_state
-        .as_mut()
-        .expect("moving drag remains active")
-        .motion
-        .region_drag_cursor = Some(IngameRegionDragCursor::VehiclePut(put_target));
+    app.mouse_state.test_mut().motion.region_drag_cursor =
+        Some(IngameRegionDragCursor::VehiclePut(put_target));
     app.engine
         .apply_object_update(
             put_target,
             ObjectUpdate::new().with_status(clonk_engine::ObjectStatus::Deleted),
         )
-        .expect("delete the stored put target before release");
+        .test_value();
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("vehicle region left-up");
+        .test_value();
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     assert!(controls.is_empty());
@@ -2620,23 +2273,13 @@ fn command_region_caption_is_immediate_and_anchored_to_region_top() {
     let point = points
         .iter()
         .find_map(|(command, point)| (*command == 6).then_some(*point))
-        .expect("fixture exposes the Sell command");
-    let (_, expected_caption, region) = app
-        .ingame_command_region_hit(owner, point)
-        .expect("command has a paired C4Region");
+        .test_value();
+    let (_, expected_caption, region) = app.ingame_command_region_hit(owner, point).test_value();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(point.x),
-        f64::from(point.y),
-    ))
-    .expect("hover command region");
+    move_cursor(&mut app, point, "hover command region");
 
-    let caption = app
-        .ingame_mouse_caption
-        .caption
-        .as_ref()
-        .expect("command region caption appears immediately");
-    let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+    let caption = app.ingame_mouse_caption.caption.test_ref();
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     assert_eq!(caption.text, expected_caption);
     assert_eq!(caption.text, "Sell");
     assert_eq!(caption.caption_bottom_y, Some(region.y - viewport.y));
@@ -2652,11 +2295,7 @@ fn help_cursor_gets_the_delayed_red_help_caption() {
     let (_target, point) = install_mouse_help_target(&mut app, "M54H", "Help hover target", None);
     app.ingame_mouse_help = true;
     let move_to_target = |app: &mut GameApp| {
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(point.x),
-            f64::from(point.y),
-        ))
-        .expect("route stable Help hover move");
+        move_cursor(app, point, "route stable Help hover move");
     };
 
     move_to_target(&mut app);
@@ -2682,7 +2321,7 @@ fn help_cursor_gets_the_delayed_red_help_caption() {
 #[test]
 fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
     let (mut app, owner, _cursor, _first, _target, region_point) = inventory_region_fixture();
-    let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let start = (viewport.y + 10..viewport.y + viewport.height as i32 - 48)
         .step_by(4)
         .flat_map(|y| {
@@ -2702,36 +2341,27 @@ fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
         })
-        .expect("empty landscape start outside the HUD region");
+        .test_value();
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(start.x),
-        f64::from(start.y),
-    ))
-    .expect("move to landscape start");
+    move_cursor(&mut app, start, "move to landscape start");
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("landscape left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("cross threshold directly into region");
+        .test_value();
+    move_cursor(
+        &mut app,
+        region_point,
+        "cross threshold directly into region",
+    );
     assert!(app.mouse_state.is_some_and(|state| {
         state.motion.moved
             && state.motion.selection_frame
             && !state.motion.selection_cancelled_by_region
     }));
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(start.x),
-        f64::from(start.y),
-    ))
-    .expect("leave region before a second region event");
+    move_cursor(&mut app, start, "leave region before a second region event");
     assert!(app.mouse_state.is_some_and(|state| {
         state.motion.selection_frame && !state.motion.selection_cancelled_by_region
     }));
 
-    app.handle_focus_lost()
-        .expect("cancel focused mouse gesture");
+    app.handle_focus_lost().test_value();
     assert!(app.mouse_state.is_none());
     assert!(app.ingame_right_mouse_state.is_none());
     assert!(app.ingame_dragged_objects.is_empty());
@@ -2746,28 +2376,17 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
     // Append commands (C4ObjectList.cpp:343-372;
     // C4MouseControl.cpp:942-961,1171-1227).
     let (mut app, owner, crew, first, second, region_point) = inventory_region_fixture();
-    let viewport = app
-        .graphics
-        .viewport_rect(owner)
-        .expect("local sandbox viewport");
+    let viewport = app.graphics.viewport_rect(owner).test_value();
 
-    let mut hidden_cursor_definition =
-        Definition::from_script("HINV", "Hidden inventory cursor", "")
-            .expect("hidden cursor definition compiles");
+    let mut hidden_cursor_definition = test_definition("HINV", "Hidden inventory cursor", "");
     hidden_cursor_definition.set_hide_hud_elements(clonk_engine::HIDE_HUD_ELEMENT_INVENTORY);
     app.engine
-        .register_definition(hidden_cursor_definition)
-        .expect("register hidden cursor definition");
-    let hidden_cursor = app
-        .engine
-        .spawn_object(SpawnConfig::new("HINV"))
-        .expect("spawn hidden ViewCursor");
+        .register_test_definition(hidden_cursor_definition);
+    let hidden_cursor = app.engine.spawn_test_object(SpawnConfig::new("HINV"));
     app.engine
-        .spawn_object(SpawnConfig::new("MITM").with_container(hidden_cursor))
-        .expect("put a live item in the hidden ViewCursor");
+        .spawn_test_object(SpawnConfig::new("MITM").with_container(hidden_cursor));
     app.engine
-        .player_mut(owner)
-        .expect("local player")
+        .test_player_mut(owner)
         .set_view_cursor(Some(hidden_cursor));
     app.snapshot = app.engine.snapshot();
     assert!(
@@ -2785,10 +2404,7 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         None,
         "HH_Inventory creates no invisible clickable region for ViewCursor"
     );
-    app.engine
-        .player_mut(owner)
-        .expect("local player")
-        .set_view_cursor(None);
+    app.engine.test_player_mut(owner).set_view_cursor(None);
     app.snapshot = app.engine.snapshot();
 
     let region_left = GuiPoint::new(
@@ -2800,20 +2416,10 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
             as f32,
         region_point.y,
     );
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_left.x),
-        f64::from(region_left.y),
-    ))
-    .expect("move to first region edge");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("region right-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_right.x),
-        f64::from(region_right.y),
-    ))
-    .expect("drag within the same region");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("region right-up");
+    move_cursor(&mut app, region_left, "move to first region edge");
+    app.test_right_button(ElementState::Pressed);
+    move_cursor(&mut app, region_right, "drag within the same region");
+    app.test_right_button(ElementState::Released);
     assert!(
         app.engine
             .object_snapshot(crew)
@@ -2823,21 +2429,14 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         "a moving drag released on a region has no object command case"
     );
 
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
-    let landscape = app.engine.landscape().expect("sandbox landscape");
+    let crew_position = app.engine.test_object_snapshot(crew).position;
+    let landscape = app.engine.landscape().test_value();
     let drop_x = crew_position.x + 30;
     let ground_y = (0..landscape.estimated_height())
         .find(|y| landscape.is_solid_at(drop_x, *y))
-        .expect("sandbox has ground beside the crew");
+        .test_value();
     let drop_world = Vector2::new(drop_x, ground_y - 1);
-    let (drop_x, drop_y) = app
-        .graphics
-        .world_to_screen(owner, drop_world)
-        .expect("ground drop point maps into the viewport");
+    let (drop_x, drop_y) = app.graphics.world_to_screen(owner, drop_world).test_value();
     let drop_pointer = (GuiPoint::new(drop_x, drop_y), drop_world, CommandId::Drop);
     assert!(
         app.graphics
@@ -2850,29 +2449,24 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         Some(CommandId::Drop)
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("move onto inventory region for left drag");
+    move_cursor(
+        &mut app,
+        region_point,
+        "move onto inventory region for left drag",
+    );
     app.handle_ingame_mouse_button(ElementState::Pressed)
-        .expect("physical region left-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_pointer.0.x),
-        f64::from(drop_pointer.0.y),
-    ))
-    .expect("cross the left-drag threshold");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_pointer.0.x),
-        f64::from(drop_pointer.0.y),
-    ))
-    .expect("resolve the left moving-drag cursor");
+        .test_value();
+    move_cursor(&mut app, drop_pointer.0, "cross the left-drag threshold");
+    move_cursor(
+        &mut app,
+        drop_pointer.0,
+        "resolve the left moving-drag cursor",
+    );
     app.handle_ingame_mouse_button(ElementState::Released)
-        .expect("physical region left-up");
+        .test_value();
     let left_commands = app
         .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
+        .test_object_snapshot(crew)
         .command_stack
         .command_views();
     assert_eq!(left_commands.len(), 1);
@@ -2881,30 +2475,19 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
     assert_eq!(left_commands[0].tx, Some(drop_pointer.1.x));
     assert_eq!(left_commands[0].ty, Some(drop_pointer.1.y));
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(region_point.x),
-        f64::from(region_point.y),
-    ))
-    .expect("move onto inventory region");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("physical region right-down");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_pointer.0.x),
-        f64::from(drop_pointer.0.y),
-    ))
-    .expect("cross the right-drag threshold");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(drop_pointer.0.x),
-        f64::from(drop_pointer.0.y),
-    ))
-    .expect("resolve the right moving-drag cursor");
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("physical region right-up");
+    move_cursor(&mut app, region_point, "move onto inventory region");
+    app.test_right_button(ElementState::Pressed);
+    move_cursor(&mut app, drop_pointer.0, "cross the right-drag threshold");
+    move_cursor(
+        &mut app,
+        drop_pointer.0,
+        "resolve the right moving-drag cursor",
+    );
+    app.test_right_button(ElementState::Released);
 
     let commands = app
         .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
+        .test_object_snapshot(crew)
         .command_stack
         .command_views();
     assert_eq!(commands.len(), 2);
@@ -2988,11 +2571,10 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     install_classic_test_assets(&mut app);
 
-    let mut definition =
-        Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
+    let mut definition = test_definition("WLKR", "Walker", walker_script());
     definition.configure_actions(
         Some("Walk".to_string()),
         HashMap::from([(
@@ -3002,25 +2584,19 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
     );
     definition.set_movement_profile(MovementProfile::default());
     definition.set_crew_member(true);
-    app.engine
-        .register_definition(definition)
-        .expect("register crew definition");
+    app.engine.register_test_definition(definition);
     app.engine
         .set_player_starts(vec![clonk_engine::scenario::PlayerStart {
             ready_crew: vec![("WLKR".to_string(), 1)],
             ..Default::default()
         }]);
-    app.join_local_player().expect("join fresh player");
+    app.join_local_player().test_value();
     app.mode = AppMode::Running;
 
     let mut keyboard = AppVirtualKeyboard::new(&mut app);
-    keyboard
-        .press(VirtualKeyCode::KeyX)
-        .expect("press physical Down");
+    keyboard.press(VirtualKeyCode::KeyX);
     let first_press = keyboard.player_control();
-    keyboard
-        .press(VirtualKeyCode::KeyX)
-        .expect("receive repeated physical Down");
+    keyboard.press(VirtualKeyCode::KeyX);
     let repeated_press = keyboard.player_control();
 
     assert_eq!(
@@ -3031,51 +2607,47 @@ fn autostop_ignores_repeated_physical_keydown_until_release() {
         repeated_press.last_com_down_double, first_press.last_com_down_double,
         "OS key-repeat must not arm the drop/double-down window"
     );
-    keyboard
-        .release(VirtualKeyCode::KeyX)
-        .expect("release physical Down");
+    keyboard.release(VirtualKeyCode::KeyX);
     assert_eq!(keyboard.player_control().pressed_coms, 0);
 }
 
 #[test]
 fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
     let mut app = new_running_sandbox_app();
-    let temp = tempdir().expect("tempdir");
+    let temp = tempdir();
     let def_dir = temp.path().join("PortraitCrew.c4d");
-    fs::create_dir(&def_dir).expect("definition directory");
+    fs::create_dir(&def_dir).test_value();
     fs::write(
         def_dir.join("DefCore.txt"),
         b"[DefCore]\nid=PCRO\nColorByOwner=1\n",
     )
-    .expect("DefCore");
+    .test_value();
     write_test_definition_graphics(&def_dir);
     image::RgbaImage::from_raw(2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255])
         .expect("portrait pixels")
         .save(def_dir.join("Portrait1.png"))
-        .expect("portrait");
+        .test_value();
     image::RgbaImage::from_raw(2, 1, vec![136, 136, 136, 255, 64, 128, 192, 128])
         .expect("overlay pixels")
         .save(def_dir.join("Overlay1.png"))
-        .expect("portrait overlay");
+        .test_value();
 
-    let group = Group::open(&def_dir).expect("open definition");
-    let resource = ResourceDefinitionData::load(&group).expect("load definition");
+    let group = Group::open(&def_dir).test_value();
+    let resource = ResourceDefinitionData::load(&group).test_value();
     app.engine
-        .register_definition(Definition::from_resource(&resource).expect("compile definition"))
-        .expect("register definition");
+        .register_test_definition(Definition::from_resource(&resource).test_value());
     app.engine
         .register_script_definition("PHST", "Portrait host", "")
-        .expect("register host definition");
+        .test_value();
     let viewed_owner = app.local_owner + 1;
     app.engine
         .register_player(
             PlayerConfig::new(viewed_owner, "Viewed").with_color(Some(RgbColor::new(255, 0, 0))),
         )
-        .expect("register viewed owner");
+        .test_value();
     let viewed_object = app
         .engine
-        .spawn_object(SpawnConfig::new("PHST").with_owner(viewed_owner))
-        .expect("spawn viewed portrait object");
+        .spawn_test_object(SpawnConfig::new("PHST").with_owner(viewed_owner));
     let mut state = app.engine.capture_state();
     state.crew_object_infos.insert(
         viewed_object,
@@ -3104,16 +2676,14 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
             },
         },
     );
-    app.engine
-        .restore_state(&state)
-        .expect("install selected portrait");
+    app.engine.restore_state(&state).test_value();
     app.snapshot = app.engine.snapshot();
     let mut color_defaults = app.snapshot.clone();
     color_defaults
         .players
         .iter_mut()
         .find(|player| player.id == viewed_owner)
-        .expect("viewed player")
+        .test_value()
         .color = None;
     assert_eq!(
         cursor_portrait_owner_color(&color_defaults, viewed_owner),
@@ -3131,11 +2701,8 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
     let viewport_player = players
         .iter_mut()
         .find(|player| player.owner == app.local_owner)
-        .expect("local viewport player");
-    let crew = viewport_player
-        .crew
-        .first_mut()
-        .expect("local crew overlay");
+        .test_value();
+    let crew = viewport_player.crew.first_mut().test_value();
     crew.object_id = viewed_object;
     app.display_flags.portraits = true;
     app.populate_crew_portraits(&mut players);
@@ -3149,7 +2716,7 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
                 .iter()
                 .find(|crew| crew.object_id == viewed_object)
         })
-        .expect("cross-owner ViewCursor portrait");
+        .test_value();
     assert_eq!(
         portrait.portrait.as_ref().expect("base").pixels(),
         &[10, 20, 30, 255, 40, 50, 60, 255],
@@ -3177,60 +2744,55 @@ fn tutorial_portrait_spec_resolves_the_colorized_definition_image() {
     // applies 0x0000ff through GetBitmap(dwClr) (C4Game.cpp:4310-4324;
     // C4DefGraphics.cpp:575-606). The tutorial must draw that image, not
     // the old flat-blue placeholder.
-    let temp = tempdir().expect("tempdir");
+    let temp = tempdir();
     let def_dir = temp.path().join("Sorcerer.c4d");
-    fs::create_dir(&def_dir).expect("definition directory");
+    fs::create_dir(&def_dir).test_value();
     fs::write(
         def_dir.join("DefCore.txt"),
         b"[DefCore]\nid=SCLK\nColorByOwner=1\n",
     )
-    .expect("DefCore");
+    .test_value();
     let mut base = Surface::new(1, 1, clonk_graphics::PixelFormat::Rgba8888);
-    base.set_pixel(0, 0, Color::new(0, 0, 0, 0))
-        .expect("base pixel");
+    base.set_pixel(0, 0, Color::new(0, 0, 0, 0)).test_value();
     fs::write(
         def_dir.join("Portrait1.png"),
-        encode_surface_to_png(&base).expect("encode portrait"),
+        encode_surface_to_png(&base).test_value(),
     )
-    .expect("portrait png");
+    .test_value();
     let mut overlay = Surface::new(1, 1, clonk_graphics::PixelFormat::Rgba8888);
     overlay
         .set_pixel(0, 0, Color::new(136, 136, 136, 255))
-        .expect("overlay pixel");
+        .test_value();
     fs::write(
         def_dir.join("Overlay1.png"),
-        encode_surface_to_png(&overlay).expect("encode portrait overlay"),
+        encode_surface_to_png(&overlay).test_value(),
     )
-    .expect("portrait overlay png");
+    .test_value();
     let mut captain = Surface::new(2, 1, clonk_graphics::PixelFormat::Rgba8888);
     captain
         .set_pixel(0, 0, Color::opaque(10, 20, 30))
-        .expect("captain pixel");
+        .test_value();
     captain
         .set_pixel(1, 0, Color::opaque(40, 50, 60))
-        .expect("captain pixel");
+        .test_value();
     fs::write(
         def_dir.join("PortraitCaptain1.png"),
-        encode_surface_to_png(&captain).expect("encode named portrait"),
+        encode_surface_to_png(&captain).test_value(),
     )
-    .expect("named portrait png");
-    let group = Group::open(&def_dir).expect("open definition");
-    let resource = ResourceDefinitionData::load(&group).expect("load definition");
-    let definition = Definition::from_resource(&resource).expect("compile definition");
+    .test_value();
+    let group = Group::open(&def_dir).test_value();
+    let resource = ResourceDefinitionData::load(&group).test_value();
+    let definition = Definition::from_resource(&resource).test_value();
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("register definition");
+    engine.register_test_definition(definition);
 
-    let portrait =
-        resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::1").expect("portrait resolves");
+    let portrait = resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::1").test_value();
     assert_eq!((portrait.width(), portrait.height()), (1, 1));
     assert_eq!(portrait.pixels(), &[0, 0, 136, 255]);
-    let fallback_tint = resolve_message_portrait_with_color(&engine, "Portrait:SCLK::1", 0xff0000)
-        .expect("TextSpec fallback color resolves");
+    let fallback_tint =
+        resolve_message_portrait_with_color(&engine, "Portrait:SCLK::1", 0xff0000).test_value();
     assert_eq!(fallback_tint.pixels(), &[136, 0, 0, 255]);
-    let captain = resolve_message_portrait(&engine, "Portrait:SCLK::ff0000::Captain1")
-        .expect("named portrait resolves");
+    let captain = resolve_message_portrait(&engine, "Portrait:SCLK::ff0000::Captain1").test_value();
     assert_eq!((captain.width(), captain.height()), (2, 1));
     assert_eq!(
         captain.pixels(),
@@ -3252,22 +2814,17 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root")
+        .test_value()
         .to_path_buf();
     let flag_group =
         Group::open(repository.join("content/Objects.c4d/Items.c4d/Equipment.c4d/Flag.c4d"))
-            .expect("open real FLAG definition");
-    let flag_resource =
-        clonk_resources::ResourceDefinition::load(&flag_group).expect("load real FLAG definition");
+            .test_value();
+    let flag_resource = clonk_resources::ResourceDefinition::load(&flag_group).test_value();
     let mut engine = Engine::new();
-    engine
-        .register_definition(
-            Definition::from_resource(&flag_resource).expect("compile real FLAG definition"),
-        )
-        .expect("register FLAG");
+    engine.register_test_definition(Definition::from_resource(&flag_resource).test_value());
     engine
         .register_script_definition("ROCK", "Rock", "")
-        .expect("register ROCK");
+        .test_value();
 
     let crew_id = ObjectId::new(1);
     let flag_a = ObjectId::new(2);
@@ -3337,13 +2894,11 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
     assert_eq!(inventory[2].definition_id, "FLAG");
     assert_eq!(inventory[2].count, 1);
 
-    let source = engine
-        .definition_picture_image("FLAG")
-        .expect("real FLAG picture");
-    let picture = inventory[0].picture.as_ref().expect("FLAG HUD picture");
+    let source = engine.definition_picture_image("FLAG").test_value();
+    let picture = inventory[0].picture.test_ref();
     assert_eq!((picture.width(), picture.height()), (64, 64));
     let source_pixels = source.pixels();
-    let mask = source.color_mask().expect("FLAG ColorByOwner mask");
+    let mask = source.color_mask().test_value();
     if mask.len() == source_pixels.len() {
         assert_eq!(picture.pixels(), source_pixels.as_ref());
         assert_eq!(inventory[0].picture_overlays.len(), 1);
@@ -3351,7 +2906,7 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         let sample = mask
             .chunks_exact(4)
             .position(|pixel| pixel[3] != 0)
-            .expect("FLAG picture has an overlay pixel");
+            .test_value();
         let offset = sample * 4;
         let overlay = &mask[offset..offset + 4];
         let tint = [owner_color.r, owner_color.g, owner_color.b];
@@ -3365,10 +2920,7 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
             "owner coverage remains on the second HUD pass",
         );
     } else {
-        let sample = mask
-            .iter()
-            .position(|value| *value != 0)
-            .expect("FLAG picture has a colorized pixel");
+        let sample = mask.iter().position(|value| *value != 0).test_value();
         let offset = sample * 4;
         let amount = u16::from(mask[sample]);
         let inverse = 255_u16 - amount;
@@ -3411,11 +2963,11 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         &HudGraphics::default(),
         0,
     )
-    .expect("buy row picture");
+    .test_value();
     let buy_source = engine
         .definition_picture_phase_image("FLAG", 0)
         .or_else(|| engine.definition_picture_image("FLAG"))
-        .expect("buy row definition picture");
+        .test_value();
     assert_eq!(
         buy_picture.pixels(),
         inventory_picture_pixels(&buy_source, buy_color),
@@ -3428,8 +2980,7 @@ fn cursor_inventory_composes_picture_overlay_phase() {
     // overlay's definition picture and phase (src/C4Object.cpp:3144-3151;
     // src/C4DefGraphics.cpp:655-659,834-855).
     let mut engine = Engine::new();
-    let mut base =
-        Definition::from_script("BASE", "Base", "#strict").expect("base definition compiles");
+    let mut base = test_definition("BASE", "Base", "#strict");
     base.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -3442,10 +2993,9 @@ fn cursor_inventory_composes_picture_overlay_phase() {
         pixels: Arc::from([0xff, 0, 0, 0xff]),
         color_mask: None,
     }));
-    engine.register_definition(base).expect("base registers");
+    engine.register_test_definition(base);
 
-    let mut overlay =
-        Definition::from_script("OVRL", "Overlay", "#strict").expect("overlay definition compiles");
+    let mut overlay = test_definition("OVRL", "Overlay", "#strict");
     overlay.set_picture(Some(clonk_engine::DefinitionPicture {
         x: 0,
         y: 0,
@@ -3458,9 +3008,7 @@ fn cursor_inventory_composes_picture_overlay_phase() {
         pixels: Arc::from([0, 0xff, 0, 0xff, 0, 0, 0xff, 0xff]),
         color_mask: None,
     }));
-    engine
-        .register_definition(overlay)
-        .expect("overlay registers");
+    engine.register_test_definition(overlay);
 
     let mut object = make_object(1, "BASE", Vector2::ZERO);
     let mut picture_overlay =
@@ -3468,7 +3016,7 @@ fn cursor_inventory_composes_picture_overlay_phase() {
             .with_definition(Some("OVRL".to_string()));
     picture_overlay.phase = 1;
     object.graphics_overlays.push(picture_overlay);
-    let picture = inventory_object_picture(&engine, &object).expect("picture composes");
+    let picture = inventory_object_picture(&engine, &object).test_value();
     assert_eq!(picture.pixels(), &[0, 0, 0xff, 0xff]);
 
     let object_id = object.id;
@@ -3498,7 +3046,7 @@ fn cursor_inventory_composes_picture_overlay_phase() {
         &HudGraphics::default(),
         0,
     )
-    .expect("menu picture composes the representative overlay");
+    .test_value();
     assert_eq!(menu_picture.pixels(), picture.pixels());
 }
 
@@ -3510,7 +3058,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         id: 9,
         team: 1,
         player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-        name: LegacyCString::from_bytes(b"Script player".to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(b"Script player".to_vec()).test_value(),
         ..Default::default()
     };
     app.control_player_infos.replace_snapshot(
@@ -3530,30 +3078,24 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         prepared: None,
     }));
     {
-        let metadata = app
-            .network_team_assignment
-            .as_mut()
-            .expect("team assignment")
-            .teams_mut();
+        let metadata = app.network_team_assignment.test_mut().teams_mut();
         let target = metadata
             .teams
             .iter_mut()
             .find(|team| team.id == 2)
-            .expect("target team");
+            .test_value();
         target.player_ids = vec![99];
         target.max_players = 1;
         metadata
             .teams
             .iter_mut()
             .find(|team| team.id == 4)
-            .expect("spare team")
+            .test_value()
             .max_players = 0;
     }
 
     assert!(app.select_classic_lobby_sheet(LobbySheet::Teams));
-    let (_, roster) = app
-        .classic_host_lobby_layouts()
-        .expect("Teams roster layout");
+    let (_, roster) = app.classic_host_lobby_layouts().test_value();
     let point_for_team = |team_id| {
         let header = roster
             .rows
@@ -3572,32 +3114,31 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
                     })) if *id == team_id
                 )
             })
-            .expect("team header");
+            .test_value();
         GuiPoint::new((header.rect.x + 2) as f32, (header.rect.y + 2) as f32)
     };
     let other_point = point_for_team(1);
     let point = point_for_team(2);
 
     app.handle_classic_lobby_pointer_move(other_point)
-        .expect("hover other team header");
+        .test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
-        .expect("press other team header");
-    app.handle_classic_lobby_pointer_move(point)
-        .expect("drag onto target team header");
+        .test_value();
+    app.handle_classic_lobby_pointer_move(point).test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Released, false)
-        .expect("release canceled cross-row gesture");
+        .test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
-        .expect("press target team header once");
+        .test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Released, false)
-        .expect("release target team header once");
+        .test_value();
     assert!(
         commands.take_player_info_updates().is_empty(),
         "a drag release must not seed a later single click as a double click"
     );
     app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
-        .expect("press target team header twice");
+        .test_value();
     app.handle_classic_lobby_pointer_button(ElementState::Released, false)
-        .expect("release target team header twice");
+        .test_value();
 
     let mut moved_chooser = chooser.clone();
     moved_chooser.team = 2;
@@ -3632,8 +3173,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     );
 
     app.classic_host_lobby
-        .as_mut()
-        .expect("test lobby")
+        .test_mut()
         .controller
         .apply_countdown_packet(clonk_frontend::game_lobby::LobbyCountdownPacket::Seconds(
             11,
@@ -3641,7 +3181,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     app.process_classic_lobby_actions(vec![
         ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
     ])
-    .expect("long countdown still permits native lobby team selection");
+    .test_value();
     assert_eq!(
         commands.take_player_info_updates().len(),
         1,
@@ -3649,37 +3189,34 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     );
 
     app.classic_host_lobby
-        .as_mut()
-        .expect("test lobby")
+        .test_mut()
         .controller
         .apply_countdown_packet(clonk_frontend::game_lobby::LobbyCountdownPacket::Abort);
     app.network_team_assignment
-        .as_mut()
-        .expect("team assignment")
+        .test_mut()
         .teams_mut()
         .teams
         .iter_mut()
         .find(|team| team.id == 4)
-        .expect("spare team")
+        .test_value()
         .max_players = -1;
     app.process_classic_lobby_actions(vec![
         ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
     ])
-    .expect("all-full team request is inert");
+    .test_value();
     assert!(
         commands.take_player_info_updates().is_empty(),
         "bulk selection is unavailable when every team is full"
     );
 
     app.network_team_assignment
-        .as_mut()
-        .expect("team assignment")
+        .test_mut()
         .teams_mut()
         .team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     app.process_classic_lobby_actions(vec![
         ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
     ])
-    .expect("random distribution request is inert");
+    .test_value();
     assert!(commands.take_player_info_updates().is_empty());
 }
 
@@ -3687,28 +3224,19 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
 fn scenario_scroll_wheel_clears_hover_ownership_until_pointer_moves() {
     let mut app = new_real_classic_menu_app(640, 480);
     app.open_scenario_browser();
-    let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
     let point = GuiPoint::new((layout.list.x + 5) as f32, (layout.list.y + 5) as f32);
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(point.x),
-        f64::from(point.y),
-    ))
-    .expect("hover scenario list");
+    move_cursor(&mut app, point, "hover scenario list");
     assert!(app.startup_element_tooltip_pending());
 
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("scroll scenario list");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert_eq!(app.startup_tooltip.pointer_position(), None);
     assert!(!app.startup_element_tooltip_pending());
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(point.x),
-        f64::from(point.y),
-    ))
-    .expect("re-arm scenario hover");
+    move_cursor(&mut app, point, "re-arm scenario hover");
     app.menu_state.set_search_text("unmatched search");
-    app.submit_scenario_search().expect("rebuild search rows");
+    app.submit_scenario_search().test_value();
     assert_eq!(app.startup_tooltip.pointer_position(), None);
 }
 
@@ -3716,10 +3244,10 @@ fn scenario_scroll_wheel_clears_hover_ownership_until_pointer_moves() {
 fn missing_scenario_bootstrap_asset_precedes_generic_fallback() {
     let mut app = new_real_classic_menu_app(320, 200);
     Arc::get_mut(&mut app.assets)
-        .expect("frontend assets are app-owned")
+        .test_value()
         .startup_dialog_images
         .remove("StartupScenSelIcons.png")
-        .expect("classic fixture includes the scenario icon sheet");
+        .test_value();
     app.open_scenario_browser();
     let mut frame = vec![0x5a; 320 * 200 * 4];
 
@@ -3738,7 +3266,7 @@ fn missing_scenario_bootstrap_asset_precedes_generic_fallback() {
 #[test]
 fn production_bootstrap_rejects_a_partial_cursor_resolution_set() {
     let mut app = new_menu_app(320, 200);
-    let assets = Arc::get_mut(&mut app.assets).expect("focused fixture owns its assets");
+    let assets = Arc::get_mut(&mut app.assets).test_value();
     assets.classic_hud_resources_required = true;
     assets.cursor_atlas = drag_cursor_atlas();
     assert_eq!(
@@ -3855,32 +3383,21 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
         app.graphics.set_runtime_sprite_filtering(3.0, false);
         app.configure_native_startup_fonts(3.0, false);
         app.retained_gpu_ordered_capture_active = retained_gpu;
-        app.open_new_startup_player_properties();
-        app.startup_player_properties_dialog
-            .as_mut()
-            .expect("new-player properties dialog")
-            .controller
-            .open_portrait_selector(
-                vec![
-                    clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                        "User",
-                        "/portrait-test",
-                    ),
-                    clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                        "Home",
-                        "/portrait-home",
-                    ),
-                ],
-                0,
-                Vec::new(),
-            );
+        open_portrait_selector(
+            &mut app,
+            "new-player properties dialog",
+            vec![
+                PortraitLocation::new("User", "/portrait-test"),
+                PortraitLocation::new("Home", "/portrait-home"),
+            ],
+            Vec::new(),
+        );
         let selector = app
             .startup_player_properties_dialog
-            .as_mut()
-            .expect("new-player properties dialog")
+            .test_mut()
             .controller
             .portrait_selector_mut()
-            .expect("open portrait selector");
+            .test_value();
         let combo =
             clonk_frontend::startup_portraitsel::portrait_sel_layout(640, 480, 2).location_combo;
         selector.handle_pointer_down(clonk_frontend::GuiPoint::new(
@@ -3947,19 +3464,18 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
 #[test]
 fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon() {
     let _lock = env_lock().lock();
-    let program_data = tempdir().expect("portrait program data");
-    let user_data = tempdir().expect("portrait user data");
-    let home = tempdir().expect("portrait home");
-    fs::create_dir(home.path().join("Desktop")).expect("create portrait desktop");
-    fs::create_dir_all(program_data.path().join("planet/System.c4g"))
-        .expect("create program path marker");
+    let program_data = tempdir();
+    let user_data = tempdir();
+    let home = tempdir();
+    fs::create_dir(home.path().join("Desktop")).test_value();
+    fs::create_dir_all(program_data.path().join("planet/System.c4g")).test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(program_data.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
         ("HOME", Some(home.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover portrait paths");
-    paths.ensure_user_dirs().expect("create portrait user path");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     write_preview_image(
         &paths.user_data_dir().join("Custom.PNG"),
         [12, 34, 56, 255],
@@ -3973,34 +3489,21 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
 
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
-    app.open_new_startup_player_properties();
     let old_portrait = ImageData::new(1, 1, vec![1, 2, 3, 255]);
     let old_icon = ImageData::new(1, 1, vec![4, 5, 6, 255]);
-    let pending = app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties");
-    pending
-        .controller
-        .replace_images(old_portrait, old_icon.clone());
-    let old_icon_update = pending.controller.big_icon_update().clone();
+    let pending = open_player_properties(&mut app, "new player properties");
+    pending.replace_images(old_portrait, old_icon.clone());
+    let old_icon_update = pending.big_icon_update().clone();
 
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("Picture opens the nested selector");
+    let selector = portrait_selector(&app, "Picture opens the nested selector");
     // C4PortraitSelDlg adds the branded user/program paths followed by
     // each existing platform location (pinned C4FileSelDlg.cpp:534-561).
     let expected_locations = vec![
-        clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "LegacyClonk User Path",
-            paths.user_data_dir(),
-        ),
-        clonk_frontend::startup_portraitsel::PortraitLocation::new(
+        PortraitLocation::new("LegacyClonk User Path", paths.user_data_dir()),
+        PortraitLocation::new(
             "LegacyClonk Program Directory",
             PathBuf::from(format!(
                 "{}{}",
@@ -4012,17 +3515,11 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     #[cfg(not(target_os = "windows"))]
     let mut expected_locations = expected_locations;
     #[cfg(target_os = "macos")]
-    expected_locations.push(clonk_frontend::startup_portraitsel::PortraitLocation::new(
-        "Home",
-        home.path(),
-    ));
+    expected_locations.push(PortraitLocation::new("Home", home.path()));
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    expected_locations.push(clonk_frontend::startup_portraitsel::PortraitLocation::new(
-        "Home Folder",
-        home.path(),
-    ));
+    expected_locations.push(PortraitLocation::new("Home Folder", home.path()));
     #[cfg(not(target_os = "windows"))]
-    expected_locations.push(clonk_frontend::startup_portraitsel::PortraitLocation::new(
+    expected_locations.push(PortraitLocation::new(
         "Desktop",
         home.path().join("Desktop"),
     ));
@@ -4044,10 +3541,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         );
         assert_eq!(
             selector.locations().last(),
-            Some(&clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "Home Folder",
-                home.path(),
-            ))
+            Some(&PortraitLocation::new("Home Folder", home.path(),))
         );
         let shell_labels = selector.locations()
             [expected_locations.len()..selector.locations().len() - 1]
@@ -4084,20 +3578,14 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
 
     app.advance_startup_player_portrait_thumbnail();
     assert!(matches!(
-        app.startup_player_properties_dialog
-            .as_ref()
-            .and_then(|pending| pending.controller.portrait_selector())
-            .expect("selector remains open")
-            .items()[0]
-            .thumbnail(),
+        portrait_selector(&app, "selector remains open").items()[0].thumbnail(),
         clonk_frontend::startup_portraitsel::PortraitThumbnail::Ready(_)
     ));
 
     for _ in 0..6 {
         let actions = app
             .startup_player_properties_dialog
-            .as_mut()
-            .expect("properties remain open")
+            .test_mut()
             .controller
             .handle_key_down(KeyCode::Tab);
         assert!(actions.is_empty());
@@ -4108,24 +3596,18 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     for key in [KeyCode::Down, KeyCode::Down, KeyCode::Down] {
         let actions = app
             .startup_player_properties_dialog
-            .as_mut()
-            .expect("properties remain open")
+            .test_mut()
             .controller
             .handle_key_down(key);
         assert!(actions.is_empty());
     }
     let actions = app
         .startup_player_properties_dialog
-        .as_mut()
-        .expect("properties remain open")
+        .test_mut()
         .controller
         .handle_key_down(KeyCode::Enter);
     app.process_startup_player_properties_actions(actions);
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("selector remains open after changing location");
+    let selector = portrait_selector(&app, "selector remains open after changing location");
     assert_eq!(selector.current_location_index(), 1);
     assert_eq!(selector.items().len(), 2);
     assert_eq!(selector.items()[0].filename(), Some("Program.BMP"));
@@ -4146,11 +3628,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
             },
         ),
     ]);
-    let controller = &app
-        .startup_player_properties_dialog
-        .as_ref()
-        .expect("properties stay open after portrait commit")
-        .controller;
+    let controller = &app.startup_player_properties_dialog.test_ref().controller;
     assert!(controller.portrait_selector().is_none());
     assert_eq!(
         controller.portrait_update(),
@@ -4166,8 +3644,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     ]);
     let actions = app
         .startup_player_properties_dialog
-        .as_mut()
-        .expect("properties remain open")
+        .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
     assert_eq!(
@@ -4180,11 +3657,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         "C4FileSelDlg.cpp:575-580 persists the current row when Cancel closes the selector"
     );
     app.process_startup_player_properties_actions(actions);
-    let controller = &app
-        .startup_player_properties_dialog
-        .as_ref()
-        .expect("selector cancel must not close properties")
-        .controller;
+    let controller = &app.startup_player_properties_dialog.test_ref().controller;
     assert!(controller.portrait_selector().is_none());
     assert_eq!(controller.portrait_update(), &before_portrait);
     assert_eq!(controller.big_icon_update(), &before_icon);
@@ -4197,15 +3670,15 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("portrait user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover portrait paths");
-    paths.ensure_user_dirs().expect("create portrait user path");
-    let graphics = main_graphics_group(&paths).expect("open bundled portraits");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    let graphics = main_graphics_group(&paths).test_value();
 
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
@@ -4223,17 +3696,16 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
                 .expect("read source stock portrait")
         );
     }
-    let config = Config::load(paths.config_file()).expect("read extraction flag");
+    let config = Config::load(paths.config_file()).test_value();
     assert!(config
         .get_in(Some("General"), "UserPortraitsWritten")
         .is_some_and(parse_config_bool));
 
     let clonk_path = paths.user_data_dir().join("Clonk.png");
-    fs::write(&clonk_path, b"user replacement").expect("replace extracted portrait");
+    fs::write(&clonk_path, b"user replacement").test_value();
     let actions = app
         .startup_player_properties_dialog
-        .as_mut()
-        .expect("properties remain open")
+        .test_mut()
         .controller
         .handle_key_down(KeyCode::Escape);
     assert_eq!(
@@ -4245,7 +3717,7 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
         ]
     );
     app.process_startup_player_properties_actions(actions);
-    fs::remove_file(paths.config_file()).expect("simulate failed extraction-flag persistence");
+    fs::remove_file(paths.config_file()).test_value();
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
@@ -4261,52 +3733,27 @@ fn first_portrait_selector_open_extracts_stock_portraits_once() {
 #[test]
 fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    let pending = app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties");
-    pending.controller.replace_images(
+    let pending = open_player_properties(&mut app, "new player properties");
+    pending.replace_images(
         ImageData::new(1, 1, vec![1, 2, 3, 255]),
         ImageData::new(1, 1, vec![4, 5, 6, 255]),
     );
-    pending.controller.open_portrait_selector(
-        vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "User",
-            PathBuf::from("."),
-        )],
-        0,
-        Vec::new(),
-    );
-    assert!(pending.controller.handle_key_down(KeyCode::Down).is_empty());
+    open_default_portrait_selector_on(pending);
+    assert!(pending.handle_key_down(KeyCode::Down).is_empty());
     assert_eq!(
         pending
-            .controller
             .portrait_selector()
             .and_then(|selector| selector.selected_index()),
         Some(0)
     );
 
     let slot = GamepadSlot::new(0);
-    app.process_gamepad_event_batch([
-        GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::Low,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Action {
-            slot,
-            action: GamepadActionType::Select,
-            state: ElementState::Pressed,
-        },
-    ])
-    .expect("portrait selector owns the complete physical input cluster");
+    app.test_gamepad_events([
+        pressed_gui_button(slot, GuiButtonClass::Low),
+        pressed_gamepad_action(slot, GamepadActionType::Select),
+    ]);
 
-    let controller = &app
-        .startup_player_properties_dialog
-        .as_ref()
-        .expect("the abstract Select alias must not submit the parent properties dialog")
-        .controller;
+    let controller = &app.startup_player_properties_dialog.test_ref().controller;
     assert!(controller.portrait_selector().is_none());
     assert!(controller.validation_error().is_none());
     assert_eq!(
@@ -4319,36 +3766,14 @@ fn portrait_selector_consumes_the_gamepad_select_alias_cluster() {
     );
     assert!(app.status_text.is_empty());
 
-    app.startup_player_properties_dialog
-        .as_mut()
-        .expect("properties remain open")
-        .controller
-        .open_portrait_selector(
-            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "User",
-                PathBuf::from("."),
-            )],
-            0,
-            Vec::new(),
-        );
-    app.process_gamepad_event_batch([
-        GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::High,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Action {
-            slot,
-            action: GamepadActionType::Cancel,
-            state: ElementState::Pressed,
-        },
-    ])
-    .expect("portrait selector owns the complete cancel cluster");
-    let controller = &app
-        .startup_player_properties_dialog
-        .as_ref()
-        .expect("the abstract Cancel alias must not close the parent properties dialog")
-        .controller;
+    open_default_portrait_selector_on(
+        &mut app.startup_player_properties_dialog.test_mut().controller,
+    );
+    app.test_gamepad_events([
+        pressed_gui_button(slot, GuiButtonClass::High),
+        pressed_gamepad_action(slot, GamepadActionType::Cancel),
+    ]);
+    let controller = &app.startup_player_properties_dialog.test_ref().controller;
     assert!(controller.portrait_selector().is_none());
     assert!(controller.validation_error().is_none());
     assert!(app.status_text.is_empty());
@@ -4364,19 +3789,10 @@ fn properties_high_cluster_does_not_cancel_the_parent_screen() {
     app.open_new_startup_player_properties();
 
     let slot = GamepadSlot::new(0);
-    app.process_gamepad_event_batch([
-        GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::High,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Action {
-            slot,
-            action: GamepadActionType::MenuToggle,
-            state: ElementState::Pressed,
-        },
-    ])
-    .expect("properties dialog owns the complete high-button cluster");
+    app.test_gamepad_events([
+        pressed_gui_button(slot, GuiButtonClass::High),
+        pressed_gamepad_action(slot, GamepadActionType::MenuToggle),
+    ]);
 
     assert!(app.startup_player_properties_dialog.is_none());
     assert_eq!(app.startup_view, StartupView::PlayerSelection);
@@ -4387,33 +3803,19 @@ fn properties_high_cluster_does_not_cancel_the_parent_screen() {
 #[test]
 fn portrait_selector_honors_exact_keyboard_modifiers() {
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    app.startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller
-        .open_portrait_selector(
-            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "User",
-                PathBuf::from("."),
-            )],
-            0,
-            vec![
-                clonk_frontend::startup_portraitsel::PortraitFileEntry::from_path(PathBuf::from(
-                    "./King.png",
-                ))
-                .expect("portrait entry"),
-            ],
-        );
+    open_portrait_selector(
+        &mut app,
+        "new player properties",
+        vec![PortraitLocation::new("User", PathBuf::from("."))],
+        vec![PortraitFileEntry::from_path(PathBuf::from("./King.png")).expect("portrait entry")],
+    );
 
     // ListBox owns Alt+Return, but activation is inert without a selected
     // item. FileSel's dialog-level confirmation binds only bare Return
     // (`C4GuiListBox.cpp:72-81,386-394`,
     // `C4FileSelDlg.cpp:118-123`).
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("Alt+Enter without a selection is inert");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(app
         .startup_player_properties_dialog
         .as_ref()
@@ -4421,35 +3823,20 @@ fn portrait_selector_honors_exact_keyboard_modifiers() {
         .is_some());
     assert!(app.message_dialogs.is_empty());
 
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Shift+Tab traverses backward");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert_eq!(
-        app.startup_player_properties_dialog
-            .as_ref()
-            .and_then(|pending| pending.controller.portrait_selector())
-            .expect("selector remains open")
-            .focus(),
+        portrait_selector(&app, "selector remains open").focus(),
         clonk_frontend::startup_portraitsel::PortraitSelControl::Location
     );
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release modifiers");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("bare Tab traverses forward");
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("select first portrait");
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold Control");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("Ctrl+Enter is consumed");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
 
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("Ctrl+Enter must not confirm the portrait selector");
+    let selector = portrait_selector(&app, "Ctrl+Enter must not confirm the portrait selector");
     assert_eq!(selector.selected_index(), Some(0));
     assert!(app.status_text.is_empty());
 }
@@ -4461,24 +3848,10 @@ fn portrait_selector_alt_o_activates_the_native_ok_hotkey() {
     // (`LanguageUS.txt:531`, `C4GuiButton.cpp:54-77`,
     // `C4GuiDialogs.cpp:359-362,569-580`).
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    app.startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller
-        .open_portrait_selector(
-            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "User",
-                PathBuf::from("."),
-            )],
-            0,
-            Vec::new(),
-        );
+    open_default_portrait_selector(&mut app, "new player properties");
 
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt");
-    app.handle_key(VirtualKeyCode::KeyO, ElementState::Pressed)
-        .expect("Alt+O invokes OK");
+    app.test_modifiers(ModifiersState::ALT);
+    app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
 
     assert_eq!(app.message_dialogs.len(), 1);
     assert!(app
@@ -4495,24 +3868,10 @@ fn portrait_selector_does_not_bind_keypad_enter_as_return() {
     // Return key/scancode, distinct from keypad Enter
     // (`C4FileSelDlg.cpp:118-123`, `StdApp.h:107,159`).
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    let controller = &mut app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller;
-    controller.open_portrait_selector(
-        vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "User",
-            PathBuf::from("."),
-        )],
-        0,
-        Vec::new(),
-    );
+    let controller = open_default_portrait_selector(&mut app, "new player properties");
     controller.handle_key_down(KeyCode::Down);
 
-    app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
-        .expect("keypad Enter remains unbound");
+    app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed);
 
     assert!(app
         .startup_player_properties_dialog
@@ -4527,21 +3886,13 @@ fn portrait_selector_outside_right_down_aborts_the_location_popup() {
     // Screen aborts a ContextMenu on outside RightDown before routing the
     // underlying event (`C4Gui.cpp:766-776`).
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    let controller = &mut app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller;
-    controller.open_portrait_selector(
+    let controller = open_portrait_selector(
+        &mut app,
+        "new player properties",
         vec![
-            clonk_frontend::startup_portraitsel::PortraitLocation::new("User", PathBuf::from(".")),
-            clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "Program",
-                PathBuf::from(".."),
-            ),
+            PortraitLocation::new("User", PathBuf::from(".")),
+            PortraitLocation::new("Program", PathBuf::from("..")),
         ],
-        0,
         Vec::new(),
     );
     controller.handle_key_down_with_tab_direction(KeyCode::Tab, true);
@@ -4551,10 +3902,12 @@ fn portrait_selector_outside_right_down_aborts_the_location_popup() {
         .expect("selector remains open")
         .is_location_popup_open());
 
-    app.handle_cursor_moved(PhysicalPosition::new(0.0, 0.0))
-        .expect("move outside location popup");
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("right-down aborts popup");
+    move_cursor_to(
+        &mut app,
+        PhysicalPosition::new(0.0, 0.0),
+        "move outside location popup",
+    );
+    app.test_right_button(ElementState::Pressed);
 
     assert!(!app
         .startup_player_properties_dialog
@@ -4570,73 +3923,50 @@ fn portrait_selector_f5_requires_dialog_keyboard_activation() {
     // dialog and is suppressed while Screen owns a ContextMenu
     // (`C4FileSelDlg.cpp:119-123`, `C4Gui.h:1616-1629`,
     // `C4GuiDialogs.cpp:731-743`).
-    let current = tempdir().expect("current portrait location");
-    let other = tempdir().expect("other portrait location");
-    fs::write(current.path().join("Old.png"), b"old").expect("seed current portrait");
-    fs::write(other.path().join("Other.png"), b"other").expect("seed other portrait");
+    let current = tempdir();
+    let other = tempdir();
+    fs::write(current.path().join("Old.png"), b"old").test_value();
+    fs::write(other.path().join("Other.png"), b"other").test_value();
     let entries = clonk_frontend::startup_portraitsel::portrait_files_in_location(current.path())
-        .expect("scan initial portraits");
+        .test_value();
 
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    let controller = &mut app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller;
-    controller.open_portrait_selector(
+    let controller = open_portrait_selector(
+        &mut app,
+        "new player properties",
         vec![
-            clonk_frontend::startup_portraitsel::PortraitLocation::new("Current", current.path()),
-            clonk_frontend::startup_portraitsel::PortraitLocation::new("Other", other.path()),
+            PortraitLocation::new("Current", current.path()),
+            PortraitLocation::new("Other", other.path()),
         ],
-        0,
         entries,
     );
     controller.handle_key_down_with_tab_direction(KeyCode::Tab, true);
     controller.handle_key_down(KeyCode::Down);
     controller.handle_key_down(KeyCode::Down);
     controller.handle_key_down(KeyCode::Down);
-    fs::write(current.path().join("New.bmp"), b"new").expect("add current portrait");
+    fs::write(current.path().join("New.bmp"), b"new").test_value();
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold Control");
-    app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("modified F5 remains unbound");
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("selector remains open");
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+    let selector = portrait_selector(&app, "selector remains open");
     assert!(!selector
         .items()
         .iter()
         .any(|item| item.filename() == Some("New.bmp")));
     assert!(selector.is_location_popup_open());
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Control");
-    app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("the open ContextMenu suppresses dialog F5");
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("selector remains open");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+    let selector = portrait_selector(&app, "selector remains open");
     assert!(!selector
         .items()
         .iter()
         .any(|item| item.filename() == Some("New.bmp")));
     assert!(selector.is_location_popup_open());
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("close the ContextMenu");
-    app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("bare F5 refreshes the active dialog");
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("selector remains open after refresh");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+    let selector = portrait_selector(&app, "selector remains open after refresh");
     assert!(selector
         .items()
         .iter()
@@ -4648,24 +3978,9 @@ fn portrait_selector_f5_requires_dialog_keyboard_activation() {
 #[test]
 fn portrait_selector_errors_use_screen_owned_modals() {
     let mut missing = new_real_classic_menu_app(640, 480);
-    missing.open_new_startup_player_properties();
-    missing
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller
-        .open_portrait_selector(
-            vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "User",
-                PathBuf::from("."),
-            )],
-            0,
-            Vec::new(),
-        );
+    open_default_portrait_selector(&mut missing, "new player properties");
 
-    missing
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("missing selection opens an error");
+    missing.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(missing
         .startup_player_properties_dialog
         .as_ref()
@@ -4677,31 +3992,20 @@ fn portrait_selector_errors_use_screen_owned_modals() {
         "Please select a file first!"
     );
 
-    let temp = tempdir().expect("corrupt portrait location");
+    let temp = tempdir();
     let corrupt = temp.path().join("Broken.png");
-    fs::write(&corrupt, b"not an image").expect("write corrupt portrait");
-    let entry = clonk_frontend::startup_portraitsel::PortraitFileEntry::from_path(corrupt.clone())
-        .expect("portrait entry");
+    fs::write(&corrupt, b"not an image").test_value();
+    let entry = PortraitFileEntry::from_path(corrupt.clone()).test_value();
     let mut broken = new_real_classic_menu_app(640, 480);
-    broken.open_new_startup_player_properties();
-    let controller = &mut broken
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties")
-        .controller;
-    controller.open_portrait_selector(
-        vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "User",
-            temp.path(),
-        )],
-        0,
+    let controller = open_portrait_selector(
+        &mut broken,
+        "new player properties",
+        vec![PortraitLocation::new("User", temp.path())],
         vec![entry],
     );
     controller.handle_key_down(KeyCode::Down);
 
-    broken
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("corrupt selection closes then reports an error");
+    broken.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(broken
         .startup_player_properties_dialog
         .as_ref()
@@ -4724,17 +4028,17 @@ fn initial_portrait_location_scan_failure_is_silent() {
     // still appends the null tile and displays no error
     // (`C4FileSelDlg.cpp:251-274`, `StdFile.cpp:712-847`).
     let _lock = env_lock().lock();
-    let root = tempdir().expect("portrait paths");
+    let root = tempdir();
     let user_data = root.path().join("not-a-directory");
-    fs::write(&user_data, b"file").expect("block the user directory");
+    fs::write(&user_data, b"file").test_value();
     let program_data = root.path().join("program");
-    fs::create_dir_all(program_data.join("planet/System.c4g")).expect("create program path marker");
+    fs::create_dir_all(program_data.join("planet/System.c4g")).test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(&program_data)),
         ("LC_USER_DATA_DIR", Some(&user_data)),
         ("HOME", None),
     ]);
-    let paths = AppPaths::discover().expect("discover portrait paths");
+    let paths = test_app_paths();
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths);
     app.open_new_startup_player_properties();
@@ -4743,14 +4047,8 @@ fn initial_portrait_location_scan_failure_is_silent() {
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
     ]);
 
-    let pending = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .expect("properties remain open");
-    let selector = pending
-        .controller
-        .portrait_selector()
-        .expect("selector opens with an empty file list");
+    let pending = app.startup_player_properties_dialog.test_ref();
+    let selector = pending.controller.portrait_selector().test_value();
     assert_eq!(selector.items().len(), 1);
     assert_eq!(
         selector.items()[0].choice(),
@@ -4762,48 +4060,17 @@ fn initial_portrait_location_scan_failure_is_silent() {
 #[test]
 fn portrait_selector_gamepad_low_toggles_the_focused_checkbox_once() {
     let mut app = new_classic_menu_app(640, 480);
-    app.open_new_startup_player_properties();
-    let pending = app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("new player properties");
-    pending.controller.open_portrait_selector(
-        vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "User",
-            PathBuf::from("."),
-        )],
-        0,
-        Vec::new(),
-    );
-    pending
-        .controller
-        .handle_key_down_with_tab_direction(KeyCode::Tab, false);
-    let before = pending
-        .controller
-        .portrait_selector()
-        .expect("selector remains open")
-        .set_picture();
+    let controller = open_default_portrait_selector(&mut app, "new player properties");
+    controller.handle_key_down_with_tab_direction(KeyCode::Tab, false);
+    let before = controller.portrait_selector().test_value().set_picture();
 
     let slot = GamepadSlot::new(0);
-    app.process_gamepad_event_batch([
-        GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::Low,
-            state: ElementState::Pressed,
-        },
-        GamepadEvent::Action {
-            slot,
-            action: GamepadActionType::Select,
-            state: ElementState::Pressed,
-        },
-    ])
-    .expect("focused checkbox owns the complete low-button cluster");
+    app.test_gamepad_events([
+        pressed_gui_button(slot, GuiButtonClass::Low),
+        pressed_gamepad_action(slot, GamepadActionType::Select),
+    ]);
 
-    let selector = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .and_then(|pending| pending.controller.portrait_selector())
-        .expect("checkbox activation must not accept the selector");
+    let selector = portrait_selector(&app, "checkbox activation must not accept the selector");
     assert_eq!(selector.set_picture(), !before);
     assert_eq!(
         selector.focus(),
@@ -4822,8 +4089,7 @@ fn quitting_from_the_main_menu_records_why_the_session_ended() {
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert_eq!(app.exit_reason, None);
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Escape quits from the main menu");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
     assert!(app.exit_requested);
     assert_eq!(app.exit_reason, Some("the main menu was closed"));
@@ -4840,8 +4106,7 @@ fn keyboard_subscreen_back_reconstructs_main() {
     );
 
     assert!(app.status_text.is_empty());
-    app.handle_key(VirtualKeyCode::Backspace, ElementState::Pressed)
-        .expect("classic Options Back remains routed to OptionsDlgState");
+    app.test_key(VirtualKeyCode::Backspace, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
 }
 
@@ -4855,19 +4120,15 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
         f64::from(about_back.x + about_back.w / 2),
         f64::from(about_back.y + about_back.h / 2),
     );
-    app.handle_cursor_moved(about_back)
-        .expect("hover About Back");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press About Back");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("button Back returns to Credits");
+    app.test_cursor(about_back);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::About);
     assert_eq!(
         app.startup_about_dialog.as_ref().unwrap().current_page(),
         clonk_frontend::startup_about_dlg::AboutPage::Credits
     );
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("dialog Back returns to Main");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
 
     app.open_network_game_dialog();
@@ -4884,11 +4145,9 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
         f64::from(games.x + games.w / 2),
         f64::from(games.y + games.h / 2),
     );
-    app.handle_cursor_moved(games).expect("hover Games");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Games");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("Games returns to retained list");
+    app.test_cursor(games);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().mode(),
         clonk_frontend::startup_netdlg::NetDlgMode::GameList
@@ -4896,8 +4155,7 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
 
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Network Back returns to retained Main");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
 }
 
@@ -4905,16 +4163,14 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
 fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
     let mut app = new_real_classic_menu_app(640, 480);
     let mut main_menu = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut main_menu).expect("render main menu");
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Down,
-        state: ElementState::Pressed,
-    }])
-    .expect("supported main-menu gamepad navigation");
+    app.test_render(&mut main_menu);
+    process_primary_direction(
+        &mut app,
+        ControlButton::Down,
+        "supported main-menu gamepad navigation",
+    );
     let mut navigated = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut navigated)
-        .expect("redraw changed main menu");
+    app.test_render(&mut navigated);
     assert_ne!(
         main_menu, navigated,
         "the D-pad must move the main-menu selection"
@@ -4922,17 +4178,10 @@ fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
 
     app.open_options_menu();
     let mut program_sheet = vec![0xa9; 640 * 480 * 4];
-    app.render(&mut program_sheet)
-        .expect("render Program sheet");
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Down,
-        state: ElementState::Pressed,
-    }])
-    .expect("D-pad enters Graphics sheet");
+    app.test_render(&mut program_sheet);
+    process_primary_direction(&mut app, ControlButton::Down, "D-pad enters Graphics sheet");
     let mut graphics_sheet = vec![0xa9; 640 * 480 * 4];
-    app.render(&mut graphics_sheet)
-        .expect("render Graphics sheet");
+    app.test_render(&mut graphics_sheet);
     assert!(graphics_sheet.iter().any(|byte| *byte != 0xa9));
     assert_ne!(
         program_sheet, graphics_sheet,
@@ -4944,7 +4193,7 @@ fn production_gamepad_batch_navigates_main_menu_then_options_sheet() {
 fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated gamepad config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
 
     assert!(
@@ -4959,7 +4208,7 @@ fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
             clonk_app_netplay::NativeConfigValue::RawAscii("false"),
         )],
     )
-    .expect("disable native gamepad input");
+    .test_value();
     let app = GameApp::new_with_frontend_scenarios(
         320,
         200,
@@ -4979,7 +4228,7 @@ fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
         },
         Some(Vec::new()),
     )
-    .expect("initialise app from disabled gamepad config");
+    .test_value();
     assert!(
         !app.gamepads_enabled,
         "startup config writes must not change the process snapshot"
@@ -4993,20 +4242,16 @@ fn gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
 fn global_gamepad_disable_drops_events_before_dispatch() {
     let mut app = new_real_classic_menu_app(640, 480);
     let mut initial = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut initial).expect("render main menu");
-    let down = || GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Down,
-        state: ElementState::Pressed,
-    };
-
+    app.test_render(&mut initial);
     app.gamepads_enabled = false;
     app.gamepad_input_enabled = false;
-    app.process_gamepad_event_batch([down()])
-        .expect("globally disabled input is discarded");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Down,
+        "globally disabled input is discarded",
+    );
     let mut discarded = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut discarded)
-        .expect("redraw after a dropped event");
+    app.test_render(&mut discarded);
     assert_eq!(
         discarded, initial,
         "disabled events must not reach startup input dispatch"
@@ -5014,11 +4259,13 @@ fn global_gamepad_disable_drops_events_before_dispatch() {
 
     app.gamepads_enabled = true;
     app.gamepad_input_enabled = true;
-    app.process_gamepad_event_batch([down()])
-        .expect("globally enabled input reaches dispatch");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Down,
+        "globally enabled input reaches dispatch",
+    );
     let mut dispatched = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut dispatched)
-        .expect("redraw after a dispatched event");
+    app.test_render(&mut dispatched);
     assert_ne!(
         dispatched, initial,
         "enabled events must move the main-menu selection"
@@ -5039,44 +4286,33 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
     let send_direction = |app: &mut GameApp, gamepad: u8, button: ControlButton| {
         let gamepad_gui_control = app.gamepad_gui_control;
         app.process_sourced_gamepad_event_batch(
-            [SourcedGamepadEvent {
-                gamepad: usize::from(gamepad),
-                cluster: 0,
-                event: GamepadEvent::Direction {
-                    slot: GamepadSlot::new(gamepad),
-                    button,
-                    state: ElementState::Pressed,
-                },
-            }],
+            [sourced_gamepad_event(
+                usize::from(gamepad),
+                0,
+                pressed_direction(GamepadSlot::new(gamepad), button),
+            )],
             gamepad_gui_control,
         )
     };
-    let focus = |app: &GameApp| {
-        app.startup_about_dialog
-            .as_ref()
-            .expect("About dialog")
-            .focused_control()
-    };
+    let focus = |app: &GameApp| app.startup_about_dialog.test_ref().focused_control();
 
     let mut disabled = open_about(false);
-    send_direction(&mut disabled, 0, ControlButton::Right)
-        .expect("disabled primary direction is ignored");
+    send_direction(&mut disabled, 0, ControlButton::Right).test_value();
     assert_eq!(focus(&disabled), None);
 
     let mut secondary = open_about(true);
-    send_direction(&mut secondary, 1, ControlButton::Right)
-        .expect("secondary direction is ignored");
+    send_direction(&mut secondary, 1, ControlButton::Right).test_value();
     assert_eq!(focus(&secondary), None);
 
     let mut app = open_about(true);
-    send_direction(&mut app, 0, ControlButton::Right).expect("focus Back");
+    send_direction(&mut app, 0, ControlButton::Right).test_value();
     assert_eq!(focus(&app), Some(AboutFocusTarget::Back));
-    send_direction(&mut app, 0, ControlButton::Right).expect("focus Update");
+    send_direction(&mut app, 0, ControlButton::Right).test_value();
     assert_eq!(focus(&app), Some(AboutFocusTarget::Update));
-    send_direction(&mut app, 0, ControlButton::Left).expect("reverse to Back");
+    send_direction(&mut app, 0, ControlButton::Left).test_value();
     assert_eq!(focus(&app), Some(AboutFocusTarget::Back));
-    send_direction(&mut app, 0, ControlButton::Right).expect("return to Update");
-    send_direction(&mut app, 0, ControlButton::Right).expect("focus Licenses");
+    send_direction(&mut app, 0, ControlButton::Right).test_value();
+    send_direction(&mut app, 0, ControlButton::Right).test_value();
     assert_eq!(focus(&app), Some(AboutFocusTarget::Licenses));
 
     app.handle_gamepad_action(
@@ -5084,13 +4320,13 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
         GamepadActionType::Select,
         ElementState::Pressed,
     )
-    .expect("press focused Licenses");
+    .test_value();
     app.handle_gamepad_action(
         GamepadSlot::new(0),
         GamepadActionType::Select,
         ElementState::Released,
     )
-    .expect("open the Licenses page");
+    .test_value();
     assert_eq!(
         app.startup_about_dialog
             .as_ref()
@@ -5099,9 +4335,9 @@ fn about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
         AboutPage::Licenses
     );
 
-    send_direction(&mut app, 0, ControlButton::Right).expect("focus LicenseTabs");
+    send_direction(&mut app, 0, ControlButton::Right).test_value();
     assert_eq!(focus(&app), Some(AboutFocusTarget::LicenseTabs));
-    send_direction(&mut app, 0, ControlButton::Left).expect("reverse to visible Update");
+    send_direction(&mut app, 0, ControlButton::Left).test_value();
     assert_eq!(focus(&app), Some(AboutFocusTarget::Update));
 }
 
@@ -5110,21 +4346,19 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
     let mut app = new_classic_menu_app(640, 480);
 
     app.open_options_menu();
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Left,
-        state: ElementState::Pressed,
-    }])
-    .expect("Options D-left traverses focus");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Left,
+        "Options D-left traverses focus",
+    );
     assert_eq!(app.startup_view, StartupView::Options);
 
     app.open_network_game_dialog();
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Left,
-        state: ElementState::Pressed,
-    }])
-    .expect("Network D-left traverses focus");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Left,
+        "Network D-left traverses focus",
+    );
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert_eq!(
         app.startup_network_dialog
@@ -5149,12 +4383,11 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
             comment: String::new(),
         });
     app.open_player_selection_dialog();
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Right,
-        state: ElementState::Pressed,
-    }])
-    .expect("Player D-right traverses focus without Crew");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Right,
+        "Player D-right traverses focus without Crew",
+    );
     assert_eq!(app.startup_view, StartupView::PlayerSelection);
     assert_eq!(
         app.startup_player_dialog
@@ -5163,12 +4396,11 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
             .focused_control(),
         clonk_frontend::startup_plrsel::PlrSelControl::Back
     );
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Left,
-        state: ElementState::Pressed,
-    }])
-    .expect("Player D-left traverses focus without Back");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Left,
+        "Player D-left traverses focus without Back",
+    );
     assert_eq!(app.startup_view, StartupView::PlayerSelection);
     assert_eq!(
         app.startup_player_dialog
@@ -5193,17 +4425,14 @@ fn options_gamepad_device_claim_switches_and_releases() {
         3,
         app.gamepad_gui_control,
     );
-    *app.startup_options_dialog
-        .as_mut()
-        .expect("options dialog")
-        .controls_mut() = controls;
+    *app.startup_options_dialog.test_mut().controls_mut() = controls;
 
     app.startup_options_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .restore_sheet(OptionsSheet::Gamepad);
     app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)])
-        .expect("enter Gamepad sheet");
+        .test_value();
     assert!(app.gamepads.is_options_slot_live(GamepadSlot::new(0)));
 
     for set in [2, 1] {
@@ -5214,7 +4443,7 @@ fn options_gamepad_device_claim_switches_and_releases() {
             .controls_mut()
             .select_set(ControlDevice::Gamepad, set));
         app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(set)])
-            .expect("switch selected gamepad");
+            .test_value();
         assert_eq!(
             app.gamepads.options_open_slot(),
             GamepadSlot::from_index(set)
@@ -5229,53 +4458,51 @@ fn options_gamepad_device_claim_switches_and_releases() {
     }
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
-        .expect("repeat selected gamepad");
+        .test_value();
     assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(3)])
-        .expect("ignore out-of-range gamepad action");
+        .test_value();
     assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
 
     app.startup_options_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .restore_sheet(OptionsSheet::Network);
     app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Network)])
-        .expect("leave Gamepad sheet");
+        .test_value();
     assert_eq!(app.gamepads.options_open_slot(), None);
 
     app.startup_options_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .restore_sheet(OptionsSheet::Gamepad);
     app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)])
-        .expect("re-enter Gamepad sheet");
+        .test_value();
     assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
 
-    let high = |gamepad, slot| SourcedGamepadEvent {
-        gamepad,
-        cluster: gamepad as u64,
-        event: GamepadEvent::GuiButton {
-            slot,
-            class: GuiButtonClass::High,
-            state: ElementState::Pressed,
-        },
+    let high = |gamepad, slot| {
+        sourced_gamepad_event(
+            gamepad,
+            gamepad as u64,
+            pressed_gui_button(slot, GuiButtonClass::High),
+        )
     };
     app.process_sourced_gamepad_event_batch([high(2, GamepadSlot::new(2))], false)
-        .expect("suppress unopened Options gamepad");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::Options);
     assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
     app.process_sourced_gamepad_event_batch([high(1, GamepadSlot::new(1))], false)
-        .expect("keep selected device separate from GUI eligibility");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::Options);
     assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
 
     app.gamepad_gui_control = true;
     app.process_sourced_gamepad_event_batch([high(0, GamepadSlot::new(0))], true)
-        .expect("route configured GUI gamepad");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert_eq!(app.gamepads.options_open_slot(), None);
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
-        .expect("ignore stale selection after Options closes");
+        .test_value();
     assert_eq!(app.gamepads.options_open_slot(), None);
 }
 
@@ -5292,17 +4519,14 @@ fn toggling_gamepad_gui_control_recreates_the_options_dialog() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
     {
-        let dialog = app.startup_options_dialog.as_mut().expect("options dialog");
+        let dialog = app.startup_options_dialog.test_mut();
         dialog.restore_sheet(OptionsSheet::Gamepad);
         assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 2));
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadGuiControlChanged(true)])
-        .expect("recreate Options after toggling gamepad GUI control");
+        .test_value();
 
-    let dialog = app
-        .startup_options_dialog
-        .as_ref()
-        .expect("recreated options dialog");
+    let dialog = app.startup_options_dialog.test_ref();
     assert_eq!(
         dialog.active_sheet(),
         OptionsSheet::Gamepad,
@@ -5333,7 +4557,7 @@ fn factory_default_control_sheets_show_empty_captions_for_unbound_slots() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
-    let dialog = app.startup_options_dialog.as_ref().expect("options dialog");
+    let dialog = app.startup_options_dialog.test_ref();
     for set in 0..CONTROL_SET_COUNT {
         for control in 0..CONTROL_KEY_COUNT {
             assert_eq!(
@@ -5376,8 +4600,7 @@ fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
     app.open_options_menu();
     let labels = app
         .startup_options_dialog
-        .as_ref()
-        .expect("options dialog")
+        .test_ref()
         .labels()
         .control_keys
         .clone();
@@ -5389,8 +4612,8 @@ fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
             control,
         };
         app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
-            .expect("open gamepad capture");
-        let modal = app.message_dialogs.pop().expect("capture modal");
+            .test_value();
+        let modal = app.message_dialogs.pop().test_value();
         assert_eq!(
             modal.state.message(),
             format!("Press the button for \"{label}\" on gamepad 1."),
@@ -5421,8 +4644,8 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(
         keyboard_target,
     )])
-    .expect("open keyboard capture");
-    let keyboard_modal = app.message_dialogs.last().expect("keyboard capture modal");
+    .test_value();
+    let keyboard_modal = app.message_dialogs.last().test_value();
     assert_eq!(keyboard_modal.state.caption(), "Assign key");
     assert_eq!(
         keyboard_modal.state.message(),
@@ -5433,11 +4656,9 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     let previous_key = app
         .bindings
         .key_for_set(2, ControlBindingId::Dig)
-        .expect("keyboard set 3 Dig binding");
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("ignore modified keyboard key");
+        .test_value();
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(
         app.bindings.key_for_set(2, ControlBindingId::Dig),
         Some(previous_key)
@@ -5446,12 +4667,9 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         dialog.continuation,
         MessageDialogContinuation::OptionsControlCapture(target) if target == keyboard_target
     )));
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release modified keyboard key");
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("capture bare Escape before the dialog cancel binding");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(
         app.bindings.key_for_set(2, ControlBindingId::Dig),
         Some(VirtualKeyCode::Escape)
@@ -5467,8 +4685,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     let mut config = Config::new();
     app.bindings.write_to_config(&mut config);
     assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release captured Escape key");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
     let gamepad_target = ControlCaptureTarget {
         device: ControlDevice::Gamepad,
@@ -5476,8 +4693,8 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
         control: ControlBindingId::Dig as usize,
     };
     app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(gamepad_target)])
-        .expect("open gamepad capture");
-    let gamepad_modal = app.message_dialogs.last().expect("gamepad capture modal");
+        .test_value();
+    let gamepad_modal = app.message_dialogs.last().test_value();
     assert_eq!(gamepad_modal.state.caption(), "Assign key");
     assert_eq!(
         gamepad_modal.state.message(),
@@ -5485,45 +4702,25 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     );
     assert_eq!(gamepad_modal.state.icon(), MessageDialogIcon::Standard(25));
 
-    let source = |gamepad, cluster, event| SourcedGamepadEvent {
-        gamepad,
-        cluster,
-        event,
-    };
+    let source = sourced_gamepad_event;
     let wrong_slot = GamepadSlot::new(1);
     app.process_sourced_gamepad_event_batch(
         [
+            source(1, 0, pressed_gui_button(wrong_slot, GuiButtonClass::High)),
             source(
                 1,
                 0,
-                GamepadEvent::GuiButton {
-                    slot: wrong_slot,
-                    class: GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                },
+                pressed_gamepad_action(wrong_slot, GamepadActionType::Cancel),
             ),
             source(
                 1,
                 0,
-                GamepadEvent::Action {
-                    slot: wrong_slot,
-                    action: GamepadActionType::Cancel,
-                    state: ElementState::Pressed,
-                },
-            ),
-            source(
-                1,
-                0,
-                GamepadEvent::Button {
-                    slot: wrong_slot,
-                    button: LegacyGamepadButton::new(3),
-                    state: ElementState::Pressed,
-                },
+                pressed_gamepad_button(wrong_slot, LegacyGamepadButton::new(3)),
             ),
         ],
         true,
     )
-    .expect("consume another pad's complete input cluster");
+    .test_value();
     assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::OptionsControlCapture(target) if target == gamepad_target
@@ -5536,46 +4733,26 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     let selected_slot = GamepadSlot::new(2);
     app.process_sourced_gamepad_event_batch(
         [
+            source(2, 1, pressed_direction(selected_slot, ControlButton::Right)),
             source(
                 2,
                 1,
-                GamepadEvent::Direction {
-                    slot: selected_slot,
-                    button: ControlButton::Right,
-                    state: ElementState::Pressed,
-                },
+                pressed_gui_button(selected_slot, GuiButtonClass::High),
             ),
             source(
                 2,
                 1,
-                GamepadEvent::GuiButton {
-                    slot: selected_slot,
-                    class: GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                },
+                pressed_gamepad_action(selected_slot, GamepadActionType::MenuToggle),
             ),
             source(
                 2,
                 1,
-                GamepadEvent::Action {
-                    slot: selected_slot,
-                    action: GamepadActionType::MenuToggle,
-                    state: ElementState::Pressed,
-                },
-            ),
-            source(
-                2,
-                1,
-                GamepadEvent::Button {
-                    slot: selected_slot,
-                    button: LegacyGamepadButton::new(5),
-                    state: ElementState::Pressed,
-                },
+                pressed_gamepad_button(selected_slot, LegacyGamepadButton::new(5)),
             ),
         ],
         false,
     )
-    .expect("capture selected pad's raw high button through production routing");
+    .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
         app.gamepad_bindings
@@ -5588,7 +4765,7 @@ fn options_key_capture_matches_classic_modal_and_production_input_routing() {
 fn false_startup_config_never_polls_gamepad_manager() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("isolated gamepad config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     persist_native_config_values(
         &paths,
@@ -5598,7 +4775,7 @@ fn false_startup_config_never_polls_gamepad_manager() {
             clonk_app_netplay::NativeConfigValue::RawAscii("false"),
         )],
     )
-    .expect("disable gamepads in native config");
+    .test_value();
 
     let mut app = GameApp::new_with_frontend_scenarios(
         320,
@@ -5619,17 +4796,15 @@ fn false_startup_config_never_polls_gamepad_manager() {
         },
         Some(Vec::new()),
     )
-    .expect("initialise app with disabled gamepads");
+    .test_value();
 
     assert!(!app.gamepads_enabled);
     assert!(!app.gamepad_input_enabled);
     assert!(!load_gamepads_enabled(Some(&paths)));
-    persist_config_value(&paths, "Network", "Comment", "resaved")
-        .expect("resave an unrelated config field");
+    persist_config_value(&paths, "Network", "Comment", "resaved").test_value();
     assert!(!load_gamepads_enabled(Some(&paths)));
     assert_eq!(app.gamepad_poll_count, 0);
-    app.process_gamepad_events()
-        .expect("disabled gamepad processing is inert");
+    app.process_gamepad_events().test_value();
     assert_eq!(app.gamepad_poll_count, 0);
 }
 
@@ -5653,24 +4828,21 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
             .players
             .into_iter()
             .find(|player| player.id == owner)
-            .expect("local player")
+            .test_value()
             .control
             .pressed_coms
     };
     let pressed_before = pressed_coms(&app, original_owner);
 
-    app.process_gamepad_event_batch([GamepadEvent::Direction {
-        slot: GamepadSlot::new(0),
-        button: ControlButton::Left,
-        state: ElementState::Pressed,
-    }])
-    .expect("disabled gamepad input is inert");
+    process_primary_direction(
+        &mut app,
+        ControlButton::Left,
+        "disabled gamepad input is inert",
+    );
 
     assert_eq!(pressed_coms(&app, original_owner), pressed_before);
 
-    app.engine
-        .remove_player(original_owner)
-        .expect("remove initial local player");
+    app.engine.remove_player(original_owner).test_value();
     app.local_controls.remove(original_owner);
     app.selected_player_file = Some(PlayerFile {
         name: "Gamepad preference".to_string(),
@@ -5680,9 +4852,8 @@ fn disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
     });
     app.gamepads_enabled = false;
 
-    app.join_local_player()
-        .expect("join falls back from the disabled gamepad");
-    let player = app.engine.player(app.local_owner).expect("joined player");
+    app.join_local_player().test_value();
+    let player = app.engine.test_player(app.local_owner);
     assert_eq!(player.control_set(), 0);
     assert_eq!(player.control_preferences(), (4, false));
     assert_eq!(app.local_controls.owner_for_set(4), None);
@@ -5706,12 +4877,10 @@ fn unconfigured_gamepad_button_emits_no_gameplay_control() {
     });
     assert!(app.ingame_menu.is_none());
 
-    app.process_gamepad_event_batch([GamepadEvent::Button {
-        slot: GamepadSlot::new(1),
-        button: LegacyGamepadButton::new(0),
-        state: ElementState::Pressed,
-    }])
-    .expect("press unconfigured gamepad button");
+    app.test_gamepad_events([pressed_gamepad_button(
+        GamepadSlot::new(1),
+        LegacyGamepadButton::new(0),
+    )]);
 
     assert!(
         app.ingame_menu.is_none(),
@@ -5724,18 +4893,14 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     let mut actual_app = new_real_classic_menu_app(320, 200);
     let mut expected_app = new_real_classic_menu_app(320, 200);
     let mut scratch = vec![0_u8; 320 * 200 * 4];
-    actual_app
-        .render(&mut scratch)
-        .expect("present actual Main");
-    expected_app
-        .render(&mut scratch)
-        .expect("present expected Main");
+    actual_app.test_render(&mut scratch);
+    expected_app.test_render(&mut scratch);
     actual_app
         .handle_main_menu_activation(MainMenuItem::About)
-        .expect("switch Main to About");
+        .test_value();
     expected_app
         .handle_main_menu_activation(MainMenuItem::About)
-        .expect("switch expected Main to About");
+        .test_value();
 
     let make_message = || {
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -5746,20 +4911,16 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     };
     actual_app
         .push_message_dialog(make_message(), MessageDialogContinuation::None)
-        .expect("open actual modal");
+        .test_value();
     expected_app
         .push_message_dialog(make_message(), MessageDialogContinuation::None)
-        .expect("open expected modal");
+        .test_value();
 
     let mut actual = vec![0_u8; scratch.len()];
-    actual_app
-        .render(&mut actual)
-        .expect("render modal over fade");
-    let pending = expected_app.message_dialogs.pop().expect("expected modal");
+    actual_app.test_render(&mut actual);
+    let pending = expected_app.message_dialogs.pop().test_value();
     let mut faded_base = vec![0_u8; scratch.len()];
-    expected_app
-        .render(&mut faded_base)
-        .expect("render matching faded base");
+    expected_app.test_render(&mut faded_base);
     expected_app
         .graphics
         .surface_mut()
@@ -5768,49 +4929,40 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     expected_app.message_dialogs.push(pending);
     expected_app
         .render_message_dialogs(Some(startup_gamma()))
-        .expect("render modal after composition");
+        .test_value();
     let expected = expected_app.graphics.surface().pixels().to_vec();
     assert_eq!(
         actual, expected,
         "modal pixels must be composed after the fade"
     );
 
-    actual_app
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("modal handles Escape above fading startup dialogs");
+    actual_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(actual_app.message_dialogs.is_empty());
     assert_eq!(actual_app.startup_view, StartupView::About);
     assert_eq!(actual_app.startup_dialog_fade.as_ref().unwrap().step, 1);
 
     let mut options = new_real_classic_menu_app(320, 200);
     options.open_options_menu();
-    options
-        .render(&mut scratch)
-        .expect("present Options immediately");
+    options.test_render(&mut scratch);
     // `Config.General.Preloading` defaults to false on macOS and true everywhere
     // else (`C4Config.cpp:400-403`), so the dialog-local edit has to be the
     // opposite of whatever this platform loaded for the revert to be visible.
     let config_preloading = options
         .startup_options_dialog
-        .as_ref()
-        .expect("Options dialog")
+        .test_ref()
         .program()
         .preloading;
     options
         .startup_options_dialog
-        .as_mut()
-        .expect("Options dialog")
+        .test_mut()
         .program_mut()
         .preloading = !config_preloading;
     options
         .process_options_dialog_actions(vec![
             clonk_frontend::startup_options_dlg::OptionsDlgAction::GamepadGuiControlChanged(true),
         ])
-        .expect("recreate Options after changing gamepad GUI control");
-    let recreate = options
-        .startup_dialog_fade
-        .as_ref()
-        .expect("same-dialog Options reconstruction fades");
+        .test_value();
+    let recreate = options.startup_dialog_fade.test_ref();
     assert_eq!(recreate.outgoing, Some(StartupDialog::Options));
     assert_eq!(recreate.incoming, StartupDialog::Options);
     // `OnGUIGamepadCheckChange` calls `RecreateDialog(false)`
@@ -5827,13 +4979,8 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
         config_preloading,
         "the rebuilt dialog re-reads Config instead of keeping dialog-local state",
     );
-    options
-        .resize(400, 300)
-        .expect("resize during Options recreation");
-    let resized = options
-        .startup_dialog_fade
-        .as_ref()
-        .expect("same-dialog fade restarts after resize");
+    options.resize(400, 300).test_value();
+    let resized = options.startup_dialog_fade.test_ref();
     assert_eq!((resized.width, resized.height, resized.step), (400, 300, 0));
     options.open_network_lobby();
     assert!(
@@ -5847,20 +4994,10 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
     let slot = GamepadSlot::new(0);
     let mut chart = new_running_sandbox_app();
     chart.toggle_network_chart();
-    chart
-        .process_gamepad_event_batch([
-            GamepadEvent::GuiButton {
-                slot,
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Action {
-                slot,
-                action: GamepadActionType::Cancel,
-                state: ElementState::Pressed,
-            },
-        ])
-        .expect("primary GUI gamepad closes the active chart");
+    chart.test_gamepad_events([
+        pressed_gui_button(slot, GuiButtonClass::High),
+        pressed_gamepad_action(slot, GamepadActionType::Cancel),
+    ]);
     assert!(chart.network_chart_dialog.is_none());
     assert!(chart.message_dialogs.is_empty());
 
@@ -5882,25 +5019,11 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
         physical.index(),
     ));
     player.toggle_network_chart();
-    player
-        .process_gamepad_event_batch([
-            GamepadEvent::GuiButton {
-                slot,
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Button {
-                slot,
-                button: physical,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Action {
-                slot,
-                action: GamepadActionType::Cancel,
-                state: ElementState::Pressed,
-            },
-        ])
-        .expect("PRIO_PlrControl owns the high-button cluster");
+    player.test_gamepad_events([
+        pressed_gui_button(slot, GuiButtonClass::High),
+        pressed_gamepad_button(slot, physical),
+        pressed_gamepad_action(slot, GamepadActionType::Cancel),
+    ]);
     assert!(player.network_chart_dialog.is_some());
     assert_ne!(
         player
@@ -5922,28 +5045,26 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
         "fixture must carry Crew.png so the forbidden fallback is observable"
     );
 
-    let temp = tempdir().expect("tempdir");
+    let temp = tempdir();
     let def_dir = temp.path().join("NoPortrait.c4d");
-    fs::create_dir(&def_dir).expect("definition directory");
+    fs::create_dir(&def_dir).test_value();
     fs::write(
         def_dir.join("DefCore.txt"),
         b"[DefCore]\nid=NPOR\nPicture=0,0,1,1\n",
     )
-    .expect("DefCore");
+    .test_value();
     write_test_definition_graphics(&def_dir);
-    let group = Group::open(&def_dir).expect("open definition");
-    let resource = ResourceDefinitionData::load(&group).expect("load definition");
+    let group = Group::open(&def_dir).test_value();
+    let resource = ResourceDefinitionData::load(&group).test_value();
     app.engine
-        .register_definition(Definition::from_resource(&resource).expect("compile definition"))
-        .expect("register definition");
+        .register_test_definition(Definition::from_resource(&resource).test_value());
     assert!(
         app.engine.definition_picture_image("NPOR").is_some(),
         "fixture must carry a definition picture"
     );
     let object = app
         .engine
-        .spawn_object(SpawnConfig::new("NPOR").with_owner(app.local_owner))
-        .expect("spawn picture-only object");
+        .spawn_test_object(SpawnConfig::new("NPOR").with_owner(app.local_owner));
     app.snapshot = app.engine.snapshot();
 
     let mut players = collect_player_overlays(
@@ -5957,7 +5078,7 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
         .iter_mut()
         .flat_map(|player| &mut player.crew)
         .next()
-        .expect("sandbox crew overlay");
+        .test_value();
     crew.object_id = object;
     crew.portrait = app.graphics.hud_graphics().crew.clone();
     crew.portrait_owner_overlay = app.graphics.hud_graphics().crew.clone();
@@ -5969,7 +5090,7 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
         .iter()
         .flat_map(|player| &player.crew)
         .find(|crew| crew.object_id == object)
-        .expect("picture-only overlay");
+        .test_value();
     assert!(
         overlay.portrait.is_none() && overlay.portrait_owner_overlay.is_none(),
         "neither the definition picture nor Crew.png is a portrait"
@@ -5986,10 +5107,10 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
             .players
             .into_iter()
             .find(|player| player.id == owner)
-            .expect("sandbox player state")
+            .test_value()
             .view_mode
     };
-    let player = app.engine.player(owner).expect("sandbox player");
+    let player = app.engine.test_player(owner);
     assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
     let scrolled_center = Vector2::new(240, 180);
     app.engine
@@ -5997,25 +5118,28 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
             owner,
             vec![clonk_engine::PlayerViewport::new(scrolled_center)],
         )
-        .expect("install camera state for the scrolling transition");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("establish mouse viewport");
-    let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(rect.x + rect.width as i32 / 2),
-        f64::from(rect.y + rect.height as i32 / 2),
-    ))
-    .expect("retain a pre-toggle gameplay pointer");
+    app.test_render(&mut frame);
+    let rect = app.graphics.viewport_rect(owner).test_value();
+    move_cursor_to(
+        &mut app,
+        PhysicalPosition::new(
+            f64::from(rect.x + rect.width as i32 / 2),
+            f64::from(rect.y + rect.height as i32 / 2),
+        ),
+        "retain a pre-toggle gameplay pointer",
+    );
     assert!(app.ingame_pointer.is_some());
     app.engine
         .scroll_player_view(owner, Vector2::ZERO, 320, 200, true)
-        .expect("enter scrolling mode before disabling mouse control");
+        .test_value();
     assert_eq!(view_mode(&app), PLAYER_VIEW_MODE_SCROLLING);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
-        .expect("disable mouse control");
-    let player = app.engine.player(owner).expect("sandbox player");
+        .test_value();
+    let player = app.engine.test_player(owner);
     assert_eq!((player.control_set(), player.mouse_control()), (0, 0));
     assert_eq!(view_mode(&app), clonk_engine::PLAYER_VIEW_MODE_CURSOR);
     assert_eq!(
@@ -6030,8 +5154,8 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
     assert!(!app.mouse_control);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
-        .expect("enable mouse control");
-    let player = app.engine.player(owner).expect("sandbox player");
+        .test_value();
+    let player = app.engine.test_player(owner);
     assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
     assert_eq!(app.local_controls.mouse_owner(), Some(owner));
     assert!(app.mouse_control);
@@ -6066,7 +5190,7 @@ fn options_mouse_entry_is_on_for_requesting_holder() {
     );
 
     app.apply_ingame_menu_action_for_player(holder, MenuAction::ActivateOptions)
-        .expect("open holder Options");
+        .test_value();
     assert_eq!(mouse_option_phase(&app, holder), Some(12));
 }
 
@@ -6080,7 +5204,7 @@ fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
     let flags = app.option_flags(other);
     assert_eq!((flags.mouse_shown, flags.mouse), (false, false));
     app.apply_ingame_menu_action_for_player(other, MenuAction::ActivateOptions)
-        .expect("open non-holder Options");
+        .test_value();
     assert_eq!(mouse_option_phase(&app, other), None);
 
     for action in [
@@ -6089,7 +5213,7 @@ fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
         MenuAction::ToggleMouseControl,
     ] {
         app.apply_ingame_menu_action_for_player(other, action)
-            .expect("reopen non-holder Options");
+            .test_value();
         assert_eq!(
             mouse_option_phase(&app, other),
             None,
@@ -6105,14 +5229,14 @@ fn unclaimed_mouse_entry_is_off_for_each_local_player() {
     let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
 
     app.apply_ingame_menu_action_for_player(primary, MenuAction::ToggleMouseControl)
-        .expect("release primary mouse control");
+        .test_value();
     assert_eq!(app.local_controls.mouse_owner(), None);
 
     for player in [primary, secondary] {
         let flags = app.option_flags(player);
         assert_eq!((flags.mouse_shown, flags.mouse), (true, false));
         app.apply_ingame_menu_action_for_player(player, MenuAction::ActivateOptions)
-            .expect("open free-player Options");
+            .test_value();
         assert_eq!(mouse_option_phase(&app, player), Some(11));
     }
 }
@@ -6129,14 +5253,14 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
     let secondary = primary + 1;
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
-        .expect("register restored secondary player");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.engine
         .set_player_mouse_control(primary, true)
-        .expect("restore primary raw mouse flag");
+        .test_value();
     app.engine
         .set_player_mouse_control(secondary, true)
-        .expect("restore secondary raw mouse flag");
+        .test_value();
 
     app.local_controls = LocalControlRegistry::default();
     for (owner, preferred_set) in [(secondary, 1), (primary, 0)] {
@@ -6160,7 +5284,7 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
     assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
 
     app.apply_ingame_menu_action_for_player(secondary, MenuAction::ToggleMouseControl)
-        .expect("disable restored active mouse owner");
+        .test_value();
 
     assert_eq!(
         app.engine
@@ -6197,53 +5321,43 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
     let mut app = new_running_sandbox_app();
     let primary = app.local_owner;
     let secondary = primary + 1;
-    let primary_crew = app
-        .engine
-        .crew_cursor(primary)
-        .expect("sandbox primary cursor");
-    let primary_crew_state = app
-        .engine
-        .object_snapshot(primary_crew)
-        .expect("sandbox primary crew remains live");
+    let primary_crew = app.engine.test_crew_cursor(primary);
+    let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
 
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
-        .expect("register secondary runtime player");
-    let secondary_crew = app
-        .engine
-        .spawn_object(
-            SpawnConfig::new(primary_crew_state.definition_id)
-                .with_position(primary_crew_state.position)
-                .with_owner(secondary)
-                .with_crew_member(true),
-        )
-        .expect("spawn secondary crew");
+        .test_value();
+    let secondary_crew = app.engine.spawn_test_object(
+        SpawnConfig::new(primary_crew_state.definition_id)
+            .with_position(primary_crew_state.position)
+            .with_owner(secondary)
+            .with_crew_member(true),
+    );
     app.engine
         .register_script_definition("MSRG", "Secondary mouse region", "#strict\n")
-        .expect("register region fixture");
+        .test_value();
     let container = app
         .engine
-        .spawn_object(SpawnConfig::new("MSRG").with_position(primary_crew_state.position))
-        .expect("spawn secondary cursor container");
+        .spawn_test_object(SpawnConfig::new("MSRG").with_position(primary_crew_state.position));
     app.engine
         .apply_object_update(
             secondary_crew,
             ObjectUpdate::new().with_container(container),
         )
-        .expect("put secondary cursor into fixture to expose Exit");
+        .test_value();
     app.engine
         .select_crew(secondary, [secondary_crew])
-        .expect("select secondary crew");
+        .test_value();
     app.engine
         .set_crew_cursor(secondary, Some(secondary_crew))
-        .expect("set secondary cursor");
+        .test_value();
     app.engine
         .replace_player_viewports(
             secondary,
             vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
                 .with_focus(Some(secondary_crew))],
         )
-        .expect("set secondary viewport away from scroll bounds");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
 
     app.local_controls = LocalControlRegistry::default();
@@ -6261,12 +5375,8 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("establish both local viewports and command regions");
-    let viewport = app
-        .graphics
-        .viewport_rect(secondary)
-        .expect("secondary viewport");
+    app.test_render(&mut frame);
+    let viewport = app.graphics.viewport_rect(secondary).test_value();
     let corner = GuiPoint::new(
         (viewport.x + viewport.width as i32 - 1) as f32,
         (viewport.y + viewport.height as i32 - 1) as f32,
@@ -6283,13 +5393,13 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
         ),
         "the secondary cursor's Exit pair covers its bottom-right edge"
     );
-    let before = app.engine.player(secondary).unwrap().viewports()[0].center;
+    let before = app.engine.player(secondary).test_value().viewports()[0].center;
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(corner.x),
-        f64::from(corner.y),
-    ))
-    .expect("move assigned secondary pointer onto its command region");
+    move_cursor(
+        &mut app,
+        corner,
+        "move assigned secondary pointer onto its command region",
+    );
 
     assert_eq!(
         app.ingame_pointer.map(|pointer| pointer.owner),
@@ -6307,23 +5417,23 @@ fn establish_free_scroll_test_viewport(
     app: &mut GameApp,
 ) -> (i32, GuiPoint, GuiPoint, Vector2, Vector2) {
     let owner = app.local_owner;
-    let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
             owner,
             vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
         )
-        .expect("place camera away from every scroll bound");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("establish mouse viewport");
-    let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+    app.test_render(&mut frame);
+    let rect = app.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     let center = GuiPoint::new(
         (rect.x + rect.width as i32 / 2) as f32,
         (rect.y + rect.height as i32 / 2) as f32,
     );
-    let before = app.engine.player(owner).unwrap().viewports()[0].center;
+    let before = app.engine.player(owner).test_value().viewports()[0].center;
     let retained_center = Vector2::new(rect.width as i32 / 2, rect.height as i32 / 2);
     (owner, left, center, before, retained_center)
 }
@@ -6334,8 +5444,11 @@ fn first_mouse_move_after_init_centers_before_edge_scroll() {
     let (owner, left, _, before, retained_center) = establish_free_scroll_test_viewport(&mut app);
     app.ingame_mouse_init_centered = false;
 
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
-        .expect("first move is evaluated at the viewport center");
+    move_cursor(
+        &mut app,
+        left,
+        "first move is evaluated at the viewport center",
+    );
 
     assert!(app.ingame_mouse_init_centered);
     assert_eq!(
@@ -6350,8 +5463,11 @@ fn first_mouse_move_after_init_centers_before_edge_scroll() {
         before
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
-        .expect("later edge move uses its physical viewport position");
+    move_cursor(
+        &mut app,
+        left,
+        "later edge move uses its physical viewport position",
+    );
 
     assert_eq!(
         app.engine.player(owner).unwrap().viewports()[0].center,
@@ -6371,12 +5487,11 @@ fn tick5_initializes_mouse_before_a_later_edge_move() {
     let mut app = new_running_sandbox_app();
     let (owner, left, _, _, retained_center) = establish_free_scroll_test_viewport(&mut app);
     while app.engine.frame() % 5 != 4 {
-        app.update().expect("align next frame to native Tick5");
+        app.test_update();
     }
     app.reset_ingame_mouse_control();
 
-    app.update()
-        .expect("Tick5 executes the first centered mouse move");
+    app.test_update();
 
     assert_eq!(app.engine.frame() % 5, 0);
     assert!(app.ingame_mouse_init_centered);
@@ -6387,10 +5502,13 @@ fn tick5_initializes_mouse_before_a_later_edge_move() {
         retained_center
     );
     assert!(app.ingame_edge_scroll.is_none());
-    let before = app.engine.player(owner).unwrap().viewports()[0].center;
+    let before = app.engine.player(owner).test_value().viewports()[0].center;
 
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
-        .expect("post-Tick5 edge move is no longer swallowed by InitCentered");
+    move_cursor(
+        &mut app,
+        left,
+        "post-Tick5 edge move is no longer swallowed by InitCentered",
+    );
 
     assert_eq!(
         app.engine.player(owner).unwrap().viewports()[0].center,
@@ -6404,8 +5522,7 @@ fn button_and_wheel_moves_consume_mouse_init_centering() {
     let (owner, left, _, _, retained_center) = establish_free_scroll_test_viewport(&mut app);
     app.reset_ingame_mouse_control();
 
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("button Move initializes the centered mouse coordinate");
+    app.test_left_button(ElementState::Pressed);
 
     assert!(app.ingame_mouse_init_centered);
     assert_eq!(
@@ -6417,14 +5534,16 @@ fn button_and_wheel_moves_consume_mouse_init_centering() {
     assert!(app.mouse_state.is_some());
 
     app.reset_ingame_mouse_control();
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
-        .expect("wheel Move consumes InitCentered without replacing VpX/VpY");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
 
     assert!(app.ingame_mouse_init_centered);
     assert!(app.ingame_viewport_mouse.is_none());
-    let before = app.engine.player(owner).unwrap().viewports()[0].center;
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
-        .expect("edge motion after wheel uses the physical viewport point");
+    let before = app.engine.player(owner).test_value().viewports()[0].center;
+    move_cursor(
+        &mut app,
+        left,
+        "edge motion after wheel uses the physical viewport point",
+    );
     assert_eq!(
         app.engine.player(owner).unwrap().viewports()[0].center,
         Vector2::new(before.x - 10, before.y)
@@ -6440,32 +5559,23 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
     let mut app = new_running_sandbox_app();
     let primary = app.local_owner;
     let secondary = primary + 1;
-    let primary_crew = app
-        .engine
-        .crew_cursor(primary)
-        .expect("sandbox primary cursor");
-    let primary_crew_state = app
-        .engine
-        .object_snapshot(primary_crew)
-        .expect("sandbox primary crew remains live");
+    let primary_crew = app.engine.test_crew_cursor(primary);
+    let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
-        .expect("register secondary runtime player");
-    let secondary_crew = app
-        .engine
-        .spawn_object(
-            SpawnConfig::new(primary_crew_state.definition_id)
-                .with_position(primary_crew_state.position)
-                .with_owner(secondary)
-                .with_crew_member(true),
-        )
-        .expect("spawn secondary crew");
+        .test_value();
+    let secondary_crew = app.engine.spawn_test_object(
+        SpawnConfig::new(primary_crew_state.definition_id)
+            .with_position(primary_crew_state.position)
+            .with_owner(secondary)
+            .with_crew_member(true),
+    );
     app.engine
         .select_crew(secondary, [secondary_crew])
-        .expect("select secondary crew");
+        .test_value();
     app.engine
         .set_crew_cursor(secondary, Some(secondary_crew))
-        .expect("set secondary cursor");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.local_controls = LocalControlRegistry::default();
     app.local_controls.initialize(LocalControlInit {
@@ -6488,37 +5598,29 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
     for id in ["MWA1", "MWA2", "MWA3"] {
         app.engine
             .register_script_definition(id, id, "#strict\n")
-            .expect("item registers");
+            .test_value();
     }
     for crew in [primary_crew, secondary_crew] {
         for id in ["MWA1", "MWA2", "MWA3"] {
             app.engine
-                .spawn_object(SpawnConfig::new(id).with_container(crew))
-                .expect("inventory item spawns");
+                .spawn_test_object(SpawnConfig::new(id).with_container(crew));
         }
     }
-    let contents = |app: &GameApp, crew| {
-        app.engine
-            .object_snapshot(crew)
-            .expect("crew remains live")
-            .contents
-    };
+    let contents = |app: &GameApp, crew| app.engine.test_object_snapshot(crew).contents;
     let primary_before = contents(&app, primary_crew);
     let secondary_before = contents(&app, secondary_crew);
     let mut expected_secondary = vec![*secondary_before.last().expect("secondary has inventory")];
     expected_secondary.extend_from_slice(&secondary_before[..secondary_before.len() - 1]);
 
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
-        .expect("wheel up");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
 
     assert_eq!(contents(&app, primary_crew), primary_before);
     assert_eq!(contents(&app, secondary_crew), expected_secondary);
 
-    app.handle_mouse_wheel(
+    app.test_mouse_wheel(
         MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -1.0)),
         2.0,
-    )
-    .expect("wheel down");
+    );
     assert_eq!(contents(&app, primary_crew), primary_before);
     assert_eq!(contents(&app, secondary_crew), secondary_before);
 }
@@ -6526,7 +5628,7 @@ fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
 #[test]
 fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     let parsed = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=Alt+N,Right,F5,F6,F7,None\n")
-        .expect("parse the represented global observer binding");
+        .test_value();
     assert_eq!(
         parsed.net_observer_next_player,
         vec![
@@ -6547,7 +5649,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     let second = first + 1;
     app.engine
         .register_player(PlayerConfig::new(second, "Second observer target"))
-        .expect("register second observer target");
+        .test_value();
     app.clear_physical_viewport_states();
     let observer = app.ownerless_physical_viewport_state();
     app.physical_viewports.push(observer);
@@ -6556,43 +5658,35 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache
         .set(Ok(parsed.clone()))
-        .expect("install observer key registry");
+        .test_value();
 
-    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
-        .expect("a canonical directional binding loads without taking scroll priority");
+    app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
 
     for key in [VirtualKeyCode::F5, VirtualKeyCode::F6, VirtualKeyCode::F7] {
         assert!(app.set_physical_film_view(OWNER_NONE));
-        app.handle_key(key, ElementState::Pressed)
-            .expect("an assigned bare observer function key precedes the fallback boundary");
+        app.test_key(key, ElementState::Pressed);
         assert_eq!(app.film_view_player, Some(first));
 
         assert!(app.set_physical_film_view(OWNER_NONE));
         app.keyboard_modifiers = ModifiersState::CONTROL;
-        app.handle_key(key, ElementState::Pressed)
-            .expect("the earlier generic debug chord retains priority");
+        app.test_key(key, ElementState::Pressed);
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
         app.keyboard_modifiers = ModifiersState::empty();
     }
     assert_eq!(runtime_flash_text(&app), Some("Actions"));
     assert!(app.set_physical_film_view(OWNER_NONE));
 
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("a modifier mismatch is inert");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("assigned observer key dispatches");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(first));
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Released)
-        .expect("observer release has no callback or player-control leak");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Released);
     assert_eq!(app.film_view_player, Some(first));
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("assigned observer key repeats");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(second));
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("observer sequence reaches NO_OWNER after the last player");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
 
     app.ingame_menu.replace(
@@ -6606,20 +5700,16 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
             &IngameMenuLabels::default(),
         ),
     );
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("ownerless fullscreen menu replaces FreeView scope");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
     app.ingame_menu.clear();
 
     app.start_running_chat(RunningChatMode::All);
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("exclusive chat replaces FreeView scope");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(OWNER_NONE));
-    app.close_running_chat()
-        .expect("close exclusive chat through its production lifecycle");
+    app.close_running_chat().test_value();
 
-    app.handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("observer cycling resumes after exclusive UI closes");
+    app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(app.film_view_player, Some(first));
     assert!(app.physical_viewports[0].is_no_owner_viewport);
     assert!(app.create_physical_viewport(first, true, true, true));
@@ -6632,14 +5722,9 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
 
     let mut owned = new_running_sandbox_app();
     owned.runtime_key_config_cache = OnceLock::new();
-    owned
-        .runtime_key_config_cache
-        .set(Ok(parsed))
-        .expect("install observer key registry");
+    owned.runtime_key_config_cache.set(Ok(parsed)).test_value();
     owned.keyboard_modifiers = ModifiersState::ALT;
-    owned
-        .handle_key(VirtualKeyCode::KeyN, ElementState::Pressed)
-        .expect("owned viewport ignores a FreeView-only binding");
+    owned.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     assert_eq!(owned.film_view_player, None);
 }
 
@@ -6650,21 +5735,21 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
     let film_target = original + 1;
     app.engine
         .register_player(PlayerConfig::new(film_target, "Film target"))
-        .expect("register film target");
+        .test_value();
     let original_identity = app.physical_viewports[0].physical_identity;
     assert!(app.set_physical_film_view(film_target));
 
     app.remove_runtime_player_with_viewport_feedback(original)
-        .expect("remove the viewport's original player");
+        .test_value();
     app.engine
         .register_player(PlayerConfig::new(original, "Reused player number"))
-        .expect("reuse original player number");
+        .test_value();
     assert!(app.create_physical_viewport(original, true, true, false));
     let new_identity = app
         .physical_viewports
         .iter()
         .find(|viewport| viewport.uses_live_player_presentation)
-        .expect("new owned viewport")
+        .test_value()
         .physical_identity;
     assert_ne!(original_identity, new_identity);
 
@@ -6673,12 +5758,12 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
         .physical_viewports
         .iter()
         .find(|viewport| viewport.physical_identity == original_identity)
-        .expect("old retargeted viewport survives");
+        .test_value();
     let new = app
         .physical_viewports
         .iter()
         .find(|viewport| viewport.physical_identity == new_identity)
-        .expect("new owned viewport survives");
+        .test_value();
     assert!(!old.uses_live_player_presentation);
     assert!(new.uses_live_player_presentation);
     assert_eq!(old.displayed_player, original);
@@ -6690,17 +5775,10 @@ fn sandbox_pointer_at_world(app: &mut GameApp, owner: i32, world: Vector2) -> Vi
     app.refresh_focus();
     let surface = app.graphics.surface();
     let mut frame = vec![0_u8; surface.width() as usize * surface.height() as usize * 4];
-    app.render(&mut frame)
-        .expect("render sandbox viewport for mouse projection");
-    let (screen_x, screen_y) = app
-        .graphics
-        .world_to_screen(owner, world)
-        .expect("world point maps into the sandbox viewport");
+    app.test_render(&mut frame);
+    let (screen_x, screen_y) = app.graphics.world_to_screen(owner, world).test_value();
     let screen = GuiPoint::new(screen_x, screen_y);
-    let projected = app
-        .graphics
-        .viewport_point_at(screen)
-        .expect("screen point maps back into the sandbox viewport");
+    let projected = app.graphics.viewport_point_at(screen).test_value();
     assert_eq!(projected.owner, owner);
     assert_eq!(ingame_pointer_world_pixel(projected), world);
     ViewportPointer {
@@ -6720,8 +5798,8 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
     app.snapshot = app.engine.snapshot();
     app.refresh_focus();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("establish sandbox viewport");
-    let viewport = app.graphics.viewport_rect(owner).expect("sandbox viewport");
+    app.test_render(&mut frame);
+    let viewport = app.graphics.viewport_rect(owner).test_value();
     let pointer = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
@@ -6742,7 +5820,7 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
                 && !app.engine.mouse_jump_zone(owner, point))
             .then_some(pointer)
         })
-        .expect("visible solid landscape point without an object or HUD region");
+        .test_value();
     let point = ingame_pointer_world_pixel(pointer);
     app.ingame_pointer = Some(pointer);
 
@@ -6750,8 +5828,7 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
-    app.on_ingame_mouse_double()
-        .expect("plain landscape double-click queues Dig");
+    app.on_ingame_mouse_double().test_value();
     assert_eq!(
         commands.take_submitted_player_commands(),
         vec![(
@@ -6770,10 +5847,8 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
         )],
     );
 
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set Control modifier");
-    app.on_ingame_mouse_double()
-        .expect("Control landscape double-click queues DigMaterial");
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.on_ingame_mouse_double().test_value();
     assert_eq!(
         commands.take_submitted_player_commands(),
         vec![(
@@ -6797,12 +5872,8 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
 fn mouse_jump_zone_click_queues_exact_jump_control() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    let position = app
-        .engine
-        .object_snapshot(cursor)
-        .expect("sandbox cursor remains live")
-        .position;
+    let cursor = app.engine.test_crew_cursor(owner);
+    let position = app.engine.test_object_snapshot(cursor).position;
     let click = Vector2::new(position.x + 8, position.y - 15);
     let pointer = sandbox_pointer_at_world(&mut app, owner, click);
     assert!(app.engine.mouse_jump_zone(owner, click));
@@ -6811,8 +5882,7 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     let tick = app.local_control_submission_tick();
-    app.handle_ingame_mouse_click(pointer)
-        .expect("jump-zone click queues synchronized command");
+    app.handle_ingame_mouse_click(pointer).test_value();
 
     assert_eq!(
         commands.take_submitted_player_commands(),
@@ -6832,10 +5902,8 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
         )]
     );
 
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("set Shift modifier");
-    app.handle_ingame_mouse_click(pointer)
-        .expect("Shift jump-zone click queues appended command");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.handle_ingame_mouse_click(pointer).test_value();
     assert_eq!(
         commands.take_submitted_player_commands(),
         vec![(
@@ -6860,33 +5928,22 @@ fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
     for contained in [true, false] {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
-        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
-        let position = app
-            .engine
-            .object_snapshot(cursor)
-            .expect("sandbox cursor remains live")
-            .position;
+        let cursor = app.engine.test_crew_cursor(owner);
+        let position = app.engine.test_object_snapshot(cursor).position;
         let click = Vector2::new(position.x + 8, position.y - 15);
         if contained {
-            let container = Definition::from_script("MBOX", "Mouse box", "#strict\n")
-                .expect("container definition compiles");
-            app.engine
-                .register_definition(container)
-                .expect("register mouse container");
-            let container = app
-                .engine
-                .spawn_object(
-                    SpawnConfig::new("MBOX")
-                        .with_position(Vector2::new(position.x + 80, position.y)),
-                )
-                .expect("spawn mouse container");
+            let container = test_definition("MBOX", "Mouse box", "#strict\n");
+            app.engine.register_test_definition(container);
+            let container = app.engine.spawn_test_object(
+                SpawnConfig::new("MBOX").with_position(Vector2::new(position.x + 80, position.y)),
+            );
             app.engine
                 .apply_object_update(cursor, ObjectUpdate::new().with_container(container))
-                .expect("contain sandbox cursor");
+                .test_value();
         } else {
             app.engine
                 .apply_object_update(cursor, ObjectUpdate::new().with_action("Jump"))
-                .expect("put sandbox cursor into a non-Walk action");
+                .test_value();
         }
         assert!(
             !app.engine.mouse_jump_zone(owner, click),
@@ -6903,8 +5960,7 @@ fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
         let tick = app.local_control_submission_tick();
-        app.handle_ingame_mouse_click(pointer)
-            .expect("disabled jump zone queues synchronized movement");
+        app.handle_ingame_mouse_click(pointer).test_value();
         assert_eq!(
             commands.take_submitted_player_commands(),
             vec![(
@@ -6930,44 +5986,26 @@ fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
 fn mouse_jump_zone_overrides_overlapping_crew_selection() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
-    let cursor_snapshot = app
-        .engine
-        .object_snapshot(cursor)
-        .expect("sandbox cursor remains live");
+    let cursor = app.engine.test_crew_cursor(owner);
+    let cursor_snapshot = app.engine.test_object_snapshot(cursor);
     let click = Vector2::new(
         cursor_snapshot.position.x + 8,
         cursor_snapshot.position.y - 15,
     );
-    let overlap = app
-        .engine
-        .spawn_object(
-            SpawnConfig::new(cursor_snapshot.definition_id)
-                .with_position(click)
-                .with_owner(owner)
-                .with_crew_member(true),
-        )
-        .expect("spawn overlapping selectable crew");
+    let overlap = app.engine.spawn_test_object(
+        SpawnConfig::new(cursor_snapshot.definition_id)
+            .with_position(click)
+            .with_owner(owner)
+            .with_crew_member(true),
+    );
     app.engine
         .apply_object_update(overlap, ObjectUpdate::new().with_position(click))
-        .expect("place overlapping crew center at the click");
-    let mut crew = app
-        .engine
-        .player(owner)
-        .expect("sandbox player remains live")
-        .crew()
-        .to_vec();
+        .test_value();
+    let mut crew = app.engine.test_player(owner).crew().to_vec();
     crew.push(overlap);
-    app.engine
-        .player_mut(owner)
-        .expect("sandbox player remains live")
-        .set_crew(crew);
-    app.engine
-        .select_crew(owner, [cursor])
-        .expect("retain only the original command selection");
-    app.engine
-        .set_crew_cursor(owner, Some(cursor))
-        .expect("retain original mouse cursor");
+    app.engine.test_player_mut(owner).set_crew(crew);
+    app.engine.select_crew(owner, [cursor]).test_value();
+    app.engine.set_crew_cursor(owner, Some(cursor)).test_value();
     let pointer = sandbox_pointer_at_world(&mut app, owner, click);
     assert_eq!(
         app.ingame_mouse_select_target(owner, pointer.screen),
@@ -6976,14 +6014,12 @@ fn mouse_jump_zone_overrides_overlapping_crew_selection() {
     );
     assert!(app.engine.mouse_jump_zone(owner, click));
 
-    app.handle_ingame_mouse_click(pointer)
-        .expect("jump cursor overrides overlapping selection");
+    app.handle_ingame_mouse_click(pointer).test_value();
 
     assert_eq!(app.engine.crew_cursor(owner), Some(cursor));
     let commands = app
         .engine
-        .object_snapshot(cursor)
-        .expect("original cursor survives")
+        .test_object_snapshot(cursor)
         .command_stack
         .command_views();
     assert_eq!(commands.len(), 1);
@@ -7008,17 +6044,12 @@ fn constructable_raw_item_id_drags_even_when_row_is_not_selectable() {
         .engine
         .cursor_object_menu(owner)
         .map(|(cursor, menu)| (cursor, menu.clone()))
-        .expect("construction fixture menu exists");
+        .test_value();
     menu.items[0].selectable = false;
     install_test_cursor_menu(&mut app, cursor, menu);
 
-    app.handle_cursor_moved(PhysicalPosition::new(
-        f64::from(menu_point.x),
-        f64::from(menu_point.y),
-    ))
-    .expect("hover disabled constructable row");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press disabled constructable row");
+    move_cursor(&mut app, menu_point, "hover disabled constructable row");
+    app.test_left_button(ElementState::Pressed);
     assert!(matches!(
         app.construction_menu_drag.as_ref(),
         Some(ConstructionMenuDrag::Candidate {
@@ -7044,8 +6075,7 @@ fn construction_drop_requires_the_original_live_mouse_assignment() {
         } else {
             app.mouse_control = false;
         }
-        app.handle_mouse_button(ElementState::Released)
-            .expect("release cached-valid construction drag");
+        app.test_left_button(ElementState::Released);
 
         let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
         assert!(controls.is_empty());
@@ -7071,15 +6101,12 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
     app.bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     app.engine
-        .player_mut(app.local_owner)
-        .expect("local player")
+        .test_player_mut(app.local_owner)
         .control
         .control_style = false;
-    app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
-        .expect("classic control owns F1 down");
+    app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
-    app.handle_key(VirtualKeyCode::F1, ElementState::Released)
-        .expect("classic control release falls through lower priorities");
+    app.test_key(VirtualKeyCode::F1, ElementState::Released);
     assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
     assert!(!app.runtime_help_visible);
 
@@ -7089,14 +6116,11 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     release_only
         .engine
-        .player_mut(release_only.local_owner)
-        .expect("local player")
+        .test_player_mut(release_only.local_owner)
         .control
         .control_style = false;
     assert!(release_only.show_startup_hint);
-    release_only
-        .handle_key(VirtualKeyCode::F1, ElementState::Released)
-        .expect("up-only classic control falls through");
+    release_only.test_key(VirtualKeyCode::F1, ElementState::Released);
     assert!(release_only.show_startup_hint);
     assert!(!release_only.runtime_help_visible);
 }
@@ -7107,25 +6131,19 @@ fn running_f4_only_stronger_escape_owns_keyboard_input() {
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
 
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("Return stays outside the nonexclusive F4 GUI scope");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("Return release stays outside the nonexclusive F4 GUI scope");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert!(app.runtime_client_list.is_some());
     assert!(
         app.running_chat_text().is_some(),
         "the lower-priority fullscreen Return binding remains reachable"
     );
-    app.close_running_chat()
-        .expect("close the chat opened below nonexclusive F4");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("the dedicated fullscreen Escape binding closes F4");
+    app.close_running_chat().test_value();
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.runtime_client_list.is_none());
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("consume the dedicated Escape release");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 }
 
 /// C++ has no F11 shortcut: `C4KeyboardInput` maps it as an ordinary physical
@@ -7138,20 +6156,16 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     let mut app = new_menu_app(320, 200);
     app.set_display_mode(DisplayMode::Window);
     let view = app.startup_view;
-    app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
-        .expect("unbound F11 is inert in Menu");
-    app.handle_key(VirtualKeyCode::F11, ElementState::Released)
-        .expect("release unbound F11");
+    app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F11, ElementState::Released);
     assert!(!app.display_flags.is_fullscreen);
     assert_eq!(app.startup_view, view);
 
     // ... and while running.
     let mut app = new_classic_running_sandbox_app();
     app.set_display_mode(DisplayMode::Window);
-    app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
-        .expect("unbound F11 is inert while running");
-    app.handle_key(VirtualKeyCode::F11, ElementState::Released)
-        .expect("release unbound F11");
+    app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F11, ElementState::Released);
     assert!(!app.display_flags.is_fullscreen);
     assert!(app.pending_screenshots.is_empty());
 
@@ -7162,10 +6176,9 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
             b"[Keys]\nToggleShowHelp=F11\n",
         )
         .expect("parse an F11 scoreboard binding")))
-        .expect("install the F11 binding");
+        .test_value();
     assert!(!app.runtime_help_visible);
-    app.handle_key(VirtualKeyCode::F11, ElementState::Pressed)
-        .expect("the bound F11 action dispatches");
+    app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     assert!(
         app.runtime_help_visible,
         "a KeyConfig action bound to F11 must reach classic dispatch"
@@ -7185,8 +6198,7 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
 fn keyconfig_accepts_extended_sdl_scancode_names() {
     let config = parse_runtime_key_config(
         b"[Keys]\n          MusicToggle=Mute\n          SoundToggle=VolumeDown\n          ToggleChat=NonUSBackslash\n          Screenshot=AC Home\n          ScreenshotEx=Left GUI\n          ScoreboardToggle=International3\n          ToggleShowHelp=Paste\n          NetClientListDlgToggle=Calculator\n          MsgBoardScrollUp=AudioNext\n          MsgBoardScrollDown=NotAnSdlScancodeName\n",
-    )
-    .expect("extended scancode names parse");
+    ).test_value();
 
     let physical = |name: &str| {
         config
@@ -7245,10 +6257,9 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
             b"[Keys]\nToggleShowHelp=Mute\n",
         )
         .expect("parse the Mute help binding")))
-        .expect("install the Mute binding");
+        .test_value();
     assert!(!app.runtime_help_visible);
-    app.handle_key(VirtualKeyCode::AudioVolumeMute, ElementState::Pressed)
-        .expect("an extended-scancode binding dispatches");
+    app.test_key(VirtualKeyCode::AudioVolumeMute, ElementState::Pressed);
     assert!(
         app.runtime_help_visible,
         "a KeyConfig action bound to an extended SDL scancode must execute"
@@ -7256,15 +6267,14 @@ fn keyconfig_accepts_extended_sdl_scancode_names() {
 }
 
 fn platform_ime_test_app() -> GameApp {
-    let mut app =
-        test_game_app(320, 200, AudioOptions::default(), None).expect("initialize IME policy app");
+    let mut app = test_game_app(320, 200, AudioOptions::default(), None).test_value();
     install_classic_test_assets(&mut app);
     app
 }
 
 fn open_platform_ime_test_context(app: &mut GameApp) {
     app.open_context_menu_at(Vec::new(), GuiPoint::new(10.0, 10.0))
-        .expect("open IME policy context menu");
+        .test_value();
     assert!(app.context_menu.is_some());
 }
 
@@ -7298,10 +6308,10 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("open ordinary IME-blocking message");
+    .test_value();
     assert!(!app.platform_ime_allowed());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("close ordinary IME-blocking message");
+        .test_value();
 
     app.mode = AppMode::Running;
     assert!(!app.platform_ime_allowed());

@@ -1,8 +1,8 @@
 // Test complete WARP script
 
-#[test]
-fn complete_warp_script() {
-    let source = r#"/* Warp */
+crate::support::compile_case!(
+    complete_warp_script,
+    r#"/* Warp */
 
 #strict
 
@@ -67,6 +67,5 @@ private func GetWarpPosition(&x, &y)
 
 public func GetSpellClass(object pMage) { return(AIR1); }
 public func GetSpellCombo(pMage) { return ("144"); }
-"#;
-    crate::support::assert_compiles(source);
-}
+"#,
+);

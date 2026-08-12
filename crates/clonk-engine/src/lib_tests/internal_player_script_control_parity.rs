@@ -1,12 +1,10 @@
 use super::*;
 
 fn register_player(engine: &mut Engine, player: i32, by_client: i32) {
-    engine
-        .register_player(PlayerConfig::new(player, format!("Player {player}")))
-        .expect("player registers");
-    engine
-        .player_mut(player)
-        .expect("player remains registered")
+    crate::TestValueExt::test_value(
+        engine.register_player(PlayerConfig::new(player, format!("Player {player}"))),
+    );
+    crate::TestValueExt::test_value(engine.player_mut(player))
         .set_at_client(PlayerAtClient::new(by_client));
 }
 
@@ -97,24 +95,22 @@ fn admitted_joined_player_team_update_applies_add_player_side_effects_only() {
         TeamInfo::new(1, "One", 0x0012_3456).with_player_ids(vec![41]),
         TeamInfo::new(2, "Two", new_color),
     ]);
-    engine
-        .register_player(
+    crate::TestValueExt::test_value(
+        engine.register_player(
             PlayerConfig::new(4, "Joined")
                 .with_player_info_id(41)
                 .with_team(Some(1))
                 .with_color(Some(old_color)),
-        )
-        .expect("joined player registers");
-    engine
-        .register_script_definition("OWND", "Owned", "")
-        .expect("owned-object definition registers");
-    let owned = engine
-        .spawn_object(
+        ),
+    );
+    crate::TestValueExt::test_value(engine.register_script_definition("OWND", "Owned", ""));
+    let owned = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("OWND")
                 .with_owner(4)
                 .with_color(0xaa12_3456),
-        )
-        .expect("owned object spawns");
+        ),
+    );
 
     assert!(engine
         .apply_admitted_player_team_update(41, 2, Some(new_color))
@@ -128,13 +124,10 @@ fn admitted_joined_player_team_update_applies_add_player_side_effects_only() {
     assert_eq!(engine.player(4).unwrap().color_dw(), new_color);
     assert!(engine.teams()[0].player_ids.is_empty());
     assert_eq!(engine.teams()[1].player_ids, vec![41]);
-    let owned_index = engine
-        .find_object_index(owned)
-        .expect("owned object remains live");
+    let owned_index = crate::TestValueExt::test_value(engine.find_object_index(owned));
     assert_eq!(engine.objects[owned_index].state.color, 0xaa00_c800);
-    let missing_applied = engine
-        .apply_admitted_player_team_update(99, 1, None)
-        .expect("a missing joined player is a native-style no-op");
+    let missing_applied =
+        crate::TestValueExt::test_value(engine.apply_admitted_player_team_update(99, 1, None));
     assert!(!missing_applied);
 }
 
@@ -150,21 +143,13 @@ fn goal_rule_control_uses_object_scope_and_global_fallback() {
         )]),
         1
     );
-    engine
+    crate::TestValueExt::test_value(engine
         .register_definition(
-            Definition::from_script(
-                    "RULE",
-                    "Rule",
-                    "#strict 3\nlocal Marker; func Activate(player) { Marker = player; return true; } func ReadMarker() { return Marker; }",
-            )
-            .expect("rule definition compiles"),
-        )
-        .expect("rule definition registers");
+            test_definition("RULE", "Rule", "#strict 3\nlocal Marker; func Activate(player) { Marker = player; return true; } func ReadMarker() { return Marker; }"),
+        ));
 
-    let normal = engine
-        .spawn_object(SpawnConfig::new("RULE"))
-        .expect("active rule spawns");
-    let normal_number = i32::try_from(normal.as_u64()).unwrap();
+    let normal = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("RULE")));
+    let normal_number = crate::TestValueExt::test_value(i32::try_from(normal.as_u64()));
     assert!(engine
         .execute_activate_game_goal_rule_control(&ActivateGameGoalRuleControlData {
             object: normal_number,
@@ -172,7 +157,7 @@ fn goal_rule_control_uses_object_scope_and_global_fallback() {
             by_client: 7,
         })
         .expect("active SafeObjectPointer scope executes"));
-    let index = engine.find_object_index(normal).unwrap();
+    let index = crate::TestValueExt::test_value(engine.find_object_index(normal));
     assert_eq!(
         engine
             .call_object_function(index, "ReadMarker", Vec::new())
@@ -180,10 +165,10 @@ fn goal_rule_control_uses_object_scope_and_global_fallback() {
         Value::Int(3)
     );
 
-    let inactive = engine
-        .spawn_object(SpawnConfig::new("RULE").with_status(ObjectStatus::Inactive))
-        .expect("inactive rule spawns");
-    let inactive_number = i32::try_from(inactive.as_u64()).unwrap();
+    let inactive = crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("RULE").with_status(ObjectStatus::Inactive)),
+    );
+    let inactive_number = crate::TestValueExt::test_value(i32::try_from(inactive.as_u64()));
     assert!(engine
         .execute_activate_game_goal_rule_control(&ActivateGameGoalRuleControlData {
             object: inactive_number,
@@ -191,7 +176,7 @@ fn goal_rule_control_uses_object_scope_and_global_fallback() {
             by_client: 7,
         })
         .expect("inactive SafeObjectPointer scope executes"));
-    let index = engine.find_object_index(inactive).unwrap();
+    let index = crate::TestValueExt::test_value(engine.find_object_index(inactive));
     assert_eq!(
         engine
             .call_object_function(index, "ReadMarker", Vec::new())
@@ -199,12 +184,9 @@ fn goal_rule_control_uses_object_scope_and_global_fallback() {
         Value::Int(3)
     );
 
-    let fallback = engine
-        .script_globals
-        .borrow()
-        .get("RuleFallback")
-        .cloned()
-        .expect("fallback global exists");
+    let fallback = crate::TestValueExt::test_value(
+        engine.script_globals.borrow().get("RuleFallback").cloned(),
+    );
     assert_eq!(*fallback.borrow(), Value::Nil);
 
     assert!(engine
@@ -259,17 +241,14 @@ fn activate_game_goal_menu_builtin_rejects_missing_player_and_queues_valid_local
 fn goal_menu_control_evaluates_every_peer_but_marks_only_local_ui() {
     let mut engine = Engine::new();
     register_player(&mut engine, 3, 7);
-    let mut goal = Definition::from_script(
+    let mut goal = test_definition(
         "GOAL",
         "Goal",
         "#strict 3\nfunc IsFulfilled() { return true; }",
-    )
-    .expect("goal definition compiles");
+    );
     goal.set_category(CATEGORY_GOAL);
-    engine.register_definition(goal).expect("goal registers");
-    engine
-        .spawn_object(SpawnConfig::new("GOAL"))
-        .expect("goal object spawns");
+    crate::TestValueExt::test_value(engine.register_definition(goal));
+    crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("GOAL")));
     let control = ActivateGameGoalMenuControlData {
         player: 3,
         by_client: 7,

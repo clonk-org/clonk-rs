@@ -7,6 +7,7 @@
 //! the C4CMD_Construct site check (C4Command.cpp:1797-1801) must leave the
 //! same red target message.
 
+use crate::support::EngineTestExt;
 use clonk_engine::landscape::PixelGrid;
 use clonk_engine::{
     Definition, Engine, Landscape, MessageKind, ObjectUpdate, PhysicalInfo, SpawnConfig, Vector2,
@@ -48,79 +49,68 @@ fn structure_definition(
     constructable: bool,
 ) -> Definition {
     let path = root.join(format!("{id}.c4d"));
-    fs::create_dir(&path).expect("definition dir");
-    fs::write(
+    crate::support::TestValueExt::test_value(fs::create_dir(&path));
+    crate::support::TestValueExt::test_value(fs::write(
         path.join("DefCore.txt"),
         format!(
             "[DefCore]\nid={id}\nName={name}\nCategory=C4D_Structure\nMass=100\n\
              Width=40\nHeight=40\nOffset=-20,-20\nConstruction={}\n",
             i32::from(constructable)
         ),
-    )
-    .expect("DefCore.txt");
-    fs::write(path.join("Script.c"), "#strict 2\n").expect("Script.c");
-    let resource =
-        ResourceDefinition::load(&Group::open(&path).expect("group opens")).expect("loads");
-    Definition::from_resource(&resource).expect("definition converts")
+    ));
+    crate::support::TestValueExt::test_value(fs::write(path.join("Script.c"), "#strict 2\n"));
+    let resource = crate::support::TestValueExt::test_value(ResourceDefinition::load(
+        &crate::support::TestValueExt::test_value(Group::open(&path)),
+    ));
+    crate::support::TestValueExt::test_value(Definition::from_resource(&resource))
 }
 
 fn feedback_engine() -> (Engine, clonk_engine::ObjectId, tempfile::TempDir) {
-    let temp = tempfile::tempdir().expect("definition tempdir");
+    let temp = crate::support::TestValueExt::test_value(tempfile::tempdir());
     let mut engine = Engine::new();
     engine.set_landscape(flat_floor_landscape());
-    engine
-        .register_definition(structure_definition(temp.path(), "STRC", "Testhouse", true))
-        .expect("STRC registers");
-    engine
-        .register_definition(structure_definition(
-            temp.path(),
-            "NOCN",
-            "Ruinshell",
-            false,
-        ))
-        .expect("NOCN registers");
-    let mut caller = Definition::from_script(
+    engine.register_test_definition(structure_definition(temp.path(), "STRC", "Testhouse", true));
+    engine.register_test_definition(structure_definition(
+        temp.path(),
+        "NOCN",
+        "Ruinshell",
+        false,
+    ));
+    let mut caller = crate::support::TestValueExt::test_value(Definition::from_script(
         "CALR",
         "Caller",
         r#"#strict 2
-public func Place(id def, int x, int y)
-{
+    public func Place(id def, int x, int y)
+    {
     var s = CreateConstruction(def, x, y, -1, 1, 0, 1);
     if (s) { return 1; }
     return 0;
-}
-public func Order(id def, int x, int y)
-{
+    }
+    public func Order(id def, int x, int y)
+    {
     return SetCommand(this, "Construct", 0, x, y, 0, def);
-}
-"#,
-    )
-    .expect("caller compiles");
+    }
+    "#,
+    ));
     caller.set_category(CATEGORY_STATIC_BACK);
     caller.set_physical(PhysicalInfo {
         can_construct: 1,
         ..PhysicalInfo::default()
     });
-    engine.register_definition(caller).expect("CALR registers");
-    engine
-        .register_script_definition("CNKT", "Conkit", "#strict 2\n")
-        .expect("CNKT registers");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("CALR").with_position(Vector2::new(0, 0)))
-        .expect("caller spawns");
+    engine.register_test_definition(caller);
+    engine.register_test_script_definition("CNKT", "Conkit", "#strict 2\n");
+    let caller =
+        engine.spawn_test_object(SpawnConfig::new("CALR").with_position(Vector2::new(0, 0)));
     (engine, caller, temp)
 }
 
 fn place(engine: &mut Engine, caller: clonk_engine::ObjectId, id: &str, x: i32, y: i32) -> i32 {
-    let index = engine.find_object_index(caller).expect("caller index");
-    match engine
-        .call_object_function(
-            index,
-            "Place",
-            vec![Value::C4Id(id.to_string()), Value::Int(x), Value::Int(y)],
-        )
-        .expect("Place runs")
-    {
+    let index = engine.test_object_index(caller);
+    match engine.call_test_object_function(
+        index,
+        "Place",
+        vec![Value::C4Id(id.to_string()), Value::Int(x), Value::Int(y)],
+    ) {
         Value::Int(value) => value,
         // Below #strict 3 the literal `0` is nil (C++ C4Aul semantics).
         Value::Nil => 0,
@@ -186,8 +176,7 @@ fn construction_check_reports_each_failed_branch_on_the_caller() {
     // IDS_OBJ_NOOTHER named after the blocker (C4Game.cpp:1298-1313;
     // C4Landscape.cpp:2159-2163).
     engine
-        .spawn_object(SpawnConfig::new("STRC").with_position(Vector2::new(220, FLOOR_Y - 20)))
-        .expect("full-con blocker spawns");
+        .spawn_test_object(SpawnConfig::new("STRC").with_position(Vector2::new(220, FLOOR_Y - 20)));
     assert_eq!(place(&mut engine, caller, "STRC", 230, FLOOR_Y), 0);
     assert_eq!(
         caller_messages(&engine, caller),
@@ -217,36 +206,30 @@ fn construct_command_site_rejection_messages_the_actor() {
     let (mut engine, caller, _temp) = feedback_engine();
     // C4CMD_Construct requires a carried conkit before the site check
     // (C4Command.cpp:1783-1795).
-    let kit = engine
-        .spawn_object(SpawnConfig::new("CNKT"))
-        .expect("kit spawns");
-    engine
-        .apply_object_update(kit, ObjectUpdate::new().with_container(caller))
-        .expect("kit enters the caller");
+    let kit = engine.spawn_test_object(SpawnConfig::new("CNKT"));
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(kit, ObjectUpdate::new().with_container(caller)),
+    );
 
     // The requested mid-map site (150,100) is inside the actor's at-site
     // range but hangs in open air -> the check rejects with
     // IDS_OBJ_NOLEVEL before C4Command::Fail (C4Command.cpp:1797-1801).
-    let index = engine.find_object_index(caller).expect("caller index");
-    engine
-        .call_object_function(
-            index,
-            "Order",
-            vec![
-                Value::C4Id("STRC".to_string()),
-                Value::Int(150),
-                Value::Int(100),
-            ],
-        )
-        .expect("Order runs");
-    engine
-        .apply_object_update(
-            caller,
-            ObjectUpdate::new().with_position(Vector2::new(150, 100)),
-        )
-        .expect("stand the actor at the requested site");
+    let index = engine.test_object_index(caller);
+    engine.call_test_object_function(
+        index,
+        "Order",
+        vec![
+            Value::C4Id("STRC".to_string()),
+            Value::Int(150),
+            Value::Int(100),
+        ],
+    );
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        caller,
+        ObjectUpdate::new().with_position(Vector2::new(150, 100)),
+    ));
     for _ in 0..3 {
-        engine.tick_without_snapshot().expect("command executes");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
     let messages = engine

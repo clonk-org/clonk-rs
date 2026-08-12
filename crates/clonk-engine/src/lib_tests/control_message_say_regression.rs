@@ -2,28 +2,20 @@ use super::*;
 
 fn say_engine() -> (Engine, ObjectId, ObjectId) {
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("VIEW", "View object", "")
-        .expect("view definition registers");
-    engine
-        .register_script_definition("CURS", "Cursor object", "")
-        .expect("cursor definition registers");
-    let view = engine
-        .spawn_object(SpawnConfig::new("VIEW"))
-        .expect("view object spawns");
-    let cursor = engine
-        .spawn_object(
+    crate::TestValueExt::test_value(engine.register_script_definition("VIEW", "View object", ""));
+    crate::TestValueExt::test_value(engine.register_script_definition("CURS", "Cursor object", ""));
+    let view = crate::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("VIEW")));
+    let cursor = crate::TestValueExt::test_value(
+        engine.spawn_object(
             SpawnConfig::new("CURS")
                 .with_custom_name("Speaker")
                 .with_color(0),
-        )
-        .expect("cursor object spawns");
-    engine
-        .register_player(
-            PlayerConfig::new(3, "Alice").with_color(Some(RgbColor::new(0x12, 0x34, 0x56))),
-        )
-        .expect("player registers");
-    let player = engine.player_mut(3).expect("player exists");
+        ),
+    );
+    crate::TestValueExt::test_value(engine.register_player(
+        PlayerConfig::new(3, "Alice").with_color(Some(RgbColor::new(0x12, 0x34, 0x56))),
+    ));
+    let player = crate::TestValueExt::test_value(engine.player_mut(3));
     player.set_at_client(PlayerAtClient::new(2));
     player.set_cursor(Some(cursor));
     player.set_view_target(Some(view));
@@ -35,7 +27,7 @@ fn say(message: Vec<u8>, by_client: i32) -> MessageControlData {
         message_type: MESSAGE_TYPE_SAY,
         player: 3,
         to_player: -1,
-        message: LegacyCString::from_bytes(message).expect("fixture is NUL-free"),
+        message: crate::TestValueExt::test_value(LegacyCString::from_bytes(message)),
         by_client,
     }
 }
@@ -116,7 +108,7 @@ fn fullscreen_film_fallback_requires_replay_and_nonzero_film_mode() {
         -1, 2,
     ));
     engine.set_replay_control(true);
-    engine.finish_replay().expect("finish replay control");
+    crate::TestValueExt::test_value(engine.finish_replay());
     assert!(
         engine.is_replay_film(),
         "ViewportCheck keeps using persistent Head.Replay after ChangeToLocal"

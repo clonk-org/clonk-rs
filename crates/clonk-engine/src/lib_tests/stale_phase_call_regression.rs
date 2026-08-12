@@ -25,7 +25,7 @@ fn phase_call_keeps_stale_function_owner_but_uses_changed_def_act_map() -> Resul
         let calls = Arc::clone(&calls);
         old_hooks.set_on_call(move |name, _| {
             if name == "OnPhase" {
-                calls.lock().unwrap().push(format!("old:{name}"));
+                crate::TestValueExt::test_value(calls.lock()).push(format!("old:{name}"));
             }
         });
     }
@@ -34,24 +34,24 @@ fn phase_call_keeps_stale_function_owner_but_uses_changed_def_act_map() -> Resul
         let calls = Arc::clone(&calls);
         new_hooks.set_on_call(move |name, _| {
             if matches!(name, "OnPhase" | "NewZeroStart" | "NewOneStart") {
-                calls.lock().unwrap().push(format!("new:{name}"));
+                crate::TestValueExt::test_value(calls.lock()).push(format!("new:{name}"));
             }
         });
     }
 
-    let mut old = Definition::from_script(
+    let mut old = test_definition(
         "POLD",
         "Old phase owner",
         r#"#strict
-local marker;
-protected func OnPhase()
-{
-    marker = 1;
-    ChangeDef(PNW1);
-    return 1;
-}
-"#,
-    )?;
+    local marker;
+    protected func OnPhase()
+    {
+        marker = 1;
+        ChangeDef(PNW1);
+        return 1;
+    }
+    "#,
+    );
     old.set_c4_callback_convention(true);
     old.set_debugger_hooks(old_hooks);
     let source = ActionSpec::default()
@@ -67,16 +67,16 @@ protected func OnPhase()
         vec![("Source", source), ("OldTarget", ActionSpec::default())],
     );
 
-    let mut new = Definition::from_script(
+    let mut new = test_definition(
         "PNW1",
         "New phase target",
         r#"#strict
-local marker;
-protected func OnPhase() { marker = 2; return 1; }
-protected func NewZeroStart() { marker = marker * 10 + 4; return 1; }
-protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
-"#,
-    )?;
+    local marker;
+    protected func OnPhase() { marker = 2; return 1; }
+    protected func NewZeroStart() { marker = marker * 10 + 4; return 1; }
+    protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
+    "#,
+    );
     new.set_c4_callback_convention(true);
     new.set_debugger_hooks(new_hooks);
     install_physical_actions(
@@ -106,7 +106,7 @@ protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
 
     engine.tick_without_snapshot()?;
 
-    let index = engine.find_object_index(object).expect("object remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     assert_eq!(engine.objects[index].definition_id, "PNW1");
     assert_eq!(
         (
@@ -136,19 +136,19 @@ fn removed_phase_receiver_still_runs_phase_end_start_before_stopping() -> Result
         let calls = Arc::clone(&calls);
         hooks.set_on_call(move |name, _| {
             if matches!(name, "OnPhase" | "OnStart" | "OnEnd") {
-                calls.lock().unwrap().push(name.to_string());
+                crate::TestValueExt::test_value(calls.lock()).push(name.to_string());
             }
         });
     }
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "PDEL",
         "Deleted phase receiver",
         r#"#strict
-protected func OnPhase() { RemoveObject(); return 1; }
-protected func OnStart() { return 1; }
-protected func OnEnd() { return 1; }
-"#,
-    )?;
+    protected func OnPhase() { RemoveObject(); return 1; }
+    protected func OnStart() { return 1; }
+    protected func OnEnd() { return 1; }
+    "#,
+    );
     definition.set_c4_callback_convention(true);
     definition.set_debugger_hooks(hooks);
     let source = ActionSpec::default()
@@ -188,29 +188,29 @@ protected func OnEnd() { return 1; }
 #[test]
 fn script_set_action_coerces_incomplete_objects_to_act_idle_and_skips_start_call(
 ) -> Result<(), EngineError> {
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "PINC",
         "Partial action gate",
         r#"#strict
-local walk_started, old_aborted, aborted_phase, abort_saw_action;
-public func Probe()
-{
-    walk_started = 0;
-    old_aborted = 0;
-    aborted_phase = -1;
-    abort_saw_action = "";
-    return SetAction("Walk");
-}
-protected func WalkStarted() { walk_started++; return 1; }
-protected func OldAborted(phase)
-{
-    old_aborted++;
-    aborted_phase = phase;
-    abort_saw_action = GetAction();
-    return 1;
-}
-"#,
-    )?;
+    local walk_started, old_aborted, aborted_phase, abort_saw_action;
+    public func Probe()
+    {
+        walk_started = 0;
+        old_aborted = 0;
+        aborted_phase = -1;
+        abort_saw_action = "";
+        return SetAction("Walk");
+    }
+    protected func WalkStarted() { walk_started++; return 1; }
+    protected func OldAborted(phase)
+    {
+        old_aborted++;
+        aborted_phase = phase;
+        abort_saw_action = GetAction();
+        return 1;
+    }
+    "#,
+    );
     definition.set_c4_callback_convention(true);
     install_physical_actions(
         &mut definition,
@@ -230,7 +230,7 @@ protected func OldAborted(phase)
             .with_action(action)
             .with_loaded(true),
     )?;
-    let index = engine.find_object_index(object).expect("object exists");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     // Establish a state that can only arise after an already-active
     // object loses construction. The call below is the seam under test.
     engine.objects[index].state.construction = FULL_CON / 2;
@@ -259,25 +259,25 @@ protected func OldAborted(phase)
 
 #[test]
 fn natural_phase_end_refreshes_ocf_before_start_and_end_callbacks() -> Result<(), EngineError> {
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "POCF",
         "Natural action OCF refresh",
         r#"#strict
-local callback_order, start_saw_fight_ready, end_saw_fight_ready;
-protected func TargetStarted()
-{
-    callback_order = callback_order * 10 + 1;
-    if (GetOCF() & OCF_FightReady) start_saw_fight_ready = 1;
-    return 1;
-}
-protected func SourceEnded()
-{
-    callback_order = callback_order * 10 + 2;
-    if (GetOCF() & OCF_FightReady) end_saw_fight_ready = 1;
-    return 1;
-}
-"#,
-    )?;
+    local callback_order, start_saw_fight_ready, end_saw_fight_ready;
+    protected func TargetStarted()
+    {
+        callback_order = callback_order * 10 + 1;
+        if (GetOCF() & OCF_FightReady) start_saw_fight_ready = 1;
+        return 1;
+    }
+    protected func SourceEnded()
+    {
+        callback_order = callback_order * 10 + 2;
+        if (GetOCF() & OCF_FightReady) end_saw_fight_ready = 1;
+        return 1;
+    }
+    "#,
+    );
     definition.set_c4_callback_convention(true);
     definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
     install_physical_actions(
@@ -312,7 +312,7 @@ protected func SourceEnded()
 
     engine.tick_without_snapshot()?;
 
-    let index = engine.find_object_index(object).expect("object remains");
+    let index = crate::TestValueExt::test_value(engine.find_object_index(object));
     let state = &engine.objects[index].state;
     assert_eq!(
         (state.action.name.as_str(), state.action.act_map_index),

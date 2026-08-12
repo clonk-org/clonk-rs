@@ -4443,60 +4443,16 @@ fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
     }))
 }
 
-const RUNTIME_REGISTERED_GLOBAL_KEYS: &[&str] = &[
-    "MusicToggle",
-    "SoundToggle",
-    "Screenshot",
-    "ScreenshotEx",
-    "ToggleChat",
-    "ToggleShowHelp",
-    "NetClientListDlgToggle",
-    "MsgBoardScrollUp",
-    "MsgBoardScrollDown",
-    "DbgModeToggle",
-    "DbgShowVtxToggle",
-    "DbgShowActionToggle",
-    "DbgShowSolidMaskToggle",
-    "GameSpeedUp",
-    "GameSlowDown",
-    "FullscreenMenuLeft",
-    "FullscreenMenuRight",
-    "FullscreenMenuUp",
-    "FullscreenMenuDown",
-    "FullscreenMenuOK",
-    "FullscreenMenuCancel",
-    "FullscreenMenuOpen",
-    "FilmNextPlayer",
-    "ChatOpen",
-    "ChatOpen2Allies",
-    "ChatOpen2Say",
-    "FreeViewScrollLeft",
-    "FreeViewScrollRight",
-    "FreeViewScrollUp",
-    "FreeViewScrollDown",
-    "ScoreboardToggle",
-    "GameAbort",
-    "FullscreenPauseToggle",
-    "ConsolePauseToggle",
-    "EditCursorModeToggle",
-    "ToolsDlgGradeUp",
-    "ToolsDlgGradeDown",
-    "ToolsDlgPopMaterial",
-    "ToolsDlgPopTextures",
-    "ToolsDlgIFTToggle",
-    "ToolsDlgToolToggle",
-    "EditCursorDelete",
-    "ChartToggle",
-    "NetObsNextPlayer",
-    "CtrlRateDown",
-    "CtrlRateUp",
-    "NetAllowJoinToggle",
-    "NetStatsToggle",
-    // Port-only, and deliberately last: the diagnostics overlay yields the
-    // chord to every action C++ registers, so no shipped binding changes
-    // meaning. See the `Graphics.ShowStats` divergence in PORT_STATUS.md.
-    "StatsToggle",
-];
+const RUNTIME_REGISTERED_GLOBAL_KEYS: &str = "MusicToggle SoundToggle Screenshot ScreenshotEx \
+    ToggleChat ToggleShowHelp NetClientListDlgToggle MsgBoardScrollUp MsgBoardScrollDown \
+    DbgModeToggle DbgShowVtxToggle DbgShowActionToggle DbgShowSolidMaskToggle GameSpeedUp \
+    GameSlowDown FullscreenMenuLeft FullscreenMenuRight FullscreenMenuUp FullscreenMenuDown \
+    FullscreenMenuOK FullscreenMenuCancel FullscreenMenuOpen FilmNextPlayer ChatOpen \
+    ChatOpen2Allies ChatOpen2Say FreeViewScrollLeft FreeViewScrollRight FreeViewScrollUp \
+    FreeViewScrollDown ScoreboardToggle GameAbort FullscreenPauseToggle ConsolePauseToggle \
+    EditCursorModeToggle ToolsDlgGradeUp ToolsDlgGradeDown ToolsDlgPopMaterial ToolsDlgPopTextures \
+    ToolsDlgIFTToggle ToolsDlgToolToggle EditCursorDelete ChartToggle NetObsNextPlayer \
+    CtrlRateDown CtrlRateUp NetAllowJoinToggle NetStatsToggle StatsToggle";
 
 fn runtime_player_key_slot(name: &str) -> Option<(usize, ControlBindingId)> {
     let rest = name.strip_prefix("Kbd")?;
@@ -4515,7 +4471,12 @@ fn runtime_player_key_slot(name: &str) -> Option<(usize, ControlBindingId)> {
 }
 
 fn runtime_registered_key_name(name: &str) -> bool {
-    RUNTIME_REGISTERED_GLOBAL_KEYS.contains(&name)
+    // `StatsToggle` is a port-only diagnostic binding. It deliberately follows
+    // every C++ registration so no shipped binding changes meaning; see the
+    // `Graphics.ShowStats` divergence in PORT_STATUS.md.
+    RUNTIME_REGISTERED_GLOBAL_KEYS
+        .split_ascii_whitespace()
+        .any(|registered| registered == name)
         || runtime_player_key_slot(name).is_some()
         || (1..=4)
             .any(|gamepad| (1..=12).any(|control| name == format!("Joy{gamepad}Btn{control}")))

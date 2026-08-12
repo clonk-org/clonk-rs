@@ -32,30 +32,29 @@ fn load_tutorial04() -> (Engine, i32) {
     let resolver = ContentResolver {
         root: content.clone(),
     };
-    let scenario =
-        Scenario::load_from_path_with(content.join("Tutorial.c4f/Tutorial04.c4s"), &resolver)
-            .expect("Tutorial04 loads");
+    let scenario = crate::support::TestValueExt::test_value(Scenario::load_from_path_with(
+        content.join("Tutorial.c4f/Tutorial04.c4s"),
+        &resolver,
+    ));
     let mut engine = Engine::with_seed(0);
-    scenario.apply(&mut engine).expect("Tutorial04 applies");
-    let player = engine
-        .join_player(JoinPlayerConfig {
-            name: "Tutorial04 construction".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
-        .expect("Tutorial04 player joins");
+    crate::support::TestValueExt::test_value(scenario.apply(&mut engine));
+    let player = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Tutorial04 construction".to_string(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: false,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }));
     (engine, player.number())
 }
 
@@ -65,16 +64,15 @@ fn tutorial04_conkit_opens_the_real_elevator_construction_menu() {
     // GetPlrKnowledge (Objects/.../Conkit.c4d/Script.c:5-21). Classic double
     // Dig activates the first carried object (C4ObjectCom.cpp:531-539).
     let (mut engine, player) = load_tutorial04();
-    let clonk = engine
-        .crew_cursor(player)
-        .expect("Tutorial04 joins one selected CLNK");
-    let conkit = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "CNKT")
-        .expect("Tutorial04 supplies a construction kit")
-        .id;
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(player));
+    let conkit = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "CNKT"),
+    )
+    .id;
 
     for _ in 0..160 {
         if engine
@@ -83,23 +81,19 @@ fn tutorial04_conkit_opens_the_real_elevator_construction_menu() {
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("ready crew Exit frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    engine
-        .apply_object_update(conkit, ObjectUpdate::new().with_container(clonk))
-        .expect("take the real tutorial construction kit");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(conkit, ObjectUpdate::new().with_container(clonk)),
+    );
 
-    engine
-        .player_in_com(player, COM_DIG, 0)
-        .expect("first Dig press");
-    engine
-        .player_in_com(player, COM_DIG, 0)
-        .expect("second Dig press");
+    crate::support::TestValueExt::test_value(engine.player_in_com(player, COM_DIG, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(player, COM_DIG, 0));
 
-    let clonk_after_activation = engine.object_snapshot(clonk).expect("CLNK survives");
-    let conkit_after_activation = engine.object_snapshot(conkit).expect("CNKT survives");
+    let clonk_after_activation =
+        crate::support::TestValueExt::test_value(engine.object_snapshot(clonk));
+    let conkit_after_activation =
+        crate::support::TestValueExt::test_value(engine.object_snapshot(conkit));
     let (_, menu) = engine.cursor_object_menu(player).unwrap_or_else(|| {
         panic!(
             "CNKT activation opens its script menu; clonk={clonk_after_activation:?}; \

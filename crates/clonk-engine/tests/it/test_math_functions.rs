@@ -7,7 +7,7 @@ use clonk_engine::{Definition, Engine, SpawnConfig};
 fn abs_function_should_work() {
     let mut engine = Engine::new();
 
-    let script = Definition::from_script(
+    let script = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -17,13 +17,12 @@ fn abs_function_should_work() {
         }
         global func Step(state, frame, random) { return 0; }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
-    engine.register_definition(script).unwrap();
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()))
-        .unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(script));
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string())),
+    );
 
     // Initialize should return Abs(-42) = 42
     // This test will fail until we implement Abs
@@ -33,7 +32,7 @@ fn abs_function_should_work() {
 fn max_function_should_work() {
     let mut engine = Engine::new();
 
-    let script = Definition::from_script(
+    let script = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -43,13 +42,12 @@ fn max_function_should_work() {
         }
         global func Step(state, frame, random) { return 0; }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
-    engine.register_definition(script).unwrap();
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()))
-        .unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(script));
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string())),
+    );
 
     // Initialize should return Max(30, 50) = 50
     // This test will fail until we implement Max
@@ -59,7 +57,7 @@ fn max_function_should_work() {
 fn min_function_should_work() {
     let mut engine = Engine::new();
 
-    let script = Definition::from_script(
+    let script = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -69,13 +67,12 @@ fn min_function_should_work() {
         }
         global func Step(state, frame, random) { return 0; }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
-    engine.register_definition(script).unwrap();
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()))
-        .unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(script));
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string())),
+    );
 
     // Initialize should return Min(30, 50) = 30
     // This test will fail until we implement Min
@@ -86,7 +83,7 @@ fn tree_still_callback_should_use_abs() {
     // This test simulates the actual Tree usage pattern
     let mut engine = Engine::new();
 
-    let script = Definition::from_script(
+    let script = crate::support::TestValueExt::test_value(Definition::from_script(
         "TREE",
         "Tree",
         r#"
@@ -98,13 +95,12 @@ fn tree_still_callback_should_use_abs() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
-    engine.register_definition(script).unwrap();
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TREE".to_string()))
-        .unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(script));
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TREE".to_string())),
+    );
 
     // This test will fail until we implement Abs
 }

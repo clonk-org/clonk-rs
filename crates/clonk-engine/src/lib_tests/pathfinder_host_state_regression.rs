@@ -1,10 +1,90 @@
 use super::*;
 use crate::landscape::PixelGrid;
 
+trait TestEngineExt {
+    fn call_test_object_function(
+        &mut self,
+        index: usize,
+        function: &str,
+        args: Vec<Value>,
+    ) -> Value;
+    fn execute_test_object_command(&mut self, object: ObjectId);
+    fn queue_test_command(&mut self, index: usize, command: CommandRequest);
+    fn register_test_definition(&mut self, definition: Definition);
+    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str);
+    fn set_test_transfer_zone(&mut self, object: ObjectId, x: i32, y: i32, width: i32, height: i32);
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId;
+    fn test_object_index(&self, object: ObjectId) -> usize;
+}
+
+impl TestEngineExt for Engine {
+    #[track_caller]
+    fn call_test_object_function(
+        &mut self,
+        index: usize,
+        function: &str,
+        args: Vec<Value>,
+    ) -> Value {
+        crate::TestValueExt::test_value(self.call_object_function(index, function, args))
+    }
+
+    #[track_caller]
+    fn execute_test_object_command(&mut self, object: ObjectId) {
+        crate::TestValueExt::test_value(self.execute_object_command_now(object));
+    }
+
+    #[track_caller]
+    fn queue_test_command(&mut self, index: usize, command: CommandRequest) {
+        crate::TestValueExt::test_value(self.objects[index].commands.push_front(command));
+    }
+
+    #[track_caller]
+    fn register_test_definition(&mut self, definition: Definition) {
+        crate::TestValueExt::test_value(self.register_definition(definition));
+    }
+
+    #[track_caller]
+    fn register_test_script_definition(&mut self, id: &str, name: &str, script: &str) {
+        crate::TestValueExt::test_value(self.register_script_definition(id, name, script));
+    }
+
+    #[track_caller]
+    fn set_test_transfer_zone(
+        &mut self,
+        object: ObjectId,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        crate::TestValueExt::test_value(self.set_transfer_zone(
+            object,
+            TransferZoneRect {
+                x,
+                y,
+                width,
+                height,
+            },
+        ));
+    }
+
+    #[track_caller]
+    fn spawn_test_object(&mut self, config: SpawnConfig) -> ObjectId {
+        crate::TestValueExt::test_value(self.spawn_object(config))
+    }
+
+    #[track_caller]
+    fn test_object_index(&self, object: ObjectId) -> usize {
+        crate::TestValueExt::test_value(self.find_object_index(object))
+    }
+}
+
 fn pixel_landscape(width: u32, height: u32, pixels: Vec<u8>) -> Landscape {
-    let mut landscape =
-        Landscape::with_default_material(width, vec![height as i32; width as usize], None)
-            .expect("pathfinder landscape");
+    let mut landscape = crate::TestValueExt::test_value(Landscape::with_default_material(
+        width,
+        vec![height as i32; width as usize],
+        None,
+    ));
     landscape.set_world_height(height as i32);
     landscape.set_pixel_grid(PixelGrid::new(
         width,
@@ -18,17 +98,15 @@ fn pixel_landscape(width: u32, height: u32, pixels: Vec<u8>) -> Landscape {
 }
 
 fn script_get_path(engine: &mut Engine, from: Vector2, to: Vector2) -> Value {
-    engine
-        .call_engine_global_function(
-            "GetPath",
-            &[
-                Value::Int(from.x),
-                Value::Int(from.y),
-                Value::Int(to.x),
-                Value::Int(to.y),
-            ],
-        )
-        .expect("GetPath host call succeeds")
+    crate::TestValueExt::test_value(engine.call_engine_global_function(
+        "GetPath",
+        &[
+            Value::Int(from.x),
+            Value::Int(from.y),
+            Value::Int(to.x),
+            Value::Int(to.y),
+        ],
+    ))
 }
 
 fn unpack_path(value: &Value) -> (i32, Vec<(i32, i32, Option<u64>)>) {
@@ -69,26 +147,18 @@ fn unpack_path(value: &Value) -> (i32, Vec<(i32, i32, Option<u64>)>) {
 }
 
 fn run_obstructed_move_to(engine: &mut Engine, object_id: ObjectId, target: Vector2) {
-    let index = engine
-        .find_object_index(object_id)
-        .expect("pathfinder object exists");
-    engine.objects[index]
-        .commands
-        .push_front(
-            CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(target.x))
-                .with_ty(Some(target.y))
-                // C4CMD_MoveTo_NoPosAdjust keeps the test coordinate
-                // fixed across the command's evaluation-only Execute.
-                .with_data(CommandData::Integer(1)),
-        )
-        .expect("MoveTo queues");
-    engine
-        .execute_object_command_now(object_id)
-        .expect("MoveTo evaluates");
-    engine
-        .execute_object_command_now(object_id)
-        .expect("MoveTo pathfind executes");
+    let index = engine.test_object_index(object_id);
+    engine.queue_test_command(
+        index,
+        CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(target.x))
+            .with_ty(Some(target.y))
+            // C4CMD_MoveTo_NoPosAdjust keeps the test coordinate
+            // fixed across the command's evaluation-only Execute.
+            .with_data(CommandData::Integer(1)),
+    );
+    engine.execute_test_object_command(object_id);
+    engine.execute_test_object_command(object_id);
 }
 
 #[test]
@@ -109,15 +179,10 @@ fn get_path_reuses_last_move_to_pathfinder_level_like_cpp() {
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    let mut definition =
-        Definition::from_script("PF05", "Level five mover", "").expect("definition compiles");
+    let mut definition = test_definition("PF05", "Level five mover", "");
     definition.set_pathfinder(5);
-    engine
-        .register_definition(definition)
-        .expect("definition registers");
-    let mover = engine
-        .spawn_object(SpawnConfig::new("PF05").with_position(from))
-        .expect("mover spawns");
+    engine.register_test_definition(definition);
+    let mover = engine.spawn_test_object(SpawnConfig::new("PF05").with_position(from));
 
     assert!(engine.find_path(from, to, 1, true).is_none());
     assert!(engine.find_path(from, to, 5, true).is_some());
@@ -155,36 +220,16 @@ fn get_path_reuses_last_move_to_transfer_zone_toggle_like_cpp() {
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    let mut enabled =
-        Definition::from_script("PFTZ", "Zone mover", "").expect("definition compiles");
+    let mut enabled = test_definition("PFTZ", "Zone mover", "");
     enabled.set_pathfinder(1);
-    engine
-        .register_definition(enabled)
-        .expect("enabled definition registers");
-    let mut disabled =
-        Definition::from_script("PFNZ", "No-zone mover", "").expect("definition compiles");
+    engine.register_test_definition(enabled);
+    let mut disabled = test_definition("PFNZ", "No-zone mover", "");
     disabled.set_pathfinder(1);
     disabled.set_no_transfer_zones(1);
-    engine
-        .register_definition(disabled)
-        .expect("disabled definition registers");
-    let zone_owner = engine
-        .spawn_object(SpawnConfig::new("PFTZ").with_position(from))
-        .expect("zone owner spawns");
-    let no_zone_mover = engine
-        .spawn_object(SpawnConfig::new("PFNZ").with_position(from))
-        .expect("no-zone mover spawns");
-    engine
-        .set_transfer_zone(
-            zone_owner,
-            TransferZoneRect {
-                x: 45,
-                y: 40,
-                width: 10,
-                height: 20,
-            },
-        )
-        .expect("transfer zone registers");
+    engine.register_test_definition(disabled);
+    let zone_owner = engine.spawn_test_object(SpawnConfig::new("PFTZ").with_position(from));
+    let no_zone_mover = engine.spawn_test_object(SpawnConfig::new("PFNZ").with_position(from));
+    engine.set_test_transfer_zone(zone_owner, 45, 40, 10, 20);
 
     assert!(engine.find_path(from, to, 1, false).is_none());
     assert!(engine.find_path(from, to, 1, true).is_some());
@@ -234,47 +279,30 @@ fn execute_command_updates_get_path_settings_within_the_same_script_call() {
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    let mut definition = Definition::from_script(
+    let mut definition = test_definition(
         "PFSY",
         "Synchronous no-zone mover",
         r#"
-                #strict 2
-                func Probe()
-                {
-                    SetCommand(this(), "MoveTo", 0, 90, 50, 0, 1);
-                    ExecuteCommand();
-                    ExecuteCommand();
-                    return GetPath(11, 49, 89, 51);
-                }
-            "#,
-    )
-    .expect("definition compiles");
+            #strict 2
+            func Probe()
+            {
+                SetCommand(this(), "MoveTo", 0, 90, 50, 0, 1);
+                ExecuteCommand();
+                ExecuteCommand();
+                return GetPath(11, 49, 89, 51);
+            }
+        "#,
+    );
     definition.set_pathfinder(1);
     definition.set_no_transfer_zones(1);
-    engine
-        .register_definition(definition)
-        .expect("definition registers");
-    let mover = engine
-        .spawn_object(SpawnConfig::new("PFSY").with_position(from))
-        .expect("mover spawns");
-    engine
-        .set_transfer_zone(
-            mover,
-            TransferZoneRect {
-                x: 45,
-                y: 40,
-                width: 10,
-                height: 20,
-            },
-        )
-        .expect("transfer zone registers");
+    engine.register_test_definition(definition);
+    let mover = engine.spawn_test_object(SpawnConfig::new("PFSY").with_position(from));
+    engine.set_test_transfer_zone(mover, 45, 40, 10, 20);
     assert!(engine.find_path(from, to, 1, true).is_some());
     assert!(engine.find_path(from, to, 1, false).is_none());
 
-    let index = engine.find_object_index(mover).expect("mover exists");
-    let value = engine
-        .call_object_function(index, "Probe", Vec::new())
-        .expect("Probe executes");
+    let index = engine.test_object_index(mover);
+    let value = engine.call_test_object_function(index, "Probe", Vec::new());
 
     assert_eq!(
         value,
@@ -290,57 +318,36 @@ fn execute_command_updates_get_path_settings_within_the_same_script_call() {
 #[test]
 fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() {
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "GATE",
-                "Transfer gate",
-                r#"
-                        #strict 2
-                        protected func ControlTransfer(object actor, tx, int ty)
-                        {
-                            SetR(73, actor);
-                            SetCommand(actor, "Transfer", this(), 777, 9);
-                            return false;
-                        }
-                    "#,
-            )
-            .expect("gate definition compiles"),
-        )
-        .expect("gate definition registers");
-    engine
-        .register_script_definition("ACTR", "Transfer actor", "")
-        .expect("actor definition registers");
+    engine.register_test_definition(test_definition(
+        "GATE",
+        "Transfer gate",
+        r#"
+                    #strict 2
+                    protected func ControlTransfer(object actor, tx, int ty)
+                    {
+                        SetR(73, actor);
+                        SetCommand(actor, "Transfer", this(), 777, 9);
+                        return false;
+                    }
+                "#,
+    ));
+    engine.register_test_script_definition("ACTR", "Transfer actor", "");
 
-    let gate = engine
-        .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(100, 0)))
-        .expect("gate spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACTR").with_position(Vector2::new(95, 0)))
-        .expect("actor spawns");
-    engine
-        .set_transfer_zone(
-            gate,
-            TransferZoneRect {
-                x: 90,
-                y: -10,
-                width: 20,
-                height: 40,
-            },
-        )
-        .expect("transfer zone registers");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine.objects[actor_index]
-        .commands
-        .push_front(
-            CommandRequest::new(CommandId::Transfer)
-                .with_target(Some(gate))
-                .with_tx_value(Value::C4Id("GOLD".to_string()))
-                .with_ty(Some(-5)),
-        )
-        .expect("Transfer queues");
+    let gate =
+        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(100, 0)));
+    let actor =
+        engine.spawn_test_object(SpawnConfig::new("ACTR").with_position(Vector2::new(95, 0)));
+    engine.set_test_transfer_zone(gate, 90, -10, 20, 40);
+    let actor_index = engine.test_object_index(actor);
+    engine.queue_test_command(
+        actor_index,
+        CommandRequest::new(CommandId::Transfer)
+            .with_target(Some(gate))
+            .with_tx_value(Value::C4Id("GOLD".to_string()))
+            .with_ty(Some(-5)),
+    );
 
-    let gate_index = engine.find_object_index(gate).expect("gate exists");
+    let gate_index = engine.test_object_index(gate);
     let _ = engine.objects[gate_index].mark_destroyed();
     assert_eq!(
         engine.objects[gate_index].state.status,
@@ -351,11 +358,9 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
         "the synthetic tombstone retains its zone for the direct-call seam"
     );
 
-    engine
-        .execute_object_command_now(actor)
-        .expect("Transfer executes");
+    engine.execute_test_object_command(actor);
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index].state.rotation, 73,
         "the cached SFn executes even though C4Object::Call would reject Status zero"
@@ -378,39 +383,28 @@ fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() 
 #[test]
 fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "ZTRG",
-                "Restored transfer gate",
-                r#"
-                        #strict 2
-                        local answer;
-                        protected func ControlTransfer(object actor, tx, int ty)
-                        {
-                            SetCommand(actor, "Transfer", this(), 777, 9);
-                            return answer;
-                        }
-                    "#,
-            )
-            .expect("gate definition compiles"),
-        )
-        .expect("gate definition registers");
-    engine
-        .register_script_definition("ZTRA", "Restored transfer actor", "")
-        .expect("actor definition registers");
+    engine.register_test_definition(test_definition(
+        "ZTRG",
+        "Restored transfer gate",
+        r#"
+                    #strict 2
+                    local answer;
+                    protected func ControlTransfer(object actor, tx, int ty)
+                    {
+                        SetCommand(actor, "Transfer", this(), 777, 9);
+                        return answer;
+                    }
+                "#,
+    ));
+    engine.register_test_script_definition("ZTRA", "Restored transfer actor", "");
 
-    let gate = engine
-        .spawn_object(SpawnConfig::new("ZTRG"))
-        .expect("gate spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ZTRA"))
-        .expect("actor spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Transfer).with_target(Some(gate)))
-        .expect("original Transfer queues");
+    let gate = engine.spawn_test_object(SpawnConfig::new("ZTRG"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("ZTRA"));
+    let actor_index = engine.test_object_index(actor);
+    engine.queue_test_command(
+        actor_index,
+        CommandRequest::new(CommandId::Transfer).with_target(Some(gate)),
+    );
 
     let queued = QueuedCommand::immediate(ObjectUpdate::default()).with_events(vec![
         CommandEvent::ControlTransfer {
@@ -421,8 +415,8 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
             command_instance_id: u64::MAX,
         },
     ]);
-    let encoded = serde_json::to_value(queued).expect("queued event serializes");
-    let restored: QueuedCommand = serde_json::from_value(encoded).expect("queued event restores");
+    let encoded = crate::TestValueExt::test_value(serde_json::to_value(queued));
+    let restored: QueuedCommand = crate::TestValueExt::test_value(serde_json::from_value(encoded));
     let [event] = restored.events.as_slice() else {
         panic!("one restored event expected");
     };
@@ -434,11 +428,9 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
         }
     ));
 
-    engine
-        .apply_command_event(event.clone())
-        .expect("restored direct callback executes");
+    crate::TestValueExt::test_value(engine.apply_command_event(event.clone()));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let commands = engine.objects[actor_index].commands.command_views();
     let [replacement] = commands.as_slice() else {
         panic!("callback replacement Transfer must remain: {commands:?}");
@@ -451,7 +443,7 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
         "the restored event resolves the original instance before its callback"
     );
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     assert_eq!(
         engine.objects[actor_index]
             .commands
@@ -459,11 +451,11 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
         vec![CommandId::Transfer]
     );
     engine.objects[actor_index].commands.clear();
-    engine.objects[actor_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Transfer).with_target(Some(gate)))
-        .expect("legacy original Transfer queues");
-    let gate_index = engine.find_object_index(gate).expect("gate remains");
+    engine.queue_test_command(
+        actor_index,
+        CommandRequest::new(CommandId::Transfer).with_target(Some(gate)),
+    );
+    let gate_index = engine.test_object_index(gate);
     let raw = 1usize.checked_shl(32).unwrap_or(0);
     engine.objects[gate_index]
         .state
@@ -485,16 +477,14 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
             }),
         },
     ]);
-    let encoded = serde_json::to_value(legacy).expect("legacy event serializes");
-    let restored: QueuedCommand = serde_json::from_value(encoded).expect("legacy event restores");
+    let encoded = crate::TestValueExt::test_value(serde_json::to_value(legacy));
+    let restored: QueuedCommand = crate::TestValueExt::test_value(serde_json::from_value(encoded));
     let [legacy_event] = restored.events.as_slice() else {
         panic!("one restored legacy event expected");
     };
-    engine
-        .apply_command_event(legacy_event.clone())
-        .expect("legacy callback event executes");
+    crate::TestValueExt::test_value(engine.apply_command_event(legacy_event.clone()));
 
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let commands = engine.objects[actor_index].commands.command_views();
     let [replacement] = commands.as_slice() else {
         panic!("legacy callback replacement Transfer must remain: {commands:?}");
@@ -523,41 +513,30 @@ fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
 #[test]
 fn transfer_direct_callback_uses_the_c4_bool_low_word() {
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "GBOL",
-                "Raw-bool transfer gate",
-                r#"
-                        #strict 2
-                        local answer;
-                        protected func ControlTransfer(object actor, tx, int ty)
-                        {
-                            return answer;
-                        }
-                    "#,
-            )
-            .expect("gate definition compiles"),
-        )
-        .expect("gate definition registers");
-    engine
-        .register_script_definition("ABOL", "Raw-bool actor", "")
-        .expect("actor definition registers");
+    engine.register_test_definition(test_definition(
+        "GBOL",
+        "Raw-bool transfer gate",
+        r#"
+                    #strict 2
+                    local answer;
+                    protected func ControlTransfer(object actor, tx, int ty)
+                    {
+                        return answer;
+                    }
+                "#,
+    ));
+    engine.register_test_script_definition("ABOL", "Raw-bool actor", "");
 
     // C4VBool stores a machine word but C4Value::getBool reads its signed
     // 32-bit payload. On a 64-bit host this value is truthy to Rust's
     // generic Value::as_bool while its native C4 bool word is zero.
     let raw = 1usize.checked_shl(32).unwrap_or(0);
-    let gate = engine
-        .spawn_object(
-            SpawnConfig::new("GBOL")
-                .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
-        )
-        .expect("gate spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ABOL"))
-        .expect("actor spawns");
-    let gate_index = engine.find_object_index(gate).expect("gate exists");
+    let gate = engine.spawn_test_object(
+        SpawnConfig::new("GBOL")
+            .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
+    );
+    let actor = engine.spawn_test_object(SpawnConfig::new("ABOL"));
+    let gate_index = engine.test_object_index(gate);
 
     assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
     assert!(
@@ -571,38 +550,27 @@ fn transfer_direct_callback_uses_the_c4_bool_low_word() {
 #[test]
 fn activate_entrance_uses_full_c4_value_truthiness() {
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "EBOL",
-                "Raw-bool entrance",
-                r#"
-                        #strict 2
-                        local answer;
-                        protected func ActivateEntrance(object actor)
-                        {
-                            return answer;
-                        }
-                    "#,
-            )
-            .expect("entrance definition compiles"),
-        )
-        .expect("entrance definition registers");
-    engine
-        .register_script_definition("ACBE", "Entrance caller", "")
-        .expect("caller definition registers");
+    engine.register_test_definition(test_definition(
+        "EBOL",
+        "Raw-bool entrance",
+        r#"
+                    #strict 2
+                    local answer;
+                    protected func ActivateEntrance(object actor)
+                    {
+                        return answer;
+                    }
+                "#,
+    ));
+    engine.register_test_script_definition("ACBE", "Entrance caller", "");
 
     let raw = 1usize.checked_shl(32).unwrap_or(0);
-    let entrance = engine
-        .spawn_object(
-            SpawnConfig::new("EBOL")
-                .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
-        )
-        .expect("entrance spawns");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("ACBE"))
-        .expect("caller spawns");
-    let entrance_index = engine.find_object_index(entrance).expect("entrance exists");
+    let entrance = engine.spawn_test_object(
+        SpawnConfig::new("EBOL")
+            .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
+    );
+    let caller = engine.spawn_test_object(SpawnConfig::new("ACBE"));
+    let entrance_index = engine.test_object_index(entrance);
     engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
 
     assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
@@ -618,40 +586,26 @@ fn activate_entrance_uses_full_c4_value_truthiness() {
 #[test]
 fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "ZENT",
-                "Restored entrance",
-                r#"
-                        #strict 2
-                        protected func ActivateEntrance(object actor)
-                        {
-                            SetCommand(actor, "Exit");
-                            return false;
-                        }
-                    "#,
-            )
-            .expect("entrance definition compiles"),
-        )
-        .expect("entrance definition registers");
-    engine
-        .register_script_definition("ZENA", "Restored entrance caller", "")
-        .expect("caller definition registers");
+    engine.register_test_definition(test_definition(
+        "ZENT",
+        "Restored entrance",
+        r#"
+                    #strict 2
+                    protected func ActivateEntrance(object actor)
+                    {
+                        SetCommand(actor, "Exit");
+                        return false;
+                    }
+                "#,
+    ));
+    engine.register_test_script_definition("ZENA", "Restored entrance caller", "");
 
-    let entrance = engine
-        .spawn_object(SpawnConfig::new("ZENT"))
-        .expect("entrance spawns");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("ZENA"))
-        .expect("caller spawns");
-    let entrance_index = engine.find_object_index(entrance).expect("entrance exists");
+    let entrance = engine.spawn_test_object(SpawnConfig::new("ZENT"));
+    let caller = engine.spawn_test_object(SpawnConfig::new("ZENA"));
+    let entrance_index = engine.test_object_index(entrance);
     engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
-    let caller_index = engine.find_object_index(caller).expect("caller exists");
-    engine.objects[caller_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Exit))
-        .expect("original Exit queues");
+    let caller_index = engine.test_object_index(caller);
+    engine.queue_test_command(caller_index, CommandRequest::new(CommandId::Exit));
 
     let queued = QueuedCommand::immediate(ObjectUpdate::default()).with_events(vec![
         CommandEvent::ActivateEntrance {
@@ -663,17 +617,14 @@ fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
             command_instance_id: u64::MAX,
         },
     ]);
-    let encoded = serde_json::to_value(queued).expect("legacy entrance event serializes");
-    let restored: QueuedCommand =
-        serde_json::from_value(encoded).expect("legacy entrance event restores");
+    let encoded = crate::TestValueExt::test_value(serde_json::to_value(queued));
+    let restored: QueuedCommand = crate::TestValueExt::test_value(serde_json::from_value(encoded));
     let [event] = restored.events.as_slice() else {
         panic!("one restored entrance event expected");
     };
-    engine
-        .apply_command_event(event.clone())
-        .expect("legacy entrance event executes");
+    crate::TestValueExt::test_value(engine.apply_command_event(event.clone()));
 
-    let caller_index = engine.find_object_index(caller).expect("caller remains");
+    let caller_index = engine.test_object_index(caller);
     let commands = engine.objects[caller_index].commands.legacy_save_commands();
     let [replacement] = commands.as_slice() else {
         panic!("callback replacement Exit must remain: {commands:?}");
@@ -688,70 +639,47 @@ fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
 #[test]
 fn script_execute_command_runs_direct_transfer_before_returning() {
     let mut engine = Engine::with_seed(1);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "GAT2",
-                "Synchronous transfer gate",
-                r#"
-                        #strict 2
-                        local seen_tx, seen_ty;
-                        protected func ControlTransfer(object actor, tx, int ty)
-                        {
-                            seen_tx = tx;
-                            seen_ty = ty;
-                            SetR(73, actor);
-                            SetCommand(actor, "Transfer", this(), 777, 9);
-                            return false;
-                        }
-                    "#,
-            )
-            .expect("gate definition compiles"),
-        )
-        .expect("gate definition registers");
-    engine
-        .register_definition(
-            Definition::from_script(
-                "ACR2",
-                "Synchronous transfer actor",
-                r#"
-                        #strict 2
-                        public func Probe(object gate)
-                        {
-                            SetCommand(this(), "Transfer", gate, GOLD, -5);
-                            ExecuteCommand();
-                            return [GetR(), GetCommand(), GetCommand(0, 2), GetCommand(0, 3)];
-                        }
-                    "#,
-            )
-            .expect("actor definition compiles"),
-        )
-        .expect("actor definition registers");
+    engine.register_test_definition(test_definition(
+        "GAT2",
+        "Synchronous transfer gate",
+        r#"
+                    #strict 2
+                    local seen_tx, seen_ty;
+                    protected func ControlTransfer(object actor, tx, int ty)
+                    {
+                        seen_tx = tx;
+                        seen_ty = ty;
+                        SetR(73, actor);
+                        SetCommand(actor, "Transfer", this(), 777, 9);
+                        return false;
+                    }
+                "#,
+    ));
+    engine.register_test_definition(test_definition(
+        "ACR2",
+        "Synchronous transfer actor",
+        r#"
+                    #strict 2
+                    public func Probe(object gate)
+                    {
+                        SetCommand(this(), "Transfer", gate, GOLD, -5);
+                        ExecuteCommand();
+                        return [GetR(), GetCommand(), GetCommand(0, 2), GetCommand(0, 3)];
+                    }
+                "#,
+    ));
 
-    let gate = engine
-        .spawn_object(SpawnConfig::new("GAT2").with_position(Vector2::new(100, 0)))
-        .expect("gate spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("ACR2").with_position(Vector2::new(95, 0)))
-        .expect("actor spawns");
-    engine
-        .set_transfer_zone(
-            gate,
-            TransferZoneRect {
-                x: 90,
-                y: -10,
-                width: 20,
-                height: 40,
-            },
-        )
-        .expect("transfer zone registers");
-    let gate_index = engine.find_object_index(gate).expect("gate exists");
+    let gate =
+        engine.spawn_test_object(SpawnConfig::new("GAT2").with_position(Vector2::new(100, 0)));
+    let actor =
+        engine.spawn_test_object(SpawnConfig::new("ACR2").with_position(Vector2::new(95, 0)));
+    engine.set_test_transfer_zone(gate, 90, -10, 20, 40);
+    let gate_index = engine.test_object_index(gate);
     let _ = engine.objects[gate_index].mark_destroyed();
 
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    let result = engine
-        .call_object_function(actor_index, "Probe", vec![object_reference_value(gate)])
-        .expect("Probe executes");
+    let actor_index = engine.test_object_index(actor);
+    let result =
+        engine.call_test_object_function(actor_index, "Probe", vec![object_reference_value(gate)]);
     assert_eq!(
         result,
         Value::Array(vec![
@@ -762,7 +690,7 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
         ]),
         "the next VM instruction observes the direct callback and its replacement command"
     );
-    let gate_index = engine.find_object_index(gate).expect("gate remains");
+    let gate_index = engine.test_object_index(gate);
     assert_eq!(
         engine.objects[gate_index].state.local_vars.get("seen_tx"),
         Some(&Value::C4Id("GOLD".to_string())),
@@ -772,7 +700,7 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
         engine.objects[gate_index].state.local_vars.get("seen_ty"),
         Some(&Value::Int(-5))
     );
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let commands = engine.objects[actor_index].commands.command_views();
     let [replacement] = commands.as_slice() else {
         panic!("replacement Transfer must remain: {commands:?}");
@@ -787,86 +715,75 @@ fn script_execute_command_runs_direct_transfer_before_returning() {
 fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
     fn setup() -> (Engine, ObjectId, ObjectId) {
         let mut engine = Engine::with_seed(1);
-        let mut container = Definition::from_script(
+        let mut container = test_definition(
             "XCTR",
             "Exit callback container",
             r#"
-                    #strict 2
-                    protected func Ejection(object item)
-                    {
-                        item->NoteExit(1);
-                        return true;
-                    }
-                "#,
-        )
-        .expect("container definition compiles");
+                #strict 2
+                protected func Ejection(object item)
+                {
+                    item->NoteExit(1);
+                    return true;
+                }
+            "#,
+        );
         container.set_c4_callback_convention(true);
-        engine
-            .register_definition(container)
-            .expect("container definition registers");
-        let mut actor = Definition::from_script(
+        engine.register_test_definition(container);
+        let mut actor = test_definition(
             "XACT",
             "Exit callback actor",
             r#"
-                    #strict 2
-                    local exit_order, after_exit_order, after_exit_command, after_exit_rotation;
-                    public func NoteExit(int step)
-                    {
-                        exit_order = exit_order * 10 + step;
-                        return true;
-                    }
-                    protected func Departure(object old_container)
-                    {
-                        NoteExit(2);
-                        SetCommand(this(), "Wait", 0, 17);
-                        return true;
-                    }
-                    public func Probe()
-                    {
-                        ExecuteCommand();
-                        after_exit_order = exit_order;
-                        after_exit_command = GetCommand();
-                        after_exit_rotation = GetR();
-                        return true;
-                    }
-                "#,
-        )
-        .expect("actor definition compiles");
+                #strict 2
+                local exit_order, after_exit_order, after_exit_command, after_exit_rotation;
+                public func NoteExit(int step)
+                {
+                    exit_order = exit_order * 10 + step;
+                    return true;
+                }
+                protected func Departure(object old_container)
+                {
+                    NoteExit(2);
+                    SetCommand(this(), "Wait", 0, 17);
+                    return true;
+                }
+                public func Probe()
+                {
+                    ExecuteCommand();
+                    after_exit_order = exit_order;
+                    after_exit_command = GetCommand();
+                    after_exit_rotation = GetR();
+                    return true;
+                }
+            "#,
+        );
         actor.set_c4_callback_convention(true);
-        engine
-            .register_definition(actor)
-            .expect("actor definition registers");
+        engine.register_test_definition(actor);
 
-        let container = engine
-            .spawn_object(SpawnConfig::new("XCTR").with_position(Vector2::new(80, 90)))
-            .expect("container spawns");
-        let actor = engine
-            .spawn_object(SpawnConfig::new("XACT").with_container(container))
-            .expect("actor spawns");
-        let container_index = engine
-            .find_object_index(container)
-            .expect("container exists");
+        let container =
+            engine.spawn_test_object(SpawnConfig::new("XCTR").with_position(Vector2::new(80, 90)));
+        let actor = engine.spawn_test_object(SpawnConfig::new("XACT").with_container(container));
+        let container_index = engine.test_object_index(container);
         engine.objects[container_index].state.entrance_status = true;
-        engine
-            .apply_object_update(
+        crate::TestValueExt::test_value(
+            engine.apply_object_update(
                 actor,
                 ObjectUpdate::new()
                     .with_position(Vector2::new(7, 9))
                     .with_rotation(45)
                     .with_velocity(Vector2::new(6, -2))
                     .with_command_direction(CommandDirection::Right),
-            )
-            .expect("contained actor is repositioned");
-        let actor_index = engine.find_object_index(actor).expect("actor exists");
-        engine.objects[actor_index]
-            .commands
-            .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
-            .expect("Exit queues");
+            ),
+        );
+        let actor_index = engine.test_object_index(actor);
+        engine.queue_test_command(
+            actor_index,
+            CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        );
         (engine, actor, container)
     }
 
     fn assert_exit_result(engine: &Engine, actor: ObjectId, container: ObjectId) {
-        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let actor_index = engine.test_object_index(actor);
         let state = &engine.objects[actor_index].state;
         assert_eq!(state.container, None);
         assert_eq!(state.position, Vector2::new(7, 9));
@@ -874,12 +791,10 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
         assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
         assert_eq!(state.command_direction, CommandDirection::Right);
         assert_eq!(state.local_vars.get("exit_order"), Some(&Value::Int(12)));
-        assert!(!engine.objects[engine
-            .find_object_index(container)
-            .expect("container remains")]
-        .state
-        .contents
-        .contains(&actor));
+        assert!(!engine.objects[engine.test_object_index(container)]
+            .state
+            .contents
+            .contains(&actor));
         let commands = engine.objects[actor_index].commands.command_views();
         let [replacement] = commands.as_slice() else {
             panic!("Departure replacement Wait must remain: {commands:?}");
@@ -890,18 +805,14 @@ fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
     }
 
     let (mut engine, actor, container) = setup();
-    engine
-        .execute_object_command_now(actor)
-        .expect("engine Exit executes");
+    engine.execute_test_object_command(actor);
     assert_exit_result(&engine, actor, container);
 
     let (mut engine, actor, container) = setup();
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine
-        .call_object_function(actor_index, "Probe", Vec::new())
-        .expect("script ExecuteCommand returns");
+    let actor_index = engine.test_object_index(actor);
+    engine.call_test_object_function(actor_index, "Probe", Vec::new());
     assert_exit_result(&engine, actor, container);
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor_index = engine.test_object_index(actor);
     let locals = &engine.objects[actor_index].state.local_vars;
     assert_eq!(locals.get("after_exit_order"), Some(&Value::Int(12)));
     assert_eq!(
@@ -929,55 +840,34 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     let mut engine = Engine::with_seed(1);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
 
-    engine
-        .register_script_definition("GATE", "Transfer gate", "")
-        .expect("gate definition registers");
-    let mut mover_definition = Definition::from_script(
+    engine.register_test_script_definition("GATE", "Transfer gate", "");
+    let mut mover_definition = test_definition(
         "PFMR",
         "Pathfinder mover",
         r#"
-                #strict 2
-                func RemoveGate(gate)
-                {
-                    RemoveObject(gate);
-                    return GetPath(10, 50, 90, 50);
-                }
-            "#,
-    )
-    .expect("mover definition compiles");
+            #strict 2
+            func RemoveGate(gate)
+            {
+                RemoveObject(gate);
+                return GetPath(10, 50, 90, 50);
+            }
+        "#,
+    );
     mover_definition.set_pathfinder(1);
-    engine
-        .register_definition(mover_definition)
-        .expect("mover definition registers");
+    engine.register_test_definition(mover_definition);
 
-    let gate = engine
-        .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)))
-        .expect("gate spawns");
-    let path_actor = engine
-        .spawn_object(SpawnConfig::new("PFMR").with_position(from))
-        .expect("path actor spawns");
-    let transfer_actor = engine
-        .spawn_object(SpawnConfig::new("PFMR").with_position(Vector2::new(45, 50)))
-        .expect("transfer actor spawns");
-    engine
-        .set_transfer_zone(
-            gate,
-            TransferZoneRect {
-                x: 45,
-                y: 40,
-                width: 10,
-                height: 20,
-            },
-        )
-        .expect("transfer zone registers");
+    let gate =
+        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)));
+    let path_actor = engine.spawn_test_object(SpawnConfig::new("PFMR").with_position(from));
+    let transfer_actor =
+        engine.spawn_test_object(SpawnConfig::new("PFMR").with_position(Vector2::new(45, 50)));
+    engine.set_test_transfer_zone(gate, 45, 40, 10, 20);
     assert!(
         engine.find_path(from, to, 1, true).is_some(),
         "the live gate is the only route through the full-height wall"
     );
     run_obstructed_move_to(&mut engine, path_actor, to);
-    let path_index = engine
-        .find_object_index(path_actor)
-        .expect("path actor exists");
+    let path_index = engine.test_object_index(path_actor);
     assert!(
         engine.objects[path_index]
             .commands
@@ -989,34 +879,28 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     );
     engine.objects[path_index].commands.clear();
 
-    let transfer_index = engine
-        .find_object_index(transfer_actor)
-        .expect("transfer actor exists");
-    engine.objects[transfer_index]
-        .commands
-        .push_front(
-            CommandRequest::new(CommandId::Transfer)
-                .with_target(Some(gate))
-                .with_tx(Some(to.x))
-                .with_ty(Some(to.y)),
-        )
-        .expect("Transfer queues before removal");
+    let transfer_index = engine.test_object_index(transfer_actor);
+    engine.queue_test_command(
+        transfer_index,
+        CommandRequest::new(CommandId::Transfer)
+            .with_target(Some(gate))
+            .with_tx(Some(to.x))
+            .with_ty(Some(to.y)),
+    );
 
-    let path_index = engine
-        .find_object_index(path_actor)
-        .expect("path actor exists");
-    let same_call_path = engine
-        .call_object_function(path_index, "RemoveGate", vec![object_reference_value(gate)])
-        .expect("script removal executes");
+    let path_index = engine.test_object_index(path_actor);
+    let same_call_path = engine.call_test_object_function(
+        path_index,
+        "RemoveGate",
+        vec![object_reference_value(gate)],
+    );
     assert_eq!(
         same_call_path,
         Value::Nil,
         "GetPath later in the removal call must not see the dead gate's zone"
     );
     assert_eq!(engine.frame(), 0, "no end-of-frame sweep has run");
-    let gate_index = engine
-        .find_object_index(gate)
-        .expect("the deleted object remains as a physical tombstone");
+    let gate_index = engine.test_object_index(gate);
     assert!(engine.objects[gate_index].destroyed);
     assert_eq!(
         engine.objects[gate_index].state.status,
@@ -1029,9 +913,7 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
     assert!(engine.find_path(from, to, 1, true).is_none());
 
     run_obstructed_move_to(&mut engine, path_actor, to);
-    let path_index = engine
-        .find_object_index(path_actor)
-        .expect("path actor remains");
+    let path_index = engine.test_object_index(path_actor);
     assert!(
         engine.objects[path_index]
             .commands
@@ -1042,27 +924,22 @@ fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer()
         "same-frame MoveTo must not enqueue a route through the removed zone"
     );
 
-    let transfer_index = engine
-        .find_object_index(transfer_actor)
-        .expect("transfer actor remains");
-    let transfer_view = engine.objects[transfer_index]
-        .commands
-        .snapshot()
-        .command_views()
-        .into_iter()
-        .next()
-        .expect("the pending Transfer remains queued until execution");
+    let transfer_index = engine.test_object_index(transfer_actor);
+    let transfer_view = crate::TestValueExt::test_value(
+        engine.objects[transfer_index]
+            .commands
+            .snapshot()
+            .command_views()
+            .into_iter()
+            .next(),
+    );
     assert_eq!(transfer_view.name, "Transfer");
     assert_eq!(
         transfer_view.target, None,
         "ClearPointers nulls the removed Transfer target synchronously"
     );
-    engine
-        .execute_object_command_now(transfer_actor)
-        .expect("queued Transfer executes after removal");
-    let transfer_index = engine
-        .find_object_index(transfer_actor)
-        .expect("transfer actor remains");
+    engine.execute_test_object_command(transfer_actor);
+    let transfer_index = engine.test_object_index(transfer_actor);
     assert!(
         engine.objects[transfer_index]
             .commands
@@ -1080,85 +957,55 @@ fn script_removal_materializes_only_objects_that_can_reference_the_target() {
     // C4Object.cpp:2194-2205). The callback projection may prefilter those
     // scalar fields, but must still clear the one matching command.
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("FILL", "Unrelated object", "#strict 2\n")
-        .expect("filler definition registers");
-    engine
-        .register_script_definition("TARG", "Removal target", "#strict 2\n")
-        .expect("target definition registers");
-    engine
-        .register_script_definition(
-            "RMVR",
-            "Removal caller",
-            r#"
+    engine.register_test_script_definition("FILL", "Unrelated object", "#strict 2\n");
+    engine.register_test_script_definition("TARG", "Removal target", "#strict 2\n");
+    engine.register_test_script_definition(
+        "RMVR",
+        "Removal caller",
+        r#"
                 #strict 2
                 public func RemoveTarget(object target)
                 {
                     return RemoveObject(target);
                 }
             "#,
-        )
-        .expect("remover definition registers");
-
-    let target = engine
-        .spawn_object(SpawnConfig::new("TARG"))
-        .expect("target spawns");
-    for _ in 0..128 {
-        engine
-            .spawn_object(SpawnConfig::new("FILL"))
-            .expect("filler spawns");
-    }
-    let action_referrer = engine
-        .spawn_object(SpawnConfig::new("FILL"))
-        .expect("action referrer spawns");
-    let action_referrer_index = engine
-        .find_object_index(action_referrer)
-        .expect("action referrer exists");
-    engine.objects[action_referrer_index].state.action.target = Some(target);
-
-    let command_referrer = engine
-        .spawn_object(SpawnConfig::new("FILL"))
-        .expect("command referrer spawns");
-    let command_referrer_index = engine
-        .find_object_index(command_referrer)
-        .expect("command referrer exists");
-    engine.objects[command_referrer_index]
-        .commands
-        .push_front(CommandRequest::new(CommandId::Transfer).with_target(Some(target)))
-        .expect("targeting command queues");
-
-    let effect_referrer = engine
-        .spawn_object(SpawnConfig::new("FILL"))
-        .expect("effect referrer spawns");
-    let effect_referrer_index = engine
-        .find_object_index(effect_referrer)
-        .expect("effect referrer exists");
-    engine.objects[effect_referrer_index].state.effects.push(
-        EffectState::new("Pointer").with_command_target(Some(
-            i32::try_from(target.as_u64()).expect("test object id fits the native effect field"),
-        )),
     );
 
-    let layer_referrer = engine
-        .spawn_object(SpawnConfig::new("FILL"))
-        .expect("layer referrer spawns");
-    let layer_referrer_index = engine
-        .find_object_index(layer_referrer)
-        .expect("layer referrer exists");
+    let target = engine.spawn_test_object(SpawnConfig::new("TARG"));
+    for _ in 0..128 {
+        engine.spawn_test_object(SpawnConfig::new("FILL"));
+    }
+    let action_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let action_referrer_index = engine.test_object_index(action_referrer);
+    engine.objects[action_referrer_index].state.action.target = Some(target);
+
+    let command_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let command_referrer_index = engine.test_object_index(command_referrer);
+    engine.queue_test_command(
+        command_referrer_index,
+        CommandRequest::new(CommandId::Transfer).with_target(Some(target)),
+    );
+
+    let effect_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let effect_referrer_index = engine.test_object_index(effect_referrer);
+    engine.objects[effect_referrer_index].state.effects.push(
+        EffectState::new("Pointer").with_command_target(Some(crate::TestValueExt::test_value(
+            i32::try_from(target.as_u64()),
+        ))),
+    );
+
+    let layer_referrer = engine.spawn_test_object(SpawnConfig::new("FILL"));
+    let layer_referrer_index = engine.test_object_index(layer_referrer);
     engine.objects[layer_referrer_index].state.layer = Some(target);
-    let remover = engine
-        .spawn_object(SpawnConfig::new("RMVR"))
-        .expect("remover spawns");
-    let remover_index = engine.find_object_index(remover).expect("remover exists");
+    let remover = engine.spawn_test_object(SpawnConfig::new("RMVR"));
+    let remover_index = engine.test_object_index(remover);
 
     HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
-    engine
-        .call_object_function(
-            remover_index,
-            "RemoveTarget",
-            vec![object_reference_value(target)],
-        )
-        .expect("script removal executes");
+    engine.call_test_object_function(
+        remover_index,
+        "RemoveTarget",
+        vec![object_reference_value(target)],
+    );
 
     assert_eq!(
         engine.objects[action_referrer_index].state.action.target, None,
@@ -1200,63 +1047,45 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
     let to = Vector2::new(90, 50);
     let mut engine = Engine::with_seed(2);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
-    engine
-        .register_script_definition("GATE", "Transfer gate", "")
-        .expect("gate definition registers");
-    let mut effect_definition = Definition::from_script(
+    engine.register_test_script_definition("GATE", "Transfer gate", "");
+    let mut effect_definition = test_definition(
         "FXRM",
         "Effect remover",
         r#"
-                #strict 2
-                func Arm(initiator)
-                {
-                    AddEffect("RemoveGate", this(), 10, 1, this());
-                    AddEffect("Observe", this(), 20, 1, this());
-                    return true;
-                }
+            #strict 2
+            func Arm(initiator)
+            {
+                AddEffect("RemoveGate", this(), 10, 1, this());
+                AddEffect("Observe", this(), 20, 1, this());
+                return true;
+            }
 
-                func FxRemoveGateTimer(object target, int number, int time)
-                {
-                    RemoveObject(FindObject(GATE));
-                    return 0;
-                }
+            func FxRemoveGateTimer(object target, int number, int time)
+            {
+                RemoveObject(FindObject(GATE));
+                return 0;
+            }
 
-                func FxObserveTimer(object target, int number, int time)
-                {
-                    if (GetPath(10, 50, 90, 50)) SetR(17);
-                    else SetR(23);
-                    return 0;
-                }
-            "#,
-    )
-    .expect("effect definition compiles");
+            func FxObserveTimer(object target, int number, int time)
+            {
+                if (GetPath(10, 50, 90, 50)) SetR(17);
+                else SetR(23);
+                return 0;
+            }
+        "#,
+    );
     effect_definition.set_c4_callback_convention(true);
     effect_definition.set_pathfinder(1);
-    engine
-        .register_definition(effect_definition)
-        .expect("effect definition registers");
+    engine.register_test_definition(effect_definition);
 
-    let gate = engine
-        .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)))
-        .expect("gate spawns");
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("FXRM")
-                .with_position(from)
-                .with_rotation(5),
-        )
-        .expect("effect actor spawns");
-    engine
-        .set_transfer_zone(
-            gate,
-            TransferZoneRect {
-                x: 45,
-                y: 40,
-                width: 10,
-                height: 20,
-            },
-        )
-        .expect("transfer zone registers");
+    let gate =
+        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)));
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("FXRM")
+            .with_position(from)
+            .with_rotation(5),
+    );
+    engine.set_test_transfer_zone(gate, 45, 40, 10, 20);
     assert!(engine.find_path(from, to, 1, true).is_some());
     assert_ne!(
         script_get_path(&mut engine, from, to),
@@ -1264,34 +1093,32 @@ fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
         "the effect callback's host GetPath can use the live zone"
     );
 
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine
-        .call_object_function(actor_index, "Arm", vec![object_reference_value(gate)])
-        .expect("effects arm");
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
-    let remove = engine.objects[actor_index]
-        .state
-        .effects
-        .iter()
-        .find(|effect| effect.name == "RemoveGate")
-        .cloned()
-        .expect("removal effect exists");
-    let observe = engine.objects[actor_index]
-        .state
-        .effects
-        .iter()
-        .find(|effect| effect.name == "Observe")
-        .cloned()
-        .expect("observer effect exists");
+    let actor_index = engine.test_object_index(actor);
+    engine.call_test_object_function(actor_index, "Arm", vec![object_reference_value(gate)]);
+    let actor_index = engine.test_object_index(actor);
+    let remove = crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "RemoveGate")
+            .cloned(),
+    );
+    let observe = crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Observe")
+            .cloned(),
+    );
     let definition_id = engine.objects[actor_index].definition_id.clone();
 
-    engine
-        .dispatch_object_effect_events(
-            actor_index,
-            &definition_id,
-            vec![EffectEvent::timer(remove), EffectEvent::timer(observe)],
-        )
-        .expect("effect batch executes");
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        actor_index,
+        &definition_id,
+        vec![EffectEvent::timer(remove), EffectEvent::timer(observe)],
+    ));
 
     assert_eq!(engine.frame(), 0, "no frame cleanup has run");
     assert_eq!(
@@ -1312,117 +1139,98 @@ fn effect_batch_threads_callback_final_contents_order() {
     // order before the deferred Rust batch folds authoritatively.
     let mut engine = Engine::with_seed(17);
     for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
-        engine
-            .register_script_definition(id, id, "#strict\n")
-            .expect("definition registers");
+        engine.register_test_script_definition(id, id, "#strict\n");
     }
-    let mut actor_definition = Definition::from_script(
+    let mut actor_definition = test_definition(
         "FXCO",
         "Contents-order observer",
         r#"
-                #strict 3
-                local box;
+            #strict 3
+            local box;
 
-                func Arm(object target)
-                {
-                    box = target;
-                    AddEffect("Move", this(), 10, 1, this());
-                    AddEffect("Observe", this(), 20, 1, this());
-                    return(1);
-                }
+            func Arm(object target)
+            {
+                box = target;
+                AddEffect("Move", this(), 10, 1, this());
+                AddEffect("Observe", this(), 20, 1, this());
+                return(1);
+            }
 
-                func FxMoveTimer()
-                {
-                    Enter(box, FindObject(PSTL));
-                    ShiftContents(box, true, PSTL);
-                    return(0);
-                }
+            func FxMoveTimer()
+            {
+                Enter(box, FindObject(PSTL));
+                ShiftContents(box, true, PSTL);
+                return(0);
+            }
 
-                func FxObserveTimer()
-                {
-                    if (GetID(Contents(0, box)) == PSTL) SetR(17);
-                    else SetR(23);
-                    return(0);
-                }
-            "#,
-    )
-    .expect("effect actor compiles");
+            func FxObserveTimer()
+            {
+                if (GetID(Contents(0, box)) == PSTL) SetR(17);
+                else SetR(23);
+                return(0);
+            }
+        "#,
+    );
     actor_definition.set_c4_callback_convention(true);
-    engine
-        .register_definition(actor_definition)
-        .expect("effect actor registers");
+    engine.register_test_definition(actor_definition);
 
-    let box_id = engine
-        .spawn_object(SpawnConfig::new("BOX_").with_category(CATEGORY_OBJECT))
-        .expect("box spawns");
-    let gold = engine
-        .spawn_object(
-            SpawnConfig::new("GOLD")
-                .with_category(CATEGORY_OBJECT)
-                .with_container(box_id),
-        )
-        .expect("gold spawns");
-    let rock = engine
-        .spawn_object(
-            SpawnConfig::new("ROCK")
-                .with_category(CATEGORY_OBJECT)
-                .with_container(box_id),
-        )
-        .expect("rock spawns");
-    let holder = engine
-        .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
-        .expect("holder spawns");
-    let pistol = engine
-        .spawn_object(
-            SpawnConfig::new("PSTL")
-                .with_category(CATEGORY_STATIC_BACK)
-                .with_container(holder),
-        )
-        .expect("retained pistol spawns");
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("FXCO")
-                .with_category(CATEGORY_OBJECT)
-                .with_rotation(5),
-        )
-        .expect("effect actor spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine
-        .call_object_function(actor_index, "Arm", vec![object_reference_value(box_id)])
-        .expect("effects arm");
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
-    let move_effect = engine.objects[actor_index]
-        .state
-        .effects
-        .iter()
-        .find(|effect| effect.name == "Move")
-        .cloned()
-        .expect("move effect exists");
-    let observe_effect = engine.objects[actor_index]
-        .state
-        .effects
-        .iter()
-        .find(|effect| effect.name == "Observe")
-        .cloned()
-        .expect("observe effect exists");
+    let box_id = engine.spawn_test_object(SpawnConfig::new("BOX_").with_category(CATEGORY_OBJECT));
+    let gold = engine.spawn_test_object(
+        SpawnConfig::new("GOLD")
+            .with_category(CATEGORY_OBJECT)
+            .with_container(box_id),
+    );
+    let rock = engine.spawn_test_object(
+        SpawnConfig::new("ROCK")
+            .with_category(CATEGORY_OBJECT)
+            .with_container(box_id),
+    );
+    let holder = engine.spawn_test_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT));
+    let pistol = engine.spawn_test_object(
+        SpawnConfig::new("PSTL")
+            .with_category(CATEGORY_STATIC_BACK)
+            .with_container(holder),
+    );
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("FXCO")
+            .with_category(CATEGORY_OBJECT)
+            .with_rotation(5),
+    );
+    let actor_index = engine.test_object_index(actor);
+    engine.call_test_object_function(actor_index, "Arm", vec![object_reference_value(box_id)]);
+    let actor_index = engine.test_object_index(actor);
+    let move_effect = crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Move")
+            .cloned(),
+    );
+    let observe_effect = crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Observe")
+            .cloned(),
+    );
     let definition_id = engine.objects[actor_index].definition_id.clone();
 
-    engine
-        .dispatch_object_effect_events(
-            actor_index,
-            &definition_id,
-            vec![
-                EffectEvent::timer(move_effect),
-                EffectEvent::timer(observe_effect),
-            ],
-        )
-        .expect("effect batch executes");
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        actor_index,
+        &definition_id,
+        vec![
+            EffectEvent::timer(move_effect),
+            EffectEvent::timer(observe_effect),
+        ],
+    ));
 
     assert_eq!(
         engine.objects[actor_index].state.rotation, 17,
         "the second timer sees PSTL at Contents.First"
     );
-    let box_index = engine.find_object_index(box_id).expect("box remains");
+    let box_index = engine.test_object_index(box_id);
     assert_eq!(
         engine.objects[box_index].state.contents,
         vec![pistol, rock, gold],
@@ -1439,7 +1247,7 @@ fn effect_batch_threads_callback_final_contents_order() {
 
 #[test]
 fn effect_batch_threads_dig_contents_shape_and_layer() {
-    let library = clonk_resources::MaterialLibrary::parse(
+    let library = crate::TestValueExt::test_value(clonk_resources::MaterialLibrary::parse(
         r#"
             [Material Earth]
             Name=Earth
@@ -1448,87 +1256,73 @@ fn effect_batch_threads_dig_contents_shape_and_layer() {
             Dig2Object=GEM_
             Dig2ObjectRatio=2
             "#,
-    )
-    .expect("dig material parses");
+    ));
     let materials = MaterialSet::from_resource_library(&library);
     let mut engine = Engine::with_seed(59);
     engine.set_materials(materials);
     engine.set_landscape(pixel_landscape(2, 1, vec![1, 1]));
 
-    engine
-        .register_script_definition("LAYR", "Layer", "")
-        .expect("layer definition registers");
-    engine
-        .register_script_definition("GEM_", "Gem", "")
-        .expect("gem definition registers");
-    let mut digger = Definition::from_script(
+    engine.register_test_script_definition("LAYR", "Layer", "");
+    engine.register_test_script_definition("GEM_", "Gem", "");
+    let mut digger = test_definition(
         "FXDG",
         "Effect digger",
         r#"
-                #strict 3
-                func Arm()
-                {
-                    AddEffect("First", this(), 200, 1, this());
-                    AddEffect("Second", this(), 100, 1, this());
-                }
+            #strict 3
+            func Arm()
+            {
+                AddEffect("First", this(), 200, 1, this());
+                AddEffect("Second", this(), 100, 1, this());
+            }
 
-                func FxFirstTimer()
-                {
-                    DigFreeRect(0, 0, 1, 1);
-                    SetPosition(10, 20);
-                    SetShape(-1, 3, 4, 7);
-                    SetObjectLayer(FindObject(LAYR));
-                    return 0;
-                }
+            func FxFirstTimer()
+            {
+                DigFreeRect(0, 0, 1, 1);
+                SetPosition(10, 20);
+                SetShape(-1, 3, 4, 7);
+                SetObjectLayer(FindObject(LAYR));
+                return 0;
+            }
 
-                func FxSecondTimer()
-                {
-                    DigFreeRect(1, 0, 1, 1);
-                    return 0;
-                }
-            "#,
-    )
-    .expect("effect digger compiles");
+            func FxSecondTimer()
+            {
+                DigFreeRect(1, 0, 1, 1);
+                return 0;
+            }
+        "#,
+    );
     digger.set_c4_callback_convention(true);
     digger.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 2)));
-    engine
-        .register_definition(digger)
-        .expect("effect digger registers");
+    engine.register_test_definition(digger);
 
-    let layer = engine
-        .spawn_object(SpawnConfig::new("LAYR"))
-        .expect("layer spawns");
-    let actor = engine
-        .spawn_object(SpawnConfig::new("FXDG"))
-        .expect("effect digger spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor exists");
-    engine
-        .call_object_function(actor_index, "Arm", Vec::new())
-        .expect("effects arm");
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
-    let first = engine.objects[actor_index]
-        .state
-        .effects
-        .iter()
-        .find(|effect| effect.name == "First")
-        .cloned()
-        .expect("first effect exists");
-    let second = engine.objects[actor_index]
-        .state
-        .effects
-        .iter()
-        .find(|effect| effect.name == "Second")
-        .cloned()
-        .expect("second effect exists");
+    let layer = engine.spawn_test_object(SpawnConfig::new("LAYR"));
+    let actor = engine.spawn_test_object(SpawnConfig::new("FXDG"));
+    let actor_index = engine.test_object_index(actor);
+    engine.call_test_object_function(actor_index, "Arm", Vec::new());
+    let actor_index = engine.test_object_index(actor);
+    let first = crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "First")
+            .cloned(),
+    );
+    let second = crate::TestValueExt::test_value(
+        engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Second")
+            .cloned(),
+    );
     let definition_id = engine.objects[actor_index].definition_id.clone();
 
-    engine
-        .dispatch_object_effect_events(
-            actor_index,
-            &definition_id,
-            vec![EffectEvent::timer(first), EffectEvent::timer(second)],
-        )
-        .expect("effect batch executes");
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        actor_index,
+        &definition_id,
+        vec![EffectEvent::timer(first), EffectEvent::timer(second)],
+    ));
 
     let gems = engine
         .objects
@@ -1561,59 +1355,41 @@ fn construction_zone_clear_is_visible_to_immediate_initialize() {
     let to = Vector2::new(90, 50);
     let mut engine = Engine::with_seed(3);
     engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
-    engine
-        .register_script_definition("GATE", "Transfer gate", "")
-        .expect("gate definition registers");
-    let mut lifecycle_definition = Definition::from_script(
+    engine.register_test_script_definition("GATE", "Transfer gate", "");
+    let mut lifecycle_definition = test_definition(
         "PFLC",
         "Lifecycle remover",
         r#"
-                #strict 2
-                func Construction()
-                {
-                    RemoveObject(FindObject(GATE));
-                    return true;
-                }
+            #strict 2
+            func Construction()
+            {
+                RemoveObject(FindObject(GATE));
+                return true;
+            }
 
-                func Initialize()
-                {
-                    if (GetPath(10, 50, 90, 50)) SetR(17);
-                    else SetR(23);
-                    return true;
-                }
-            "#,
-    )
-    .expect("lifecycle definition compiles");
+            func Initialize()
+            {
+                if (GetPath(10, 50, 90, 50)) SetR(17);
+                else SetR(23);
+                return true;
+            }
+        "#,
+    );
     lifecycle_definition.set_c4_callback_convention(true);
     lifecycle_definition.set_pathfinder(1);
-    engine
-        .register_definition(lifecycle_definition)
-        .expect("lifecycle definition registers");
+    engine.register_test_definition(lifecycle_definition);
 
-    let gate = engine
-        .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)))
-        .expect("gate spawns");
-    engine
-        .set_transfer_zone(
-            gate,
-            TransferZoneRect {
-                x: 45,
-                y: 40,
-                width: 10,
-                height: 20,
-            },
-        )
-        .expect("transfer zone registers");
+    let gate =
+        engine.spawn_test_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)));
+    engine.set_test_transfer_zone(gate, 45, 40, 10, 20);
     assert_ne!(script_get_path(&mut engine, from, to), Value::Nil);
 
-    let actor = engine
-        .spawn_object(
-            SpawnConfig::new("PFLC")
-                .with_position(from)
-                .with_rotation(5),
-        )
-        .expect("lifecycle actor spawns");
-    let actor_index = engine.find_object_index(actor).expect("actor remains");
+    let actor = engine.spawn_test_object(
+        SpawnConfig::new("PFLC")
+            .with_position(from)
+            .with_rotation(5),
+    );
+    let actor_index = engine.test_object_index(actor);
 
     assert_eq!(engine.frame(), 0, "no frame cleanup has run");
     assert_eq!(

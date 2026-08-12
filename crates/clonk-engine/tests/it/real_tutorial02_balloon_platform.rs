@@ -1,4 +1,5 @@
 use crate::support::real_scenario::load_tutorial;
+use crate::support::EngineTestExt;
 use clonk_engine::{
     CommandDirection, Engine, JoinPlayerConfig, ObjectUpdate, Vector2, COM_DOWN,
     COM_RELEASE_OFFSET, COM_UP,
@@ -31,20 +32,19 @@ fn load_tutorial02(control_style: bool) -> (Engine, i32) {
 #[test]
 fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
     let (mut engine, player) = load_tutorial02(true);
-    let clonk = engine
-        .crew_cursor(player)
-        .expect("Tutorial02 joins one selected CLNK");
-    let balloon = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "BALN")
-        .expect("Tutorial02 places BALN");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(player));
+    let balloon = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "BALN"),
+    );
 
     // C4Player::PlaceReadyCrew/PlaceReadyVehic put both objects into the
     // first base and replace their command stacks with Exit before play
     // begins (C4Player.cpp:551-564,619-640).
-    let clonk_at_spawn = engine.object_snapshot(clonk).expect("spawned CLNK");
+    let clonk_at_spawn = engine.test_object_snapshot(clonk);
     assert_eq!(clonk_at_spawn.container, balloon.container);
     assert!(clonk_at_spawn.container.is_some());
     assert_eq!(clonk_at_spawn.command_stack.command_names(), ["Exit"]);
@@ -60,46 +60,34 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         {
             break;
         }
-        engine.tick_without_snapshot().expect("startup Exit frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("exited CLNK")
-            .container,
-        None
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(balloon.id)
-            .expect("exited BALN")
-            .container,
-        None
-    );
+    assert_eq!(engine.test_object_snapshot(clonk).container, None);
+    assert_eq!(engine.test_object_snapshot(balloon.id).container, None);
 
     // Fresh players default to Jump'n'Run/AutoStop control. Its single held
     // Down queues Grab, and the completed command enters DFA_PUSH
     // (C4Player.cpp:1490-1554; C4ObjectCom.cpp:247-259,573-588).
-    engine
-        .player_in_com(player, COM_DOWN, 0)
-        .expect("held AutoStop Down press");
+    crate::support::TestValueExt::test_value(engine.player_in_com(player, COM_DOWN, 0));
     for _ in 0..80 {
         if engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(balloon.id)
         }) {
             break;
         }
-        engine.tick_without_snapshot().expect("Grab command frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let pushing = engine.object_snapshot(clonk).expect("CLNK after Grab");
-    let balloon_before_lift = engine.object_snapshot(balloon.id).expect("BALN after Grab");
+    let pushing = engine.test_object_snapshot(clonk);
+    let balloon_before_lift = engine.test_object_snapshot(balloon.id);
     assert_eq!(pushing.action.name, "Push");
     assert_eq!(pushing.action.target, Some(balloon.id));
     let platform_delta_x = pushing.position.x - balloon_before_lift.position.x;
     let platform_delta_y = pushing.position.y - balloon_before_lift.position.y;
-    engine
-        .player_in_com(player, COM_DOWN + COM_RELEASE_OFFSET, 0)
-        .expect("AutoStop Down release after Grab");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        player,
+        COM_DOWN + COM_RELEASE_OFFSET,
+        0,
+    ));
 
     // While DFA_PUSH is active, the target receives Up first
     // (C4Object.cpp:3520-3537). AutoStop's BALN::ControlUpdate selects
@@ -109,14 +97,9 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
     // its solid mask, C++ backs up every object contacting that mask, then
     // Put moves each one by BALN's dx/dy before its own attachment pass
     // (C4Movement.cpp:121-126,443-445; C4SolidMask.cpp:178-195,276-305).
-    engine
-        .player_in_com(player, COM_UP, 0)
-        .expect("Up while pushing BALN");
+    crate::support::TestValueExt::test_value(engine.player_in_com(player, COM_UP, 0));
     assert_eq!(
-        engine
-            .object_snapshot(balloon.id)
-            .expect("controlled BALN")
-            .command_direction,
+        engine.test_object_snapshot(balloon.id).command_direction,
         CommandDirection::Up
     );
 
@@ -127,13 +110,9 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("controlled BALN lift frame");
-        let clonk_now = engine.object_snapshot(clonk).expect("CLNK during lift");
-        let balloon_now = engine
-            .object_snapshot(balloon.id)
-            .expect("BALN during lift");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let clonk_now = engine.test_object_snapshot(clonk);
+        let balloon_now = engine.test_object_snapshot(balloon.id);
         assert_eq!(
             (clonk_now.action.name.as_str(), clonk_now.action.target),
             ("Push", Some(balloon.id)),
@@ -154,7 +133,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         );
     }
 
-    let balloon_after_lift = engine.object_snapshot(balloon.id).expect("lifted BALN");
+    let balloon_after_lift = engine.test_object_snapshot(balloon.id);
     assert!(
         balloon_after_lift.position.y < balloon_before_lift.position.y
             && balloon_after_lift.position.y <= 275,
@@ -166,22 +145,17 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
     // C4SolidMask's x/y attachment restore across multiple platform widths
     // (C4Object.cpp:3321-3338; Balloon.c4d/Script.c:60-78,103-110;
     // C4SolidMask.cpp:178-195,276-305).
-    engine
-        .player_in_com(player, COM_UP + COM_RELEASE_OFFSET, 0)
-        .expect("Up release after lift");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        player,
+        COM_UP + COM_RELEASE_OFFSET,
+        0,
+    ));
     assert_eq!(
-        engine
-            .object_snapshot(balloon.id)
-            .expect("BALN after DownSingle")
-            .command_direction,
+        engine.test_object_snapshot(balloon.id).command_direction,
         CommandDirection::Stop
     );
 
-    let coast_start_x = engine
-        .object_snapshot(balloon.id)
-        .expect("BALN before lateral coast")
-        .position
-        .x;
+    let coast_start_x = engine.test_object_snapshot(balloon.id).position.x;
     for coast_frame in 1..=600 {
         if engine
             .object_snapshot(balloon.id)
@@ -189,13 +163,9 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         {
             break;
         }
-        engine
-            .tick_without_snapshot()
-            .expect("controlled BALN lateral coast frame");
-        let clonk_now = engine.object_snapshot(clonk).expect("CLNK during coast");
-        let balloon_now = engine
-            .object_snapshot(balloon.id)
-            .expect("BALN during coast");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let clonk_now = engine.test_object_snapshot(clonk);
+        let balloon_now = engine.test_object_snapshot(balloon.id);
         assert_eq!(
             (clonk_now.action.name.as_str(), clonk_now.action.target),
             ("Push", Some(balloon.id)),
@@ -214,9 +184,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
              balloon={balloon_now:?}"
         );
     }
-    let balloon_after_coast = engine
-        .object_snapshot(balloon.id)
-        .expect("BALN after lateral coast");
+    let balloon_after_coast = engine.test_object_snapshot(balloon.id);
     assert!(
         (balloon_after_coast.position.x - coast_start_x).abs() >= 64,
         "real Tutorial02 wind must move BALN at least 64px laterally while the CLNK stays attached; \
@@ -224,24 +192,15 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
     );
 
     let descent_start_y = balloon_after_coast.position.y;
-    engine
-        .player_in_com(player, COM_DOWN, 0)
-        .expect("held AutoStop Down begins descent");
+    crate::support::TestValueExt::test_value(engine.player_in_com(player, COM_DOWN, 0));
     assert_eq!(
-        engine
-            .object_snapshot(balloon.id)
-            .expect("BALN after held Down")
-            .command_direction,
+        engine.test_object_snapshot(balloon.id).command_direction,
         CommandDirection::Down
     );
     for descent_frame in 1..=30 {
-        engine
-            .tick_without_snapshot()
-            .expect("controlled BALN descent frame");
-        let clonk_now = engine.object_snapshot(clonk).expect("CLNK during descent");
-        let balloon_now = engine
-            .object_snapshot(balloon.id)
-            .expect("BALN during descent");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let clonk_now = engine.test_object_snapshot(clonk);
+        let balloon_now = engine.test_object_snapshot(balloon.id);
         assert_eq!(
             (clonk_now.action.name.as_str(), clonk_now.action.target),
             ("Push", Some(balloon.id)),
@@ -260,14 +219,13 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
             .is_some_and(|object| object.position.y > descent_start_y),
         "held AutoStop Down must lower the attached BALN"
     );
-    engine
-        .player_in_com(player, COM_DOWN + COM_RELEASE_OFFSET, 0)
-        .expect("AutoStop Down release after descent");
+    crate::support::TestValueExt::test_value(engine.player_in_com(
+        player,
+        COM_DOWN + COM_RELEASE_OFFSET,
+        0,
+    ));
     assert_eq!(
-        engine
-            .object_snapshot(balloon.id)
-            .expect("BALN after descent release")
-            .command_direction,
+        engine.test_object_snapshot(balloon.id).command_direction,
         CommandDirection::Stop
     );
 }
@@ -277,9 +235,7 @@ fn tutorial02_open_bottom_removes_the_clonk_in_the_crossing_tick() {
     // Tutorial02 has BottomOpen=1. C4Object::ExecMovement removes an ordinary
     // object at y > GBackHgt in that same tick (src/C4Movement.cpp:598-617).
     let (mut engine, player) = load_tutorial02(true);
-    let clonk = engine
-        .crew_cursor(player)
-        .expect("Tutorial02 joins one selected CLNK");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(player));
     for _ in 0..160 {
         if engine
             .object_snapshot(clonk)
@@ -287,23 +243,21 @@ fn tutorial02_open_bottom_removes_the_clonk_in_the_crossing_tick() {
         {
             break;
         }
-        engine.tick_without_snapshot().expect("startup Exit frame");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let landscape = engine.landscape().expect("Tutorial02 has a landscape");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
     assert!(landscape.bottom_open());
     let below_bottom = landscape.estimated_height() + 1;
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(100, below_bottom))
                 .with_velocity(Vector2::ZERO),
-        )
-        .expect("place CLNK below the open bottom");
+        ),
+    );
 
-    engine
-        .tick_without_snapshot()
-        .expect("out-of-bounds movement tick");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(
         engine.object_snapshot(clonk).is_none(),
         "the raw open bottom must not leave the CLNK alive for another frame"

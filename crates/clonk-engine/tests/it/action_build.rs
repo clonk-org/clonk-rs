@@ -10,7 +10,11 @@ global func Initialize(state, random) { return 0; }
 "#;
 
 fn builder_definition() -> Definition {
-    let mut definition = Definition::from_script("Builder", "Builder", BASIC_SCRIPT).unwrap();
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "Builder",
+        "Builder",
+        BASIC_SCRIPT,
+    ));
     let mut actions = HashMap::new();
     actions.insert("Idle".to_string(), ActionSpec::default());
     actions.insert(
@@ -34,7 +38,11 @@ fn builder_definition() -> Definition {
 }
 
 fn target_definition() -> Definition {
-    let mut definition = Definition::from_script("Target", "Target", BASIC_SCRIPT).unwrap();
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "Target",
+        "Target",
+        BASIC_SCRIPT,
+    ));
     let mut actions = HashMap::new();
     actions.insert("Idle".to_string(), ActionSpec::default());
     definition.configure_actions(Some("Idle".to_string()), actions);
@@ -85,9 +93,7 @@ fn resource_turn_to_c4id_adapt_precedes_live_morph_lookup() -> Result<(), Box<dy
     let overlong_burn = engine.spawn_object(SpawnConfig::new("TURN"))?;
     let short_burn = engine.spawn_object(SpawnConfig::new("SHRT"))?;
     for object in [overlong_burn, short_burn] {
-        let index = engine
-            .find_object_index(object)
-            .expect("burn object exists");
+        let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
         assert!(engine.incinerate_object(index, 0, false, None)?);
     }
     assert_eq!(
@@ -128,12 +134,8 @@ fn resource_turn_to_c4id_adapt_precedes_live_morph_lookup() -> Result<(), Box<dy
     }
 
     let snapshot = engine.tick()?;
-    let overlong_built = snapshot
-        .object(overlong_build)
-        .expect("overlong build object survives");
-    let short_built = snapshot
-        .object(short_build)
-        .expect("short build object survives");
+    let overlong_built = crate::support::TestValueExt::test_value(snapshot.object(overlong_build));
+    let short_built = crate::support::TestValueExt::test_value(snapshot.object(short_build));
     assert!(overlong_built.construction > 0, "the Build tick succeeded");
     assert!(short_built.construction > 0, "the Build tick succeeded");
     assert_eq!(
@@ -170,9 +172,7 @@ fn build_procedure_advances_construction_and_stops_when_complete(
     )?;
 
     let first_tick = engine.tick()?;
-    let target_snapshot = first_tick
-        .object(target_id)
-        .expect("target exists after first tick");
+    let target_snapshot = crate::support::TestValueExt::test_value(first_tick.object(target_id));
     let expected_delta = (10 * 100 * 150) / 100;
     assert_eq!(target_snapshot.construction, expected_delta);
 
@@ -180,9 +180,7 @@ fn build_procedure_advances_construction_and_stops_when_complete(
     let mut last_snapshot = first_tick;
     for _ in 0..200 {
         let snapshot = engine.tick()?;
-        let target_snapshot = snapshot
-            .object(target_id)
-            .expect("target exists while building");
+        let target_snapshot = crate::support::TestValueExt::test_value(snapshot.object(target_id));
         if target_snapshot.construction >= FULL_CON {
             last_snapshot = snapshot;
             built = true;
@@ -192,9 +190,8 @@ fn build_procedure_advances_construction_and_stops_when_complete(
     }
 
     assert!(built, "target should reach full construction");
-    let builder_snapshot = last_snapshot
-        .object(builder_id)
-        .expect("builder exists after construction");
+    let builder_snapshot =
+        crate::support::TestValueExt::test_value(last_snapshot.object(builder_id));
     assert_eq!(
         builder_snapshot.action.name, "Build",
         "the FullCon crossing frame still sees Target::Build succeed"

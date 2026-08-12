@@ -1,4 +1,5 @@
 use crate::support::real_scenario::load_installed_scenario;
+use crate::support::EngineTestExt;
 use clonk_engine::{EffectVarValue, SpawnConfig};
 use clonk_script::Value;
 
@@ -12,45 +13,29 @@ fn eke_missile_scheduled_explosion_uses_its_power_local() {
         "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/MissileMatch.c4s",
         0,
     );
-    let launcher = engine
-        .spawn_object(SpawnConfig::new("RL5B").with_loaded(true))
-        .expect("real Eke rocket launcher spawns");
-    let missile = engine
-        .spawn_object(SpawnConfig::new("MS5B").with_loaded(true))
-        .expect("real Eke missile spawns");
+    let launcher = engine.spawn_test_object(SpawnConfig::new("RL5B").with_loaded(true));
+    let missile = engine.spawn_test_object(SpawnConfig::new("MS5B").with_loaded(true));
 
-    let missile_index = engine
-        .find_object_index(missile)
-        .expect("the missile has an index");
-    engine
-        .call_object_function(
-            missile_index,
-            "Launch",
-            vec![Value::Object(launcher.as_u64()), Value::Nil],
-        )
-        .expect("the missile launches from the real rocket launcher");
+    let missile_index = engine.test_object_index(missile);
+    engine.call_test_object_function(
+        missile_index,
+        "Launch",
+        vec![Value::Object(launcher.as_u64()), Value::Nil],
+    );
     assert_eq!(
-        engine
-            .object_snapshot(missile)
-            .expect("the launched missile remains live")
-            .local_vars
-            .get("power"),
+        engine.test_object_snapshot(missile).local_vars.get("power"),
         Some(&Value::Int(50))
     );
 
-    let missile_index = engine
-        .find_object_index(missile)
-        .expect("the launched missile has an index");
-    engine
-        .call_object_function(missile_index, "BlowUp", Vec::new())
-        .expect("the missile schedules its explosion");
-    let scheduled = engine
-        .object_snapshot(missile)
-        .expect("the scheduled missile remains live until the timer")
-        .effects
-        .into_iter()
-        .find(|effect| effect.name == "IntSchedule" && effect.priority == 1)
-        .expect("BlowUp arms the real one-shot IntSchedule effect");
+    let missile_index = engine.test_object_index(missile);
+    engine.call_test_object_function(missile_index, "BlowUp", Vec::new());
+    let scheduled = crate::support::TestValueExt::test_value(
+        engine
+            .test_object_snapshot(missile)
+            .effects
+            .into_iter()
+            .find(|effect| effect.name == "IntSchedule" && effect.priority == 1),
+    );
     assert_eq!(
         scheduled.vars,
         [
@@ -60,9 +45,7 @@ fn eke_missile_scheduled_explosion_uses_its_power_local() {
         "the real Helpers.c effect retains the missile's explosion expression"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("the scheduled explosion executes");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     assert!(
         engine.object_snapshot(missile).is_none(),
         "eval resolves MS5B's power local and Explode removes the missile"

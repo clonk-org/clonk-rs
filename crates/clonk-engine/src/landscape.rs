@@ -8064,6 +8064,17 @@ mod tests {
         landscape
     }
 
+    fn blank_pixel_grid(width: u32, height: u32, bytes: Vec<u8>, slots: usize) -> PixelGrid {
+        PixelGrid::new(
+            width,
+            height,
+            bytes,
+            vec![0; slots],
+            vec![None; slots],
+            vec![None; slots],
+        )
+    }
+
     #[test]
     fn landscape_without_raster_state_remains_backward_compatible() {
         let landscape: Landscape =
@@ -8358,14 +8369,8 @@ mod tests {
         // stay shared until a real terrain write needs an independent copy.
         const WIDTH: u32 = 1_488;
         const HEIGHT: u32 = 1_536;
-        let original = PixelGrid::new(
-            WIDTH,
-            HEIGHT,
-            vec![7; WIDTH as usize * HEIGHT as usize],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let original =
+            blank_pixel_grid(WIDTH, HEIGHT, vec![7; WIDTH as usize * HEIGHT as usize], 0);
         let original_revision = original.revision();
         let mut clone = original.clone();
 
@@ -8643,14 +8648,7 @@ mod tests {
         // (C4Landscape.cpp:741-763). Far Worlds maps are several million
         // pixels, so joining distant edits would relight the strip between
         // them even though C++ never touches it.
-        let mut live = PixelGrid::new(
-            512,
-            64,
-            vec![1; 512 * 64],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let mut live = blank_pixel_grid(512, 64, vec![1; 512 * 64], 0);
         let snapshot = live.clone();
 
         live.set_byte(2, 32, 7);
@@ -8698,14 +8696,7 @@ mod tests {
 
     #[test]
     fn skipped_render_snapshots_keep_cpp_relight_thresholds_and_global_cap() {
-        let mut live = PixelGrid::new(
-            180,
-            40,
-            vec![1; 180 * 40],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let mut live = blank_pixel_grid(180, 40, vec![1; 180 * 40], 0);
         let rendered = live.clone();
 
         for index in 0..30 {
@@ -8735,14 +8726,7 @@ mod tests {
 
     #[test]
     fn sparse_render_dirty_generation_keeps_legacy_bounding_rect() {
-        let mut live = PixelGrid::new(
-            512,
-            64,
-            vec![1; 512 * 64],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let mut live = blank_pixel_grid(512, 64, vec![1; 512 * 64], 0);
         let snapshot = live.clone();
         live.set_byte(2, 32, 7);
         live.set_byte(509, 32, 8);
@@ -9114,10 +9098,60 @@ mod tests {
         landscape
     }
 
+    fn solid_mask_definition(script: &str, c4_callback_convention: bool) -> crate::Definition {
+        let mut definition =
+            crate::Definition::from_script("MASK", "Mask", script).expect("definition compiles");
+        definition.set_c4_callback_convention(c4_callback_convention);
+        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        definition
+    }
+
+    fn engine_with_definition(
+        seed: u64,
+        landscape: Landscape,
+        definition: crate::Definition,
+    ) -> crate::Engine {
+        let mut engine = crate::Engine::with_seed(seed);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+    }
+
+    fn solid_mask_engine(seed: u64, script: &str, c4_callback_convention: bool) -> crate::Engine {
+        engine_with_definition(
+            seed,
+            raster_grid_landscape(4, 5, vec![0; 20]),
+            solid_mask_definition(script, c4_callback_convention),
+        )
+    }
+
+    fn mask_spawn() -> crate::SpawnConfig {
+        crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1))
+    }
+
+    fn adjusted_mask_spawn() -> crate::SpawnConfig {
+        let mut spawn = mask_spawn();
+        spawn.position_adjusted = true;
+        spawn
+    }
+
+    fn object_index(engine: &crate::Engine, id: crate::ObjectId) -> usize {
+        engine.find_object_index(id).expect("object exists")
+    }
+
+    fn mask_bake(engine: &crate::Engine, index: usize) -> &crate::SolidMaskBake {
+        engine.objects[index]
+            .solid_mask_bake
+            .as_ref()
+            .expect("solid mask is put")
+    }
+
     fn overlapping_solid_mask_engine() -> (crate::Engine, [crate::ObjectId; 3]) {
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            8,
             r#"
 #strict 2
 func RotateMaskCycle()
@@ -9140,20 +9174,12 @@ func MoveMask(int x, int y)
     return SetPosition(x, y);
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(8);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+            false,
+        );
         let mut ids = [crate::ObjectId::new(0); 3];
         for id in &mut ids {
             *id = engine
-                .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
+                .spawn_object(mask_spawn())
                 .expect("overlapping mask spawns");
         }
         (engine, ids)
@@ -9447,14 +9473,7 @@ func MoveMask(int x, int y)
         // afterwards (C4Landscape.cpp:2497,2501), so a mask byte is collision
         // truth that is never drawn. The plane the frontend composes from has
         // to answer the same way, whatever the collision plane says.
-        let mut grid = PixelGrid::new(
-            4,
-            4,
-            vec![1; 16],
-            vec![0; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut grid = blank_pixel_grid(4, 4, vec![1; 16], 128);
 
         grid.write_mask_byte(1, 1, 2);
 
@@ -9478,14 +9497,7 @@ func MoveMask(int x, int y)
         // instances rather than copying them into every presentation
         // snapshot (C4SolidMask.cpp:79-101). Rust's derived render helper is
         // likewise runtime-only and may stay shared until either clone writes.
-        let mut grid = PixelGrid::new(
-            4,
-            4,
-            vec![1; 16],
-            vec![0; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut grid = blank_pixel_grid(4, 4, vec![1; 16], 128);
         grid.write_mask_byte(1, 1, 2);
 
         let cloned = grid.clone();
@@ -9505,14 +9517,7 @@ func MoveMask(int x, int y)
         // so only the first mask owns the real background. The rendered plane
         // must report that background throughout, and go back to the live byte
         // only once the last mask is gone.
-        let mut grid = PixelGrid::new(
-            2,
-            2,
-            vec![3; 4],
-            vec![0; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut grid = blank_pixel_grid(2, 2, vec![3; 4], 128);
 
         grid.write_mask_byte(0, 0, 2);
         grid.write_mask_byte(0, 0, 2);
@@ -9533,14 +9538,7 @@ func MoveMask(int x, int y)
         // 233-274). Batching the Rust storage access must retain the exact
         // per-pixel mutation sequence, including doubled MCVehic writes.
         let grid = || {
-            let mut grid = PixelGrid::new(
-                4,
-                2,
-                vec![1, 1, 3, 3, 1, 1, 3, 3],
-                vec![0; 128],
-                vec![None; 128],
-                vec![None; 128],
-            );
+            let mut grid = blank_pixel_grid(4, 2, vec![1, 1, 3, 3, 1, 1, 3, 3], 128);
             grid.materials = vec![
                 None,
                 MaterialId::new(0),
@@ -9593,14 +9591,7 @@ func MoveMask(int x, int y)
         // no C4Landscape state effect (C4SolidMask.cpp:92-96). In particular,
         // a storage batching seam must not turn that no-op into a snapshot or
         // render-lineage split.
-        let mut grid = PixelGrid::new(
-            2,
-            2,
-            vec![2; 4],
-            vec![0; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut grid = blank_pixel_grid(2, 2, vec![2; 4], 128);
         grid.materials = vec![None, None, MaterialId::new(0)];
         let bytes = Arc::clone(&grid.bytes);
         let background = Arc::clone(&grid.mask_background.0);
@@ -9695,14 +9686,7 @@ func MoveMask(int x, int y)
         // (C4Landscape.cpp:2851-2880), so the background the mask restores is
         // the changed material. A SetPix that does land while a mask is still
         // put must not keep reporting the stale background either.
-        let mut grid = PixelGrid::new(
-            2,
-            2,
-            vec![1; 4],
-            vec![0; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut grid = blank_pixel_grid(2, 2, vec![1; 4], 128);
 
         grid.write_mask_byte(0, 0, 2);
         grid.set_byte(0, 0, 3);
@@ -9722,14 +9706,7 @@ func MoveMask(int x, int y)
         // Keeping mask bytes out of the *rendered* rectangles is a presentation
         // concern and lives in `rects`, which is `#[serde(skip)]`; the legacy
         // bounding rectangle must keep covering every write, mask or not.
-        let mut grid = PixelGrid::new(
-            64,
-            4,
-            vec![0; 256],
-            vec![0; 128],
-            vec![None; 128],
-            vec![None; 128],
-        );
+        let mut grid = blank_pixel_grid(64, 4, vec![0; 256], 128);
 
         grid.set_byte(10, 1, 1);
         grid.write_mask_byte(50, 2, 2);
@@ -9785,41 +9762,20 @@ func MoveMask(int x, int y)
         // C4SolidMask::Last->Prev, so C claims the freed bytes before B
         // (C4SolidMask.cpp:263-274,387-400).
         let (mut engine, ids) = overlapping_solid_mask_engine();
-        let indices = ids.map(|id| engine.find_object_index(id).expect("mask exists"));
-        let sequences = indices.map(|index| {
-            engine.objects[index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("mask is put")
-                .instance_sequence
-        });
+        let indices = ids.map(|id| object_index(&engine, id));
+        let sequences = indices.map(|index| mask_bake(&engine, index).instance_sequence);
         assert!(sequences[0] < sequences[1] && sequences[1] < sequences[2]);
-        assert_eq!(
-            engine.objects[indices[0]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("A bake")
-                .buffer,
-            vec![0]
-        );
+        assert_eq!(mask_bake(&engine, indices[0]).buffer, vec![0]);
 
         engine.remove_solid_mask(indices[0]);
 
         assert_eq!(
-            engine.objects[indices[2]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("C bake")
-                .buffer,
+            mask_bake(&engine, indices[2]).buffer,
             vec![0],
             "newest survivor C owns A's freed background"
         );
         assert_eq!(
-            engine.objects[indices[1]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("B bake")
-                .buffer,
+            mask_bake(&engine, indices[1]).buffer,
             vec![2],
             "older survivor B sees C's already-restored MCVehic"
         );
@@ -9831,9 +9787,8 @@ func MoveMask(int x, int y)
         // Construction runs first; only the following initial DoCon makes
         // the new object eligible (C4Game.cpp:1117-1127). A mask recreated
         // by Construction is therefore older than the new object's mask.
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            11,
             r#"
 #strict 2
 protected func Construction(object creator)
@@ -9841,76 +9796,41 @@ protected func Construction(object creator)
     if (creator) SetSolidMask(0, 0, 1, 1, 0, 0, creator);
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(11);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        let oldest = engine.spawn_object(spawn()).expect("oldest mask spawns");
-        let recreated = engine.spawn_object(spawn()).expect("second mask spawns");
-        let recreated_index = engine
-            .find_object_index(recreated)
-            .expect("second mask exists");
-        let original_sequence = engine.objects[recreated_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("second mask is put")
-            .instance_sequence;
+            false,
+        );
+        let oldest = engine
+            .spawn_object(mask_spawn())
+            .expect("oldest mask spawns");
+        let recreated = engine
+            .spawn_object(mask_spawn())
+            .expect("second mask spawns");
+        let recreated_index = object_index(&engine, recreated);
+        let original_sequence = mask_bake(&engine, recreated_index).instance_sequence;
 
         let newest = engine
-            .spawn_object_with_initial_lifecycle(spawn(), Some(recreated))
+            .spawn_object_with_initial_lifecycle(mask_spawn(), Some(recreated))
             .expect("native lifecycle completes")
             .expect("new mask survives Construction");
-        let recreated_sequence = engine.objects[recreated_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("Construction recreated target mask")
-            .instance_sequence;
-        let newest_index = engine
-            .find_object_index(newest)
-            .expect("newest mask exists");
-        let newest_sequence = engine.objects[newest_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("initial DoCon put the new mask")
-            .instance_sequence;
+        let recreated_sequence = mask_bake(&engine, recreated_index).instance_sequence;
+        let newest_index = object_index(&engine, newest);
+        let newest_sequence = mask_bake(&engine, newest_index).instance_sequence;
         assert!(original_sequence < recreated_sequence);
         assert!(recreated_sequence < newest_sequence);
 
-        let oldest_index = engine
-            .find_object_index(oldest)
-            .expect("oldest mask exists");
+        let oldest_index = object_index(&engine, oldest);
         engine.remove_solid_mask(oldest_index);
         assert_eq!(
-            engine.objects[newest_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("newest bake")
-                .buffer,
+            mask_bake(&engine, newest_index).buffer,
             vec![0],
             "the post-Construction instance claims the freed background"
         );
-        assert_eq!(
-            engine.objects[recreated_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("recreated bake")
-                .buffer,
-            vec![2]
-        );
+        assert_eq!(mask_bake(&engine, recreated_index).buffer, vec![2]);
     }
 
     #[test]
     fn solid_mask_direct_spawn_finishes_construction_replay_scope() {
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            16,
             r#"
 #strict 2
 protected func Construction()
@@ -9919,26 +9839,16 @@ protected func Construction()
     return true;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(16);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let mut spawn = crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        spawn.position_adjusted = true;
+            true,
+        );
+        let spawn = adjusted_mask_spawn();
         let first = engine
             .spawn_object(spawn.clone())
             .expect("first mask spawns");
         let second = engine.spawn_object(spawn).expect("second mask spawns");
 
         for id in [first, second] {
-            let index = engine.find_object_index(id).expect("spawn remains live");
+            let index = object_index(&engine, id);
             assert!(engine.objects[index].solid_mask_bake.is_some());
         }
         assert!(
@@ -9949,9 +9859,8 @@ protected func Construction()
 
     #[test]
     fn solid_mask_foreign_only_construction_reserves_spawn_instance_after_stream() {
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            19,
             r#"
 #strict 2
 local Victim;
@@ -9962,27 +9871,19 @@ protected func Construction()
     return true;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(19);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        let foreign = engine.spawn_object(spawn()).expect("foreign mask spawns");
-        let mut config = spawn().with_local_vars(std::collections::HashMap::from([(
+            true,
+        );
+        let foreign = engine
+            .spawn_object(mask_spawn())
+            .expect("foreign mask spawns");
+        let mut config = mask_spawn().with_local_vars(std::collections::HashMap::from([(
             "Victim".to_string(),
             clonk_script::Value::Object(foreign.as_u64()),
         )]));
         config.position_adjusted = true;
         let spawned = engine.spawn_object(config).expect("new mask spawns");
-        let foreign_index = engine.find_object_index(foreign).expect("foreign exists");
-        let spawned_index = engine.find_object_index(spawned).expect("spawned exists");
+        let foreign_index = object_index(&engine, foreign);
+        let spawned_index = object_index(&engine, spawned);
         let foreign_sequence = engine.objects[foreign_index]
             .solid_mask_instance_sequence
             .expect("Construction recreated foreign mask");
@@ -9995,10 +9896,7 @@ protected func Construction()
 
     #[test]
     fn solid_mask_direct_spawn_replays_after_same_call_children_materialize() {
-        let mut mask =
-            crate::Definition::from_script("MASK", "Mask", "").expect("mask definition compiles");
-        mask.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        mask.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        let mask = solid_mask_definition("", false);
         let mut parent = crate::Definition::from_script(
             "PARN",
             "Parent",
@@ -10017,14 +9915,11 @@ protected func Construction()
         .expect("parent definition compiles");
         parent.set_c4_callback_convention(true);
 
-        let mut engine = crate::Engine::with_seed(17);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine.register_definition(mask).expect("mask registers");
+        let mut engine = engine_with_definition(17, raster_grid_landscape(4, 5, vec![0; 20]), mask);
         engine
             .register_definition(parent)
             .expect("parent registers");
-        let mut mask_spawn = crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        mask_spawn.position_adjusted = true;
+        let mask_spawn = adjusted_mask_spawn();
         let oldest = engine
             .spawn_object(mask_spawn.clone())
             .expect("oldest mask spawns");
@@ -10050,26 +9945,15 @@ protected func Construction()
             })
             .map(|object| object.id)
             .expect("Construction child materialized");
-        let child_index = engine.find_object_index(child).expect("child exists");
-        let survivor_index = engine.find_object_index(survivor).expect("survivor exists");
+        let child_index = object_index(&engine, child);
+        let survivor_index = object_index(&engine, survivor);
         assert!(engine.find_object_index(parent_id).is_some());
         assert_eq!(
-            engine.objects[child_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("child bake")
-                .buffer,
+            mask_bake(&engine, child_index).buffer,
             vec![0],
             "same-call child claims the victim's freed background"
         );
-        assert_eq!(
-            engine.objects[survivor_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("older survivor bake")
-                .buffer,
-            vec![2]
-        );
+        assert_eq!(mask_bake(&engine, survivor_index).buffer, vec![2]);
     }
 
     #[test]
@@ -10077,9 +9961,8 @@ protected func Construction()
         // The effect creates A to completion and only then recreates B's
         // mask. C++ therefore links A before the new B instance even though
         // Rust folds the outer B update before materializing deferred A.
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            12,
             r#"
 #strict 2
 func Arm()
@@ -10095,28 +9978,16 @@ func FxRecreateTimer(object target, int number, int time)
     return 0;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(12);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        let oldest = engine.spawn_object(spawn()).expect("oldest mask spawns");
-        let recreated = engine.spawn_object(spawn()).expect("effect owner spawns");
-        let recreated_index = engine
-            .find_object_index(recreated)
-            .expect("overlapping B exists");
-        let original_sequence = engine.objects[recreated_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("effect owner mask is put")
-            .instance_sequence;
+            true,
+        );
+        let oldest = engine
+            .spawn_object(mask_spawn())
+            .expect("oldest mask spawns");
+        let recreated = engine
+            .spawn_object(mask_spawn())
+            .expect("effect owner spawns");
+        let recreated_index = object_index(&engine, recreated);
+        let original_sequence = mask_bake(&engine, recreated_index).instance_sequence;
 
         engine
             .call_object_function(recreated_index, "Arm", Vec::new())
@@ -10143,27 +10014,13 @@ func FxRecreateTimer(object target, int number, int time)
             .find(|object| object.id != oldest && object.id != recreated)
             .map(|object| object.id)
             .expect("effect spawned overlapping mask");
-        let spawned_index = engine
-            .find_object_index(spawned)
-            .expect("spawned mask exists");
-        let spawned_sequence = engine.objects[spawned_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("spawned mask is put")
-            .instance_sequence;
-        let recreated_sequence = engine.objects[recreated_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("effect owner mask was recreated")
-            .instance_sequence;
-        let spawned_position = engine.objects[spawned_index]
-            .solid_mask_bake
-            .as_ref()
-            .map(|bake| (bake.x, bake.y));
-        let recreated_position = engine.objects[recreated_index]
-            .solid_mask_bake
-            .as_ref()
-            .map(|bake| (bake.x, bake.y));
+        let spawned_index = object_index(&engine, spawned);
+        let spawned_sequence = mask_bake(&engine, spawned_index).instance_sequence;
+        let recreated_sequence = mask_bake(&engine, recreated_index).instance_sequence;
+        let spawned_position = mask_bake(&engine, spawned_index);
+        let spawned_position = (spawned_position.x, spawned_position.y);
+        let recreated_position = mask_bake(&engine, recreated_index);
+        let recreated_position = (recreated_position.x, recreated_position.y);
         assert_eq!(spawned_position, recreated_position);
         assert!(original_sequence < spawned_sequence);
         assert!(
@@ -10171,27 +10028,14 @@ func FxRecreateTimer(object target, int number, int time)
             "CreateObject's initial DoCon precedes the following SetSolidMask"
         );
 
-        let oldest_index = engine
-            .find_object_index(oldest)
-            .expect("oldest mask exists");
+        let oldest_index = object_index(&engine, oldest);
         engine.remove_solid_mask(oldest_index);
         assert_eq!(
-            engine.objects[recreated_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("recreated bake")
-                .buffer,
+            mask_bake(&engine, recreated_index).buffer,
             vec![0],
             "newest recreated B claims the freed background"
         );
-        assert_eq!(
-            engine.objects[spawned_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("spawned bake")
-                .buffer,
-            vec![2]
-        );
+        assert_eq!(mask_bake(&engine, spawned_index).buffer, vec![2]);
     }
 
     #[test]
@@ -10199,9 +10043,8 @@ func FxRecreateTimer(object target, int number, int time)
         // Each effect callback gets its own copy-in/copy-out host context.
         // The first makes A eligible and then recreates B; the second does
         // an ordinary A re-put, which must retain A's older live instance.
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            13,
             r#"
 #strict 2
 func ArmThreaded(object b)
@@ -10230,35 +10073,23 @@ func FxSecondTimer(object target, int number, int time)
     return 0;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(13);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let full = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        let _oldest = engine.spawn_object(full()).expect("oldest mask spawns");
-        let recreated = engine.spawn_object(full()).expect("effect owner spawns");
-        let mut pending_config = full().with_construction(0);
+            true,
+        );
+        let _oldest = engine
+            .spawn_object(mask_spawn())
+            .expect("oldest mask spawns");
+        let recreated = engine
+            .spawn_object(mask_spawn())
+            .expect("effect owner spawns");
+        let mut pending_config = mask_spawn().with_construction(0);
         pending_config.position_adjusted = true;
         let pending = engine
             .spawn_object(pending_config)
             .expect("incomplete mask object spawns");
-        let recreated_index = engine
-            .find_object_index(recreated)
-            .expect("effect owner exists");
-        let original_recreated_sequence = engine.objects[recreated_index]
-            .solid_mask_bake
-            .as_ref()
-            .expect("effect owner mask is put")
-            .instance_sequence;
+        let recreated_index = object_index(&engine, recreated);
+        let original_recreated_sequence = mask_bake(&engine, recreated_index).instance_sequence;
 
-        let pending_index = engine.find_object_index(pending).expect("A exists");
+        let pending_index = object_index(&engine, pending);
         engine
             .call_object_function(
                 pending_index,
@@ -10312,9 +10143,8 @@ func FxSecondTimer(object target, int number, int time)
 
     #[test]
     fn solid_mask_effect_batch_threads_foreign_mask_state() {
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            18,
             r#"
 #strict 2
 func ArmForeignState(object other)
@@ -10348,22 +10178,16 @@ func FxMoveForeignTimer(object target, int number, int time)
     return 0;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(18);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        let outer = engine.spawn_object(spawn()).expect("outer mask spawns");
-        let foreign = engine.spawn_object(spawn()).expect("foreign mask spawns");
-        let outer_index = engine.find_object_index(outer).expect("outer exists");
-        let foreign_index = engine.find_object_index(foreign).expect("foreign exists");
+            true,
+        );
+        let outer = engine
+            .spawn_object(mask_spawn())
+            .expect("outer mask spawns");
+        let foreign = engine
+            .spawn_object(mask_spawn())
+            .expect("foreign mask spawns");
+        let outer_index = object_index(&engine, outer);
+        let foreign_index = object_index(&engine, foreign);
 
         engine
             .call_object_function(
@@ -10407,9 +10231,8 @@ func FxMoveForeignTimer(object target, int number, int time)
         // effect 2 disables outer A. Native C++ therefore re-puts B before
         // removing A, and B (now newer than C) claims A's freed byte. The
         // copy-out channels must not remove A before applying foreign B.
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            14,
             r#"
 #strict 2
 func ArmOwnership(object b)
@@ -10437,24 +10260,14 @@ func FxDisableOuterTimer(object target, int number, int time)
     return 0;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(14);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        let a = engine.spawn_object(spawn()).expect("A spawns");
-        let b = engine.spawn_object(spawn()).expect("B spawns");
-        let c = engine.spawn_object(spawn()).expect("C spawns");
-        let a_index = engine.find_object_index(a).expect("A exists");
-        let b_index = engine.find_object_index(b).expect("B exists");
-        let c_index = engine.find_object_index(c).expect("C exists");
+            true,
+        );
+        let a = engine.spawn_object(mask_spawn()).expect("A spawns");
+        let b = engine.spawn_object(mask_spawn()).expect("B spawns");
+        let c = engine.spawn_object(mask_spawn()).expect("C spawns");
+        let a_index = object_index(&engine, a);
+        let b_index = object_index(&engine, b);
+        let c_index = object_index(&engine, c);
 
         engine
             .call_object_function(
@@ -10502,22 +10315,11 @@ func FxDisableOuterTimer(object target, int number, int time)
                     .expect("C keeps original instance")
         );
         assert_eq!(
-            engine.objects[b_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("B bake")
-                .buffer,
+            mask_bake(&engine, b_index).buffer,
             vec![0],
             "B is first to claim A's freed background"
         );
-        assert_eq!(
-            engine.objects[c_index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("C bake")
-                .buffer,
-            vec![2]
-        );
+        assert_eq!(mask_bake(&engine, c_index).buffer, vec![2]);
     }
 
     #[test]
@@ -10526,9 +10328,8 @@ func FxDisableOuterTimer(object target, int number, int time)
         // transaction. Its call must therefore remain interleaved with
         // SetSolidMask: Put->raw leaves Earth visible with the old saved
         // background, while raw->Put leaves MCVehic with Earth saved.
-        let mut definition = crate::Definition::from_script(
-            "MASK",
-            "Mask",
+        let mut engine = solid_mask_engine(
+            15,
             r#"
 #strict 2
 func PutThenRaw()
@@ -10560,21 +10361,12 @@ func TransactionThenRaw()
     return true;
 }
 "#,
-        )
-        .expect("definition compiles");
-        definition.set_c4_callback_convention(true);
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(15);
-        engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let mut spawn = crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
-        spawn.position_adjusted = true;
-        let id = engine.spawn_object(spawn).expect("mask spawns");
-        let index = engine.find_object_index(id).expect("mask exists");
+            true,
+        );
+        let id = engine
+            .spawn_object(adjusted_mask_spawn())
+            .expect("mask spawns");
+        let index = object_index(&engine, id);
 
         engine
             .call_object_function(index, "PutThenRaw", Vec::new())
@@ -10587,14 +10379,7 @@ func TransactionThenRaw()
             Some(1),
             "raw Earth remains visible after the preceding Put"
         );
-        assert_eq!(
-            engine.objects[index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("mask bake remains linked")
-                .buffer,
-            vec![0]
-        );
+        assert_eq!(mask_bake(&engine, index).buffer, vec![0]);
 
         engine
             .call_object_function(index, "RawThenPut", Vec::new())
@@ -10608,11 +10393,7 @@ func TransactionThenRaw()
             "the following Put restores MCVehic"
         );
         assert_eq!(
-            engine.objects[index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("mask bake remains linked")
-                .buffer,
+            mask_bake(&engine, index).buffer,
             vec![1],
             "Put saves the raw Earth byte"
         );
@@ -10645,52 +10426,29 @@ func TransactionThenRaw()
     #[test]
     fn solid_mask_rotation_eligibility_cycle_recreates_instance() {
         let (mut engine, ids) = overlapping_solid_mask_engine();
-        let indices = ids.map(|id| engine.find_object_index(id).expect("mask exists"));
-        let previous_newest = engine.objects[indices[2]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("C bake")
-            .instance_sequence;
+        let indices = ids.map(|id| object_index(&engine, id));
+        let previous_newest = mask_bake(&engine, indices[2]).instance_sequence;
 
         engine
             .call_object_function(indices[1], "RotateMaskCycle", Vec::new())
             .expect("rotation cycle completes");
-        let recreated_b = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("B mask was recreated")
-            .instance_sequence;
+        let recreated_b = mask_bake(&engine, indices[1]).instance_sequence;
         assert!(recreated_b > previous_newest);
 
         engine.remove_solid_mask(indices[0]);
         assert_eq!(
-            engine.objects[indices[1]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("B bake")
-                .buffer,
+            mask_bake(&engine, indices[1]).buffer,
             vec![0],
             "rotation eligibility loss moves B to the native list tail"
         );
-        assert_eq!(
-            engine.objects[indices[2]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("C bake")
-                .buffer,
-            vec![2]
-        );
+        assert_eq!(mask_bake(&engine, indices[2]).buffer, vec![2]);
     }
 
     #[test]
     fn solid_mask_set_position_reputs_only_after_integer_motion() {
         let (mut engine, ids) = overlapping_solid_mask_engine();
-        let indices = ids.map(|id| engine.find_object_index(id).expect("mask exists"));
-        let original_sequence = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("B bake")
-            .instance_sequence;
+        let indices = ids.map(|id| object_index(&engine, id));
+        let original_sequence = mask_bake(&engine, indices[1]).instance_sequence;
 
         engine
             .call_object_function(
@@ -10699,10 +10457,7 @@ func TransactionThenRaw()
                 vec![clonk_script::Value::Int(2), clonk_script::Value::Int(1)],
             )
             .expect("changed SetPosition succeeds");
-        let moved = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("B was re-put at its new position");
+        let moved = mask_bake(&engine, indices[1]);
         assert_eq!((moved.x, moved.y), (2, 1));
         assert_eq!(moved.instance_sequence, original_sequence);
         assert_eq!(moved.buffer, vec![0]);
@@ -10715,10 +10470,7 @@ func TransactionThenRaw()
                 vec![clonk_script::Value::Int(2), clonk_script::Value::Int(1)],
             )
             .expect("same-position SetPosition succeeds");
-        let after_same_position = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("same-position call leaves the bake put");
+        let after_same_position = mask_bake(&engine, indices[1]);
         assert_eq!(
             after_same_position.instance_sequence,
             before_same_position.instance_sequence
@@ -10727,11 +10479,7 @@ func TransactionThenRaw()
 
         engine.remove_solid_mask(indices[0]);
         assert_eq!(
-            engine.objects[indices[2]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("C bake")
-                .buffer,
+            mask_bake(&engine, indices[2]).buffer,
             vec![0],
             "moving B away leaves C to claim A's freed old pixel"
         );
@@ -10740,13 +10488,11 @@ func TransactionThenRaw()
     #[test]
     fn solid_mask_containment_eligibility_cycle_recreates_instance() {
         let (mut engine, ids) = overlapping_solid_mask_engine();
-        let target_index = engine.find_object_index(ids[1]).expect("target exists");
+        let target_index = object_index(&engine, ids[1]);
         let container = engine
             .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(-20, -20)))
             .expect("offscreen container spawns");
-        let container_index = engine
-            .find_object_index(container)
-            .expect("container exists");
+        let container_index = object_index(&engine, container);
         let container_sequence = engine.objects[container_index]
             .solid_mask_instance_sequence
             .expect("eligible offscreen container has an instance");
@@ -10773,25 +10519,13 @@ func TransactionThenRaw()
     #[test]
     fn solid_mask_instance_age_survives_reput_but_setsolidmask_recreates() {
         let (mut engine, ids) = overlapping_solid_mask_engine();
-        let indices = ids.map(|id| engine.find_object_index(id).expect("mask exists"));
-        let original_b = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("B bake")
-            .instance_sequence;
-        let original_c = engine.objects[indices[2]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("C bake")
-            .instance_sequence;
+        let indices = ids.map(|id| object_index(&engine, id));
+        let original_b = mask_bake(&engine, indices[1]).instance_sequence;
+        let original_c = mask_bake(&engine, indices[2]).instance_sequence;
 
         engine.update_solid_mask(indices[1]);
         assert_eq!(
-            engine.objects[indices[1]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("B re-put")
-                .instance_sequence,
+            mask_bake(&engine, indices[1]).instance_sequence,
             original_b,
             "ordinary Remove/Put retains the live C4SolidMask instance"
         );
@@ -10805,11 +10539,7 @@ func TransactionThenRaw()
                 },
             )
             .expect("same-rect SetSolidMask update applies");
-        let recreated_b = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("B recreated")
-            .instance_sequence;
+        let recreated_b = mask_bake(&engine, indices[1]).instance_sequence;
         assert!(
             recreated_b > original_c,
             "SetSolidMask deletes and reconstructs B at the list tail"
@@ -10824,11 +10554,7 @@ func TransactionThenRaw()
                 },
             )
             .expect("same-definition ChangeDef update applies");
-        let changed_def_b = engine.objects[indices[1]]
-            .solid_mask_bake
-            .as_ref()
-            .expect("B recreated after ChangeDef")
-            .instance_sequence;
+        let changed_def_b = mask_bake(&engine, indices[1]).instance_sequence;
         assert!(
             changed_def_b > recreated_b,
             "ChangeDef deletes and reconstructs even for the same definition"
@@ -10836,22 +10562,11 @@ func TransactionThenRaw()
 
         engine.remove_solid_mask(indices[0]);
         assert_eq!(
-            engine.objects[indices[1]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("B bake")
-                .buffer,
+            mask_bake(&engine, indices[1]).buffer,
             vec![0],
             "recreated newest B now claims A's freed background"
         );
-        assert_eq!(
-            engine.objects[indices[2]]
-                .solid_mask_bake
-                .as_ref()
-                .expect("C bake")
-                .buffer,
-            vec![2]
-        );
+        assert_eq!(mask_bake(&engine, indices[2]).buffer, vec![2]);
     }
 
     #[test]
@@ -10860,19 +10575,15 @@ func TransactionThenRaw()
         // A fully off-landscape eligible mask therefore has no raster bake,
         // but remains logically put and keeps its list age when it later
         // moves on-screen.
-        let mut definition =
-            crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-        let mut engine = crate::Engine::with_seed(9);
-        engine.set_landscape(raster_grid_landscape(4, 4, vec![0; 16]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
+        let mut engine = engine_with_definition(
+            9,
+            raster_grid_landscape(4, 4, vec![0; 16]),
+            solid_mask_definition("", false),
+        );
         let id = engine
             .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(-20, -20)))
             .expect("offscreen mask spawns");
-        let index = engine.find_object_index(id).expect("mask exists");
+        let index = object_index(&engine, id);
         let offscreen_sequence = engine.objects[index]
             .solid_mask_instance_sequence
             .expect("eligible offscreen instance was constructed");
@@ -10882,11 +10593,7 @@ func TransactionThenRaw()
         engine.objects[index].set_position(Vector2::new(1, 1));
         engine.update_solid_mask(index);
         assert_eq!(
-            engine.objects[index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("on-screen mask puts")
-                .instance_sequence,
+            mask_bake(&engine, index).instance_sequence,
             offscreen_sequence
         );
         assert!(!engine.objects[index].solid_mask_empty_put);
@@ -10897,12 +10604,7 @@ func TransactionThenRaw()
         engine.objects[index].state.container = None;
         engine.update_solid_mask(index);
         assert!(
-            engine.objects[index]
-                .solid_mask_bake
-                .as_ref()
-                .expect("re-eligible mask puts")
-                .instance_sequence
-                > offscreen_sequence,
+            mask_bake(&engine, index).instance_sequence > offscreen_sequence,
             "regaining eligibility constructs a new tail instance"
         );
     }
@@ -10914,28 +10616,18 @@ func TransactionThenRaw()
         // C4SolidMask::Repair records the changed background before putting
         // MCVehic back (C4SolidMask.cpp:365-383), so removing the mask later
         // must reveal the new water+IFT byte, not the old sky.
-        let mut definition =
-            crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
-        let mut engine = crate::Engine::with_seed(7);
-        engine.set_landscape(raster_grid_landscape(4, 4, vec![0; 16]));
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let id = engine
-            .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
-            .expect("mask spawns");
-        let index = engine.find_object_index(id).expect("mask exists");
+        let mut engine = engine_with_definition(
+            7,
+            raster_grid_landscape(4, 4, vec![0; 16]),
+            solid_mask_definition("", false),
+        );
+        let id = engine.spawn_object(mask_spawn()).expect("mask spawns");
+        let index = object_index(&engine, id);
         assert!(engine.solid_mask_grid_mode());
         assert!(engine.solid_mask_spec(index).is_some());
         engine.update_solid_mask(index);
-        let (mask_x, mask_y) = engine.objects[index]
-            .solid_mask_bake
-            .as_ref()
-            .map(|bake| (bake.x, bake.y))
-            .expect("mask is put");
+        let bake = mask_bake(&engine, index);
+        let (mask_x, mask_y) = (bake.x, bake.y);
         assert_eq!(
             engine
                 .landscape()
@@ -10982,11 +10674,6 @@ func TransactionThenRaw()
         // PrepareChange/FinishChange must also repair an intersecting solid
         // mask over the newly written background (C4Landscape.cpp:2851-2880;
         // C4SolidMask.cpp:323-342,365-385).
-        let mut definition =
-            crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
-        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
-        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-
         let mut landscape = raster_grid_landscape(7, 5, vec![1; 35]);
         let mut texmap = landscape
             .raster_state()
@@ -10995,21 +10682,12 @@ func TransactionThenRaw()
             .clone();
         texmap.shapes[3] = Some(crate::chunky::ChunkShape::Flat);
         landscape.set_raster_state(LandscapeRasterState::new(2, 0, texmap.clone()));
-        let mut engine = crate::Engine::with_seed(11);
-        engine.set_landscape(landscape);
-        engine
-            .register_definition(definition)
-            .expect("definition registers");
-        let id = engine
-            .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
-            .expect("mask spawns");
-        let index = engine.find_object_index(id).expect("mask exists");
+        let mut engine = engine_with_definition(11, landscape, solid_mask_definition("", false));
+        let id = engine.spawn_object(mask_spawn()).expect("mask spawns");
+        let index = object_index(&engine, id);
         engine.update_solid_mask(index);
-        let (mask_x, mask_y) = engine.objects[index]
-            .solid_mask_bake
-            .as_ref()
-            .map(|bake| (bake.x, bake.y))
-            .expect("mask is put");
+        let bake = mask_bake(&engine, index);
+        let (mask_x, mask_y) = (bake.x, bake.y);
 
         let bitmap = clonk_resources::bitmap::IndexedBitmap {
             width: 3,

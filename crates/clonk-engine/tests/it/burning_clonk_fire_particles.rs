@@ -22,9 +22,7 @@ fn catalog_has(engine: &Engine, name: &str) -> bool {
 fn burning_clonk_emits_shipped_fire_and_fire2_particles() {
     let mut engine = load_tutorial(1, 0);
     let owner = join_local_player(&mut engine, "Burning clonk fire particles");
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Tutorial01 joins with a selected clonk");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
 
     assert!(
         catalog_has(&engine, "Fire") && catalog_has(&engine, "Fire2"),
@@ -43,9 +41,9 @@ fn burning_clonk_emits_shipped_fire_and_fire2_particles() {
     // before it lands would put every particle at a negative world y, which
     // fxStdExec culls against `YOff` (src/C4Particles.cpp:695) — in C++ too.
     for _ in 0..40 {
-        engine.tick_without_snapshot().expect("the scenario settles");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let index = engine.find_object_index(clonk).expect("the clonk is live");
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(clonk));
     assert!(
         engine.objects[index].state.position.y > 0,
         "the clonk has landed inside the map before it is set alight",
@@ -59,7 +57,7 @@ fn burning_clonk_emits_shipped_fire_and_fire2_particles() {
     // (src/C4Effect.cpp:673-674); a clonk is C4D_Living, so it burns in
     // C4Fx_FireMode_LivingVeg and waits for the fourth execution.
     for _ in 0..4 {
-        engine.tick_without_snapshot().expect("the fire executes");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
     let particles = engine.particle_system().particles();

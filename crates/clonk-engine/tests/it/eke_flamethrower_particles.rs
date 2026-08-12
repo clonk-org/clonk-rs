@@ -12,25 +12,21 @@ fn eke_flamethrower_launches_global_fire2_particles() {
     let mut engine =
         load_installed_scenario("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/MeltMe.c4s", 0);
     let owner = join_local_player(&mut engine, "Eke flamethrower particles");
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("MeltMe joins with a selected SFT");
-    let flamethrower = engine
-        .object_snapshot(clonk)
-        .expect("the SFT is live")
-        .contents
-        .iter()
-        .copied()
-        .find(|&object| {
-            engine
-                .object_snapshot(object)
-                .is_some_and(|snapshot| snapshot.definition_id == "FT5B")
-        })
-        .expect("MeltMe equips the SFT with FT5B");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let flamethrower = crate::support::TestValueExt::test_value(
+        crate::support::TestValueExt::test_value(engine.object_snapshot(clonk))
+            .contents
+            .iter()
+            .copied()
+            .find(|&object| {
+                engine
+                    .object_snapshot(object)
+                    .is_some_and(|snapshot| snapshot.definition_id == "FT5B")
+            }),
+    );
 
-    let flamethrower_index = engine
-        .find_object_index(flamethrower)
-        .expect("the FT5B has an index");
+    let flamethrower_index =
+        crate::support::TestValueExt::test_value(engine.find_object_index(flamethrower));
     assert_eq!(
         engine
             .call_object_function(
@@ -69,9 +65,7 @@ fn eke_flamethrower_launches_global_fire2_particles() {
         "the shipped Fire2 render definition retains its Graphics.png"
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("the launched FI5B and global particles execute");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     let advanced = engine.snapshot();
     let advanced_flames: Vec<_> = advanced
         .particles

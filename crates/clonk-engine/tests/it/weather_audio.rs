@@ -23,9 +23,7 @@ fn tutorial07_real_acid_rain_starts_on_each_cpp_phase_call() {
 
     let expected = [0, 3, 3, 6];
     for (tick, expected_count) in (1..=4).zip(expected) {
-        engine
-            .tick_without_snapshot()
-            .expect("Tutorial07 weather tick succeeds");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
         assert_eq!(
             acid_rain_count(&engine),
             expected_count,
@@ -44,16 +42,14 @@ fn tutorial07_tick10_starts_cpp_wind_loop_at_level_40() {
     assert_eq!(engine.environment().wind, 50);
 
     for _ in 0..9 {
-        let frame = engine.tick().expect("pre-Tick10 tutorial frame succeeds");
+        let frame = crate::support::TestValueExt::test_value(engine.tick());
         assert!(
             frame.audio.iter().all(|event| !is_wind_event(event)),
             "Tutorial07 must not start wind audio before Tick10"
         );
     }
 
-    let wind_events = engine
-        .tick()
-        .expect("Tutorial07 Tick10 succeeds")
+    let wind_events = crate::support::TestValueExt::test_value(engine.tick())
         .audio
         .into_iter()
         .filter(is_wind_event)

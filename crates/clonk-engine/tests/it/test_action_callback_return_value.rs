@@ -8,7 +8,7 @@ use std::collections::HashMap;
 fn action_callback_can_return_int() {
     let mut engine = Engine::new();
 
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -21,8 +21,7 @@ fn action_callback_can_return_int() {
             return 1;
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
     // Configure action with StartCall
     let mut actions = HashMap::new();
@@ -37,18 +36,18 @@ fn action_callback_can_return_int() {
     );
     definition.configure_actions(Some("Idle".to_string()), actions);
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
     // Spawn object with TestAction that has StartCall=TestCallback
     let action_state = ActionState::new("TestAction");
-    let obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()).with_action(action_state))
-        .expect("spawn should work");
+    let obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string()).with_action(action_state)),
+    );
 
     // This should NOT fail - action callbacks can return non-nil values
     // The C++ engine allows this behavior
     // The StartCall will be triggered during spawn with the action
-    let snapshot = engine.tick().expect("tick should succeed");
+    let snapshot = crate::support::TestValueExt::test_value(engine.tick());
     assert!(
         snapshot.object(obj).is_some(),
         "object should exist after tick"
@@ -60,7 +59,7 @@ fn scaling_callback_returns_int() {
     // Reproduces the actual TRPR/Scaling issue
     let mut engine = Engine::new();
 
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "CLNK",
         "Clonk",
         r#"
@@ -73,8 +72,7 @@ fn scaling_callback_returns_int() {
             return 1;  // Returns int, not nil
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
     // Configure Scale action with StartCall=Scaling
     let mut actions = HashMap::new();
@@ -89,16 +87,16 @@ fn scaling_callback_returns_int() {
     );
     definition.configure_actions(Some("Idle".to_string()), actions);
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
     // Spawn object with Scale action
     let action_state = ActionState::new("Scale");
-    let obj = engine
-        .spawn_object(SpawnConfig::new("CLNK".to_string()).with_action(action_state))
-        .expect("spawn should work - Scaling callback should be allowed to return int");
+    let obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("CLNK".to_string()).with_action(action_state)),
+    );
 
     // Verify object exists and action works
-    let snapshot = engine.tick().expect("tick should succeed");
+    let snapshot = crate::support::TestValueExt::test_value(engine.tick());
     assert!(
         snapshot.object(obj).is_some(),
         "object should exist after tick"

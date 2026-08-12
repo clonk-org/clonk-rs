@@ -19,11 +19,11 @@ fn two_line_product_logo_keeps_classic_startup_footprint() {
 
 #[test]
 fn hud_graphics_receive_canonical_transparent_pixels_from_the_shared_loader() {
-    let directory = tempdir().expect("graphics directory");
+    let directory = tempdir();
     let graphics_dir = directory.path().join("Graphics.c4g");
-    fs::create_dir(&graphics_dir).expect("create Graphics.c4g");
-    let source = image::RgbaImage::from_raw(2, 1, vec![255, 127, 63, 0, 200, 100, 50, 1])
-        .expect("rgba image");
+    fs::create_dir(&graphics_dir).test_value();
+    let source =
+        image::RgbaImage::from_raw(2, 1, vec![255, 127, 63, 0, 200, 100, 50, 1]).test_value();
     for name in [
         "Player.png",
         "Crew.png",
@@ -36,7 +36,7 @@ fn hud_graphics_receive_canonical_transparent_pixels_from_the_shared_loader() {
             .unwrap_or_else(|error| panic!("write {name}: {error}"));
     }
 
-    let graphics = GraphicsResource::open(&graphics_dir).expect("graphics resource");
+    let graphics = GraphicsResource::open(&graphics_dir).test_value();
     let hud = FrontendAssets::load_hud_graphics(&graphics);
     for (name, image) in [
         ("Player.png", hud.player.as_ref()),
@@ -91,26 +91,23 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     // destroys the local catalog and reconstructs Music.c4g + MoreMusic.txt
     // before startup or the next full scenario (C4Application.cpp:232-293,
     // 373-400; C4MusicSystem.cpp:37-45,391-434).
-    let dir = tempdir().expect("music lifecycle fixture");
+    let dir = tempdir();
     let global = dir.path().join("Music.c4g");
     let extras = dir.path().join("Extras");
-    fs::create_dir_all(dir.path().join("planet/System.c4g"))
-        .expect("create minimal install system group");
-    fs::create_dir_all(&global).expect("create global music group");
-    fs::create_dir_all(&extras).expect("create MoreMusic directory");
-    fs::write(global.join("Old Base.ogg"), b"old base").expect("old global track");
-    fs::write(global.join("Removed.mod"), b"removed").expect("removed global track");
-    fs::write(extras.join("Old Match.mp3"), b"old wildcard").expect("old wildcard track");
+    fs::create_dir_all(dir.path().join("planet/System.c4g")).test_value();
+    fs::create_dir_all(&global).test_value();
+    fs::create_dir_all(&extras).test_value();
+    fs::write(global.join("Old Base.ogg"), b"old base").test_value();
+    fs::write(global.join("Removed.mod"), b"removed").test_value();
+    fs::write(extras.join("Old Match.mp3"), b"old wildcard").test_value();
     // \x2A is the byte for '*'; writing it as an escape keeps cloc's Rust
     // filter from misreading the glob's slash-star as a block-comment open
     // and stalling (the bytes are unchanged).
-    fs::write(dir.path().join("MoreMusic.txt"), b"Extras/\x2A.mp3\n")
-        .expect("initial MoreMusic manifest");
+    fs::write(dir.path().join("MoreMusic.txt"), b"Extras/\x2A.mp3\n").test_value();
 
     let local_scenario = dir.path().join("Local.c4s");
-    fs::create_dir_all(&local_scenario).expect("create local scenario");
-    fs::write(local_scenario.join("Local Theme.ogg"), b"local")
-        .expect("write local scenario track");
+    fs::create_dir_all(&local_scenario).test_value();
+    fs::write(local_scenario.join("Local Theme.ogg"), b"local").test_value();
 
     let user_data = dir.path().join("user");
     let _env_lock = env_lock().lock();
@@ -119,8 +116,8 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         ("LC_CONTENT_DIR", Some(dir.path())),
         ("LC_USER_DATA_DIR", Some(user_data.as_path())),
     ]);
-    let paths = AppPaths::discover().expect("discover fixture paths");
-    paths.ensure_user_dirs().expect("create fixture user paths");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut audio = AudioContext::try_new_with_paths(
         AudioOptions {
             max_channels: 1,
@@ -128,7 +125,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         },
         Some(&paths),
     )
-    .expect("create audio context");
+    .test_value();
 
     let mut initial = audio.music_resolver.global.filenames();
     initial.sort();
@@ -138,7 +135,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         &audio
             .music_resolver
             .resolve("Local Theme")
-            .expect("local scenario catalog")
+            .test_value()
             .identity,
     );
     audio
@@ -147,18 +144,18 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     lock_unpoisoned(&audio.music_control).most_recently_played = Some(stale_recent);
     audio.set_scenario_music_level(Some(25));
 
-    fs::remove_file(global.join("Old Base.ogg")).expect("remove old global track");
-    fs::remove_file(global.join("Removed.mod")).expect("remove second old track");
-    fs::remove_file(extras.join("Old Match.mp3")).expect("remove old wildcard track");
-    fs::write(global.join("New Base.ogg"), b"new base").expect("new global track");
-    fs::write(global.join("Frontend.ogg"), b"new frontend").expect("new frontend track");
-    fs::write(extras.join("New Match.ogg"), b"new wildcard").expect("new wildcard track");
+    fs::remove_file(global.join("Old Base.ogg")).test_value();
+    fs::remove_file(global.join("Removed.mod")).test_value();
+    fs::remove_file(extras.join("Old Match.mp3")).test_value();
+    fs::write(global.join("New Base.ogg"), b"new base").test_value();
+    fs::write(global.join("Frontend.ogg"), b"new frontend").test_value();
+    fs::write(extras.join("New Match.ogg"), b"new wildcard").test_value();
     // \x2A is '*' (see note above); bytes identical, dodges the same cloc stall.
     fs::write(
         dir.path().join("MoreMusic.txt"),
         b"Extras/\x2A.ogg\n#clear\nMusic.c4g\nExtras/\x2A.ogg\n",
     )
-    .expect("replacement MoreMusic manifest");
+    .test_value();
 
     assert!(
         audio.music_resolver.global.resolve("New Base").is_none(),
@@ -215,16 +212,12 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     // A failed startup host/join also runs QuitGame -> PreInit ->
     // DoStartup. Prove that shortcut performs a third discovery before it
     // requests frontend music, rather than retaining this second catalog.
-    let controlled_fixture = audio
-        .system
-        .load_music(&silent_pcm_wav(20))
-        .expect("predecode controlled frontend fixture");
+    let controlled_fixture = audio.system.load_music(&silent_pcm_wav(20)).test_value();
     audio.control_music_loads_with(controlled_fixture);
-    fs::remove_file(global.join("New Base.ogg")).expect("remove second-generation base");
-    fs::remove_file(extras.join("New Match.ogg")).expect("remove second-generation wildcard match");
-    fs::write(global.join("Final Base.ogg"), b"final base").expect("third-generation global track");
-    fs::write(extras.join("Final Match.ogg"), b"final wildcard")
-        .expect("third-generation wildcard track");
+    fs::remove_file(global.join("New Base.ogg")).test_value();
+    fs::remove_file(extras.join("New Match.ogg")).test_value();
+    fs::write(global.join("Final Base.ogg"), b"final base").test_value();
+    fs::write(extras.join("Final Match.ogg"), b"final wildcard").test_value();
 
     let mut app = new_real_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
@@ -234,9 +227,9 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     app.startup_restart_diagnostics
         .add_fatal_error("fixture startup failure");
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
-        .expect("failed startup returns through PreInit and DoStartup");
+        .test_value();
 
-    let audio = app.audio.as_ref().expect("test audio survives PreInit");
+    let audio = app.audio.test_ref();
     let mut final_catalog = audio.music_resolver.active_filenames();
     final_catalog.sort();
     assert_eq!(
@@ -249,18 +242,12 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     let expected_frontend = audio
         .music_resolver
         .first_default()
-        .expect("fresh frontend selection")
+        .test_value()
         .identity
         .clone();
-    let controlled = audio
-        .controlled_music_loads
-        .as_ref()
-        .expect("controlled music loading");
+    let controlled = audio.controlled_music_loads.test_ref();
     assert_eq!(controlled.requests.len(), 1);
-    let request = controlled
-        .requests
-        .front()
-        .expect("DoStartup frontend music request");
+    let request = controlled.requests.front().test_value();
     assert!(!request.looped);
     assert!(request
         .identity
@@ -268,22 +255,18 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
         .is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
 
     let pre_console_generation = lock_unpoisoned(&audio.music_control).generation;
-    fs::remove_file(global.join("Final Base.ogg")).expect("remove third-generation base");
-    fs::remove_file(extras.join("Final Match.ogg"))
-        .expect("remove third-generation wildcard match");
-    fs::write(global.join("Console Only.ogg"), b"console").expect("console-only external edit");
+    fs::remove_file(global.join("Final Base.ogg")).test_value();
+    fs::remove_file(extras.join("Final Match.ogg")).test_value();
+    fs::write(global.join("Console Only.ogg"), b"console").test_value();
     app.console_mode = true;
     app.resume_frontend_music_after_fade = true;
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
         .add_fatal_error("fixture console failure");
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
-        .expect("console open failure returns without application PreInit");
+        .test_value();
 
-    let audio = app
-        .audio
-        .as_ref()
-        .expect("console retains audio generation");
+    let audio = app.audio.test_ref();
     assert_eq!(
         lock_unpoisoned(&audio.music_control).generation,
         pre_console_generation
@@ -313,11 +296,8 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     app.startup_restart_diagnostics
         .add_fatal_error("fixture command-line failure");
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
-        .expect("explicit command-line failure does not enter PreInit");
-    let audio = app
-        .audio
-        .as_ref()
-        .expect("command-line failure retains audio generation");
+        .test_value();
+    let audio = app.audio.test_ref();
     assert_eq!(
         lock_unpoisoned(&audio.music_control).generation,
         pre_console_generation
@@ -347,17 +327,11 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     // Its ordinary startup lineage must run the same QuitGame -> PreInit
     // reconstruction, while the earlier console edit is still pending.
     app.classic_command_line = ClassicCommandLine::default();
-    let pre_lobby_generation = lock_unpoisoned(
-        &app.audio
-            .as_ref()
-            .expect("lobby retains audio")
-            .music_control,
-    )
-    .generation;
+    let pre_lobby_generation = lock_unpoisoned(&app.audio.test_ref().music_control).generation;
     install_test_classic_host_lobby(&mut app);
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::ExitRequested])
-        .expect("lobby abort returns through PreInit and DoStartup");
-    let audio = app.audio.as_ref().expect("lobby abort retains audio");
+        .test_value();
+    let audio = app.audio.test_ref();
     assert!(lock_unpoisoned(&audio.music_control).generation > pre_lobby_generation);
     assert!(audio.music_resolver.resolve("Console Only").is_some());
     assert_eq!(
@@ -415,13 +389,11 @@ fn about_chrome_uses_runtime_resource_strings() {
 
     // The relocated mnemonic activates, and the old English one does not.
     app.keyboard_modifiers = ModifiersState::ALT;
-    app.handle_key(VirtualKeyCode::KeyU, ElementState::Pressed)
-        .expect("dispatch the translated update mnemonic");
+    app.test_key(VirtualKeyCode::KeyU, ElementState::Pressed);
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("abort the update check");
-    app.handle_key(VirtualKeyCode::KeyL, ElementState::Pressed)
-        .expect("dispatch the translated licenses mnemonic");
+        .test_value();
+    app.test_key(VirtualKeyCode::KeyL, ElementState::Pressed);
     assert_eq!(
         app.startup_about_dialog
             .as_ref()
@@ -485,12 +457,7 @@ fn startup_options_visible_labels_follow_runtime_resources() {
             .insert(key.to_string(), value.to_string());
     }
     app.open_options_menu();
-    let labels = app
-        .startup_options_dialog
-        .as_ref()
-        .expect("options dialog")
-        .labels()
-        .clone();
+    let labels = app.startup_options_dialog.test_ref().labels().clone();
 
     // The caption drops its mnemonic marker like every FullscreenDialog title.
     assert_eq!(labels.title, "Einstellungen");
@@ -539,9 +506,8 @@ fn startup_options_visible_labels_follow_runtime_resources() {
         app.startup_tooltip_resources
             .insert(key.to_string(), value.to_string());
     }
-    app.begin_options_scale_test(100, 150)
-        .expect("open the resolution confirmation");
-    let confirm = app.message_dialogs.last().expect("confirmation dialog");
+    app.begin_options_scale_test(100, 150).test_value();
+    let confirm = app.message_dialogs.last().test_value();
     assert_eq!(confirm.state.caption(), "Aufloesung wechseln");
     assert_eq!(
         confirm.state.message(),
@@ -558,12 +524,8 @@ fn startup_options_visible_labels_follow_runtime_resources() {
     );
 
     // Layout measures the resolved text, so a longer label widens its column.
-    let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
-    let book = app
-        .assets
-        .options_book_fonts
-        .as_deref()
-        .expect("options fonts");
+    let fonts = app.assets.clonk_fonts.as_deref().test_value();
+    let book = app.assets.options_book_fonts.as_deref().test_value();
     let wide = clonk_frontend::startup_options_dlg::OptionsLabels {
         language: "Sprachauswahl fuer das gesamte Programm".to_string(),
         ..Default::default()
@@ -601,7 +563,7 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
             .insert(key.to_string(), value.to_string());
     }
     let at_anchor = |anchor: (i32, i32)| GuiPoint::new(anchor.0 as f32, anchor.1 as f32 + 1.0);
-    let fonts = Arc::clone(app.assets.clonk_fonts.as_ref().expect("classic fonts"));
+    let fonts = Arc::clone(app.assets.clonk_fonts.test_ref());
 
     let net_metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(fonts.as_ref());
     let mut network = clonk_frontend::startup_netdlg::NetDlgController::new(
@@ -624,11 +586,7 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
     );
 
     app.open_options_menu();
-    let options_book = app
-        .assets
-        .options_book_fonts
-        .as_deref()
-        .expect("options fonts");
+    let options_book = app.assets.options_book_fonts.as_deref().test_value();
     let options = clonk_frontend::startup_options_dlg::options_dlg_layout(
         640,
         480,
@@ -646,7 +604,7 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
         app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)),
         Some(StartupTooltip::text("Spielerauswahl"))
     );
-    let player_dialog = app.startup_player_dialog.as_mut().expect("player dialog");
+    let player_dialog = app.startup_player_dialog.test_mut();
     player_dialog.set_player_count(1);
     assert!(player_dialog.enter_crew_mode(0, "Ada", vec![true]));
     assert_eq!(
@@ -725,12 +683,10 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
 
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("IRC warning user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0")
-        .expect("enable IRC warning");
-    persist_config_value(&paths, "IRC", "Server2", "irc.configured.test")
-        .expect("seed configured IRC server");
+    persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0").test_value();
+    persist_config_value(&paths, "IRC", "Server2", "irc.configured.test").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     install_classic_test_assets(&mut app);
     let cancelled = clonk_frontend::startup_netdlg::NetDlgChatLogin {
@@ -742,8 +698,8 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
     };
 
     app.request_startup_irc_connection(cancelled.clone())
-        .expect("open IRC warning");
-    let warning = app.message_dialogs.last_mut().expect("IRC warning dialog");
+        .test_value();
+    let warning = app.message_dialogs.last_mut().test_value();
     assert_eq!(warning.state.caption(), "Chat - Disclaimer");
     assert!(warning.state.message().contains("irc.cancelled.test"));
     assert_eq!(warning.state.buttons(), MessageDialogButtons::OK_CANCEL);
@@ -760,10 +716,10 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
     assert_eq!(warning.state.handle_hotkey('d'), None);
     app.persist_top_message_dialog_checkbox_changes();
     app.finish_message_dialog(MessageDialogResult::Cancel)
-        .expect("cancel IRC warning");
+        .test_value();
     assert!(app.startup_irc_client.is_none());
 
-    let persisted = Config::load(paths.config_file()).expect("reload persisted IRC config");
+    let persisted = Config::load(paths.config_file()).test_value();
     assert_eq!(persisted.get_in(Some("IRC"), "Nick"), Some("SavedNick"));
     assert_eq!(
         persisted.get_in(Some("IRC"), "RealName"),
@@ -782,8 +738,7 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
         "the don't-show choice persists even when the connection is cancelled"
     );
 
-    persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0")
-        .expect("show warning again");
+    persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0").test_value();
     let (address, server) = spawn_loopback_irc_server();
     let accepted = clonk_frontend::startup_netdlg::NetDlgChatLogin {
         server: address,
@@ -792,29 +747,28 @@ fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok
         real_name: "Accepted Name".into(),
         channel: "#accepted".into(),
     };
-    app.request_startup_irc_connection(accepted)
-        .expect("reopen IRC warning");
+    app.request_startup_irc_connection(accepted).test_value();
     assert!(app.startup_irc_client.is_none());
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("accept IRC warning");
-    let client = app.startup_irc_client.as_ref().expect("IRC client started");
+        .test_value();
+    let client = app.startup_irc_client.test_ref();
     assert!(matches!(
         client.recv_event_timeout(Duration::from_secs(2)),
         Ok(clonk_network::IrcClientEvent::Connected)
     ));
     drop(app);
-    server.join().expect("join loopback IRC server");
+    server.test_join();
     reset_cached_app_paths();
 }
 
 #[test]
 fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback IRC");
-    let address = listener.local_addr().expect("loopback IRC address");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let address = listener.local_addr().test_value();
     let server = thread::spawn(move || {
         use std::io::Read as _;
 
-        let (mut stream, _) = listener.accept().expect("accept loopback IRC client");
+        let (mut stream, _) = listener.accept().test_value();
         let mut buffer = [0_u8; 512];
         while stream.read(&mut buffer).is_ok_and(|read| read != 0) {}
     });
@@ -826,7 +780,7 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
         ),
         Duration::from_secs(2),
     )
-    .expect("start loopback IRC client");
+    .test_value();
     assert!(matches!(
         handle.recv_event_timeout(Duration::from_secs(2)),
         Ok(clonk_network::IrcClientEvent::Connected)
@@ -853,8 +807,7 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     );
 
     let mut frame = vec![0xa5; 640 * 480 * 4];
-    app.render(&mut frame)
-        .expect("the classic startup Chat sheet renders");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0xa5));
 
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
@@ -869,11 +822,9 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
         f64::from(button.x + button.w / 2),
         f64::from(button.y + button.h / 2),
     );
-    app.handle_cursor_moved(point).expect("hover Games");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Games");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("return to the game list");
+    app.test_cursor(point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().mode(),
         clonk_frontend::startup_netdlg::NetDlgMode::GameList
@@ -892,7 +843,7 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
         "the process-global IRC client survives startup-screen replacement"
     );
     drop(app);
-    server.join().expect("join loopback IRC server");
+    server.test_join();
 }
 
 #[test]
@@ -1026,7 +977,7 @@ fn missing_startup_models_precede_status_and_leave_pixels_untouched() {
 
 /// The message dialog a finished check left behind.
 fn update_result_dialog(app: &GameApp) -> &PendingMessageDialog {
-    app.message_dialogs.last().expect("visible update result")
+    app.message_dialogs.last().test_value()
 }
 
 #[test]
@@ -1037,7 +988,7 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     // opened it (see `game_app::update`).
     use crate::update_check::test_support::{manifest_for, FakeTransport, OFFERED_VERSION};
 
-    let user_data = tempdir().expect("update download user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths);
@@ -1046,8 +997,7 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
         clonk_core::version::ENGINE_VERSION,
     ));
 
-    app.check_for_updates_with(false, &transport)
-        .expect("present an available update");
+    app.check_for_updates_with(false, &transport).test_value();
 
     let prompt = update_result_dialog(&app);
     assert_eq!(
@@ -1074,17 +1024,17 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     let mut declined = new_classic_menu_app(640, 480);
     declined
         .check_for_updates_with(false, &transport)
-        .expect("present an available update");
+        .test_value();
     declined
         .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
-        .expect("decline the update");
+        .test_value();
     assert!(declined.message_dialogs.is_empty());
 
     // Accepting starts the cancellable component download. The test build
     // parks its network worker, so this pins the hand-off without touching
     // the network.
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
-        .expect("accept the update");
+        .test_value();
     let download = update_result_dialog(&app);
     assert_eq!(download.state.message(), "Downloading update 99.0.0...");
     assert_eq!(download.state.caption(), "Check for Updates");
@@ -1095,18 +1045,17 @@ fn an_available_update_opens_the_localized_yes_no_prompt() {
     );
     assert!(app.update_download.is_some());
 
-    app.check_for_updates_at(false, 1_000)
-        .expect("report the accepted download already in progress");
+    app.check_for_updates_at(false, 1_000).test_value();
     assert!(app.update_check.is_none());
     assert_eq!(
         update_result_dialog(&app).state.message(),
         "Update still in progress. Please wait."
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("close the in-progress notice");
+        .test_value();
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("cancel the component download");
+        .test_value();
     assert!(app.update_download.is_none());
     assert!(app.message_dialogs.is_empty());
 }
@@ -1125,7 +1074,7 @@ fn only_a_manual_check_reports_that_there_is_no_update() {
     let mut manual = new_classic_menu_app(640, 480);
     manual
         .check_for_updates_with(false, &transport)
-        .expect("present a manual check with nothing to offer");
+        .test_value();
     assert_eq!(
         update_result_dialog(&manual).state.message(),
         format!(
@@ -1145,7 +1094,7 @@ fn only_a_manual_check_reports_that_there_is_no_update() {
     let mut automatic = new_classic_menu_app(640, 480);
     automatic
         .check_for_updates_with(true, &transport)
-        .expect("run an automatic check with nothing to offer");
+        .test_value();
     assert!(automatic.message_dialogs.is_empty());
 }
 
@@ -1157,7 +1106,7 @@ fn a_failed_check_reports_the_transport_error_after_the_localized_prefix() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.check_for_updates_with(true, &FakeTransport::failing("https://mirror.invalid/u"))
-        .expect("present a failed check");
+        .test_value();
 
     let failure = update_result_dialog(&app);
     assert!(
@@ -1192,7 +1141,7 @@ fn a_release_built_against_another_engine_asks_for_a_manual_install() {
             [major, minor, objects + 1, revision, build],
         )),
     )
-    .expect("present an engine-changing release");
+    .test_value();
 
     assert_eq!(
         update_result_dialog(&app).state.message(),
@@ -1209,7 +1158,7 @@ fn an_incoming_update_package_is_refused_instead_of_executed() {
     let mut app = new_classic_menu_app(640, 480);
 
     app.refuse_incoming_update(Path::new("Patch.c4u"))
-        .expect("report the refused package");
+        .test_value();
 
     let refusal = update_result_dialog(&app);
     assert_eq!(refusal.state.caption(), "Update");
@@ -1225,21 +1174,20 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
     // `C4UpdateDlg.cpp:264-268`: an automatic check runs at most daily; a
     // manual one ignores the gate; and the attempt is recorded either way,
     // successful or not.
-    let user_data = tempdir().expect("update throttle user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "Network", "LastUpdateTime", "1000")
-        .expect("record a previous check");
+    persist_config_value(&paths, "Network", "LastUpdateTime", "1000").test_value();
 
     let mut app = new_classic_menu_app(640, 480);
     app.app_paths = Some(paths.clone());
 
     app.check_for_updates_at(true, 1000 + 60 * 60 * 24 - 1)
-        .expect("throttled automatic check");
+        .test_value();
     assert!(app.update_check.is_none(), "an automatic check is daily");
     assert!(app.message_dialogs.is_empty());
 
     app.check_for_updates_at(false, 1000 + 60 * 60 * 24 - 1)
-        .expect("manual check ignores the throttle");
+        .test_value();
     assert!(app.update_check.is_some());
     assert_eq!(
         Config::load(paths.config_file())
@@ -1253,7 +1201,7 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
     // A second request while one is in flight says so rather than starting
     // another; C++ cannot reach this because its check blocks.
     app.check_for_updates_at(false, 1000 + 60 * 60 * 24)
-        .expect("second manual check");
+        .test_value();
     assert_eq!(
         update_result_dialog(&app).state.message(),
         "Update still in progress. Please wait."
@@ -1261,7 +1209,7 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
 
     app.abort_update_check();
     app.check_for_updates_at(true, 1000 + 2 * 60 * 60 * 24)
-        .expect("a day later the automatic check runs");
+        .test_value();
     assert!(app.update_check.is_some());
 }
 
@@ -1276,11 +1224,11 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
     app.process_about_dialog_actions(vec![
         clonk_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
     ])
-    .expect("a manual update check must not be a fatal parity boundary");
+    .test_value();
     assert_eq!(app.startup_view, StartupView::About);
     assert!(app.startup_about_dialog.is_some());
     assert!(app.update_check.is_some(), "the check must be in flight");
-    let wait = app.message_dialogs.last().expect("visible update wait");
+    let wait = app.message_dialogs.last().test_value();
     assert_eq!(wait.state.caption(), "Check for Updates");
     assert_eq!(wait.state.message(), "Checking for updates...");
     assert_eq!(
@@ -1298,7 +1246,7 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
     );
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("abort the update check");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
     assert!(
         app.update_check.is_none(),
@@ -1310,20 +1258,16 @@ fn about_update_action_runs_a_manual_check_and_retains_about() {
         let mut app = new_classic_menu_app(640, 480);
         app.open_about_dialog();
         for _ in 0..2 {
-            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-                .expect("advance About focus");
-            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-                .expect("release About focus key");
+            app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         }
-        app.handle_key(key, ElementState::Pressed)
-            .expect("press focused update button");
+        app.test_key(key, ElementState::Pressed);
         assert!(app.message_dialogs.is_empty());
-        app.handle_key(key, ElementState::Released)
-            .expect("activate focused update button");
+        app.test_key(key, ElementState::Released);
         assert_eq!(app.message_dialogs.len(), 1);
         assert_eq!(app.startup_view, StartupView::About);
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-            .expect("abort the focused-key update check");
+            .test_value();
         assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_view, StartupView::About);
     }
@@ -1335,19 +1279,13 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
 
     let mut app = new_classic_menu_app(640, 480);
     app.open_about_dialog();
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Shift+Tab focuses the last About control");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release Shift+Tab");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
-        .expect("press focused Licenses button");
-    app.handle_key(VirtualKeyCode::Space, ElementState::Released)
-        .expect("open Licenses page");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Space, ElementState::Released);
     assert_eq!(
         app.startup_about_dialog
             .as_ref()
@@ -1356,39 +1294,25 @@ fn about_shift_tab_reverses_buttons_and_license_tabs() {
         AboutPage::Licenses
     );
 
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("plain Tab advances from hidden Licenses to LicenseTabs");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release plain Tab");
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift on Licenses page");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Shift+Tab reverses from LicenseTabs to Update");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release Licenses Shift+Tab");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
 
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("press focused Update button");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("activate focused Update button");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(app.message_dialogs.len(), 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss update hand-off");
+        .test_value();
 
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold Shift after Update");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("Shift+Tab reverses from Update to Back");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release final Shift+Tab");
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Shift");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("press focused Back button");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("return from Licenses to Credits");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert_eq!(
         app.startup_about_dialog
             .as_ref()
@@ -1407,7 +1331,7 @@ fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::NewPlayer,
     ])
-    .expect("new-player properties are implemented");
+    .test_value();
     assert!(app.startup_player_properties_dialog.is_some());
     app.startup_player_properties_dialog = None;
 }
@@ -1423,10 +1347,9 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let actions = app
         .startup_player_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .handle_key_down(KeyCode::Down);
-    app.process_player_dialog_actions(actions)
-        .expect("route the selection sound");
+    app.process_player_dialog_actions(actions).test_value();
     assert_eq!(app.ui_sound_log, ["Command"]);
 
     let back = clonk_frontend::startup_plrsel::plrsel_layout(640, 480).buttons[0];
@@ -1434,47 +1357,41 @@ fn player_selection_widget_sounds_reach_the_production_audio_route() {
     let actions = app
         .startup_player_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .handle_pointer_down(back);
-    app.process_player_dialog_actions(actions)
-        .expect("route the button-down sound");
+    app.process_player_dialog_actions(actions).test_value();
     assert_eq!(app.ui_sound_log, ["Command", "ArrowHit"]);
 
     let actions = app
         .startup_player_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .handle_pointer_up(back);
-    app.process_player_dialog_actions(actions)
-        .expect("route the button-release sound before Back");
+    app.process_player_dialog_actions(actions).test_value();
     assert_eq!(app.ui_sound_log, ["Command", "ArrowHit", "Click"]);
 }
 
 #[test]
 fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode() {
-    let directory = tempdir().expect("crew fixture root");
+    let directory = tempdir();
     let player_path = directory.path().join("Ada.c4p");
-    fs::create_dir(&player_path).expect("create player group");
+    fs::create_dir(&player_path).test_value();
     fs::write(
         player_path.join("Player.txt"),
         "[Player]\nName=Ada\n\n[Preferences]\nColorDw=255\n",
     )
-    .expect("write player core");
+    .test_value();
     for (file_name, name, id, experience) in [
         ("Low.c4i", "Low", "CLNK", 20),
         ("High.c4i", "High", "WIPF", 200),
     ] {
         let crew = player_path.join(file_name);
-        fs::create_dir(&crew).expect("create crew child");
-        fs::write(
-                crew.join("ObjectInfo.txt"),
-                format!(
-                    "[ObjectInfo]\nid={id}\nName={name}\nRankName=Clonk\nExperience={experience}\nParticipation=1\n"
-                ),
-            )
-            .expect("write crew core");
+        fs::create_dir(&crew).test_value();
+        fs::write(crew.join("ObjectInfo.txt"), format!(
+            "[ObjectInfo]\nid={id}\nName={name}\nRankName=Clonk\nExperience={experience}\nParticipation=1\n"
+        )).test_value();
     }
-    let player_file = PlayerFile::load_from_path(&player_path).expect("load player fixture");
+    let player_file = PlayerFile::load_from_path(&player_path).test_value();
     let player_model = clonk_frontend::startup_plrsel::PlrSelPlayer {
         name: "Ada".to_string(),
         activated: false,
@@ -1501,8 +1418,8 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
     ])
-    .expect("Crew enters without a PlayerCrew parity boundary");
-    let controller = app.startup_player_dialog.as_ref().expect("player dialog");
+    .test_value();
+    let controller = app.startup_player_dialog.test_ref();
     assert!(controller.is_crew_mode());
     assert_eq!(controller.dialog_title(), "Crew: Ada");
     assert_eq!(controller.selected_index(), Some(0));
@@ -1522,19 +1439,19 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
             participating: false,
         },
     ])
-    .expect("persist crew participation");
+    .test_value();
     let persisted = Group::open(player_path.join(&selected_crew_file))
         .and_then(|group| {
             clonk_engine::player_file::CrewInfo::load(&group)
                 .map_err(|error| GroupError::InvalidGroup(error.to_string()))
         })
-        .expect("reload persisted crew participation");
+        .test_value();
     assert_eq!(persisted.participation, 0);
 
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::SetCrewDeathMessage(0),
     ])
-    .expect("open crew death-message input");
+    .test_value();
     assert_eq!(
         app.game_option_input_dialog
             .as_ref()
@@ -1546,19 +1463,18 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "Farewell".to_string(),
     )])
-    .expect("persist crew death message");
+    .test_value();
     let persisted = Group::open(player_path.join(&selected_crew_file))
         .and_then(|group| {
             clonk_engine::player_file::CrewInfo::load(&group)
                 .map_err(|error| GroupError::InvalidGroup(error.to_string()))
         })
-        .expect("reload persisted crew death message");
+        .test_value();
     assert_eq!(persisted.death_message, "Farewell");
 
     let layout = clonk_frontend::startup_plrsel::plrsel_layout(640, 480);
     app.startup_player_dialog
-        .as_mut()
-        .expect("player dialog")
+        .test_mut()
         .set_pointer_position(Some(GuiPoint::new(
             (layout.list_client.x + layout.item_height * 2) as f32,
             (layout.list_client.y + layout.item_height / 2) as f32,
@@ -1581,18 +1497,18 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::LeaveCrew,
     ])
-    .expect("return to player mode");
-    let controller = app.startup_player_dialog.as_ref().expect("player dialog");
+    .test_value();
+    let controller = app.startup_player_dialog.test_ref();
     assert!(!controller.is_crew_mode());
     assert_eq!(controller.selected_index(), Some(0));
 
-    fs::remove_dir_all(player_path.join("Low.c4i")).expect("remove low crew");
-    fs::remove_dir_all(player_path.join("High.c4i")).expect("remove high crew");
+    fs::remove_dir_all(player_path.join("Low.c4i")).test_value();
+    fs::remove_dir_all(player_path.join("High.c4i")).test_value();
     app.process_player_dialog_actions(vec![
         clonk_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
     ])
-    .expect("crewless player opens a message, not a typed boundary");
-    let controller = app.startup_player_dialog.as_ref().expect("player dialog");
+    .test_value();
+    let controller = app.startup_player_dialog.test_ref();
     assert!(!controller.is_crew_mode());
     assert_eq!(controller.selected_index(), Some(0));
     assert_eq!(app.message_dialogs.len(), 1);
@@ -1655,8 +1571,7 @@ fn startup_player_resize_matches_cpp_copyfrom_sfc_max_size() {
         "C4Surface load blackens hidden RGB"
     );
     let owner_source = ImageData::new(2, 1, vec![0, 0, 255, 255, 200, 30, 30, 255]);
-    let icon = startup_player_big_icon(&owner_source, 0x00ff_ffff)
-        .expect("ordinary icon dimensions survive materialization");
+    let icon = startup_player_big_icon(&owner_source, 0x00ff_ffff).test_value();
     assert_eq!(
         icon.pixels(),
         &[254, 254, 254, 255, 200, 30, 30, 255],
@@ -1673,52 +1588,45 @@ fn startup_player_resize_matches_cpp_copyfrom_sfc_max_size() {
 #[test]
 fn startup_player_existence_scan_stops_after_the_first_visible_file() {
     let _lock = env_lock().lock();
-    let install_root = tempdir().expect("install root");
-    let user_data = tempdir().expect("user data");
-    fs::create_dir_all(install_root.path().join("planet/System.c4g"))
-        .expect("create system group marker");
-    fs::create_dir_all(install_root.path().join("Players")).expect("create first player root");
+    let install_root = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install_root.path().join("planet/System.c4g")).test_value();
+    fs::create_dir_all(install_root.path().join("Players")).test_value();
     fs::write(
         install_root.path().join("Players/Visible.C4P"),
         b"filename-only player marker",
     )
-    .expect("create visible player filename");
-    fs::create_dir_all(install_root.path().join("build")).expect("create later developer root");
+    .test_value();
+    fs::create_dir_all(install_root.path().join("build")).test_value();
     fs::write(
         install_root.path().join("build/Players"),
         b"not a directory",
     )
-    .expect("create unreadable later player root");
+    .test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover isolated app paths");
-    persist_config_value(&paths, "General", "PlayerPath", "Players")
-        .expect("configure relative player path");
+    let paths = test_app_paths();
+    persist_config_value(&paths, "General", "PlayerPath", "Players").test_value();
 
     assert!(startup_player_file_exists(&paths).expect("short-circuit existence scan"));
 
-    fs::remove_file(install_root.path().join("Players/Visible.C4P"))
-        .expect("remove first visible player");
+    fs::remove_file(install_root.path().join("Players/Visible.C4P")).test_value();
     assert!(startup_player_file_exists(&paths).is_err());
 
-    fs::remove_dir(install_root.path().join("Players")).expect("remove empty first player root");
-    fs::write(install_root.path().join("Players"), b"not a directory")
-        .expect("make first player root unreadable");
-    fs::remove_file(install_root.path().join("build/Players"))
-        .expect("remove unreadable later player root");
-    fs::create_dir_all(install_root.path().join("build/Players"))
-        .expect("create later player root");
+    fs::remove_dir(install_root.path().join("Players")).test_value();
+    fs::write(install_root.path().join("Players"), b"not a directory").test_value();
+    fs::remove_file(install_root.path().join("build/Players")).test_value();
+    fs::create_dir_all(install_root.path().join("build/Players")).test_value();
     fs::write(
         install_root.path().join("build/Players/Later.c4p"),
         b"later filename-only player marker",
     )
-    .expect("create later visible player filename");
+    .test_value();
     assert!(startup_player_file_exists(&paths).expect("continue after an earlier scan error"));
 
-    fs::remove_file(install_root.path().join("build/Players/Later.c4p"))
-        .expect("remove later visible player");
+    fs::remove_file(install_root.path().join("build/Players/Later.c4p")).test_value();
     assert!(startup_player_file_exists(&paths).is_err());
     reset_cached_app_paths();
 }
@@ -1729,25 +1637,22 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let player_root = user_data.path().join("Players");
-    fs::create_dir_all(player_root.join(".Private.c4p"))
-        .expect("create ignored private player entry");
-    fs::create_dir_all(player_root.join("Nested/Deep.c4p"))
-        .expect("create ignored nested player entry");
+    fs::create_dir_all(player_root.join(".Private.c4p")).test_value();
+    fs::create_dir_all(player_root.join("Nested/Deep.c4p")).test_value();
     let mut config = Config::new();
     config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
     config.set_in(Some("General"), "Participants", "Stale.c4p;Other.c4p");
     config.set_in(Some("General"), "FirstStart", "0");
-    fs::create_dir_all(paths.config_file().parent().expect("config parent"))
-        .expect("create config parent");
-    config.save(paths.config_file()).expect("save config");
+    fs::create_dir_all(paths.config_file().parent().test_value()).test_value();
+    config.save(paths.config_file()).test_value();
 
     let mut app = GameApp::new(
         640,
@@ -1767,7 +1672,7 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
             record_enabled: false,
         },
     )
-    .expect("initialise fresh-profile app");
+    .test_value();
     wait_for_menu_preserving_first_player_dialog(&mut app);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(matches!(
@@ -1790,23 +1695,23 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     assert!(app.startup_player_properties_dialog.is_none());
     assert_eq!(app.startup_view, StartupView::MainMenu);
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
-        .expect("cancelled main menu remains usable");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::PlayerSelection);
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
-        .expect("return to main without a player");
+        .test_value();
     assert!(app.startup_player_properties_dialog.is_some());
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
     ]);
 
     let broken = player_root.join("Broken.C4P");
-    fs::write(&broken, b"not a player group").expect("create visible broken player entry");
+    fs::write(&broken, b"not a player group").test_value();
     app.show_main_menu();
     assert!(
         app.startup_player_properties_dialog.is_none(),
         "the native scan matches names without opening player groups"
     );
-    fs::remove_file(&broken).expect("remove visible broken player entry");
+    fs::remove_file(&broken).test_value();
     app.show_main_menu();
     assert!(app
         .startup_player_properties_dialog
@@ -1817,21 +1722,18 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
         )));
 
     let raced = player_root.join("Racer.c4p");
-    fs::create_dir_all(&raced).expect("create player that appears behind the modal");
+    fs::create_dir_all(&raced).test_value();
     fs::write(
         raced.join("Player.txt"),
         "[Player]\nName=Racer\n\n[Preferences]\nColorDw=255\n",
     )
-    .expect("write raced player core");
-    let mut raced_config = Config::load(paths.config_file()).expect("reload raced config");
+    .test_value();
+    let mut raced_config = Config::load(paths.config_file()).test_value();
     raced_config.set_in(Some("General"), "Participants", raced.to_string_lossy());
-    raced_config
-        .save(paths.config_file())
-        .expect("select raced player behind modal");
+    raced_config.save(paths.config_file()).test_value();
 
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("forced editor")
+        .test_mut()
         .controller
         .set_name("First");
     app.process_startup_player_properties_actions(vec![
@@ -1878,12 +1780,11 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
         "a visible player prevents another forced dialog"
     );
     app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
-        .expect("open player selection");
-    fs::remove_dir_all(&raced).expect("remove non-participating raced player");
-    app.delete_startup_player_and_refresh(&created)
-        .expect("delete the last player");
+        .test_value();
+    fs::remove_dir_all(&raced).test_value();
+    app.delete_startup_player_and_refresh(&created).test_value();
     app.process_player_dialog_actions(vec![clonk_frontend::startup_plrsel::PlrSelAction::Back])
-        .expect("return after deleting the last player");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(
         app.startup_player_properties_dialog.is_some(),
@@ -1894,17 +1795,13 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
     ]);
     assert!(app.startup_player_properties_dialog.is_none());
     app.handle_main_menu_activation(MainMenuItem::Options)
-        .expect("main menu remains usable after cancelling forced creation");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::Options);
     reset_cached_app_paths();
 }
 
 fn set_distinct_player_properties_fields(app: &mut GameApp, name: &str) -> (PlayerFile, String) {
-    let controller = &mut app
-        .startup_player_properties_dialog
-        .as_mut()
-        .expect("open player-properties form")
-        .controller;
+    let controller = &mut app.startup_player_properties_dialog.test_mut().controller;
     controller.set_name(name);
     controller.set_comment("Retained validation comment");
     let player = controller.player_mut();
@@ -1930,7 +1827,7 @@ fn assert_player_properties_validation_modal(
         MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
     };
 
-    let modal = app.message_dialogs.last().expect("name validation modal");
+    let modal = app.message_dialogs.last().test_value();
     assert_eq!(modal.state.message(), expected_message);
     assert_eq!(modal.state.caption(), "");
     assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
@@ -1940,10 +1837,7 @@ fn assert_player_properties_validation_modal(
         modal.continuation,
         MessageDialogContinuation::None
     ));
-    let form = app
-        .startup_player_properties_dialog
-        .as_ref()
-        .expect("properties form remains below modal");
+    let form = app.startup_player_properties_dialog.test_ref();
     assert_eq!(form.controller.player(), expected_player);
     assert_eq!(form.controller.comment(), expected_comment);
     assert_eq!(form.controller.validation_error(), None);
@@ -1952,7 +1846,7 @@ fn assert_player_properties_validation_modal(
 
 #[test]
 fn startup_player_properties_empty_name_shows_modal_message_dialog() {
-    let user_data = tempdir().expect("empty-name user data");
+    let user_data = tempdir();
     let (_guard, _paths, _player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
     let (expected_player, expected_comment) = set_distinct_player_properties_fields(&mut app, "");
@@ -1968,20 +1862,20 @@ fn startup_player_properties_empty_name_shows_modal_message_dialog() {
         &expected_comment,
     );
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss empty-name modal");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
-    let form = app.startup_player_properties_dialog.as_ref().unwrap();
+    let form = app.startup_player_properties_dialog.as_ref().test_value();
     assert_eq!(form.controller.player(), &expected_player);
     assert_eq!(form.controller.comment(), expected_comment);
 }
 
 #[test]
 fn startup_player_properties_duplicate_name_shows_modal_message_dialog() {
-    let user_data = tempdir().expect("duplicate-name user data");
+    let user_data = tempdir();
     let (_guard, _paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
     let occupied = player_root.join("Taken.c4p");
-    fs::create_dir(&occupied).expect("create colliding player group");
+    fs::create_dir(&occupied).test_value();
     let (expected_player, expected_comment) =
         set_distinct_player_properties_fields(&mut app, "Taken");
 
@@ -1998,9 +1892,9 @@ fn startup_player_properties_duplicate_name_shows_modal_message_dialog() {
     assert!(occupied.is_dir());
     assert!(app.startup_player_files.is_empty());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("dismiss duplicate-name modal");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
-    let form = app.startup_player_properties_dialog.as_ref().unwrap();
+    let form = app.startup_player_properties_dialog.as_ref().test_value();
     assert_eq!(form.controller.player(), &expected_player);
     assert_eq!(form.controller.comment(), expected_comment);
 }
@@ -2011,29 +1905,27 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
         MessageDialogButtons, MessageDialogIcon, MessageDialogResult, MessageDialogSize,
     };
 
-    let user_data = tempdir().expect("rename-failure user data");
+    let user_data = tempdir();
     let (_guard, paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
     app.startup_player_properties_dialog = None;
 
     let old = player_root.join("Old.c4p");
-    fs::create_dir(&old).expect("create selected player group");
-    fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").expect("write selected player core");
-    persist_config_value(&paths, "General", "Participants", old.to_string_lossy())
-        .expect("activate selected player");
+    fs::create_dir(&old).test_value();
+    fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n").test_value();
+    persist_config_value(&paths, "General", "Participants", old.to_string_lossy()).test_value();
     app.refresh_startup_player_list();
     assert_eq!(app.startup_player_files.len(), 1);
 
     app.open_existing_startup_player_properties(0);
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("open player-properties form")
+        .test_mut()
         .controller
         .set_name("Renamed");
 
     // Fail the rename step itself: the source group vanishes behind the
     // open form, so the move onto the new filename has nothing to rename.
-    fs::remove_dir_all(&old).expect("remove source group behind open form");
+    fs::remove_dir_all(&old).test_value();
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
@@ -2053,10 +1945,7 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
         Some("")
     );
 
-    let modal = app
-        .message_dialogs
-        .last()
-        .expect("classic rename-error dialog");
+    let modal = app.message_dialogs.last().test_value();
     assert_eq!(modal.state.caption(), "Error");
     assert!(!modal.state.message().is_empty());
     assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
@@ -2068,7 +1957,7 @@ fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
     ));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss rename-error dialog");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(
         app.startup_player_dialog
@@ -2084,19 +1973,18 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
         MessageDialogButtons, MessageDialogIcon, MessageDialogResult, MessageDialogSize,
     };
 
-    let user_data = tempdir().expect("create-failure user data");
+    let user_data = tempdir();
     let (_guard, _paths, player_root, mut app) =
         startup_player_properties_validation_app(user_data.path());
     app.startup_player_properties_dialog
-        .as_mut()
-        .expect("open new-player form")
+        .test_mut()
         .controller
         .set_name("Fresh");
 
     // Break the configured player root under the open creation form: the
     // occupancy scan and the new group write both need a directory there.
-    fs::remove_dir_all(&player_root).expect("remove player root");
-    fs::write(&player_root, b"not a directory").expect("occupy player root path");
+    fs::remove_dir_all(&player_root).test_value();
+    fs::write(&player_root, b"not a directory").test_value();
     app.process_startup_player_properties_actions(vec![
         clonk_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
     ]);
@@ -2108,10 +1996,7 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
     assert!(app.startup_player_files.is_empty());
     assert!(app.status_text.is_empty());
 
-    let modal = app
-        .message_dialogs
-        .last()
-        .expect("classic create-error dialog");
+    let modal = app.message_dialogs.last().test_value();
     assert_eq!(modal.state.caption(), "Error");
     assert!(!modal.state.message().is_empty());
     assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
@@ -2123,7 +2008,7 @@ fn startup_player_properties_new_player_create_failure_opens_classic_error_dialo
     ));
 
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss create-error dialog");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
 }
 
@@ -2133,15 +2018,11 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
     credits.open_about_dialog();
     let credits_layout = clonk_frontend::startup_about_dlg::about_layout(1280, 720);
     let scripting = credits_layout.sections[2].textbox;
-    credits
-        .handle_cursor_moved(PhysicalPosition::new(
-            f64::from(scripting.x + 1),
-            f64::from(scripting.y + 9),
-        ))
-        .expect("hover the overflowing Scripting TextWindow");
-    credits
-        .handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("scroll About credits");
+    credits.test_cursor(PhysicalPosition::new(
+        f64::from(scripting.x + 1),
+        f64::from(scripting.y + 9),
+    ));
+    credits.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert_eq!(
         credits
             .startup_about_dialog
@@ -2154,15 +2035,11 @@ fn about_routes_wheel_to_credits_and_license_textwindows() {
     enter_about_licenses(&mut licenses);
     let licenses_layout = clonk_frontend::startup_about_dlg::about_layout(320, 240);
     let text = licenses_layout.licenses.text;
-    licenses
-        .handle_cursor_moved(PhysicalPosition::new(
-            f64::from(text.x + 12),
-            f64::from(text.y + 10),
-        ))
-        .expect("hover the license TextWindow");
-    licenses
-        .handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("scroll About licenses");
+    licenses.test_cursor(PhysicalPosition::new(
+        f64::from(text.x + 12),
+        f64::from(text.y + 10),
+    ));
+    licenses.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert!(licenses
         .startup_about_dialog
         .as_ref()
@@ -2179,16 +2056,12 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         ModifiersState::SHIFT,
     ] {
         app.keyboard_modifiers = modifiers;
-        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-            .expect("modified Network F5 is not the classic shortcut");
-        app.handle_key(VirtualKeyCode::F5, ElementState::Released)
-            .expect("release modified Network F5");
+        app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::F5, ElementState::Released);
     }
     app.keyboard_modifiers = ModifiersState::SUPER;
-    app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("Logo is outside C++'s shortcut modifier mask");
-    app.handle_key(VirtualKeyCode::F5, ElementState::Released)
-        .expect("release Logo+F5");
+    app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F5, ElementState::Released);
 
     let shortcut_model = clonk_frontend::startup_plrsel::PlrSelPlayer {
         name: "Shortcut Player".to_string(),
@@ -2217,16 +2090,13 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
         (ModifiersState::SHIFT, VirtualKeyCode::Delete),
     ] {
         app.keyboard_modifiers = modifiers;
-        app.handle_key(key, ElementState::Pressed)
-            .expect("modified player shortcut is inert");
-        app.handle_key(key, ElementState::Released)
-            .expect("release modified player shortcut");
+        app.test_key(key, ElementState::Pressed);
+        app.test_key(key, ElementState::Released);
     }
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
     app.keyboard_modifiers = ModifiersState::SUPER;
-    app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-        .expect("Logo+F2 retains the classic Properties shortcut");
+    app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     assert!(matches!(
         app.startup_player_properties_dialog
             .as_ref()
@@ -2238,7 +2108,7 @@ fn startup_override_shortcuts_require_exact_unmodified_keys() {
 #[test]
 fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
     let mut app = new_real_classic_menu_app(320, 200);
-    let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+    let assets = Arc::get_mut(&mut app.assets).test_value();
 
     // Remove in deliberately non-oracle order. The boundary must still
     // report C4StartupGraphics::Init order, followed by its font order.
@@ -2257,7 +2127,7 @@ fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
         "failed to decode image".to_string(),
     );
     let (caption, text, small) = {
-        let fonts = assets.book_fonts.as_deref().expect("book fonts");
+        let fonts = assets.book_fonts.as_deref().test_value();
         (
             fonts.caption.clone(),
             fonts.text.clone(),
@@ -2313,10 +2183,10 @@ fn startup_bootstrap_precedes_recursive_startup_children() {
     ] {
         enter_retained_startup_child(&mut app, child);
         let removed = Arc::get_mut(&mut app.assets)
-            .expect("frontend assets are app-owned")
+            .test_value()
             .startup_dialog_images
             .remove("StartupPlrCtrlType.png")
-            .expect("player-control atlas is eagerly loaded");
+            .test_value();
         let mut frame = vec![0xc7; 640 * 480 * 4];
         let error = app
             .render(&mut frame)
@@ -2329,7 +2199,7 @@ fn startup_bootstrap_precedes_recursive_startup_children() {
         );
         assert!(frame.iter().all(|byte| *byte == 0xc7));
         Arc::get_mut(&mut app.assets)
-            .expect("frontend assets are app-owned")
+            .test_value()
             .startup_dialog_images
             .insert("StartupPlrCtrlType.png".to_string(), removed);
         app.status_text.clear();
@@ -2391,10 +2261,7 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
         clonk_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
         clonk_engine::TeamInfo::new(2, "Blue", 0x0000_00f4),
     ]);
-    app.engine
-        .player_mut(owner)
-        .expect("menu owner")
-        .set_team(Some(1));
+    app.engine.test_player_mut(owner).set_team(Some(1));
     app.snapshot = app.engine.snapshot();
 
     let mut teams = app.engine.team_configuration();
@@ -2416,10 +2283,10 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
 
     app.engine
         .set_player_status(owner, PlayerStatus::TeamSelection)
-        .expect("put player back into initial team selection");
+        .test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
-        .expect("reopen initial selection from Main");
-    let initial = app.ingame_menu.get(owner).expect("initial team page");
+        .test_value();
+    let initial = app.ingame_menu.get(owner).test_value();
     assert_eq!(initial.close_action(), Some(&MenuAction::ActivateMain));
     assert!(initial
         .items()
@@ -2428,11 +2295,11 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     app.ingame_menu.clear();
     app.engine
         .set_player_status(owner, PlayerStatus::Active)
-        .expect("restore active player");
+        .test_value();
 
     app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
-        .expect("open team-switch page");
-    let menu = app.ingame_menu.get_mut(owner).expect("team-switch page");
+        .test_value();
+    let menu = app.ingame_menu.get_mut(owner).test_value();
     assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
     assert_eq!(
         menu.items()
@@ -2444,12 +2311,12 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     menu.set_selection(1);
     let outcome = menu
         .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
-        .expect("select Blue");
+        .test_value();
 
     app.execute_ingame_menu_outcome_for_player(owner, outcome)
-        .expect("execute offline team switch");
+        .test_value();
 
-    let player = app.engine.player(owner).expect("menu owner remains");
+    let player = app.engine.test_player(owner);
     assert_eq!(player.status(), PlayerStatus::Active);
     assert_eq!(player.team(), Some(2));
     assert!(app.ingame_menu.get(owner).is_none());
@@ -2462,7 +2329,7 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
 
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
-            .expect("windowed main menu remains nonempty");
+            .test_value();
     assert!(!main
         .items()
         .iter()
@@ -2487,7 +2354,7 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
     app.set_display_mode(DisplayMode::Fullscreen);
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
-            .expect("fullscreen main menu remains nonempty");
+            .test_value();
     assert!(main
         .items()
         .iter()
@@ -2504,34 +2371,23 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
 fn crew_name_label_respects_display_flags() {
     let mut app = new_state_only_running_sandbox_app();
     let viewer = app.local_owner;
-    let focus = app
-        .engine
-        .crew_cursor(viewer)
-        .expect("sandbox viewer has a crew cursor");
-    let focus_state = app
-        .engine
-        .object_snapshot(focus)
-        .expect("sandbox cursor remains live");
+    let focus = app.engine.test_crew_cursor(viewer);
+    let focus_state = app.engine.test_object_snapshot(focus);
     let remote = viewer + 1;
     app.engine
         .register_player(PlayerConfig::new(remote, "Remote Player"))
-        .expect("register allied remote player");
-    app.engine
-        .spawn_object(
-            SpawnConfig::new(focus_state.definition_id)
-                .with_position(focus_state.position)
-                .with_owner(remote)
-                .with_crew_member(true)
-                .with_custom_name("Remote Clonk"),
-        )
-        .expect("spawn remote crew member");
+        .test_value();
+    app.engine.spawn_test_object(
+        SpawnConfig::new(focus_state.definition_id)
+            .with_position(focus_state.position)
+            .with_owner(remote)
+            .with_crew_member(true)
+            .with_custom_name("Remote Clonk"),
+    );
     app.snapshot = app.engine.snapshot();
 
     let labels = |app: &GameApp| {
-        let focus = app
-            .snapshot
-            .object(focus)
-            .expect("viewer focus in snapshot");
+        let focus = app.snapshot.object(focus).test_value();
         app.crew_name_overlays(&[ViewportInput::new(viewer, focus.position, 1.0, focus)])
     };
 
@@ -2555,14 +2411,14 @@ fn loader_origin_fixture_scenario(
     path: &Path,
     origin: &str,
 ) -> (FrontendScenario, Group, ScenarioLoaderHead) {
-    fs::create_dir_all(path).expect("fixture scenario group");
+    fs::create_dir_all(path).test_value();
     fs::write(
         path.join("Scenario.txt"),
         format!("[Head]\nOrigin={origin}\n"),
     )
-    .expect("fixture Scenario.txt");
-    let group = Group::open(path).expect("fixture scenario group");
-    let head = ScenarioLoaderHead::load_from_group(&group).expect("fixture loader head");
+    .test_value();
+    let group = Group::open(path).test_value();
+    let head = ScenarioLoaderHead::load_from_group(&group).test_value();
     let mut scenario = FrontendScenario::fallback();
     scenario.identifier = path
         .file_name()
@@ -2584,16 +2440,16 @@ fn loader_fixture_definition_load() -> ScenarioDefinitionLoad {
 
 #[test]
 fn extra_definition_names_follow_definition_path_and_local_folder_vector_order() {
-    let root = tempdir().expect("Extra activation-vector fixture");
+    let root = tempdir();
     let outer = root.path().join("Outer.c4f");
     let inner = outer.join("Inner.c4f");
     let scenario = inner.join("Scenario.c4s");
-    fs::create_dir_all(outer.join("OuterDefs.c4d")).expect("outer local definitions");
-    fs::create_dir_all(inner.join("InnerDefs.c4d")).expect("inner local definitions");
-    fs::create_dir_all(&scenario).expect("scenario group");
-    fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Vector\n").expect("scenario core");
-    let scenario_group = Group::open(&scenario).expect("scenario group");
-    let head = ScenarioLoaderHead::load_from_group(&scenario_group).expect("loader head");
+    fs::create_dir_all(outer.join("OuterDefs.c4d")).test_value();
+    fs::create_dir_all(inner.join("InnerDefs.c4d")).test_value();
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Vector\n").test_value();
+    let scenario_group = Group::open(&scenario).test_value();
+    let head = ScenarioLoaderHead::load_from_group(&scenario_group).test_value();
     let names = extra_definition_group_names(
         &head,
         &ScenarioDefinitionLoad::Fixed {
@@ -2602,7 +2458,7 @@ fn extra_definition_names_follow_definition_path_and_local_folder_vector_order()
         },
         &scenario,
     )
-    .expect("final Extra activation names");
+    .test_value();
     assert_eq!(
         names,
         ["Objects.c4d", "Objects.c4d", "Outer.c4f", "Inner.c4f"]
@@ -2619,10 +2475,10 @@ fn extra_definition_names_follow_definition_path_and_local_folder_vector_order()
 
 #[test]
 fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
-    let root = tempdir().expect("loader Origin fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let origin_parent = content.join("Parent.c4f");
-    fs::create_dir(&origin_parent).expect("Origin parent group");
+    fs::create_dir(&origin_parent).test_value();
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "Parent.c4f/Missing.c4s");
@@ -2634,7 +2490,7 @@ fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
         &loader_fixture_definition_load(),
         &paths,
     )
-    .expect("missing final Origin leaf does not block parent registration");
+    .test_value();
     assert_eq!(registrations.len(), 2);
     assert_eq!(registrations[0].priority, 200);
     assert_eq!(registrations[1].priority, 100);
@@ -2648,10 +2504,10 @@ fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
 /// disk carry the install-root spelling, so both must name the same group.
 #[test]
 fn loader_origin_relative_to_the_install_root_registers_the_same_parent() {
-    let root = tempdir().expect("install-root loader Origin fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let origin_parent = content.join("Parent.c4f");
-    fs::create_dir(&origin_parent).expect("Origin parent group");
+    fs::create_dir(&origin_parent).test_value();
     let scenario_path = root.path().join("Savegames.c4f").join("Saved.c4s");
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "content/Parent.c4f/Original.c4s");
@@ -2663,7 +2519,7 @@ fn loader_origin_relative_to_the_install_root_registers_the_same_parent() {
         &loader_fixture_definition_load(),
         &paths,
     )
-    .expect("install-root relative Origin resolves");
+    .test_value();
     assert!(
         registrations
             .iter()
@@ -2674,7 +2530,7 @@ fn loader_origin_relative_to_the_install_root_registers_the_same_parent() {
 
 #[test]
 fn loader_origin_explicit_empty_value_is_a_valid_no_op() {
-    let root = tempdir().expect("empty loader Origin fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) = loader_origin_fixture_scenario(&scenario_path, "");
@@ -2687,14 +2543,14 @@ fn loader_origin_explicit_empty_value_is_a_valid_no_op() {
         &loader_fixture_definition_load(),
         &paths,
     )
-    .expect("validated empty Origin is a no-op");
+    .test_value();
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].group.root(), scenario_path.as_path());
 }
 
 #[test]
 fn loader_origin_identical_existing_scenario_does_not_duplicate_parent() {
-    let root = tempdir().expect("identical loader Origin fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let parent = content.join("Parent.c4f");
     let scenario_path = parent.join("Actual.c4s");
@@ -2708,7 +2564,7 @@ fn loader_origin_identical_existing_scenario_does_not_duplicate_parent() {
         &loader_fixture_definition_load(),
         &paths,
     )
-    .expect("identical Origin");
+    .test_value();
     assert_eq!(registrations.len(), 2);
     assert_eq!(
         registrations
@@ -2722,12 +2578,12 @@ fn loader_origin_identical_existing_scenario_does_not_duplicate_parent() {
 
 #[test]
 fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
-    let root = tempdir().expect("packed loader Origin fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let inner = packed_test_group(&[]);
     let outer = packed_test_file_group(&[("INNER.C4F", true, inner.as_slice())]);
     let outer_path = content.join("Outer.c4f");
-    fs::write(&outer_path, outer).expect("packed outer Origin parent");
+    fs::write(&outer_path, outer).test_value();
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) =
         loader_origin_fixture_scenario(&scenario_path, "Outer.c4f/inner.c4f/Missing.c4s");
@@ -2739,7 +2595,7 @@ fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
         &loader_fixture_definition_load(),
         &paths,
     )
-    .expect("packed logical Origin parents");
+    .test_value();
     assert_eq!(registrations.len(), 3);
     assert_eq!(registrations[1].group.root(), outer_path.as_path());
     assert_eq!(registrations[1].priority, 100);
@@ -2757,10 +2613,10 @@ fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
 /// set. Partial registration is the C++ shape, not a boundary.
 #[test]
 fn unresolvable_packed_loader_origin_keeps_the_parents_already_registered() {
-    let root = tempdir().expect("ambiguous packed loader Origin fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let outer_path = content.join("Outer.c4f");
-    fs::write(&outer_path, packed_test_file_group(&[])).expect("packed outer Origin parent");
+    fs::write(&outer_path, packed_test_file_group(&[])).test_value();
     let scenario_path = content.join("Actual.c4s");
     let (_, _, head) =
         loader_origin_fixture_scenario(&scenario_path, "Outer.c4f/MissingInner.c4f/Missing.c4s");
@@ -2770,7 +2626,7 @@ fn unresolvable_packed_loader_origin_keeps_the_parents_already_registered() {
         &paths,
     )
     .expect("representable ItemIdentical paths")
-    .expect("Origin differs");
+    .test_value();
     let mut registrations = Vec::new();
     let mut registration_order = 0;
 
@@ -2784,7 +2640,7 @@ fn unresolvable_packed_loader_origin_keeps_the_parents_already_registered() {
 /// holds costs those groups and nothing else — the scenario still loads.
 #[test]
 fn loader_origin_naming_an_absent_parent_still_registers_the_scenario() {
-    let root = tempdir().expect("absent loader Origin parent fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) =
@@ -2797,18 +2653,17 @@ fn loader_origin_naming_an_absent_parent_still_registers_the_scenario() {
         &loader_fixture_definition_load(),
         &paths,
     )
-    .expect("an absent Origin parent is not fatal");
+    .test_value();
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].group.root(), scenario_path.as_path());
 }
 
 #[test]
 fn selected_loader_title_cross_loads_from_origin_and_local_candidate_wins() {
-    let root = tempdir().expect("loader language-pack fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    fs::create_dir_all(paths.config_dir()).expect("loader config directory");
-    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
-        .expect("configure loader language");
+    fs::create_dir_all(paths.config_dir()).test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
     let scenario_path = content.join("Actual.c4s");
     let (_, scenario_group, _) =
         loader_origin_fixture_scenario(&scenario_path, "Archive.c4f/Original.c4s");
@@ -2817,115 +2672,106 @@ fn selected_loader_title_cross_loads_from_origin_and_local_candidate_wins() {
         .join("Language.c4g")
         .join("Test.c4g")
         .join("Archive.c4f/Original.c4s");
-    fs::create_dir_all(&packed_title).expect("Origin-mapped language-pack scenario group");
-    fs::write(packed_title.join("TitleUS.txt"), "US:Pack title\n")
-        .expect("language-pack title component");
+    fs::create_dir_all(&packed_title).test_value();
+    fs::write(packed_title.join("TitleUS.txt"), "US:Pack title\n").test_value();
 
-    let packed = load_classic_scenario_loader_head(&scenario_group, &paths)
-        .expect("pack-only Origin title is selected");
+    let packed = load_classic_scenario_loader_head(&scenario_group, &paths).test_value();
     assert_eq!(packed.scenario_title(), "Pack title");
     let mut staged = FrontendScenario::fallback();
     staged.title = "Catalog fallback".to_string();
     retain_selected_scenario_title(&mut staged, Some(packed.scenario_title()));
     assert_eq!(staged.title, "Pack title");
 
-    fs::write(scenario_path.join("TitleUS.txt"), "US:Local title\n")
-        .expect("local title component");
-    let local = load_classic_scenario_loader_head(&scenario_group, &paths)
-        .expect("local same-candidate title overrides the pack");
+    fs::write(scenario_path.join("TitleUS.txt"), "US:Local title\n").test_value();
+    let local = load_classic_scenario_loader_head(&scenario_group, &paths).test_value();
     assert_eq!(local.scenario_title(), "Local title");
 }
 
 #[test]
 fn frontend_discovery_cross_loads_pack_title_and_local_candidate_wins() {
-    let root = tempdir().expect("frontend language-pack fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    paths.ensure_user_dirs().expect("frontend config directory");
-    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
-        .expect("configure frontend language");
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
     let scenario_path = content.join("Actual.c4s");
-    fs::create_dir_all(&scenario_path).expect("frontend scenario");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Core fallback\n",
     )
-    .expect("scenario core");
+    .test_value();
     let pack_scenario = paths.planet_dir().join("Language.c4g/Test.c4g/Actual.c4s");
-    fs::create_dir_all(&pack_scenario).expect("pack scenario mirror");
-    fs::write(pack_scenario.join("TitleUS.txt"), "US:Pack catalog title\n")
-        .expect("pack-only catalog title");
+    fs::create_dir_all(&pack_scenario).test_value();
+    fs::write(pack_scenario.join("TitleUS.txt"), "US:Pack catalog title\n").test_value();
 
     let packed = load_frontend_scenarios();
     let packed = packed
         .iter()
         .find(|entry| entry.identifier.ends_with("Actual.c4s"))
-        .expect("discover pack-localized scenario");
+        .test_value();
     assert_eq!(packed.title, "Pack catalog title");
 
     fs::write(
         scenario_path.join("TitleUS.txt"),
         "US:Local catalog title\n",
     )
-    .expect("local catalog title");
+    .test_value();
     let local = load_frontend_scenarios();
     let local = local
         .iter()
         .find(|entry| entry.identifier.ends_with("Actual.c4s"))
-        .expect("rediscover locally localized scenario");
+        .test_value();
     assert_eq!(local.title, "Local catalog title");
 }
 
 #[test]
 fn loader_title_uses_configured_language_ex_without_ui_fallbacks() {
-    let root = tempdir().expect("loader LanguageEx fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    fs::create_dir_all(paths.config_dir()).expect("config directory");
+    fs::create_dir_all(paths.config_dir()).test_value();
     fs::write(
         paths.config_file(),
         "[General]\nLanguageEx=FR\nLanguage=FR - French\n",
     )
-    .expect("language config");
+    .test_value();
     let scenario_path = content.join("Actual.c4s");
-    fs::create_dir(&scenario_path).expect("scenario group");
+    fs::create_dir(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Head fallback\n",
     )
-    .expect("scenario core");
-    fs::write(scenario_path.join("TitleUS.txt"), "US:Wrong UI fallback\n")
-        .expect("US-only title component");
-    let scenario_group = Group::open(&scenario_path).expect("scenario group");
+    .test_value();
+    fs::write(scenario_path.join("TitleUS.txt"), "US:Wrong UI fallback\n").test_value();
+    let scenario_group = Group::open(&scenario_path).test_value();
 
-    let head = load_classic_scenario_loader_head(&scenario_group, &paths)
-        .expect("configured loader title");
+    let head = load_classic_scenario_loader_head(&scenario_group, &paths).test_value();
     assert_eq!(head.scenario_title(), "Head fallback");
 }
 
 #[test]
 fn frontend_and_loader_titles_share_fresh_primary_language_sequence() {
-    let root = tempdir().expect("fresh language config fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    paths.ensure_user_dirs().expect("config directory");
-    fs::write(paths.config_file(), "[General]\nLanguage=DE - Deutsch\n")
-        .expect("fresh language config");
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguage=DE - Deutsch\n").test_value();
     let scenario_path = content.join("FreshLanguage.c4s");
-    fs::create_dir_all(&scenario_path).expect("scenario group");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Head fallback\n",
     )
-    .expect("scenario core");
-    fs::write(scenario_path.join("Title.txt"), "US:English title\n").expect("US-only title");
-    let scenario_group = Group::open(&scenario_path).expect("scenario group");
+    .test_value();
+    fs::write(scenario_path.join("Title.txt"), "US:English title\n").test_value();
+    let scenario_group = Group::open(&scenario_path).test_value();
 
     let loader_title = load_classic_scenario_loader_head(&scenario_group, &paths)
-        .expect("loader head")
+        .test_value()
         .scenario_title()
         .to_string();
     let frontend_title = load_frontend_scenarios()
         .into_iter()
         .find(|scenario| scenario.identifier.ends_with("FreshLanguage.c4s"))
-        .expect("frontend scenario")
+        .test_value()
         .title;
 
     assert_eq!(
@@ -2946,32 +2792,32 @@ fn frontend_and_loader_titles_share_fresh_primary_language_sequence() {
 
 #[test]
 fn frontend_and_loader_titles_share_persisted_language_ex_sequence() {
-    let root = tempdir().expect("persisted LanguageEx fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    paths.ensure_user_dirs().expect("config directory");
+    paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
         "[General]\nLanguage=DE - Deutsch\nLanguageEx=DE,US\n",
     )
-    .expect("persisted language config");
+    .test_value();
     let scenario_path = content.join("PersistedLanguage.c4s");
-    fs::create_dir_all(&scenario_path).expect("scenario group");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Head fallback\n",
     )
-    .expect("scenario core");
-    fs::write(scenario_path.join("Title.txt"), "US:English title\n").expect("US-only title");
-    let scenario_group = Group::open(&scenario_path).expect("scenario group");
+    .test_value();
+    fs::write(scenario_path.join("Title.txt"), "US:English title\n").test_value();
+    let scenario_group = Group::open(&scenario_path).test_value();
 
     let loader_title = load_classic_scenario_loader_head(&scenario_group, &paths)
-        .expect("loader head")
+        .test_value()
         .scenario_title()
         .to_string();
     let frontend_title = load_frontend_scenarios()
         .into_iter()
         .find(|scenario| scenario.identifier.ends_with("PersistedLanguage.c4s"))
-        .expect("frontend scenario")
+        .test_value()
         .title;
 
     assert_eq!(
@@ -2992,10 +2838,10 @@ fn frontend_and_loader_titles_share_persisted_language_ex_sequence() {
 
 #[test]
 fn loader_language_ex_keeps_raw_two_byte_segments_and_duplicates() {
-    let root = tempdir().expect("raw loader LanguageEx fixture");
+    let root = tempdir();
     let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
-    fs::create_dir_all(paths.config_dir()).expect("config directory");
-    fs::write(paths.config_file(), "LanguageEx=DE, DE,DE\n").expect("language config");
+    fs::create_dir_all(paths.config_dir()).test_value();
+    fs::write(paths.config_file(), "LanguageEx=DE, DE,DE\n").test_value();
 
     assert_eq!(
         classic_loader_language_sequence(&paths).expect("raw LanguageEx sequence"),
@@ -3024,10 +2870,10 @@ fn loader_config_strings_fail_beyond_cpp_byte_capacity() {
 
 #[test]
 fn raw_loader_config_nul_is_rejected_before_field_parsing() {
-    let root = tempdir().expect("raw loader config fixture");
+    let root = tempdir();
     let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
-    fs::create_dir_all(paths.config_dir()).expect("config directory");
-    fs::write(paths.config_file(), b"[Graphics]\nScale=100\0\nScale=500\n").expect("NUL config");
+    fs::create_dir_all(paths.config_dir()).test_value();
+    fs::write(paths.config_file(), b"[Graphics]\nScale=100\0\nScale=500\n").test_value();
 
     let error = load_classic_loader_config(&paths)
         .expect_err("raw config suffix hidden from C++ must not be parsed");
@@ -3036,10 +2882,10 @@ fn raw_loader_config_nul_is_rejected_before_field_parsing() {
 
 #[test]
 fn planet_extra_registers_root_and_only_activated_definition_children() {
-    let root = tempdir().expect("loader planet Extra fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let extra_path = paths.planet_dir().join("Extra.c4g");
-    fs::create_dir(&extra_path).expect("planet Extra group");
+    fs::create_dir(&extra_path).test_value();
     let extra_graphics = extra_path.join("Graphics.c4g");
     let objects = extra_path.join("Objects.c4d");
     let objects_graphics = objects.join("Graphics.c4g");
@@ -3054,7 +2900,7 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
         &second_graphics,
         &unused_graphics,
     ] {
-        fs::create_dir_all(path).expect("Extra graphics group");
+        fs::create_dir_all(path).test_value();
     }
     write_preview_png(
         &extra_graphics.join("ChildWins.png"),
@@ -3091,11 +2937,11 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
         (&extra_materials, b"root".as_slice()),
         (&global_materials, b"global".as_slice()),
     ] {
-        fs::create_dir_all(path).expect("material group");
-        fs::write(path.join("Source.txt"), marker).expect("material marker");
+        fs::create_dir_all(path).test_value();
+        fs::write(path.join("Source.txt"), marker).test_value();
     }
 
-    let startup = startup_loader_registrations(&paths).expect("startup Extra registration");
+    let startup = startup_loader_registrations(&paths).test_value();
     assert_eq!(startup.len(), 1);
     assert_eq!(startup[0].priority, 2);
     assert_eq!(startup[0].group.root(), extra_path.as_path());
@@ -3103,7 +2949,7 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     let scenario_path = content.join("Actual.c4s");
     let (scenario, scenario_group, head) = loader_origin_fixture_scenario(&scenario_path, "");
     let scenario_graphics = scenario_path.join("Graphics.c4g");
-    fs::create_dir(&scenario_graphics).expect("scenario Graphics.c4g");
+    fs::create_dir(&scenario_graphics).test_value();
     write_preview_png(
         &scenario_graphics.join("ScenarioWins.png"),
         [0xdd, 0xee, 0xff, 0xff],
@@ -3114,7 +2960,7 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
     };
     let registrations =
         classic_loader_registrations(&scenario, &scenario_group, &head, &definitions, &paths)
-            .expect("cosmetic Extra content no longer aborts scenario setup");
+            .test_value();
     assert_eq!(
         registrations
             .iter()
@@ -3131,7 +2977,7 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
         .iter()
         .all(|registration| registration.group.root() != unused.as_path()));
 
-    let loader_tier = highest_loader_tier(&registrations).expect("Extra loader tier");
+    let loader_tier = highest_loader_tier(&registrations).test_value();
     assert_eq!(
         loader_tier
             .iter()
@@ -3141,11 +2987,10 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
         "priority-3 children pool later-first and exclude the priority-2 Extra root"
     );
 
-    let graphics = loader_graphics_registrations(&registrations)
-        .expect("registered Extra Graphics.c4g children");
+    let graphics = loader_graphics_registrations(&registrations).test_value();
     let base_graphics = paths.planet_dir().join("Graphics.c4g");
-    fs::create_dir(&base_graphics).expect("base Graphics.c4g");
-    let base = Group::open(&base_graphics).expect("base graphics group");
+    fs::create_dir(&base_graphics).test_value();
+    let base = Group::open(&base_graphics).test_value();
     assert_eq!(
         load_named_graphics_image("ChildWins", &graphics, &base)
             .expect("activated child graphic")
@@ -3171,16 +3016,16 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
 
     let first_definition_root = content.join("Objects.c4d");
     let second_definition_root = content.join("Second.c4d");
-    fs::create_dir(&first_definition_root).expect("first activated definition root");
-    fs::create_dir(&second_definition_root).expect("second activated definition root");
+    fs::create_dir(&first_definition_root).test_value();
+    fs::create_dir(&second_definition_root).test_value();
     let definition_roots = [
-        Group::open(&first_definition_root).expect("first activated definition"),
-        Group::open(&second_definition_root).expect("second activated definition"),
+        Group::open(&first_definition_root).test_value(),
+        Group::open(&second_definition_root).test_value(),
     ];
     let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
     let resolved_graphics = resolver
         .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_roots)
-        .expect("runtime Extra graphics chain");
+        .test_value();
     assert_eq!(
         resolved_graphics
             .iter()
@@ -3197,7 +3042,7 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
 
     let materials = resolver
         .resolve_material_groups(&scenario_group)
-        .expect("native pre-Extra.Init material snapshot");
+        .test_value();
     assert_eq!(
         materials
             .iter()
@@ -3210,34 +3055,33 @@ fn planet_extra_registers_root_and_only_activated_definition_children() {
 
 #[test]
 fn classic_loader_setup_accepts_an_activated_cosmetic_extra_child() {
-    let root = tempdir().expect("cosmetic Extra loader fixture");
+    let root = tempdir();
     install_global_gui_and_loader_test_root(root.path());
     let content = root.path().join("content");
     let scenario_path = content.join("Scenario.c4s");
-    fs::create_dir_all(&scenario_path).expect("scenario group");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Cosmetic Extra\nLoader=LoaderExtra\n",
     )
-    .expect("scenario core");
-    fs::create_dir(content.join("Objects.c4d")).expect("activated definition root");
+    .test_value();
+    fs::create_dir(content.join("Objects.c4d")).test_value();
     let extra_child = root.path().join("planet/Extra.c4g/Objects.c4d");
-    fs::create_dir_all(&extra_child).expect("activated Extra child");
+    fs::create_dir_all(&extra_child).test_value();
     write_preview_png(
         &extra_child.join("LoaderExtra.png"),
         [0x12, 0x34, 0x56, 0xff],
     );
-    fs::write(extra_child.join("Graphics.c4g"), b"not a group")
-        .expect("malformed optional Extra graphics child");
+    fs::write(extra_child.join("Graphics.c4g"), b"not a group").test_value();
     let user = root.path().join("user");
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(root.path())),
         ("LC_CONTENT_DIR", Some(content.as_path())),
         ("LC_USER_DATA_DIR", Some(user.as_path())),
     ]);
-    let paths = AppPaths::discover().expect("cosmetic Extra paths");
-    paths.ensure_user_dirs().expect("fixture user directories");
-    persist_config_value(&paths, "General", "LanguageEx", "US").expect("fixture loader language");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
+    persist_config_value(&paths, "General", "LanguageEx", "US").test_value();
     let assets = FrontendAssets::load(Some(&paths));
     let mut scenario = FrontendScenario::fallback();
     scenario.identifier = "Scenario.c4s".to_string();
@@ -3253,7 +3097,7 @@ fn classic_loader_setup_accepts_an_activated_cosmetic_extra_child() {
         &paths,
         &assets,
     )
-    .expect("cosmetic Extra no longer aborts classic loader setup");
+    .test_value();
     assert_eq!(
         setup.screen.selection().selected_filename(),
         "LoaderExtra.png"
@@ -3262,14 +3106,12 @@ fn classic_loader_setup_accepts_an_activated_cosmetic_extra_child() {
 
 #[test]
 fn distinct_global_extra_hits_take_ambiguity_boundary() {
-    let root = tempdir().expect("ambiguous loader Extra fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
-    fs::create_dir(paths.planet_dir().join("Extra.c4g")).expect("planet Extra group");
-    fs::create_dir(content.join("Extra.c4g")).expect("content Extra group");
+    fs::create_dir(paths.planet_dir().join("Extra.c4g")).test_value();
+    fs::create_dir(content.join("Extra.c4g")).test_value();
 
-    let error = startup_loader_registrations(&paths)
-        .err()
-        .expect("distinct global Extra roots are ambiguous");
+    let error = startup_loader_registrations(&paths).err().test_value();
     assert!(error.to_string().contains("mapping is ambiguous"));
     assert!(error.to_string().contains("planet"));
     assert!(error.to_string().contains("content"));
@@ -3277,18 +3119,16 @@ fn distinct_global_extra_hits_take_ambiguity_boundary() {
 
 #[test]
 fn content_only_extra_cannot_enter_mapped_global_loader_set() {
-    let root = tempdir().expect("unmapped loader Extra fixture");
+    let root = tempdir();
     let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
     let extra_path = content.join("Extra.c4g");
-    fs::create_dir(&extra_path).expect("content Extra group");
+    fs::create_dir(&extra_path).test_value();
     write_preview_png(
         &extra_path.join("LoaderUnmapped.png"),
         [0x12, 0x34, 0x56, 0xff],
     );
 
-    let error = startup_loader_registrations(&paths)
-        .err()
-        .expect("content Extra must not receive global priority 2");
+    let error = startup_loader_registrations(&paths).err().test_value();
     assert!(error
         .to_string()
         .contains("outside the mapped global-data namespace"));
@@ -3299,13 +3139,13 @@ fn content_only_extra_cannot_enter_mapped_global_loader_set() {
 
 #[test]
 fn invalid_present_loader_graphics_booleans_take_typed_boundary() {
-    let root = tempdir().expect("invalid loader boolean fixture");
+    let root = tempdir();
     let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
-    paths.ensure_user_dirs().expect("user dirs");
+    paths.ensure_user_dirs().test_value();
     for key in ["PointFiltering", "DisableGamma"] {
         let mut config = Config::new();
         config.set_in(Some("Graphics"), key, "on");
-        config.save(paths.config_file()).expect("graphics config");
+        config.save(paths.config_file()).test_value();
         let error = validate_classic_loader_graphics_config(&paths)
             .expect_err("invalid-present legacy boolean must not default silently");
         assert!(error.to_string().contains(key));
@@ -3347,21 +3187,20 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     // branch creates a loader only when none exists
     // (src/C4Game.cpp:371-381), so the next network join must still find
     // the startup loader installed instead of the loader boundary.
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
-    let user_data = tempdir().expect("user data");
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let installed = app
         .loader_screen
-        .as_ref()
-        .expect("PreInit installs the startup background loader")
+        .test_ref()
         .selection()
         .selected_filename()
         .to_string();
@@ -3382,8 +3221,7 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     // taking the loader boundary and killing the process.
     app.mode = AppMode::Loading;
     let mut frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut frame)
-        .expect("the next join renders the retained startup loader");
+    app.test_render(&mut frame);
 }
 
 /// `PreInit` asks for `C4CFN_StartupBackgroundMain`, but `C4LoaderScreen::Init`
@@ -3392,12 +3230,12 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
 /// (src/C4Application.cpp:240-248; src/C4LoaderScreen.cpp:75-87).
 #[test]
 fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     install_global_gui_test_root(install.path(), None);
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
+        .test_value();
     // The pack ships a loader, just not the requested one.
     for name in [
         "LoaderWatercave1.png",
@@ -3411,14 +3249,14 @@ fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
         )
         .unwrap_or_else(|error| panic!("copy fixture {name}: {error}"));
     }
-    let user_data = tempdir().expect("user data");
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let app = new_menu_app_with_paths(640, 480, &paths);
 
     assert!(
@@ -3439,17 +3277,15 @@ fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
     // A pack with no eligible loader at all still fails the preflight, so
     // the boundary is the absent wildcard rather than the absent name.
     drop(_guard);
-    let bare = tempdir().expect("bare install root");
+    let bare = tempdir();
     install_global_gui_test_root(bare.path(), None);
     let _bare_guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(bare.path())),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let bare_paths = AppPaths::discover().expect("discover bare app paths");
-    bare_paths
-        .ensure_user_dirs()
-        .expect("create user directories");
+    let bare_paths = test_app_paths();
+    bare_paths.ensure_user_dirs().test_value();
     let bare_assets = FrontendAssets::load(Some(&bare_paths));
     assert!(bare_assets.menu_background.is_none());
     assert!(matches!(
@@ -3464,16 +3300,16 @@ fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
     // A failed host/join runs the same QuitGame -> PreInit -> DoStartup
     // shortcut, so PreInit re-initializes the loader screen before the
     // remembered dialog returns (src/C4Application.cpp:242-247,373-389).
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
-    let user_data = tempdir().expect("user data");
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     assert!(app.loader_screen.is_some());
 
@@ -3481,7 +3317,7 @@ fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
     app.startup_restart_diagnostics
         .add_fatal_error("fixture join failure");
     app.finish_startup_network_restart(StartupNetworkPurpose::Join)
-        .expect("failed join returns through PreInit and DoStartup");
+        .test_value();
 
     assert_eq!(
         app.loader_screen
@@ -3499,22 +3335,22 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
     // unwinds through QuitGame -> PreInit, which re-initializes the loader
     // before the startup dialog returns (src/C4Application.cpp:242-247,
     // 373-389,442-451).
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
-    let user_data = tempdir().expect("user data");
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     assert!(app.loader_screen.is_some());
     app.mode = AppMode::Loading;
 
     app.finish_scenario_loading_failure("controlled local load failure".to_string(), false)
-        .expect("failed local load returns to the startup selector");
+        .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(
@@ -3529,11 +3365,10 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
 
 #[test]
 fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
-    let mut app =
-        test_game_app(320, 200, AudioOptions::default(), None).expect("asset-less app state");
+    let mut app = test_game_app(320, 200, AudioOptions::default(), None).test_value();
     install_classic_test_assets(&mut app);
     assert!(app.boot_loading.is_none(), "pathless app skips boot worker");
-    app.update().expect("update pathless startup");
+    app.test_update();
     assert_eq!(app.mode, AppMode::Loading);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     assert!(app.render(&mut frame).is_err());
@@ -3541,9 +3376,9 @@ fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
 
 #[test]
 fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
-    let directory = tempdir().expect("loader group");
-    fs::write(directory.path().join("LoaderOne.png"), b"not decoded here").expect("loader entry");
-    let group = Group::open(directory.path()).expect("loader group");
+    let directory = tempdir();
+    fs::write(directory.path().join("LoaderOne.png"), b"not decoded here").test_value();
+    let group = Group::open(directory.path()).test_value();
     let graphics = group.clone();
     let mut ranges = Vec::new();
     let selected = select_loader_source(&[group], &graphics, "LoaderOne.png", |range| {
@@ -3554,7 +3389,7 @@ fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
             range - 1
         }
     })
-    .expect("select explicit loader");
+    .test_value();
     assert_eq!(selected.entry.relative_path, PathBuf::from("LoaderOne.png"));
     assert_eq!(ranges, [1, 2, 3, 7]);
     assert!(classic_wildcard_match(b"*.*", b"extensionless"));
@@ -3567,10 +3402,10 @@ fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
 
 #[test]
 fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
-    let directory = tempdir().expect("raw graphics fixture");
+    let directory = tempdir();
     let image_path = directory.path().join("pixel.png");
     write_preview_png(&image_path, [11, 22, 33, 255]);
-    let image_bytes = fs::read(image_path).expect("fixture PNG bytes");
+    let image_bytes = fs::read(image_path).test_value();
 
     #[cfg(unix)]
     {
@@ -3595,24 +3430,22 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
             entry(PathBuf::from("Player.png"), b"Player.png"),
         ];
         assert!(loader_entries_have_content(&raw_entries));
-        let graphic = find_classic_named_entry_from_entries(raw_entries, b"player.PNG")
-            .expect("opaque sibling does not abort named graphics lookup");
+        let graphic =
+            find_classic_named_entry_from_entries(raw_entries, b"player.PNG").test_value();
         assert_eq!(graphic.name_bytes, b"Player.png");
 
         #[cfg(not(target_os = "macos"))]
         {
             let raw_directory = directory.path().join("Directory.c4g");
-            fs::create_dir(&raw_directory).expect("directory graphics group");
+            fs::create_dir(&raw_directory).test_value();
             fs::write(
                 raw_directory.join(OsStr::from_bytes(b"Opaque\xfe.bin")),
                 b"unrelated",
             )
-            .expect("opaque directory sibling");
-            fs::write(raw_directory.join("LoaderGood.png"), &image_bytes)
-                .expect("directory loader");
-            fs::write(raw_directory.join("Player.png"), &image_bytes)
-                .expect("directory named graphic");
-            let directory_group = Group::open(&raw_directory).expect("open directory group");
+            .test_value();
+            fs::write(raw_directory.join("LoaderGood.png"), &image_bytes).test_value();
+            fs::write(raw_directory.join("Player.png"), &image_bytes).test_value();
+            let directory_group = Group::open(&raw_directory).test_value();
 
             assert!(loader_group_has_content(&directory_group)
                 .expect("opaque sibling does not abort loader classification"));
@@ -3622,11 +3455,11 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
                 "LoaderGood",
                 |_| 0,
             )
-            .expect("opaque sibling does not abort loader selection");
+            .test_value();
             assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
             let graphic = find_classic_named_entry(&directory_group, "player.PNG")
                 .expect("opaque sibling does not abort named graphics lookup")
-                .expect("case-insensitive directory graphic");
+                .test_value();
             assert_eq!(graphic.name_bytes, b"Player.png");
         }
     }
@@ -3634,25 +3467,25 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
     let mut fixture = MutableGroup::new_bytes(b"Fixture.bin".to_vec());
     fixture
         .add_file_bytes_with_metadata(b"Opaque\xfe.bin".to_vec(), b"unrelated".to_vec(), 1, false)
-        .expect("opaque sibling");
+        .test_value();
     fixture
         .add_file("LoaderGood.png", image_bytes.clone())
-        .expect("ASCII loader");
+        .test_value();
     fixture
         .add_file_bytes_with_metadata(b"Loader\xff.png".to_vec(), image_bytes.clone(), 1, false)
-        .expect("opaque loader");
+        .test_value();
     fixture
         .add_file("Player.png", image_bytes.clone())
-        .expect("named graphic");
+        .test_value();
     let group = Group::from_raw_memory(
         PathBuf::from("Fixture.bin"),
         fixture.pack_raw().expect("pack raw lookup fixture"),
     )
-    .expect("open raw lookup fixture");
+    .test_value();
 
     assert!(loader_group_has_content(&group).expect("classify loader group"));
     let selected = select_loader_source(std::slice::from_ref(&group), &group, "LoaderGood", |_| 0)
-        .expect("unrelated opaque sibling does not abort loader selection");
+        .test_value();
     assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
     assert_eq!(
         decode_selected_loader(&selected)
@@ -3663,7 +3496,7 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
 
     let graphic = find_classic_named_entry(&group, "player.PNG")
         .expect("enumerate named graphics")
-        .expect("case-insensitive named graphic");
+        .test_value();
     assert_eq!(graphic.name_bytes, b"Player.png");
 
     let opaque_specification = clonk_script::c4_string_from_bytes(b"Loader\xff.png");
@@ -3673,7 +3506,7 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
         &opaque_specification,
         |_| 0,
     )
-    .expect("raw wildcard selects an opaque loader filename");
+    .test_value();
     assert_eq!(selected.filename_bytes(), b"Loader\xff.png");
     assert_eq!(
         decode_selected_loader(&selected)
@@ -3685,13 +3518,13 @@ fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
 
 #[test]
 fn loader_tier_keeps_later_equal_priority_registration_first() {
-    let directory = tempdir().expect("loader tiers");
+    let directory = tempdir();
     let lower = directory.path().join("lower.c4f");
     let actual = directory.path().join("actual.c4f");
     let origin = directory.path().join("origin.c4f");
     for path in [&lower, &actual, &origin] {
-        fs::create_dir(path).expect("loader group");
-        fs::write(path.join("LoaderTier.png"), b"candidate").expect("loader entry");
+        fs::create_dir(path).test_value();
+        fs::write(path.join("LoaderTier.png"), b"candidate").test_value();
     }
     let registrations = vec![
         LoaderGroupRegistration {
@@ -3710,7 +3543,7 @@ fn loader_tier_keeps_later_equal_priority_registration_first() {
             group: Group::open(&origin).expect("origin group"),
         },
     ];
-    let tier = highest_loader_tier(&registrations).expect("highest tier");
+    let tier = highest_loader_tier(&registrations).test_value();
     assert_eq!(tier.len(), 2);
     assert_eq!(tier[0].root(), origin.as_path());
     assert_eq!(tier[1].root(), actual.as_path());
@@ -3718,25 +3551,25 @@ fn loader_tier_keeps_later_equal_priority_registration_first() {
 
 #[test]
 fn loader_selector_includes_child_group_names_then_decode_fails() {
-    let directory = tempdir().expect("loader child group");
-    fs::create_dir(directory.path().join("LoaderChild.png")).expect("child group");
-    let group = Group::open(directory.path()).expect("loader group");
+    let directory = tempdir();
+    fs::create_dir(directory.path().join("LoaderChild.png")).test_value();
+    let group = Group::open(directory.path()).test_value();
     let selected = select_loader_source(std::slice::from_ref(&group), &group, "LoaderChild", |_| 0)
-        .expect("child group participates in C4Group search");
+        .test_value();
     assert!(decode_selected_loader(&selected).is_err());
 }
 
 #[test]
 fn loader_decoder_uses_selected_filename_extension_instead_of_magic() {
-    let directory = tempdir().expect("renamed loader image");
+    let directory = tempdir();
     write_preview_png(
         &directory.path().join("LoaderRenamed.jpg"),
         [0x11, 0x22, 0x33, 0xff],
     );
-    let group = Group::open(directory.path()).expect("loader group");
+    let group = Group::open(directory.path()).test_value();
     let selected =
         select_loader_source(std::slice::from_ref(&group), &group, "LoaderRenamed", |_| 0)
-            .expect("renamed loader candidate");
+            .test_value();
     assert_eq!(
         selected.entry.relative_path,
         PathBuf::from("LoaderRenamed.jpg")
@@ -3749,15 +3582,15 @@ fn loader_decoder_uses_selected_filename_extension_instead_of_magic() {
 
 #[test]
 fn selected_loader_decoder_uses_the_same_transparent_pixel_invariant() {
-    let directory = tempdir().expect("loader image");
+    let directory = tempdir();
     image::RgbaImage::from_raw(2, 1, vec![17, 34, 51, 0, 68, 85, 102, 1])
         .expect("rgba image")
         .save(directory.path().join("Loader.png"))
-        .expect("write loader png");
-    let group = Group::open(directory.path()).expect("loader group");
+        .test_value();
+    let group = Group::open(directory.path()).test_value();
     let entry = find_classic_named_entry(&group, "Loader.png")
         .expect("enumerate loader group")
-        .expect("loader entry");
+        .test_value();
     let selected = SelectedLoaderSource { group, entry };
 
     assert_eq!(
@@ -3773,20 +3606,20 @@ fn startup_loader_render_uses_configured_user_gamma() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
-    paths.ensure_user_dirs().expect("user dirs");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut config = Config::new();
     config.set_in(Some("Graphics"), "Gamma1", "0");
     config.set_in(Some("Graphics"), "Gamma2", "6579300");
     config.set_in(Some("Graphics"), "Gamma3", "13158600");
-    config.save(paths.config_file()).expect("gamma config");
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
+    config.save(paths.config_file()).test_value();
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     assert_eq!(
         app.loader_gamma,
         Some(clonk_graphics::GammaRamp::from_control_points([
@@ -3794,16 +3627,14 @@ fn startup_loader_render_uses_configured_user_gamma() {
         ]))
     );
     let mut corrected = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut corrected).expect("gamma-corrected loader");
+    app.test_render(&mut corrected);
     app.loader_gamma = Some(clonk_graphics::GammaRamp::standard());
     let mut standard = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut standard).expect("standard loader");
+    app.test_render(&mut standard);
     assert_ne!(corrected, standard);
 
     config.set_in(Some("Graphics"), "DisableGamma", "true");
-    config
-        .save(paths.config_file())
-        .expect("disabled gamma config");
+    config.save(paths.config_file()).test_value();
     assert_eq!(load_classic_loader_gamma(Some(&paths)), None);
     app.loader_gamma = None;
     let current_renderer_config = app.graphics.advanced_renderer_config();
@@ -3813,7 +3644,7 @@ fn startup_loader_render_uses_configured_user_gamma() {
             ..current_renderer_config
         });
     let mut disabled = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut disabled).expect("gamma-disabled loader");
+    app.test_render(&mut disabled);
     assert!(disabled
         .chunks_exact(4)
         .zip(standard.chunks_exact(4))
@@ -3825,20 +3656,15 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("installed paths");
-    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("app");
-    let resources = app
-        .loader_screen
-        .as_ref()
-        .expect("loader")
-        .resources()
-        .clone();
+    let paths = test_app_paths();
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
+    let resources = app.loader_screen.test_ref().resources().clone();
     let (sender, receiver) = mpsc::channel();
     app.loading_state = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
@@ -3851,8 +3677,8 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     reporter.report(42, "Exact phase-status line");
     reporter.report(40, "Definition metadata and sources collected");
     reporter.send(ScenarioLoadingEvent::RefreshResources);
-    app.poll_loading().expect("poll progress");
-    let state = app.loader_screen.as_ref().expect("loader").state();
+    app.poll_loading().test_value();
+    let state = app.loader_screen.test_ref().state();
     assert_eq!(state.progress(), 42);
     assert_eq!(state.process(), None);
     assert!(matches!(
@@ -3865,7 +3691,7 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
 
 #[test]
 fn real_legacy_worker_updates_live_loader_through_activation() {
-    let user_data = tempdir().expect("isolated legacy-loader user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     configure_test_startup_participant(&paths, user_data.path());
     let mut app = GameApp::new(
@@ -3886,11 +3712,11 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
             record_enabled: false,
         },
     )
-    .expect("initialize legacy-loader app");
+    .test_value();
     wait_for_menu(&mut app);
     let scenario =
         resolve_next_mission_scenario(&app.scenario_catalog, "Tutorial.c4f/Tutorial01.c4s")
-            .expect("shipped legacy Tutorial01");
+            .test_value();
     assert!(scenario
         .path
         .as_ref()
@@ -3898,15 +3724,10 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
         .join("Scenario.txt")
         .is_file());
 
-    app.start_scenario(scenario)
-        .expect("start asynchronous legacy scenario");
+    app.start_scenario(scenario).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    let state = app
-        .loader_screen
-        .as_ref()
-        .expect("retained live loader")
-        .state();
+    let state = app.loader_screen.test_ref().state();
     assert_eq!(state.progress(), 100);
     let clonk_frontend::loader_screen::LoaderLog::Visible(lines) = state.log() else {
         panic!("worker phase status must make the live loader log visible");
@@ -3959,13 +3780,11 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     app.startup_player_dialog = Some(controller);
 
     let layout = plrsel_layout(640, 480);
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_viewport.x + 4),
         f64::from(layout.list_viewport.y + 4),
-    ))
-    .expect("point inside player list");
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("wheel down through app shell");
+    ));
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert_eq!(
         app.startup_player_dialog
             .as_ref()
@@ -3973,8 +3792,7 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
             .list_scroll_offset(),
         60
     );
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
-        .expect("wheel up through app shell");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
     assert_eq!(
         app.startup_player_dialog
             .as_ref()
@@ -3983,31 +3801,20 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
         0
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
         f64::from(layout.list_scrollbar.y + layout.list_scrollbar.h - 8),
-    ))
-    .expect("point at bottom book-scrollbar arrow");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("hold bottom book-scrollbar arrow");
+    ));
+    app.test_left_button(ElementState::Pressed);
     let mut frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut frame).expect("first held-arrow frame");
-    let first = app
-        .startup_player_dialog
-        .as_ref()
-        .expect("player dialog")
-        .list_scroll_offset();
-    app.render(&mut frame).expect("second held-arrow frame");
-    let second = app
-        .startup_player_dialog
-        .as_ref()
-        .expect("player dialog")
-        .list_scroll_offset();
+    app.test_render(&mut frame);
+    let first = app.startup_player_dialog.test_ref().list_scroll_offset();
+    app.test_render(&mut frame);
+    let second = app.startup_player_dialog.test_ref().list_scroll_offset();
     assert_eq!((first, second), (1, 3));
 
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release bottom book-scrollbar arrow");
-    app.render(&mut frame).expect("post-release frame");
+    app.test_left_button(ElementState::Released);
+    app.test_render(&mut frame);
     assert_eq!(
         app.startup_player_dialog
             .as_ref()
@@ -4016,30 +3823,24 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
         second
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
         f64::from(layout.list_scrollbar.y + layout.list_scrollbar.h / 2),
-    ))
-    .expect("point at book-scrollbar track");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("capture book-scrollbar drag");
+    ));
+    app.test_left_button(ElementState::Pressed);
     let first_row_name = PhysicalPosition::new(
         f64::from(layout.list_viewport.x + layout.item_height * 3),
         f64::from(layout.list_viewport.y + layout.item_height / 2),
     );
-    app.handle_cursor_moved(first_row_name)
-        .expect("drag thumb outside bar over a player row");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release captured drag over player row");
+    app.test_cursor(first_row_name);
+    app.test_left_button(ElementState::Released);
     assert!(
         app.plrsel_last_click.is_none(),
         "scrollbar release must not seed row double-click bookkeeping"
     );
 
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press row after scrollbar release");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release first genuine row click");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.plrsel_last_click.map(|(index, _)| index),
         Some(0),
@@ -4079,18 +3880,14 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
     assert!(app.render(&mut main).expect("present stable Main dialog"));
 
     app.handle_main_menu_activation(MainMenuItem::About)
-        .expect("switch Main to About");
-    let fade = app.startup_dialog_fade.as_ref().expect("fade started");
+        .test_value();
+    let fade = app.startup_dialog_fade.test_ref();
     assert_eq!(fade.outgoing, Some(StartupDialog::MainMenu));
     assert_eq!(fade.incoming, StartupDialog::About);
     assert_eq!(fade.step, 0);
     let fade_underlay = fade.underlay.clone();
-    let fade_outgoing = fade
-        .outgoing_frame
-        .clone()
-        .expect("cross-fade has an outgoing layer");
-    app.update()
-        .expect("menu update does not advance a draw fade");
+    let fade_outgoing = fade.outgoing_frame.clone().test_value();
+    app.test_update();
     assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, 0);
 
     let mut presented = Vec::new();
@@ -4108,7 +3905,7 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
         presented.push(frame);
     }
 
-    let about = presented.last().expect("fully visible About").clone();
+    let about = presented.last().test_value().clone();
     assert_ne!(main, about);
     for (index, actual) in presented.iter().take(9).enumerate() {
         let mut expected = about.clone();
@@ -4134,50 +3931,42 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
 fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
     let mut app = new_real_classic_menu_app(320, 200);
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("present Main");
+    app.test_render(&mut frame);
     app.handle_main_menu_activation(MainMenuItem::About)
-        .expect("switch Main to About");
+        .test_value();
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("suppress early Escape");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("suppress early Escape release");
-    app.process_gamepad_event_batch([GamepadEvent::Action {
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    app.test_gamepad_events([GamepadEvent::Action {
         slot: GamepadSlot::new(0),
         action: GamepadActionType::Cancel,
         state: ElementState::Pressed,
-    }])
-    .expect("suppress early gamepad Cancel");
+    }]);
     assert_eq!(app.startup_view, StartupView::About);
     assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, 0);
 
     for expected_step in 1..=9 {
-        app.render(&mut frame).expect("present inactive About");
+        app.test_render(&mut frame);
         assert_eq!(
             app.startup_dialog_fade.as_ref().unwrap().step,
             expected_step
         );
     }
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("suppress ninth-frame Escape");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::About);
 
-    app.render(&mut frame).expect("complete About fade-in");
+    app.test_render(&mut frame);
     assert!(app.startup_dialog_fade.is_none());
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("active About handles Escape");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
-    let reverse = app
-        .startup_dialog_fade
-        .as_ref()
-        .expect("reverse fade started");
+    let reverse = app.startup_dialog_fade.test_ref();
     assert_eq!(reverse.outgoing, Some(StartupDialog::About));
     assert_eq!(reverse.incoming, StartupDialog::MainMenu);
     assert_eq!(reverse.step, 0);
 
     let mut ninth = None;
     for expected_step in 1..=9 {
-        app.render(&mut frame).expect("present inactive Main");
+        app.test_render(&mut frame);
         assert_eq!(
             app.startup_dialog_fade.as_ref().unwrap().step,
             expected_step
@@ -4186,12 +3975,11 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
             ninth = Some(frame.clone());
         }
     }
-    app.render(&mut frame).expect("complete Main fade-in");
+    app.test_render(&mut frame);
     assert!(app.startup_dialog_fade.is_none());
     let frame_ten = frame.clone();
     let mut settled = vec![0_u8; frame.len()];
-    app.render(&mut settled)
-        .expect("present active settled Main");
+    app.test_render(&mut settled);
     assert_eq!(
         frame_ten, settled,
         "frame ten must already draw active focus"
@@ -4199,20 +3987,20 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
     assert_ne!(ninth.expect("ninth frame"), frame_ten);
 
     app.handle_main_menu_activation(MainMenuItem::Options)
-        .expect("switch Main to Options");
+        .test_value();
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
-        app.render(&mut frame).expect("complete Options fade-in");
+        app.test_render(&mut frame);
     }
     app.process_options_dialog_actions(vec![
         clonk_frontend::startup_options_dlg::OptionsDlgAction::Back,
     ])
-    .expect("Options Back switches to Main");
-    let back = app.startup_dialog_fade.as_ref().expect("Back fade started");
+    .test_value();
+    let back = app.startup_dialog_fade.test_ref();
     assert_eq!(back.outgoing, Some(StartupDialog::Options));
     assert_eq!(back.incoming, StartupDialog::MainMenu);
     assert_eq!(back.step, 0);
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
-        app.render(&mut frame).expect("complete Options Back fade");
+        app.test_render(&mut frame);
     }
     assert!(app.startup_dialog_fade.is_none());
 }
@@ -4221,22 +4009,21 @@ fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
 fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.begin_startup_dialog_fade_in();
-    let fade = app.startup_dialog_fade.as_ref().expect("fade-in started");
+    let fade = app.startup_dialog_fade.test_ref();
     assert_eq!(fade.outgoing, None);
     assert_eq!(fade.incoming, StartupDialog::MainMenu);
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("initial fade suppresses Escape");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(!app.take_exit_request());
     let mut frame = vec![0_u8; 320 * 200 * 4];
     for expected_step in 1..STARTUP_DIALOG_FADE_STEPS {
-        app.render(&mut frame).expect("present initial fade-in");
+        app.test_render(&mut frame);
         assert_eq!(
             app.startup_dialog_fade.as_ref().unwrap().step,
             expected_step
         );
     }
-    app.render(&mut frame).expect("complete initial fade-in");
+    app.test_render(&mut frame);
     assert!(app.startup_dialog_fade.is_none());
 
     let mut modal_app = new_real_classic_menu_app(320, 200);
@@ -4245,14 +4032,10 @@ fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
     );
     modal_app.begin_startup_dialog_fade_in();
     for _ in 0..STARTUP_DIALOG_FADE_STEPS {
-        modal_app
-            .render(&mut frame)
-            .expect("fade Main beneath first-player modal");
+        modal_app.test_render(&mut frame);
     }
     let frame_ten = frame.clone();
-    modal_app
-        .render(&mut frame)
-        .expect("render settled first-player modal");
+    modal_app.test_render(&mut frame);
     assert_eq!(
         frame_ten, frame,
         "first-player modal remains visible after fade"
@@ -4267,8 +4050,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     // fullscreen supplies 1152x723 before boot leaves Loading.
     let mut app = new_real_classic_menu_app(1152, 644);
     app.mode = AppMode::Loading;
-    app.resize(1152, 723)
-        .expect("apply deferred fullscreen resize during boot loading");
+    app.resize(1152, 723).test_value();
     assert_eq!(app.mode, AppMode::Loading);
     app.mode = AppMode::Menu;
     app.show_main_menu();
@@ -4278,11 +4060,10 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     app.configure_native_startup_fonts(3.0, false);
     let mut logical_frame = vec![0_u8; 1152 * 723 * 4];
     app.render_ordered_native_base(&mut logical_frame)
-        .expect("capture the production Main presentation after boot");
+        .test_value();
     let commands = app
         .pending_native_presentation
-        .as_ref()
-        .expect("ordered Main presentation plan")
+        .test_ref()
         .batches
         .iter()
         .flat_map(|batch| batch.text.iter())
@@ -4291,7 +4072,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     let start = commands
         .iter()
         .find(|command| command.text.ends_with("</c>tart Game"))
-        .expect("captured first main-menu button label");
+        .test_value();
     assert_eq!(
         (start.role, start.align, start.x, start.y),
         (
@@ -4306,7 +4087,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     let participants = commands
         .iter()
         .find(|command| command.text == app.main_menu_state.participants_label)
-        .expect("captured Players footer label");
+        .test_value();
     assert_eq!(
         (
             participants.role,
@@ -4325,7 +4106,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     let fanproject = commands
         .iter()
         .find(|command| command.text.starts_with("Clonk Rust is a fan project"))
-        .expect("captured fan-project footer label");
+        .test_value();
     assert_eq!(
         (
             fanproject.role,
@@ -4367,44 +4148,35 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     let mut app = new_classic_running_sandbox_app();
     let primary = app.local_owner;
     let secondary = primary + 1;
-    let primary_crew = app
-        .engine
-        .crew_cursor(primary)
-        .expect("sandbox primary cursor");
-    let primary_crew_state = app
-        .engine
-        .object_snapshot(primary_crew)
-        .expect("sandbox primary crew remains live");
+    let primary_crew = app.engine.test_crew_cursor(primary);
+    let primary_crew_state = app.engine.test_object_snapshot(primary_crew);
 
     app.engine
         .register_player(PlayerConfig::new(secondary, "Secondary"))
-        .expect("register secondary runtime player");
+        .test_value();
     let secondary_position = Vector2::new(
         primary_crew_state.position.x.saturating_add(24),
         primary_crew_state.position.y,
     );
-    let secondary_crew = app
-        .engine
-        .spawn_object(
-            SpawnConfig::new(primary_crew_state.definition_id)
-                .with_position(secondary_position)
-                .with_owner(secondary)
-                .with_crew_member(true),
-        )
-        .expect("spawn secondary crew");
+    let secondary_crew = app.engine.spawn_test_object(
+        SpawnConfig::new(primary_crew_state.definition_id)
+            .with_position(secondary_position)
+            .with_owner(secondary)
+            .with_crew_member(true),
+    );
     app.engine
         .select_crew(secondary, [secondary_crew])
-        .expect("select secondary crew");
+        .test_value();
     app.engine
         .set_crew_cursor(secondary, Some(secondary_crew))
-        .expect("set secondary cursor");
+        .test_value();
     app.engine
         .replace_player_viewports(
             secondary,
             vec![clonk_engine::PlayerViewport::new(secondary_position)
                 .with_focus(Some(secondary_crew))],
         )
-        .expect("set secondary viewport");
+        .test_value();
     app.engine.set_local_players([primary, secondary]);
     app.local_controls = LocalControlRegistry::default();
     for (owner, preferred_set, prefers_mouse) in [(primary, 0, true), (secondary, 1, false)] {
@@ -4418,22 +4190,19 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
         });
     }
     app.snapshot = app.engine.snapshot();
-    app.open_ingame_menu_for_player(primary)
-        .expect("open primary player menu");
-    app.open_ingame_menu_for_player(secondary)
-        .expect("open secondary player menu");
+    app.open_ingame_menu_for_player(primary).test_value();
+    app.open_ingame_menu_for_player(secondary).test_value();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("establish both local viewports and menus");
+    app.test_render(&mut frame);
 
     let item_point = |app: &GameApp, owner: i32, caption: &str| {
-        let menu = app.ingame_menu.get(owner).expect("player menu");
+        let menu = app.ingame_menu.get(owner).test_value();
         let index = menu
             .items()
             .iter()
             .position(|item| item.caption == caption)
-            .expect("menu item");
-        let area = app.graphics.viewport_rect(owner).expect("player viewport");
+            .test_value();
+        let area = app.graphics.viewport_rect(owner).test_value();
         let fallback = app.assets.font_arc();
         let font = clonk_frontend::hud::HudFont::from_set(
             app.assets.clonk_fonts.as_deref(),
@@ -4481,12 +4250,9 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     let secondary_item = item_point(&app, secondary, "Goals");
     assert_eq!(app.local_controls.mouse_owner(), Some(primary));
 
-    app.handle_cursor_moved(secondary_item)
-        .expect("move over unassigned secondary menu");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press over unassigned secondary menu");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release over unassigned secondary menu");
+    app.test_cursor(secondary_item);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.ingame_menu.get(primary).map(IngameMenuState::page),
         Some(ingame_menu::MenuPage::Main),
@@ -4498,12 +4264,9 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
         "the unassigned viewport must not receive the click"
     );
 
-    app.handle_cursor_moved(primary_item)
-        .expect("move over assigned primary menu");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press primary item");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release primary item");
+    app.test_cursor(primary_item);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.ingame_menu.get(primary).map(IngameMenuState::page),
         Some(ingame_menu::MenuPage::Goals)
@@ -4527,10 +4290,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     }
     assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
     let secondary_close = {
-        let area = app
-            .graphics
-            .viewport_rect(secondary)
-            .expect("secondary viewport");
+        let area = app.graphics.viewport_rect(secondary).test_value();
         let fallback = app.assets.font_arc();
         let font = clonk_frontend::hud::HudFont::from_set(
             app.assets.clonk_fonts.as_deref(),
@@ -4539,7 +4299,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
         let close = app
             .ingame_menu
             .get(secondary)
-            .expect("secondary player menu")
+            .test_value()
             .close_button_rect(
                 area,
                 &font,
@@ -4565,12 +4325,9 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
             "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_item:?}",
             app.graphics.viewport_rect(secondary),
         );
-    app.handle_cursor_moved(secondary_item)
-        .expect("move over assigned secondary menu");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press secondary item");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release secondary item");
+    app.test_cursor(secondary_item);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.ingame_menu.get(secondary).map(IngameMenuState::page),
         Some(ingame_menu::MenuPage::Goals)
@@ -4591,7 +4348,7 @@ fn activate_new_player_reoffers_an_eliminated_startup_file() {
         env!("CARGO_MANIFEST_DIR"),
         "/../clonk-engine/tests/fixtures/embedded_player.c4p"
     ));
-    let player_file = PlayerFile::load_from_path(player_path).expect("load player fixture");
+    let player_file = PlayerFile::load_from_path(player_path).test_value();
     let mut app = new_running_sandbox_app();
     app.startup_player_files.push(StartupPlayerFile {
         path: player_path.to_path_buf(),
@@ -4613,7 +4370,7 @@ fn activate_new_player_reoffers_an_eliminated_startup_file() {
     });
 
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
-        .expect("open new-player menu");
+        .test_value();
 
     assert_eq!(
         app.ingame_menu
@@ -4636,7 +4393,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     // open once Game.Parameters.MaxPlayers is reached
     // (pristine 9ffa0a5d src/C4MainMenu.cpp:59-121;
     // src/C4PlayerList.cpp:433-451).
-    let directory = tempdir().expect("create player directory");
+    let directory = tempdir();
     let write_packed_player = |filename: &str, name: &str| {
         let path = directory.path().join(filename);
         let mut group = clonk_resources::MutableGroup::new(filename);
@@ -4647,20 +4404,20 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
                 1,
                 false,
             )
-            .expect("add player core");
-        fs::write(&path, group.pack().expect("pack player")).expect("write packed player");
+            .test_value();
+        fs::write(&path, group.pack().test_value()).test_value();
         path
     };
     let zulu = write_packed_player("Zulu.c4p", "Zulu");
     let active = write_packed_player("Active.c4p", "Active");
     let alpha = write_packed_player("Alpha.c4p", "Alpha");
     let folder = directory.path().join("Folder.c4p");
-    fs::create_dir_all(&folder).expect("create directory player group");
+    fs::create_dir_all(&folder).test_value();
     fs::write(
         folder.join("Player.txt"),
         "[Player]\nName=Folder\n[Preferences]\nColorDw=255\n",
     )
-    .expect("write directory player core");
+    .test_value();
 
     let mut config = Config::new();
     config.set_in(
@@ -4669,8 +4426,8 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
         directory.path().to_string_lossy(),
     );
     config.set_in(Some("General"), "Participants", active.to_string_lossy());
-    let mut players = startup_player_files::discover_player_files_in(directory.path(), &config)
-        .expect("discover player files");
+    let mut players =
+        startup_player_files::discover_player_files_in(directory.path(), &config).test_value();
     players.sort_by_key(|player| match player.player_file.name.as_str() {
         "Zulu" => 0,
         "Active" => 1,
@@ -4682,9 +4439,9 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     let mut app = new_running_sandbox_app();
     app.startup_player_files = players;
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
-        .expect("open new-player menu");
+        .test_value();
 
-    let menu = app.ingame_menu.as_ref().expect("new-player menu opens");
+    let menu = app.ingame_menu.get(app.local_owner).test_value();
     assert_eq!(
         menu.items()
             .iter()
@@ -4716,7 +4473,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
         .collect();
     app.ingame_menu.clear();
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
-        .expect("full-game activation is ignored");
+        .test_value();
     assert!(
         app.ingame_menu.is_none(),
         "a full game keeps the submenu closed"
@@ -4726,7 +4483,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
 #[test]
 fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     let mut app = new_menu_app(320, 200);
-    let user_data = tempdir().expect("isolated frontend audio config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     for (key, value) in [
         ("MenuMusic", "true"),
@@ -4739,16 +4496,8 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
             .unwrap_or_else(|error| panic!("seed Sound.{key}: {error}"));
     }
     app.app_paths = Some(paths.clone());
-    app.audio
-        .as_mut()
-        .expect("state-only test audio")
-        .options
-        .menu_music_enabled = true;
-    app.audio
-        .as_mut()
-        .expect("state-only test audio")
-        .options
-        .menu_sound_enabled = true;
+    app.audio.test_mut().options.menu_music_enabled = true;
+    app.audio.test_mut().options.menu_sound_enabled = true;
 
     let press_frontend_f3 = |app: &mut GameApp, modifiers: ModifiersState, label: &str| {
         app.handle_modifiers_changed(modifiers)
@@ -4762,7 +4511,7 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     press_frontend_f3(&mut app, ModifiersState::empty(), "startup F3");
     let after_startup_music = {
         app.flush_deferred_config();
-        Config::load(paths.config_file()).expect("reload startup frontend-music toggle")
+        Config::load(paths.config_file()).test_value()
     };
     assert_eq!(
         after_startup_music.get_in(Some("Sound"), "MenuMusic"),
@@ -4777,7 +4526,7 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     press_frontend_f3(&mut app, ModifiersState::CONTROL, "startup Ctrl+F3");
     let after_startup_sound = {
         app.flush_deferred_config();
-        Config::load(paths.config_file()).expect("reload startup frontend-sound toggle")
+        Config::load(paths.config_file()).test_value()
     };
     assert_eq!(
         after_startup_sound.get_in(Some("Sound"), "MenuSound"),
@@ -4804,7 +4553,7 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
     press_frontend_f3(&mut app, ModifiersState::CONTROL, "loading Ctrl+F3");
     let after_loading = {
         app.flush_deferred_config();
-        Config::load(paths.config_file()).expect("reload loading frontend audio toggles")
+        Config::load(paths.config_file()).test_value()
     };
     assert_eq!(
         after_loading.get_in(Some("Sound"), "MenuMusic"),
@@ -4828,37 +4577,22 @@ fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
 #[test]
 fn frontend_audio_toggle_write_failure_keeps_live_state() {
     let mut app = new_menu_app(320, 200);
-    let user_data = tempdir().expect("unwritable frontend audio config");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     app.app_paths = Some(paths.clone());
-    let music_before = app
-        .audio
-        .as_ref()
-        .expect("state-only test audio")
-        .options
-        .menu_music_enabled;
-    let sound_before = app
-        .audio
-        .as_ref()
-        .expect("state-only test audio")
-        .options
-        .menu_sound_enabled;
+    let music_before = app.audio.test_ref().options.menu_music_enabled;
+    let sound_before = app.audio.test_ref().options.menu_sound_enabled;
 
-    fs::remove_file(paths.config_file()).expect("remove writable config");
-    fs::create_dir(paths.config_file()).expect("replace config file with directory");
+    fs::remove_file(paths.config_file()).test_value();
+    fs::create_dir(paths.config_file()).test_value();
 
-    app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("frontend music stays live after persistence failure");
-    app.handle_key(VirtualKeyCode::F3, ElementState::Released)
-        .expect("release frontend music key");
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set Ctrl for frontend sound");
-    app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("frontend sound stays live after persistence failure");
-    app.handle_key(VirtualKeyCode::F3, ElementState::Released)
-        .expect("release frontend sound key");
+    app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F3, ElementState::Released);
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::F3, ElementState::Released);
 
-    let audio = app.audio.as_ref().expect("state-only test audio");
+    let audio = app.audio.test_ref();
     assert_eq!(audio.options.menu_music_enabled, !music_before);
     assert_eq!(audio.options.menu_sound_enabled, !sound_before);
 }
@@ -4872,12 +4606,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             .startup_options_dialog
             .as_ref()
             .map(|dialog| dialog.sound().frontend_music);
-        let before_music = app
-            .audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .menu_music_enabled;
+        let before_music = app.audio.test_ref().options.menu_music_enabled;
         app.handle_modifiers_changed(ModifiersState::empty())
             .unwrap_or_else(|error| panic!("clear modifiers for {label}: {error}"));
         app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -4910,12 +4639,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         app.handle_key(VirtualKeyCode::F3, ElementState::Released)
             .unwrap_or_else(|error| panic!("frontend F3 release over {label}: {error}"));
 
-        let before_sound = app
-            .audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .menu_sound_enabled;
+        let before_sound = app.audio.test_ref().options.menu_sound_enabled;
         let before_visual_sound = app
             .startup_options_dialog
             .as_ref()
@@ -5011,7 +4735,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("open startup modal");
+        .test_value();
     exercise(&mut nested, "modal above retained Options Sound sheet");
     assert_eq!(nested.message_dialogs.len(), 1);
 
@@ -5028,7 +4752,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             )],
             GuiPoint::new(120.0, 80.0),
         )
-        .expect("open context above Options Sound");
+        .test_value();
     exercise(&mut context, "context above retained Options Sound sheet");
     assert!(context.context_menu.is_some());
 
@@ -5045,21 +4769,19 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
 fn escape_in_submenu_returns_to_main_menu() {
     clonk_logging::init();
     let mut app = new_running_sandbox_app();
-    app.open_ingame_menu().expect("open player menu directly");
+    app.open_ingame_menu().test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
-        .expect("open options");
+        .test_value();
     assert_eq!(
         app.ingame_menu.as_ref().map(|menu| menu.page()),
         Some(ingame_menu::MenuPage::Options)
     );
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("escape back to main");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert_eq!(
         app.ingame_menu.as_ref().map(|menu| menu.page()),
         Some(ingame_menu::MenuPage::Main)
     );
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("escape closes menu");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.ingame_menu.is_none());
 }
 
@@ -5068,28 +4790,28 @@ fn load_frontend_scenarios_orders_folders_by_index() {
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
 
-    let install_dir = tempdir().unwrap();
+    let install_dir = tempdir();
     let planet_dir = install_dir.path().join("planet");
-    fs::create_dir_all(&planet_dir).unwrap();
-    fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
 
     let scenarios_dir = install_dir.path().join("Scenarios");
-    fs::create_dir_all(&scenarios_dir).unwrap();
+    fs::create_dir_all(&scenarios_dir).test_value();
 
     let missions_folder = scenarios_dir.join("Missions.c4f");
-    fs::create_dir_all(&missions_folder).unwrap();
+    fs::create_dir_all(&missions_folder).test_value();
     fs::write(
         missions_folder.join("Folder.txt"),
         "Title=Missions\nIndex=1\n",
     )
-    .unwrap();
+    .test_value();
 
     let arcade_folder = scenarios_dir.join("Arcade.c4f");
-    fs::create_dir_all(&arcade_folder).unwrap();
-    fs::write(arcade_folder.join("Folder.txt"), "Title=Arcade\nIndex=2\n").unwrap();
+    fs::create_dir_all(&arcade_folder).test_value();
+    fs::write(arcade_folder.join("Folder.txt"), "Title=Arcade\nIndex=2\n").test_value();
 
     let user_dir = install_dir.path().join("user-data");
-    fs::create_dir_all(&user_dir).unwrap();
+    fs::create_dir_all(&user_dir).test_value();
 
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_dir.path())),
@@ -5171,37 +4893,37 @@ fn loader_reads_startup_alphabetical_sorting_recursively() {
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
 
-    let install_dir = tempdir().unwrap();
+    let install_dir = tempdir();
     let planet_dir = install_dir.path().join("planet");
-    fs::create_dir_all(&planet_dir).unwrap();
-    fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
 
     let worlds_folder = install_dir.path().join("Scenarios").join("Worlds.c4f");
-    fs::create_dir_all(&worlds_folder).unwrap();
-    fs::write(worlds_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+    fs::create_dir_all(&worlds_folder).test_value();
+    fs::write(worlds_folder.join("Folder.txt"), "Title=Worlds\n").test_value();
     let alpha_dir = worlds_folder.join("Alpha.c4s");
-    fs::create_dir_all(&alpha_dir).unwrap();
+    fs::create_dir_all(&alpha_dir).test_value();
     fs::write(
         alpha_dir.join("Scenario.txt"),
         "[Head]\nTitle=Alpha\nDifficulty=3\n",
     )
-    .unwrap();
+    .test_value();
     let beta_dir = worlds_folder.join("Beta.c4s");
-    fs::create_dir_all(&beta_dir).unwrap();
+    fs::create_dir_all(&beta_dir).test_value();
     fs::write(
         beta_dir.join("Scenario.txt"),
         "[Head]\nTitle=Beta\nDifficulty=1\n",
     )
-    .unwrap();
+    .test_value();
 
     let user_dir = install_dir.path().join("user-data");
-    fs::create_dir_all(&user_dir).unwrap();
+    fs::create_dir_all(&user_dir).test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_dir.path())),
         ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create config directory");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
 
     let child_titles = |entries: &[FrontendScenario]| {
         entries[0]
@@ -5211,11 +4933,11 @@ fn loader_reads_startup_alphabetical_sorting_recursively() {
             .collect::<Vec<_>>()
     };
 
-    fs::write(paths.config_file(), "[Startup]\nAlphabeticalSorting=1\n").unwrap();
+    fs::write(paths.config_file(), "[Startup]\nAlphabeticalSorting=1\n").test_value();
     let alphabetical = load_frontend_scenarios_from_paths(&paths);
     assert_eq!(child_titles(&alphabetical), vec!["Alpha", "Beta"]);
 
-    fs::write(paths.config_file(), "[Startup]\nAlphabeticalSorting=0\n").unwrap();
+    fs::write(paths.config_file(), "[Startup]\nAlphabeticalSorting=0\n").test_value();
     let legacy = load_frontend_scenarios_from_paths(&paths);
     assert_eq!(child_titles(&legacy), vec!["Beta", "Alpha"]);
 
@@ -5227,34 +4949,34 @@ fn load_frontend_scenarios_orders_by_icon_index() {
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
 
-    let install_dir = tempdir().unwrap();
+    let install_dir = tempdir();
     let planet_dir = install_dir.path().join("planet");
-    fs::create_dir_all(&planet_dir).unwrap();
-    fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
 
     let scenarios_dir = install_dir.path().join("Scenarios");
     let missions_folder = scenarios_dir.join("Missions.c4f");
-    fs::create_dir_all(&missions_folder).unwrap();
-    fs::write(missions_folder.join("Folder.txt"), "Title=Missions\n").unwrap();
+    fs::create_dir_all(&missions_folder).test_value();
+    fs::write(missions_folder.join("Folder.txt"), "Title=Missions\n").test_value();
 
     let bravo_dir = missions_folder.join("Bravo.c4s");
-    fs::create_dir_all(&bravo_dir).unwrap();
+    fs::create_dir_all(&bravo_dir).test_value();
     fs::write(
         bravo_dir.join("Scenario.txt"),
         "[Head]\nTitle=Bravo\nIcon=3\n",
     )
-    .unwrap();
+    .test_value();
 
     let alpha_dir = missions_folder.join("Alpha.c4s");
-    fs::create_dir_all(&alpha_dir).unwrap();
+    fs::create_dir_all(&alpha_dir).test_value();
     fs::write(
         alpha_dir.join("Scenario.txt"),
         "[Head]\nTitle=Alpha\nIcon=5\n",
     )
-    .unwrap();
+    .test_value();
 
     let user_dir = install_dir.path().join("user-data");
-    fs::create_dir_all(&user_dir).unwrap();
+    fs::create_dir_all(&user_dir).test_value();
 
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_dir.path())),
@@ -5284,41 +5006,41 @@ fn load_frontend_scenarios_preserves_legacy_ordering() {
     let _env_lock = crate::tests::env_lock().lock();
     reset_cached_app_paths();
 
-    let install_dir = tempdir().unwrap();
+    let install_dir = tempdir();
     let planet_dir = install_dir.path().join("planet");
-    fs::create_dir_all(&planet_dir).unwrap();
-    fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
 
     let install_folder = install_dir.path().join("Scenarios").join("Worlds.c4f");
-    fs::create_dir_all(&install_folder).unwrap();
-    fs::write(install_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+    fs::create_dir_all(&install_folder).test_value();
+    fs::write(install_folder.join("Folder.txt"), "Title=Worlds\n").test_value();
     let install_bravo = install_folder.join("Bravo.c4s");
-    fs::create_dir_all(&install_bravo).unwrap();
+    fs::create_dir_all(&install_bravo).test_value();
     fs::write(
         install_bravo.join("Scenario.txt"),
         "[Head]\nTitle=Bravo\nDifficulty=1\n",
     )
-    .unwrap();
+    .test_value();
     let install_charlie = install_folder.join("Charlie.c4s");
-    fs::create_dir_all(&install_charlie).unwrap();
+    fs::create_dir_all(&install_charlie).test_value();
     fs::write(
         install_charlie.join("Scenario.txt"),
         "[Head]\nTitle=Charlie\nDifficulty=2\n",
     )
-    .unwrap();
+    .test_value();
 
     let user_dir = install_dir.path().join("user-data");
-    fs::create_dir_all(&user_dir).unwrap();
+    fs::create_dir_all(&user_dir).test_value();
     let user_folder = user_dir.join("Scenarios").join("Worlds.c4f");
-    fs::create_dir_all(&user_folder).unwrap();
-    fs::write(user_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+    fs::create_dir_all(&user_folder).test_value();
+    fs::write(user_folder.join("Folder.txt"), "Title=Worlds\n").test_value();
     let user_alpha = user_folder.join("Alpha.c4s");
-    fs::create_dir_all(&user_alpha).unwrap();
+    fs::create_dir_all(&user_alpha).test_value();
     fs::write(
         user_alpha.join("Scenario.txt"),
         "[Head]\nTitle=Alpha Override\nDifficulty=3\n",
     )
-    .unwrap();
+    .test_value();
 
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_dir.path())),
@@ -5363,21 +5085,21 @@ fn load_frontend_scenarios_preserves_legacy_ordering() {
 fn load_frontend_scenarios_sets_human_readable_location() {
     reset_cached_app_paths();
 
-    let install_dir = tempdir().unwrap();
+    let install_dir = tempdir();
 
     let planet_dir = install_dir.path().join("planet");
-    fs::create_dir_all(&planet_dir).unwrap();
-    fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
 
     let user_dir = install_dir.path().join("user-data");
-    fs::create_dir_all(&user_dir).unwrap();
+    fs::create_dir_all(&user_dir).test_value();
     let scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
-    fs::create_dir_all(&scenario_dir).unwrap();
+    fs::create_dir_all(&scenario_dir).test_value();
     fs::write(
         scenario_dir.join("Scenario.json"),
         br#"{"name":"Alpha Mission"}"#,
     )
-    .unwrap();
+    .test_value();
 
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_dir.path())),
@@ -5456,24 +5178,23 @@ fn classic_startup_argument_selects_initial_cpp_view() {
 /// without effect.
 #[test]
 fn startup_f6_launches_editor_when_available() {
-    let install = tempdir().expect("editor install root");
-    let user_data = tempdir().expect("editor user data");
+    let install = tempdir();
+    let user_data = tempdir();
     install_global_gui_and_loader_test_root(install.path());
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_CONTENT_DIR", None),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
 
     // Without Editor.exe the shortcut is inert on every platform: startup
     // stays open and nothing is queued.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
     assert_eq!(app.classic_editor_executable(), None);
-    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
-        .expect("bare F6 without an editor is handled");
+    app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
     assert!(app.pending_editor_launch.is_none());
     assert!(!app.exit_requested);
@@ -5481,12 +5202,11 @@ fn startup_f6_launches_editor_when_available() {
     // With Editor.exe beside the engine, Windows queues the deferred launch
     // and exits; other platforms still consume the key with no effect.
     let editor = install.path().join("Editor.exe");
-    fs::write(&editor, b"stub").expect("write the editor stub");
+    fs::write(&editor, b"stub").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
     assert_eq!(app.classic_editor_executable(), Some(editor.clone()));
-    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
-        .expect("bare F6 with an editor is handled");
+    app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     if cfg!(windows) {
         assert_eq!(app.pending_editor_launch, Some(editor));
         assert!(app.exit_requested, "SwitchToEditor exits startup");
@@ -5500,16 +5220,14 @@ fn startup_f6_launches_editor_when_available() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.show_main_menu();
     app.keyboard_modifiers = ModifiersState::CONTROL;
-    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
-        .expect("Ctrl+F6 is not the editor shortcut");
+    app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     assert!(app.pending_editor_launch.is_none());
     assert!(!app.exit_requested);
 
     // The binding belongs to the main dialog only.
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     app.open_about_dialog();
-    app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
-        .expect("F6 outside the main dialog is not the editor shortcut");
+    app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
     assert!(app.pending_editor_launch.is_none());
     assert_eq!(app.startup_view, StartupView::About);
 }

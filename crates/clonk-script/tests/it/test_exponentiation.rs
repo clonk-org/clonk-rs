@@ -34,11 +34,7 @@ fn runtime_error(expression: &str) -> String {
     }
 }
 
-#[test]
-fn simple_exponentiation() {
-    let source = r#"func Test() { return 2**3; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(simple_exponentiation, r#"func Test() { return 2**3; }"#);
 
 #[test]
 fn exponentiation_is_left_associative_like_cpp() {
@@ -52,24 +48,21 @@ fn exponentiation_with_parentheses() {
     assert_eq!(eval("2**(3**2)"), Value::Int(512));
 }
 
-#[test]
-fn exponentiation_with_variable() {
-    let source = r#"func Test() { var iAlpha = 2; return iAlpha**5; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    exponentiation_with_variable,
+    r#"func Test() { var iAlpha = 2; return iAlpha**5; }"#
+);
 
-#[test]
-fn exponentiation_with_negative_base() {
-    let source = r#"func Test() { return (-2)**3; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    exponentiation_with_negative_base,
+    r#"func Test() { return (-2)**3; }"#
+);
 
-#[test]
-fn frca_pattern() {
-    // The actual pattern from FRCA script: Sqrt(Sqrt(iAlpha**5))
-    let source = r#"func Test() { var iAlpha; return Sqrt(Sqrt(iAlpha**5)); }"#;
-    crate::support::assert_compiles(source);
-}
+// The actual pattern from FRCA script: Sqrt(Sqrt(iAlpha**5))
+crate::support::compile_case!(
+    frca_pattern,
+    r#"func Test() { var iAlpha; return Sqrt(Sqrt(iAlpha**5)); }"#
+);
 
 #[test]
 fn exponentiation_precedence_higher_than_multiply() {

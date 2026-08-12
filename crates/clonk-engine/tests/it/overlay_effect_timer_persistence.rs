@@ -34,39 +34,33 @@ public func FxMovePointerTimer(object target, int number, int time)
 #[test]
 fn effect_timer_overlay_write_keeps_the_objects_other_overlays() {
     let mut engine = Engine::new();
-    let mut hud_definition = Definition::from_script("MHUD", "HUD", HUD).expect("HUD compiles");
+    let mut hud_definition =
+        crate::support::TestValueExt::test_value(Definition::from_script("MHUD", "HUD", HUD));
     hud_definition.set_c4_callback_convention(true);
-    engine
-        .register_definition(hud_definition)
-        .expect("HUD registers");
+    crate::support::TestValueExt::test_value(engine.register_definition(hud_definition));
 
-    let hud = engine
-        .spawn_object(SpawnConfig::new("MHUD"))
-        .expect("HUD spawns");
+    let hud =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("MHUD")));
 
     // Overlay 1 is authoritative object state, exactly as a foreign
     // `HUD->UpdateO2(...)` write leaves it.
-    engine
-        .apply_object_update(
-            hud,
-            ObjectUpdate {
-                graphics_overlays: Some(vec![ObjectGraphicsOverlay::new(
+    crate::support::TestValueExt::test_value(engine.apply_object_update(
+        hud,
+        ObjectUpdate {
+            graphics_overlays: Some(vec![ObjectGraphicsOverlay::new(
                     1,
                     GraphicsOverlayMode::Action,
                 )
                 .with_action(Some("O20".to_string()))]),
-                ..ObjectUpdate::default()
-            },
-        )
-        .expect("O2 overlay installs");
+            ..ObjectUpdate::default()
+        },
+    ));
 
-    let hud_index = engine.find_object_index(hud).expect("HUD present");
-    engine
-        .call_object_function(hud_index, "Arm", vec![])
-        .expect("pointer effect arms");
+    let hud_index = crate::support::TestValueExt::test_value(engine.find_object_index(hud));
+    crate::support::TestValueExt::test_value(engine.call_object_function(hud_index, "Arm", vec![]));
 
     for _ in 0..5 {
-        engine.tick_without_snapshot().expect("frame runs");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
 
     assert_eq!(

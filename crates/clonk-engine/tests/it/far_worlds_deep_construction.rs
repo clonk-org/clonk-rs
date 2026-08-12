@@ -17,6 +17,7 @@
 //! pinned in the reject leg of the full-loop test below.
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::EngineTestExt;
 use clonk_engine::{
     ObjectUpdate, SpawnConfig, Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_THROW, FULL_CON,
 };
@@ -34,10 +35,8 @@ const MAX_BUILD_TICKS: i32 = 32;
 fn deep_sea_conkit_site_starts_building_underwater() {
     let mut engine = load_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
     let owner = join_local_player(&mut engine, "Deep Sea construction parity");
-    let clonk = engine
-        .crew_cursor(owner)
-        .expect("Deep Sea joins with a selected HCLK");
-    let clonk_state = engine.object_snapshot(clonk).expect("cursor clonk lives");
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(owner));
+    let clonk_state = engine.test_object_snapshot(clonk);
     assert_eq!(clonk_state.definition_id, "HCLK");
     // Seed-zero ScenarioInit: Position=26,35 zoomed by MapZoom=17, crew
     // spread (C4Player.cpp:710-763). The shore under the shell is walkable
@@ -50,12 +49,13 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     );
 
     // Deep.c4s InitializePlayer fills the TRTS shell with 5 CNKT + 3 LNKT.
-    let base_state = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "TRTS")
-        .expect("Deep Sea places the player's TRTS shell");
+    let base_state = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "TRTS"),
+    );
     assert_eq!(base_state.position, Vector2::new(449, 575));
     let count_contents = |ids: &[clonk_engine::ObjectId], definition: &str| {
         ids.iter()
@@ -72,48 +72,33 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     // The scenario's own Deep.c4d overloads CNKT: GCOR=2;METL=1 components
     // replace the Objects.c4d WOOD=2;METL=1 and Activate loses the
     // CanConstruct gate (Deep.c4d/Items.c4d/Conkit.c4d).
-    let conkit = base_state
-        .contents
-        .iter()
-        .copied()
-        .find(|id| {
+    let conkit =
+        crate::support::TestValueExt::test_value(base_state.contents.iter().copied().find(|id| {
             engine
                 .object_snapshot(*id)
                 .is_some_and(|object| object.definition_id == "CNKT")
-        })
-        .expect("a shell conkit");
-    let kit_components = engine
-        .object_snapshot(conkit)
-        .expect("CNKT lives")
-        .components;
+        }));
+    let kit_components = engine.test_object_snapshot(conkit).components;
     assert_eq!(kit_components.get("GCOR"), Some(&2));
     assert_eq!(kit_components.get("METL"), Some(&1));
 
     // Take one CNKT from the shell (the interactive contents-menu route is
     // pinned above ground by the Tutorial04 suites).
-    engine
-        .apply_object_update(conkit, ObjectUpdate::new().with_container(clonk))
-        .expect("take a CNKT from the TRTS shell");
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(conkit, ObjectUpdate::new().with_container(clonk)),
+    );
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("clonk lives")
-            .contents
-            .first(),
+        engine.test_object_snapshot(clonk).contents.first(),
         Some(&conkit),
         "dig-double activates the first carried object (C4ObjectCom.cpp:537-539)"
     );
 
     // Link: dig-double opens CNKT::Activate's CXCN menu underwater, filled
     // from GetPlrKnowledge(owner, 0, i++, C4D_Structure()).
-    engine.player_in_com(owner, COM_DIG, 0).expect("first Dig");
-    engine
-        .player_in_com(owner, COM_DIG, 0)
-        .expect("second Dig inside the double-click window");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG, 0));
     {
-        let (_, menu) = engine
-            .cursor_object_menu(owner)
-            .expect("CNKT::Activate opens its CXCN menu underwater");
+        let (_, menu) = crate::support::TestValueExt::test_value(engine.cursor_object_menu(owner));
         assert_eq!(menu.identification, Value::C4Id("CXCN".to_string()));
         assert_eq!(menu.symbol_id, "CXCN");
         assert_eq!(menu.command_object, Some(conkit));
@@ -149,12 +134,8 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     // (C4Landscape.cpp:2152-2157; C4GameMessage.cpp:280-282). The failed
     // CreateConstruction returns nil, so CreateConstructionSite keeps the
     // kit (Conkit.c4d/Script.c).
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, 1)
-        .expect("select the PWR2 row");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("menu enter runs CreateConstructionSite");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_MENU_SELECT, 1));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
     assert!(
         !engine
             .snapshot()
@@ -164,10 +145,7 @@ fn deep_sea_conkit_site_starts_building_underwater() {
         "the shore reject must not place a site"
     );
     assert_eq!(
-        engine
-            .object_snapshot(conkit)
-            .expect("kit outlives the reject")
-            .container,
+        engine.test_object_snapshot(conkit).container,
         Some(clonk),
         "a rejected CreateConstruction keeps the kit"
     );
@@ -202,41 +180,26 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     // Down: the sinking HCLK lands into Walk through the ACLK ContactBottom
     // contact call (AquaClonk.c4d/Script.c; C4Movement.cpp:166-182;
     // HCLK's own ActMap strips InLiquidAction from Walk).
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(721, 500))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Swim"),
-        )
-        .expect("swim above the buildable floor");
-    assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("clonk lives")
-            .action
-            .name,
-        "Swim"
+        ),
     );
-    engine
-        .player_in_com(owner, COM_DOWN, 0)
-        .expect("hold Down toward the sea floor");
+    assert_eq!(engine.test_object_snapshot(clonk).action.name, "Swim");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DOWN, 0));
     let mut landed = false;
     for _ in 0..40 {
-        engine.tick_without_snapshot().expect("landing advances");
-        if engine
-            .object_snapshot(clonk)
-            .expect("clonk survives the descent")
-            .action
-            .name
-            == "Walk"
-        {
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        if engine.test_object_snapshot(clonk).action.name == "Walk" {
             landed = true;
             break;
         }
     }
-    let clonk_state = engine.object_snapshot(clonk).expect("clonk lives");
+    let clonk_state = engine.test_object_snapshot(clonk);
     assert!(
         landed,
         "holding Down must land the swimming HCLK into Walk; action={} pos={:?}",
@@ -249,26 +212,21 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     );
 
     // Link: the same menu route places the site on the legal floor.
-    engine.player_in_com(owner, COM_DIG, 0).expect("first Dig");
-    engine
-        .player_in_com(owner, COM_DIG, 0)
-        .expect("second Dig inside the double-click window");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DIG, 0));
     assert!(
         engine.cursor_object_menu(owner).is_some(),
         "the CXCN menu reopens over the buildable floor"
     );
-    engine
-        .player_in_com(owner, COM_MENU_SELECT, 1)
-        .expect("select the PWR2 row");
-    engine
-        .player_in_com(owner, COM_THROW, 0)
-        .expect("menu enter runs CreateConstructionSite");
-    let site = engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == "PWR2" && object.status.is_active())
-        .expect("CreateConstruction places the PWR2 site underwater");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_MENU_SELECT, 1));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_THROW, 0));
+    let site = crate::support::TestValueExt::test_value(
+        engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "PWR2" && object.status.is_active()),
+    );
     // CreateConstruction(idType, 0, 10, owner, 1, 1, 1): kit offsets ride on
     // the carrying clonk, one percent Con (C4Script.cpp:1905-1933).
     assert_eq!(site.position, Vector2::new(721, 542));
@@ -303,12 +261,10 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     for definition in [
         "GCOR", "GCOR", "GCOR", "GCOR", "GCOR", "GCOR", "GLAS", "GLAS",
     ] {
-        let material = engine
-            .spawn_object(SpawnConfig::new(definition))
-            .expect("component spawns");
-        engine
-            .apply_object_update(material, ObjectUpdate::new().with_container(clonk))
-            .expect("component enters the builder");
+        let material = engine.spawn_test_object(SpawnConfig::new(definition));
+        crate::support::TestValueExt::test_value(
+            engine.apply_object_update(material, ObjectUpdate::new().with_container(clonk)),
+        );
     }
 
     // Deep Sea spawns 7 SHRK predators; a stationary builder is prey in
@@ -322,24 +278,18 @@ fn deep_sea_conkit_site_starts_building_underwater() {
         .map(|object| object.id)
         .collect::<Vec<_>>();
     for animal in wildlife {
-        engine
-            .apply_object_update(
-                animal,
-                ObjectUpdate::new().with_status(clonk_engine::ObjectStatus::Deleted),
-            )
-            .expect("retire Deep Sea wildlife for the deterministic build leg");
+        crate::support::TestValueExt::test_value(engine.apply_object_update(
+            animal,
+            ObjectUpdate::new().with_status(clonk_engine::ObjectStatus::Deleted),
+        ));
     }
 
     // Link: double-Down over the OCF_Construct site starts Build through
     // PlayerObjectCommand(C4CMD_Build) -> C4Command::Build's at-target arm
     // -> ObjectComBuild -> SetActionByName("Build")
     // (C4ObjectCom.cpp:573-589,690-698; C4Command.cpp:874-895).
-    engine
-        .player_in_com(owner, COM_DOWN, 0)
-        .expect("first Down");
-    engine
-        .player_in_com(owner, COM_DOWN, 0)
-        .expect("second Down inside the double-click window");
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DOWN, 0));
+    crate::support::TestValueExt::test_value(engine.player_in_com(owner, COM_DOWN, 0));
 
     // DFA_BUILD per-frame progression (C4Object.cpp:5010-5055,1682-1775):
     // Build(iLevel=10) grabs at most one carried object per needed id per
@@ -358,16 +308,14 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     let total_frames = (FULL_CON - FULL_CON / 100) / STOCK_CON_PER_TICK;
     assert_eq!(total_frames, 3960);
     for frame in 1..=STOCK_BUILD_TICKS {
-        engine
-            .tick_without_snapshot()
-            .expect("stock-speed Build frames advance");
-        let site_state = engine.object_snapshot(site).expect("site survives");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let site_state = engine.test_object_snapshot(site);
         assert_eq!(
             site_state.construction,
             FULL_CON / 100 + frame * STOCK_CON_PER_TICK,
             "frame {frame}: DoCon rises exactly 25 per stock-speed Build frame"
         );
-        let builder_state = engine.object_snapshot(clonk).expect("builder survives");
+        let builder_state = engine.test_object_snapshot(clonk);
         assert_eq!(
             builder_state.action.name, "Build",
             "frame {frame}: the underwater Build action persists"
@@ -401,75 +349,60 @@ fn deep_sea_conkit_site_starts_building_underwater() {
     assert_eq!(accelerated_delta, 9_885);
     let accelerated_can_construct = accelerated_delta * 4;
     assert_eq!(accelerated_can_construct, 39_540);
-    engine
-        .register_definition(
-            clonk_engine::Definition::from_script(
-                "BSPD",
-                "Build-speed probe",
-                r#"#strict 2
-public func Refill(object target)
-{
-  return DoBreath(700000, target);
-}
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        clonk_engine::Definition::from_script(
+            "BSPD",
+            "Build-speed probe",
+            r#"#strict 2
+        public func Refill(object target)
+        {
+          return DoBreath(700000, target);
+        }
 
-public func Accelerate(object target, int speed)
-{
-  return SetPhysical("CanConstruct", speed, PHYS_Temporary, target);
-}
-"#,
-            )
-            .expect("build-speed probe compiles"),
-        )
-        .expect("build-speed probe registers");
-    let accelerator = engine
-        .spawn_object(SpawnConfig::new("BSPD").with_position(Vector2::new(0, 0)))
-        .expect("build-speed probe spawns");
-    let accelerator_index = engine
-        .find_object_index(accelerator)
-        .expect("build-speed probe stays live");
+        public func Accelerate(object target, int speed)
+        {
+          return SetPhysical("CanConstruct", speed, PHYS_Temporary, target);
+        }
+        "#,
+        ),
+    ));
+    let accelerator =
+        engine.spawn_test_object(SpawnConfig::new("BSPD").with_position(Vector2::new(0, 0)));
+    let accelerator_index = engine.test_object_index(accelerator);
     assert_eq!(
-        engine
-            .call_object_function(
-                accelerator_index,
-                "Refill",
-                vec![Value::Object(clonk.as_u64())],
-            )
-            .expect("the diver refreshes breath before the accelerated build"),
+        engine.call_test_object_function(
+            accelerator_index,
+            "Refill",
+            vec![Value::Object(clonk.as_u64())],
+        ),
         Value::Bool(true)
     );
     assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("builder survives the breath refill")
-            .breath,
+        engine.test_object_snapshot(clonk).breath,
         700_000,
         "DoBreath retains the former long-build refill seam (C4Script.cpp:508-514)"
     );
     assert_eq!(
-        engine
-            .call_object_function(
-                accelerator_index,
-                "Accelerate",
-                vec![
-                    Value::Object(clonk.as_u64()),
-                    Value::Int(accelerated_can_construct),
-                ],
-            )
-            .expect("temporary CanConstruct acceleration succeeds"),
+        engine.call_test_object_function(
+            accelerator_index,
+            "Accelerate",
+            vec![
+                Value::Object(clonk.as_u64()),
+                Value::Int(accelerated_can_construct),
+            ],
+        ),
         Value::Bool(true)
     );
 
     for frame in 1..=ACCELERATED_BUILD_TICKS {
-        engine
-            .tick_without_snapshot()
-            .expect("accelerated Build frames advance");
-        let site_state = engine.object_snapshot(site).expect("site survives");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
+        let site_state = engine.test_object_snapshot(site);
         assert_eq!(
             site_state.construction,
             FULL_CON / 100 + STOCK_BUILD_TICKS * STOCK_CON_PER_TICK + frame * accelerated_delta,
             "accelerated frame {frame}: DoCon follows the temporary physical"
         );
-        let builder_state = engine.object_snapshot(clonk).expect("builder survives");
+        let builder_state = engine.test_object_snapshot(clonk);
         assert_eq!(
             builder_state.action.name, "Build",
             "accelerated frame {frame}: the underwater Build action persists"
@@ -494,7 +427,7 @@ public func Accelerate(object target, int speed)
     // Completion: Con caps at FullCon on the exact frame, PSF_Completion +
     // PSF_Initialize fire, and OCF swaps Construct for FullCon
     // (C4Object.cpp:1489-1516,1758-1767).
-    let complete = engine.object_snapshot(site).expect("completed site");
+    let complete = engine.test_object_snapshot(site);
     assert_eq!(complete.construction, FULL_CON);
     // DoCon anchors straight-con growth on the bottom edge while ordinary
     // physics settles the growing structure into the chunky floor; the
@@ -523,9 +456,9 @@ public func Accelerate(object target, int speed)
     // C4CMD_Energy for the power *generator* (C4Object.cpp:5033-5045;
     // C4Command.cpp:838-880).
     for _ in 0..5 {
-        engine.tick_without_snapshot().expect("builder stops");
+        crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
     }
-    let builder = engine.object_snapshot(clonk).expect("builder lives");
+    let builder = engine.test_object_snapshot(clonk);
     assert_ne!(builder.action.name, "Build");
     assert!(
         builder.command_queue.is_empty(),
@@ -543,305 +476,80 @@ public func Accelerate(object target, int speed)
 /// byte-identical (C4Landscape.cpp:337-380,2125-2169).
 #[test]
 fn deep_sea_construction_site_survey_matches_cpp_oracle() {
+    #[rustfmt::skip]
     const CPP_ORACLE: &[(i32, i32, i32, i32, i32)] = &[
-        (60, 67, 0, 0, 0),
-        (70, 67, 0, 0, 0),
-        (80, 74, 0, 0, 0),
-        (90, 114, 0, 0, 0),
-        (100, 117, 0, 0, 0),
-        (110, 135, 0, 0, 0),
-        (120, 135, 0, 0, 0),
-        (130, 145, 0, 0, 0),
-        (140, 152, 0, 0, 0),
-        (150, 151, 0, 0, 0),
-        (160, 164, 0, 0, 0),
-        (170, 167, 0, 0, 0),
-        (180, 167, 0, 0, 0),
-        (190, 167, 0, 1, 1),
-        (200, 165, 1, 1, 1),
-        (210, 167, 1, 1, 1),
-        (220, 167, 1, 1, 1),
-        (230, 163, 0, 0, 0),
-        (240, 168, 1, 1, 1),
-        (250, 167, 1, 1, 1),
-        (260, 165, 1, 1, 1),
-        (270, 166, 1, 1, 1),
-        (280, 167, 1, 1, 1),
-        (290, 168, 0, 0, 0),
-        (300, 164, 0, 0, 0),
-        (310, 168, 0, 0, 0),
-        (320, 153, 1, 1, 1),
-        (330, 149, 1, 1, 1),
-        (340, 149, 1, 1, 1),
-        (350, 152, 0, 1, 0),
-        (360, 150, 0, 0, 0),
-        (370, 149, 0, 0, 0),
-        (380, 152, 0, 0, 0),
-        (390, 132, 1, 1, 1),
-        (400, 131, 1, 1, 1),
-        (410, 133, 0, 0, 0),
-        (420, 135, 0, 0, 0),
-        (430, 126, 0, 0, 0),
-        (440, 118, 1, 1, 1),
-        (450, 113, 0, 0, 0),
-        (460, 118, 0, 0, 0),
-        (470, 117, 1, 0, 0),
-        (480, 115, 1, 1, 1),
-        (490, 105, 0, 0, 0),
-        (500, 99, 0, 0, 0),
-        (510, 99, 0, 0, 0),
-        (520, 114, 1, 1, 1),
-        (530, 117, 1, 0, 0),
-        (540, 117, 1, 1, 1),
-        (550, 123, 0, 0, 0),
-        (560, 150, 0, 0, 0),
-        (570, 149, 0, 0, 0),
-        (580, 150, 0, 0, 0),
-        (590, 152, 0, 0, 0),
-        (600, 149, 1, 1, 1),
-        (610, 149, 1, 1, 1),
-        (620, 167, 0, 0, 0),
-        (630, 168, 0, 0, 0),
-        (640, 164, 0, 0, 0),
-        (650, 171, 0, 0, 0),
-        (660, 185, 0, 0, 0),
-        (670, 181, 0, 0, 0),
-        (680, 151, 0, 0, 0),
-        (690, 152, 0, 0, 0),
-        (700, 132, 0, 0, 0),
-        (710, 133, 0, 0, 0),
-        (720, 134, 0, 0, 0),
-        (730, 135, 0, 1, 0),
-        (740, 140, 0, 1, 1),
-        (750, 168, 0, 0, 0),
-        (760, 167, 0, 0, 0),
-        (770, 207, 0, 0, 0),
-        (780, 219, 0, 0, 0),
-        (790, 593, 0, 0, 0),
-        (800, 596, 0, 0, 0),
-        (810, 611, 0, 0, 0),
-        (820, 613, 0, 0, 0),
-        (830, 625, 0, 0, 0),
-        (840, 628, 0, 0, 0),
-        (850, 626, 0, 1, 0),
-        (860, 637, 0, 0, 0),
-        (870, 644, 0, 0, 0),
-        (880, 643, 0, 0, 0),
-        (890, 640, 0, 0, 0),
-        (900, 643, 0, 0, 0),
-        (910, 633, 0, 1, 1),
-        (920, 626, 1, 1, 1),
-        (930, 625, 1, 1, 1),
-        (940, 628, 0, 0, 0),
-        (950, 627, 0, 0, 0),
-        (960, 617, 1, 1, 1),
-        (970, 609, 1, 1, 1),
-        (980, 611, 1, 1, 1),
-        (990, 607, 0, 1, 1),
-        (1000, 609, 1, 1, 1),
-        (1010, 610, 1, 1, 1),
-        (1020, 608, 1, 1, 1),
-        (1030, 608, 1, 1, 1),
-        (1040, 610, 1, 1, 1),
-        (1050, 611, 1, 1, 1),
-        (1060, 607, 1, 1, 1),
-        (1070, 609, 1, 1, 1),
-        (1080, 611, 1, 1, 1),
-        (1090, 608, 1, 1, 1),
-        (1100, 608, 1, 1, 1),
-        (1110, 610, 1, 1, 1),
-        (1120, 611, 1, 1, 1),
-        (1130, 617, 0, 0, 0),
-        (1140, 609, 1, 1, 1),
-        (1150, 611, 1, 1, 1),
-        (1160, 607, 1, 1, 1),
-        (1170, 609, 1, 1, 1),
-        (1180, 610, 1, 1, 1),
-        (1190, 608, 1, 1, 1),
-        (1200, 608, 1, 1, 1),
-        (1210, 610, 1, 1, 1),
-        (1220, 611, 1, 1, 1),
-        (1230, 607, 1, 1, 1),
-        (1240, 609, 1, 1, 1),
-        (1250, 611, 0, 0, 0),
-        (1260, 608, 0, 1, 0),
-        (1270, 608, 0, 0, 0),
-        (1280, 604, 0, 0, 0),
-        (1290, 594, 0, 1, 0),
-        (1300, 593, 0, 0, 0),
-        (1310, 593, 0, 0, 0),
-        (1320, 586, 0, 0, 0),
-        (1330, 576, 1, 1, 1),
-        (1340, 575, 1, 1, 1),
-        (1350, 572, 0, 0, 0),
-        (1360, 575, 1, 1, 1),
-        (1370, 575, 1, 1, 1),
-        (1380, 575, 1, 1, 1),
-        (1390, 573, 1, 1, 1),
-        (1400, 575, 0, 0, 0),
-        (1410, 575, 0, 0, 0),
-        (1420, 565, 1, 1, 1),
-        (1430, 559, 1, 1, 1),
-        (1440, 560, 1, 1, 1),
-        (1450, 557, 1, 1, 1),
-        (1460, 557, 1, 1, 1),
-        (1470, 561, 1, 1, 1),
-        (1480, 558, 1, 1, 1),
-        (1490, 557, 1, 1, 1),
-        (1500, 560, 1, 1, 1),
-        (1510, 559, 1, 1, 1),
-        (1520, 557, 1, 1, 1),
-        (1530, 557, 1, 1, 1),
-        (1540, 560, 1, 1, 1),
-        (1550, 558, 1, 1, 1),
-        (1560, 557, 1, 1, 1),
-        (1570, 560, 1, 1, 1),
-        (1580, 558, 1, 1, 1),
-        (1590, 557, 1, 1, 1),
-        (1600, 558, 0, 1, 1),
-        (1610, 560, 0, 0, 0),
-        (1620, 557, 0, 0, 0),
-        (1630, 557, 0, 0, 0),
-        (1640, 535, 0, 0, 0),
-        (1650, 526, 0, 0, 0),
-        (1660, 525, 0, 0, 0),
-        (1670, 529, 0, 0, 0),
-        (1680, 543, 0, 0, 0),
-        (1690, 539, 1, 0, 1),
-        (1700, 542, 0, 0, 0),
-        (1710, 560, 0, 0, 0),
-        (1720, 558, 0, 0, 0),
-        (1730, 550, 0, 0, 0),
-        (1740, 542, 0, 0, 0),
-        (1750, 491, 0, 0, 0),
-        (1760, 480, 0, 0, 0),
-        (1770, 472, 0, 0, 0),
-        (1780, 361, 0, 0, 0),
-        (1790, 356, 0, 0, 0),
-        (1800, 288, 1, 1, 1),
-        (1810, 289, 0, 1, 0),
-        (1820, 286, 0, 0, 0),
-        (1830, 285, 0, 0, 0),
-        (1840, 288, 0, 0, 0),
-        (1850, 270, 1, 1, 1),
-        (1860, 267, 0, 1, 1),
-        (1870, 269, 0, 0, 0),
-        (1880, 271, 0, 0, 0),
-        (1890, 253, 0, 1, 0),
-        (1900, 253, 0, 0, 0),
-        (1910, 250, 0, 0, 0),
-        (1920, 253, 0, 0, 0),
-        (1930, 226, 0, 1, 1),
-        (1940, 218, 0, 0, 0),
-        (1950, 217, 0, 0, 0),
-        (1960, 220, 0, 1, 0),
-        (1970, 219, 0, 0, 0),
-        (1980, 263, 0, 0, 0),
-        (1990, 254, 0, 0, 0),
-        (2000, 253, 0, 0, 0),
-        (2010, 251, 0, 0, 0),
-        (2020, 252, 0, 0, 0),
-        (2030, 263, 0, 0, 0),
-        (2040, 336, 0, 0, 0),
-        (2050, 336, 0, 0, 0),
-        (2060, 340, 0, 0, 0),
-        (2070, 557, 0, 0, 0),
-        (2080, 564, 0, 0, 0),
-        (2090, 575, 0, 0, 0),
-        (2100, 628, 0, 0, 0),
-        (2110, 626, 0, 0, 0),
-        (2120, 601, 0, 0, 0),
-        (2130, 590, 0, 0, 0),
-        (2140, 593, 1, 0, 1),
-        (2150, 593, 0, 0, 0),
-        (2160, 596, 0, 1, 0),
-        (2170, 628, 0, 0, 0),
-        (2180, 625, 0, 0, 0),
-        (2190, 625, 0, 0, 0),
-        (2200, 628, 0, 0, 0),
-        (2210, 626, 1, 1, 1),
-        (2220, 658, 0, 0, 0),
-        (2230, 661, 0, 0, 0),
-        (2240, 661, 0, 0, 0),
-        (2250, 658, 0, 0, 0),
-        (2260, 661, 0, 0, 0),
-        (2270, 693, 0, 0, 0),
-        (2280, 694, 0, 0, 0),
-        (2290, 596, 0, 0, 0),
-        (2300, 590, 0, 0, 0),
-        (2310, 593, 0, 0, 0),
-        (2320, 567, 0, 0, 0),
-        (2330, 540, 0, 0, 0),
-        (2340, 540, 0, 0, 0),
-        (2350, 321, 0, 1, 0),
-        (2360, 321, 0, 0, 0),
-        (2370, 317, 0, 0, 0),
-        (2380, 322, 0, 0, 0),
-        (2390, 293, 0, 0, 0),
-        (2400, 286, 0, 0, 0),
-        (2410, 285, 0, 0, 0),
-        (2420, 300, 0, 0, 0),
-        (2430, 219, 1, 1, 1),
-        (2440, 220, 1, 1, 1),
-        (2450, 218, 1, 1, 1),
-        (2460, 217, 1, 1, 1),
-        (2470, 220, 0, 1, 0),
-        (2480, 219, 0, 0, 0),
-        (2490, 217, 0, 0, 0),
-        (2500, 217, 0, 0, 0),
-        (2510, 220, 0, 0, 0),
-        (2520, 185, 1, 1, 1),
-        (2530, 185, 1, 1, 1),
-        (2540, 202, 0, 0, 0),
-        (2550, 186, 1, 1, 1),
-        (2560, 185, 1, 1, 1),
-        (2570, 184, 1, 1, 1),
-        (2580, 184, 1, 1, 1),
-        (2590, 185, 1, 1, 1),
-        (2600, 185, 1, 1, 1),
-        (2610, 181, 0, 0, 0),
-        (2620, 188, 1, 1, 1),
-        (2630, 233, 0, 0, 0),
-        (2640, 235, 0, 0, 0),
-        (2650, 235, 0, 0, 0),
-        (2660, 271, 0, 0, 0),
-        (2670, 271, 0, 0, 0),
-        (2680, 278, 0, 0, 0),
-        (2690, 304, 0, 0, 0),
-        (2700, 303, 0, 0, 0),
-        (2710, 464, 0, 0, 0),
-        (2720, 475, 0, 0, 0),
+        (60, 67, 0, 0, 0), (70, 67, 0, 0, 0), (80, 74, 0, 0, 0), (90, 114, 0, 0, 0), (100, 117, 0, 0, 0), (110, 135, 0, 0, 0),
+        (120, 135, 0, 0, 0), (130, 145, 0, 0, 0), (140, 152, 0, 0, 0), (150, 151, 0, 0, 0), (160, 164, 0, 0, 0), (170, 167, 0, 0, 0),
+        (180, 167, 0, 0, 0), (190, 167, 0, 1, 1), (200, 165, 1, 1, 1), (210, 167, 1, 1, 1), (220, 167, 1, 1, 1), (230, 163, 0, 0, 0),
+        (240, 168, 1, 1, 1), (250, 167, 1, 1, 1), (260, 165, 1, 1, 1), (270, 166, 1, 1, 1), (280, 167, 1, 1, 1), (290, 168, 0, 0, 0),
+        (300, 164, 0, 0, 0), (310, 168, 0, 0, 0), (320, 153, 1, 1, 1), (330, 149, 1, 1, 1), (340, 149, 1, 1, 1), (350, 152, 0, 1, 0),
+        (360, 150, 0, 0, 0), (370, 149, 0, 0, 0), (380, 152, 0, 0, 0), (390, 132, 1, 1, 1), (400, 131, 1, 1, 1), (410, 133, 0, 0, 0),
+        (420, 135, 0, 0, 0), (430, 126, 0, 0, 0), (440, 118, 1, 1, 1), (450, 113, 0, 0, 0), (460, 118, 0, 0, 0), (470, 117, 1, 0, 0),
+        (480, 115, 1, 1, 1), (490, 105, 0, 0, 0), (500, 99, 0, 0, 0), (510, 99, 0, 0, 0), (520, 114, 1, 1, 1), (530, 117, 1, 0, 0),
+        (540, 117, 1, 1, 1), (550, 123, 0, 0, 0), (560, 150, 0, 0, 0), (570, 149, 0, 0, 0), (580, 150, 0, 0, 0), (590, 152, 0, 0, 0),
+        (600, 149, 1, 1, 1), (610, 149, 1, 1, 1), (620, 167, 0, 0, 0), (630, 168, 0, 0, 0), (640, 164, 0, 0, 0), (650, 171, 0, 0, 0),
+        (660, 185, 0, 0, 0), (670, 181, 0, 0, 0), (680, 151, 0, 0, 0), (690, 152, 0, 0, 0), (700, 132, 0, 0, 0), (710, 133, 0, 0, 0),
+        (720, 134, 0, 0, 0), (730, 135, 0, 1, 0), (740, 140, 0, 1, 1), (750, 168, 0, 0, 0), (760, 167, 0, 0, 0), (770, 207, 0, 0, 0),
+        (780, 219, 0, 0, 0), (790, 593, 0, 0, 0), (800, 596, 0, 0, 0), (810, 611, 0, 0, 0), (820, 613, 0, 0, 0), (830, 625, 0, 0, 0),
+        (840, 628, 0, 0, 0), (850, 626, 0, 1, 0), (860, 637, 0, 0, 0), (870, 644, 0, 0, 0), (880, 643, 0, 0, 0), (890, 640, 0, 0, 0),
+        (900, 643, 0, 0, 0), (910, 633, 0, 1, 1), (920, 626, 1, 1, 1), (930, 625, 1, 1, 1), (940, 628, 0, 0, 0), (950, 627, 0, 0, 0),
+        (960, 617, 1, 1, 1), (970, 609, 1, 1, 1), (980, 611, 1, 1, 1), (990, 607, 0, 1, 1), (1000, 609, 1, 1, 1), (1010, 610, 1, 1, 1),
+        (1020, 608, 1, 1, 1), (1030, 608, 1, 1, 1), (1040, 610, 1, 1, 1), (1050, 611, 1, 1, 1), (1060, 607, 1, 1, 1), (1070, 609, 1, 1, 1),
+        (1080, 611, 1, 1, 1), (1090, 608, 1, 1, 1), (1100, 608, 1, 1, 1), (1110, 610, 1, 1, 1), (1120, 611, 1, 1, 1), (1130, 617, 0, 0, 0),
+        (1140, 609, 1, 1, 1), (1150, 611, 1, 1, 1), (1160, 607, 1, 1, 1), (1170, 609, 1, 1, 1), (1180, 610, 1, 1, 1), (1190, 608, 1, 1, 1),
+        (1200, 608, 1, 1, 1), (1210, 610, 1, 1, 1), (1220, 611, 1, 1, 1), (1230, 607, 1, 1, 1), (1240, 609, 1, 1, 1), (1250, 611, 0, 0, 0),
+        (1260, 608, 0, 1, 0), (1270, 608, 0, 0, 0), (1280, 604, 0, 0, 0), (1290, 594, 0, 1, 0), (1300, 593, 0, 0, 0), (1310, 593, 0, 0, 0),
+        (1320, 586, 0, 0, 0), (1330, 576, 1, 1, 1), (1340, 575, 1, 1, 1), (1350, 572, 0, 0, 0), (1360, 575, 1, 1, 1), (1370, 575, 1, 1, 1),
+        (1380, 575, 1, 1, 1), (1390, 573, 1, 1, 1), (1400, 575, 0, 0, 0), (1410, 575, 0, 0, 0), (1420, 565, 1, 1, 1), (1430, 559, 1, 1, 1),
+        (1440, 560, 1, 1, 1), (1450, 557, 1, 1, 1), (1460, 557, 1, 1, 1), (1470, 561, 1, 1, 1), (1480, 558, 1, 1, 1), (1490, 557, 1, 1, 1),
+        (1500, 560, 1, 1, 1), (1510, 559, 1, 1, 1), (1520, 557, 1, 1, 1), (1530, 557, 1, 1, 1), (1540, 560, 1, 1, 1), (1550, 558, 1, 1, 1),
+        (1560, 557, 1, 1, 1), (1570, 560, 1, 1, 1), (1580, 558, 1, 1, 1), (1590, 557, 1, 1, 1), (1600, 558, 0, 1, 1), (1610, 560, 0, 0, 0),
+        (1620, 557, 0, 0, 0), (1630, 557, 0, 0, 0), (1640, 535, 0, 0, 0), (1650, 526, 0, 0, 0), (1660, 525, 0, 0, 0), (1670, 529, 0, 0, 0),
+        (1680, 543, 0, 0, 0), (1690, 539, 1, 0, 1), (1700, 542, 0, 0, 0), (1710, 560, 0, 0, 0), (1720, 558, 0, 0, 0), (1730, 550, 0, 0, 0),
+        (1740, 542, 0, 0, 0), (1750, 491, 0, 0, 0), (1760, 480, 0, 0, 0), (1770, 472, 0, 0, 0), (1780, 361, 0, 0, 0), (1790, 356, 0, 0, 0),
+        (1800, 288, 1, 1, 1), (1810, 289, 0, 1, 0), (1820, 286, 0, 0, 0), (1830, 285, 0, 0, 0), (1840, 288, 0, 0, 0), (1850, 270, 1, 1, 1),
+        (1860, 267, 0, 1, 1), (1870, 269, 0, 0, 0), (1880, 271, 0, 0, 0), (1890, 253, 0, 1, 0), (1900, 253, 0, 0, 0), (1910, 250, 0, 0, 0),
+        (1920, 253, 0, 0, 0), (1930, 226, 0, 1, 1), (1940, 218, 0, 0, 0), (1950, 217, 0, 0, 0), (1960, 220, 0, 1, 0), (1970, 219, 0, 0, 0),
+        (1980, 263, 0, 0, 0), (1990, 254, 0, 0, 0), (2000, 253, 0, 0, 0), (2010, 251, 0, 0, 0), (2020, 252, 0, 0, 0), (2030, 263, 0, 0, 0),
+        (2040, 336, 0, 0, 0), (2050, 336, 0, 0, 0), (2060, 340, 0, 0, 0), (2070, 557, 0, 0, 0), (2080, 564, 0, 0, 0), (2090, 575, 0, 0, 0),
+        (2100, 628, 0, 0, 0), (2110, 626, 0, 0, 0), (2120, 601, 0, 0, 0), (2130, 590, 0, 0, 0), (2140, 593, 1, 0, 1), (2150, 593, 0, 0, 0),
+        (2160, 596, 0, 1, 0), (2170, 628, 0, 0, 0), (2180, 625, 0, 0, 0), (2190, 625, 0, 0, 0), (2200, 628, 0, 0, 0), (2210, 626, 1, 1, 1),
+        (2220, 658, 0, 0, 0), (2230, 661, 0, 0, 0), (2240, 661, 0, 0, 0), (2250, 658, 0, 0, 0), (2260, 661, 0, 0, 0), (2270, 693, 0, 0, 0),
+        (2280, 694, 0, 0, 0), (2290, 596, 0, 0, 0), (2300, 590, 0, 0, 0), (2310, 593, 0, 0, 0), (2320, 567, 0, 0, 0), (2330, 540, 0, 0, 0),
+        (2340, 540, 0, 0, 0), (2350, 321, 0, 1, 0), (2360, 321, 0, 0, 0), (2370, 317, 0, 0, 0), (2380, 322, 0, 0, 0), (2390, 293, 0, 0, 0),
+        (2400, 286, 0, 0, 0), (2410, 285, 0, 0, 0), (2420, 300, 0, 0, 0), (2430, 219, 1, 1, 1), (2440, 220, 1, 1, 1), (2450, 218, 1, 1, 1),
+        (2460, 217, 1, 1, 1), (2470, 220, 0, 1, 0), (2480, 219, 0, 0, 0), (2490, 217, 0, 0, 0), (2500, 217, 0, 0, 0), (2510, 220, 0, 0, 0),
+        (2520, 185, 1, 1, 1), (2530, 185, 1, 1, 1), (2540, 202, 0, 0, 0), (2550, 186, 1, 1, 1), (2560, 185, 1, 1, 1), (2570, 184, 1, 1, 1),
+        (2580, 184, 1, 1, 1), (2590, 185, 1, 1, 1), (2600, 185, 1, 1, 1), (2610, 181, 0, 0, 0), (2620, 188, 1, 1, 1), (2630, 233, 0, 0, 0),
+        (2640, 235, 0, 0, 0), (2650, 235, 0, 0, 0), (2660, 271, 0, 0, 0), (2670, 271, 0, 0, 0), (2680, 278, 0, 0, 0), (2690, 304, 0, 0, 0),
+        (2700, 303, 0, 0, 0), (2710, 464, 0, 0, 0), (2720, 475, 0, 0, 0),
     ];
 
     let mut engine = load_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
     let _owner = join_local_player(&mut engine, "Deep Sea oracle survey");
-    engine
-        .register_definition(
-            clonk_engine::Definition::from_script(
-                "PRBE",
-                "Construction probe",
-                r#"#strict 2
-public func ProbeFloor(int x)
-{
-    var y = 0;
-    while (!GBackSolid(x, y) && y < LandscapeHeight()) ++y;
-    return y;
-}
-public func ProbeSite(id def, int x, int y)
-{
-    var s = CreateConstruction(def, x, y, -1, 1, 0, 1);
-    if (s) { RemoveObject(s); return 1; }
-    return 0;
-}
-"#,
-            )
-            .expect("probe compiles"),
-        )
-        .expect("probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("PRBE").with_position(Vector2::new(0, 0)))
-        .expect("probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe index");
+    engine.register_test_definition(crate::support::TestValueExt::test_value(
+        clonk_engine::Definition::from_script(
+            "PRBE",
+            "Construction probe",
+            r#"#strict 2
+        public func ProbeFloor(int x)
+        {
+            var y = 0;
+            while (!GBackSolid(x, y) && y < LandscapeHeight()) ++y;
+            return y;
+        }
+        public func ProbeSite(id def, int x, int y)
+        {
+            var s = CreateConstruction(def, x, y, -1, 1, 0, 1);
+            if (s) { RemoveObject(s); return 1; }
+            return 0;
+        }
+        "#,
+        ),
+    ));
+    let probe =
+        engine.spawn_test_object(SpawnConfig::new("PRBE").with_position(Vector2::new(0, 0)));
+    let probe_index = engine.test_object_index(probe);
 
     // Below #strict 3 the literal `0` is nil (C++ C4Aul semantics), so
     // ProbeSite's miss arm surfaces as Nil; the C++ log's `%d` formats the
@@ -854,25 +562,21 @@ public func ProbeSite(id def, int x, int y)
 
     let mut mismatches = Vec::new();
     for &(x, floor, fdr2, pwr2, drsc) in CPP_ORACLE {
-        let rust_floor = as_int(
-            engine
-                .call_object_function(probe_index, "ProbeFloor", vec![Value::Int(x)])
-                .expect("floor probe runs"),
-        );
+        let rust_floor = as_int(engine.call_test_object_function(
+            probe_index,
+            "ProbeFloor",
+            vec![Value::Int(x)],
+        ));
         let mut site = |def: &str| {
-            as_int(
-                engine
-                    .call_object_function(
-                        probe_index,
-                        "ProbeSite",
-                        vec![
-                            Value::C4Id(def.to_string()),
-                            Value::Int(x),
-                            Value::Int(rust_floor),
-                        ],
-                    )
-                    .expect("site probe runs"),
-            )
+            as_int(engine.call_test_object_function(
+                probe_index,
+                "ProbeSite",
+                vec![
+                    Value::C4Id(def.to_string()),
+                    Value::Int(x),
+                    Value::Int(rust_floor),
+                ],
+            ))
         };
         let row = (x, rust_floor, site("FDR2"), site("PWR2"), site("DRSC"));
         if row != (x, floor, fdr2, pwr2, drsc) {

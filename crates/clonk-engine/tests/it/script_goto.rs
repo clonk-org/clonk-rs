@@ -1,7 +1,7 @@
 use clonk_engine::{Definition, Engine};
 
 fn marker_definition(id: &str) -> Definition {
-    Definition::from_script(id, id, "#strict\n").expect("marker definition compiles")
+    crate::support::TestValueExt::test_value(Definition::from_script(id, id, "#strict\n"))
 }
 
 #[test]
@@ -23,19 +23,15 @@ func Script60() { CreateObject(GOOD); }
 "#;
 
     let mut engine = Engine::new();
-    engine
-        .register_definition(marker_definition("GOOD"))
-        .expect("GOOD registers");
-    engine
-        .register_definition(marker_definition("BAD1"))
-        .expect("BAD1 registers");
-    engine
-        .install_scenario_script_with_convention("Tutorial", SCENARIO, true)
-        .expect("scenario installs");
+    crate::support::TestValueExt::test_value(engine.register_definition(marker_definition("GOOD")));
+    crate::support::TestValueExt::test_value(engine.register_definition(marker_definition("BAD1")));
+    crate::support::TestValueExt::test_value(
+        engine.install_scenario_script_with_convention("Tutorial", SCENARIO, true),
+    );
 
-    let snapshot = (0..20)
-        .try_fold(engine.snapshot(), |_, _| engine.tick())
-        .expect("script errors are fail-safe");
+    let snapshot = crate::support::TestValueExt::test_value(
+        (0..20).try_fold(engine.snapshot(), |_, _| engine.tick()),
+    );
     let definitions: Vec<_> = snapshot
         .objects
         .iter()

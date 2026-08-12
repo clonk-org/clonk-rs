@@ -12,7 +12,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
         .process_console_command(
             "/open \"Missions/My Round/Scenario.txt\" /network /lobby:17 \"/comment:console game\"",
         )
-        .expect("queue console scenario during startup loading");
+        .test_value();
     assert_eq!(
         startup.classic_command_line.scenario,
         Some(PathBuf::from("Missions/My Round"))
@@ -24,15 +24,13 @@ fn console_open_close_and_message_fallback_follow_app_state() {
         Some("console game")
     );
     assert!(startup.auto_start_classic_command_line_scenario);
-    startup
-        .process_console_command("/close")
-        .expect("cancel console scenario while process boot is pending");
+    startup.process_console_command("/close").test_value();
     assert_eq!(startup.mode, AppMode::Loading);
     assert!(startup.boot_loading.is_some());
     assert!(!startup.auto_start_classic_command_line_scenario);
     boot_sender
         .send(BootLoadingEvent::Finished(None))
-        .expect("finish retained boot worker");
+        .test_value();
     startup.poll_boot_loading();
     assert_eq!(startup.mode, AppMode::Menu);
     assert!(startup.boot_loading.is_none());
@@ -47,17 +45,15 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     let pending_join_arguments = startup.classic_command_line.clone();
     startup
         .process_console_command("/open Replacement.c4s")
-        .expect("ignore a second open while game initialization is pending");
+        .test_value();
     assert_eq!(startup.classic_command_line, pending_join_arguments);
-    startup
-        .process_console_command("/close")
-        .expect("close an asynchronously initializing console round");
+    startup.process_console_command("/close").test_value();
     assert_eq!(startup.mode, AppMode::Menu);
     assert!(startup.classic_direct_reference_query.is_none());
     assert!(startup.console_startup_active());
     startup
         .process_console_command("/open /comment:replacement")
-        .expect("open a replacement after closing pending initialization");
+        .test_value();
     assert_eq!(
         startup.classic_command_line.comment.as_deref(),
         Some("replacement")
@@ -68,7 +64,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     running.network = Some(network);
     running
         .process_console_command("administrator message")
-        .expect("route ordinary console input to message input");
+        .test_value();
     assert_eq!(
         commands.take_submitted_messages(),
         vec![MessageControlData {
@@ -82,9 +78,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     );
     running.full_speed = true;
     running.frame_skip = 9;
-    running
-        .process_console_command("/close")
-        .expect("close running console round");
+    running.process_console_command("/close").test_value();
     assert_eq!(running.mode, AppMode::Menu);
     assert!(running.active_scenario.is_none());
     assert!(!running.full_speed);
@@ -95,28 +89,14 @@ fn console_open_close_and_message_fallback_follow_app_state() {
 fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app
-        .engine
-        .crew_cursor(owner)
-        .expect("sandbox has a cursor crew member");
-    let crew_position = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .position;
-    let mut item = Definition::from_script("CHDG", "Chat drag item", "#strict\n")
-        .expect("carryable definition compiles");
+    let crew = app.engine.test_crew_cursor(owner);
+    let crew_position = app.engine.test_object_snapshot(crew).position;
+    let mut item = test_definition("CHDG", "Chat drag item", "#strict\n");
     item.set_category(clonk_engine::CATEGORY_OBJECT);
     item.set_collectible(true);
     item.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-4, -4, 8, 8)));
-    app.engine
-        .register_definition(item)
-        .expect("register carryable definition");
-    let layer = app
-        .engine
-        .object_snapshot(crew)
-        .expect("crew remains live")
-        .layer;
+    app.engine.register_test_definition(item);
+    let layer = app.engine.test_object_snapshot(crew).layer;
     let spawn = layer
         .map(|layer| {
             SpawnConfig::new("CHDG")
@@ -127,23 +107,17 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
             SpawnConfig::new("CHDG")
                 .with_position(Vector2::new(crew_position.x - 60, crew_position.y))
         });
-    let target = app
-        .engine
-        .spawn_object(spawn)
-        .expect("spawn chat-drag carryable");
+    let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
     let start = mouse_test_object_point(&app, owner, target);
     let (end, _) = mouse_test_empty_point(&mut app, owner, start, None);
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(start.x),
         f64::from(start.y),
-    ))
-    .expect("move to carryable");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("begin world drag");
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)))
-        .expect("cross world drag threshold");
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_cursor(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)));
     assert!(app
         .mouse_state
         .is_some_and(|state| { state.motion.moved && state.motion.world_drag_started }));
@@ -157,12 +131,11 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("insert lower message without cancelling chat-owned drag");
+    .test_value();
     assert!(app
         .mouse_state
         .is_some_and(|state| state.motion.world_drag_started));
-    app.handle_mouse_button(ElementState::Released)
-        .expect("active world drag release bypasses compact chat");
+    app.test_left_button(ElementState::Released);
     assert!(app.mouse_state.is_none());
     assert!(app.running_chat.is_some());
     assert_eq!(app.message_dialogs.len(), 1);
@@ -176,7 +149,7 @@ fn message_speech_test_engine(samples: &[String]) -> Engine {
             PlayerConfig::new(0, "Player")
                 .with_viewports([clonk_engine::PlayerViewport::new(Vector2::ZERO)]),
         )
-        .expect("speech fixture player");
+        .test_value();
     engine.configure_sound_samples(samples);
     engine
 }
@@ -188,15 +161,14 @@ fn execute_message_speech_for_audio(
     audio_snapshot: &SimulationSnapshot,
 ) -> Vec<clonk_engine::MessageSnapshot> {
     let control = clonk_engine::ScriptControlData {
-        script: LegacyCString::from_bytes(script.as_bytes().to_vec())
-            .expect("speech script has no NUL"),
+        script: LegacyCString::from_bytes(script.as_bytes().to_vec()).test_value(),
         by_client: 0,
         ..clonk_engine::ScriptControlData::default()
     };
     engine
         .execute_script_control(&control, ScriptControlPolicy::live(false))
         .expect("message script executes")
-        .expect("host script is accepted");
+        .test_value();
 
     let mut snapshot = audio_snapshot.clone();
     snapshot.audio = std::mem::take(&mut engine.pending_audio);
@@ -207,19 +179,18 @@ fn execute_message_speech_for_audio(
 
 #[test]
 fn message_speech_falls_back_when_new_instance_is_rejected() {
-    let dir = tempdir().expect("tempdir");
+    let dir = tempdir();
     let scenario = dir.path().join("Speech.c4s");
-    fs::create_dir_all(&scenario).expect("scenario sound group");
-    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).expect("speech sample");
-    fs::write(scenario.join("Blocker.wav"), silent_pcm_wav(10_000))
-        .expect("channel blocker sample");
+    fs::create_dir_all(&scenario).test_value();
+    fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).test_value();
+    fs::write(scenario.join("Blocker.wav"), silent_pcm_wav(10_000)).test_value();
 
     let make_audio = |max_channels| {
         let mut audio = AudioContext::try_new(AudioOptions {
             max_channels,
             ..AudioOptions::default()
         })
-        .expect("audio context");
+        .test_value();
         audio.configure_scenario(Some(&scenario));
         audio
     };
@@ -257,7 +228,7 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
             make_object(
                 index + 1,
                 "SPCH",
-                Vector2::new(i32::try_from(index).expect("index fits") * 51, 0),
+                Vector2::new(i32::try_from(index).test_value() * 51, 0),
             )
         })
         .collect::<Vec<_>>();
@@ -303,7 +274,7 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
             &empty_snapshot,
             &[],
         )
-        .expect("blocker occupies the mixer");
+        .test_value();
     let samples = channel_audio.available_sound_samples();
     let mut channel_engine = message_speech_test_engine(&samples);
     let messages = execute_message_speech_for_audio(
@@ -333,7 +304,7 @@ fn message_speech_falls_back_when_new_instance_is_rejected() {
     let muted = muted_audio
         .active_channels
         .get(&SoundInstanceKey::new("Speech", None))
-        .expect("muted logical instance");
+        .test_value();
     assert!(muted.channel.is_none());
 
     // Filename inventory rejection remains synchronous and never emits a
@@ -445,7 +416,7 @@ fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.local_owner)
-        .expect("local message viewport")
+        .test_value()
         .rect;
     let batch = plan
         .batches
@@ -456,7 +427,7 @@ fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
                 .iter()
                 .any(|command| command.text == "Fractional clip")
         })
-        .expect("isolated game-message batch");
+        .test_value();
 
     assert!(batch.logical_layer.is_some(), "message frame is rasterized");
     assert_eq!(batch.clip, Some(viewport));
@@ -483,7 +454,7 @@ fn secondary_local_viewport_draws_its_player_global_message_only_there() {
         .iter()
         .find(|player| player.id == app.local_owner)
         .cloned()
-        .expect("sandbox local player");
+        .test_value();
     let mut secondary = local;
     secondary.id = app.local_owner + 1;
     secondary.name = "Secondary local".to_string();
@@ -510,18 +481,16 @@ fn secondary_local_viewport_draws_its_player_global_message_only_there() {
 
     let messages = std::mem::take(&mut app.snapshot.hud.messages);
     let mut baseline = vec![0; 320 * 200 * 4];
-    app.render(&mut baseline)
-        .expect("render split-view baseline without the message");
+    app.test_render(&mut baseline);
     app.snapshot.hud.messages = messages;
     let mut rendered = vec![0; 320 * 200 * 4];
-    app.render(&mut rendered)
-        .expect("secondary local viewport receives its player-global message");
+    app.test_render(&mut rendered);
     let viewport = app
         .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == secondary.id)
-        .expect("secondary local viewport")
+        .test_value()
         .rect;
     let changed = rendered
         .chunks_exact(4)
@@ -617,12 +586,12 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
         .players
         .iter_mut()
         .find(|player| player.id == app.local_owner)
-        .expect("sandbox local player");
+        .test_value();
     // Model SetFoW(false) so this case exercises rounding independently
     // of the visibility-bitmap boundary.
     player.fog_of_war = false;
     player.force_fog_of_war = true;
-    let target = app.snapshot.objects.first_mut().expect("sandbox target");
+    let target = app.snapshot.objects.first_mut().test_value();
     target.position = Vector2::new(100, 50);
     let target_id = target.id;
     let shape_height = app
@@ -660,7 +629,7 @@ fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
         content_origin_y: 0.0,
         zoom: 0.4,
     };
-    let target = app.snapshot.object(target_id).expect("target remains live");
+    let target = app.snapshot.object(target_id).test_value();
     let position = c4_message_target_position(target, message.offset, shape_height, viewport);
     assert!(viewport.contains_logical_point(position));
     let output = viewport.logical_to_output(position);
@@ -682,7 +651,7 @@ fn offscreen_target_player_message_does_not_trigger_renderer_boundary() {
         .objects
         .first()
         .map(|object| object.id)
-        .expect("sandbox target");
+        .test_value();
     app.snapshot.hud.messages = vec![clonk_engine::MessageSnapshot {
         id: 1,
         kind: MessageKind::TargetPlayer,
@@ -699,8 +668,7 @@ fn offscreen_target_player_message_does_not_trigger_renderer_boundary() {
     }];
 
     let mut frame = vec![0; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("outside target coordinates are not drawable");
+    app.test_render(&mut frame);
 }
 
 #[test]
@@ -711,7 +679,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .objects
         .first()
         .map(|object| object.id)
-        .expect("sandbox target");
+        .test_value();
     let shape_height = app
         .snapshot
         .object(target)
@@ -734,17 +702,13 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         frame_decoration: None,
         portrait: None,
     };
-    let target_position = app
-        .snapshot
-        .object(target)
-        .expect("sandbox target")
-        .position;
+    let target_position = app.snapshot.object(target).test_value().position;
     let player = app
         .snapshot
         .players
         .iter_mut()
         .find(|player| player.id == app.local_owner)
-        .expect("sandbox player");
+        .test_value();
     player.fog_of_war = true;
     player.force_fog_of_war = true;
     player.viewports =
@@ -754,7 +718,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .objects
         .iter_mut()
         .find(|object| object.id == target)
-        .expect("sandbox target");
+        .test_value();
     target_object.visibility = clonk_engine::VIS_ALL;
     target_object.category &= !C4D_IGNORE_FOW;
     target_object.plr_view_range = 128;
@@ -767,8 +731,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     );
 
     let mut baseline = vec![0; 320 * 200 * 4];
-    app.render(&mut baseline)
-        .expect("render visible FoW baseline");
+    app.test_render(&mut baseline);
     let viewports = app.graphics.active_viewport_projections();
     assert_eq!(
         app.hud_message_drawability(&message, &viewports),
@@ -778,15 +741,14 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .iter()
         .copied()
         .find(|viewport| viewport.owner == app.local_owner)
-        .expect("local target-message viewport");
+        .test_value();
     let anchor = app
         .target_message_position_for_viewport(&message, viewport)
-        .expect("visible adjusted target anchor");
+        .test_value();
     let output_anchor = viewport.logical_to_output(anchor);
     app.snapshot.hud.messages = vec![message.clone()];
     let mut visible = vec![0; 320 * 200 * 4];
-    app.render(&mut visible)
-        .expect("visible in-FoW target message renders");
+    app.test_render(&mut visible);
     let changed = visible
         .chunks_exact(4)
         .zip(baseline.chunks_exact(4))
@@ -818,8 +780,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         },
     );
     let mut fog_baseline = vec![0; 320 * 200 * 4];
-    app.render(&mut fog_baseline)
-        .expect("render hidden FoW baseline");
+    app.test_render(&mut fog_baseline);
     let viewports = app.graphics.active_viewport_projections();
     assert_eq!(
         app.hud_message_drawability(&message, &viewports),
@@ -827,8 +788,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     );
     app.snapshot.hud.messages = vec![message.clone()];
     let mut fogged = vec![0; 320 * 200 * 4];
-    app.render(&mut fogged)
-        .expect("hidden FoW target message is silently skipped");
+    app.test_render(&mut fogged);
     assert_eq!(fogged, fog_baseline);
 
     // C4GM_Target additionally honors C4Object::IsVisible. The player-
@@ -838,17 +798,16 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .players
         .iter_mut()
         .find(|player| player.id == app.local_owner)
-        .expect("sandbox player")
+        .test_value()
         .fog_of_war = false;
     app.snapshot
         .objects
         .iter_mut()
         .find(|object| object.id == target)
-        .expect("sandbox target")
+        .test_value()
         .visibility = clonk_engine::VIS_NONE;
     let mut visibility_baseline = vec![0; 320 * 200 * 4];
-    app.render(&mut visibility_baseline)
-        .expect("render IsVisible baseline");
+    app.test_render(&mut visibility_baseline);
     let viewports = app.graphics.active_viewport_projections();
     assert_eq!(
         app.hud_message_drawability(&message, &viewports),
@@ -856,8 +815,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     );
     app.snapshot.hud.messages = vec![message.clone()];
     let mut invisible = vec![0; 320 * 200 * 4];
-    app.render(&mut invisible)
-        .expect("invisible C4GM_Target is silently skipped");
+    app.test_render(&mut invisible);
     assert_eq!(invisible, visibility_baseline);
 
     message.kind = MessageKind::TargetPlayer;
@@ -874,14 +832,14 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .players
         .iter_mut()
         .find(|player| player.id == app.local_owner)
-        .expect("sandbox player")
+        .test_value()
         .fog_of_war = true;
     let target_object = app
         .snapshot
         .objects
         .iter_mut()
         .find(|object| object.id == target)
-        .expect("sandbox target");
+        .test_value();
     target_object.visibility = clonk_engine::VIS_ALL;
     target_object.category |= C4D_IGNORE_FOW;
     assert_eq!(
@@ -895,24 +853,19 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
 fn hidden_startup_irc_warning_connects_immediately() {
     let _lock = env_lock().lock();
     reset_cached_app_paths();
-    let user_data = tempdir().expect("hidden IRC warning user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let (address, server) = spawn_loopback_irc_server();
-    persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "1").expect("hide IRC warning");
-    persist_config_value(&paths, "Network", "MasterServerSignUp", "0")
-        .expect("disable test masterserver query");
-    persist_config_value(&paths, "IRC", "Server2", &address).expect("seed loopback IRC server");
-    persist_config_value(&paths, "IRC", "Nick", "HiddenNick").expect("seed IRC nick");
-    persist_config_value(&paths, "IRC", "RealName", "Hidden Name").expect("seed IRC real name");
-    persist_config_value(&paths, "IRC", "Channel", "#hidden").expect("seed IRC channel");
+    persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "1").test_value();
+    persist_config_value(&paths, "Network", "MasterServerSignUp", "0").test_value();
+    persist_config_value(&paths, "IRC", "Server2", &address).test_value();
+    persist_config_value(&paths, "IRC", "Nick", "HiddenNick").test_value();
+    persist_config_value(&paths, "IRC", "RealName", "Hidden Name").test_value();
+    persist_config_value(&paths, "IRC", "Channel", "#hidden").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     install_classic_test_assets(&mut app);
     app.open_network_game_dialog();
-    let mut login = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .chat_login();
+    let mut login = app.startup_network_dialog.test_ref().chat_login();
     assert_eq!(login.server, address);
     assert_eq!(login.nick, "HiddenNick");
     assert_eq!(login.real_name, "Hidden Name");
@@ -920,19 +873,18 @@ fn hidden_startup_irc_warning_connects_immediately() {
     login.password = "not-persisted".into();
     let dialog_count = app.message_dialogs.len();
 
-    app.request_startup_irc_connection(login)
-        .expect("connect without warning");
+    app.request_startup_irc_connection(login).test_value();
     assert_eq!(app.message_dialogs.len(), dialog_count);
-    let client = app.startup_irc_client.as_ref().expect("IRC client started");
+    let client = app.startup_irc_client.test_ref();
     assert!(matches!(
         client.recv_event_timeout(Duration::from_secs(2)),
         Ok(clonk_network::IrcClientEvent::Connected)
     ));
-    let persisted = Config::load(paths.config_file()).expect("reload hidden-warning config");
+    let persisted = Config::load(paths.config_file()).test_value();
     assert_eq!(persisted.get_in(Some("IRC"), "Nick"), Some("HiddenNick"));
     assert_eq!(persisted.get_in(Some("IRC"), "Password"), None);
     drop(app);
-    server.join().expect("join loopback IRC server");
+    server.test_join();
     reset_cached_app_paths();
 }
 
@@ -947,7 +899,7 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
         ),
         Duration::from_secs(2),
     )
-    .expect("start loopback IRC client");
+    .test_value();
     assert!(matches!(
         handle.recv_event_timeout(Duration::from_secs(2)),
         Ok(clonk_network::IrcClientEvent::Connected)
@@ -978,7 +930,7 @@ fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport()
     assert!(app.startup_irc_client_active());
 
     drop(app);
-    server.join().expect("join loopback IRC server");
+    server.test_join();
 }
 
 #[test]
@@ -994,8 +946,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     let mut app = new_real_classic_menu_app(640, 480);
     app.startup_network_dialog = Some(app.new_network_dialog_controller());
     let embedded_controller_ptr = app.startup_network_dialog.as_ref().map(std::ptr::from_ref);
-    app.show_external_irc_dialog()
-        .expect("open the standalone IRC dialog");
+    app.show_external_irc_dialog().test_value();
     assert_ne!(
         app.external_irc_dialog.as_ref().map(std::ptr::from_ref),
         embedded_controller_ptr,
@@ -1004,16 +955,15 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     app.process_network_dialog_actions(vec![NetDlgAction::ChatValidationFailed(
         NetDlgChatValidationError::InvalidPassword,
     )])
-    .expect("invalid IRC login opens the localized modal");
-    let validation = app.message_dialogs.last().expect("validation modal");
+    .test_value();
+    let validation = app.message_dialogs.last().test_value();
     assert_eq!(validation.state.icon(), MessageDialogIcon::ERROR);
     assert!(validation.state.message().contains("31"));
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss validation modal");
+        .test_value();
 
     app.external_irc_dialog
-        .as_mut()
-        .expect("standalone chat controller")
+        .test_mut()
         .sync_chat_snapshot(NetDlgChatSnapshot {
             connection_state: NetDlgChatConnectionState::Connected,
             server: "irc.example.test".into(),
@@ -1025,8 +975,8 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         NetDlgChatPage::Chats
     );
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
-        .expect("server-tab close opens the classic confirmation");
-    let confirmation = app.message_dialogs.last().expect("disconnect modal");
+        .test_value();
+    let confirmation = app.message_dialogs.last().test_value();
     assert!(matches!(
         confirmation.continuation,
         MessageDialogContinuation::StartupIrcDisconnectConfirm
@@ -1037,16 +987,16 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         "Abort"
     );
     app.finish_message_dialog(MessageDialogResult::Cancel)
-        .expect("Abort preserves the active chat sheet");
+        .test_value();
     assert_eq!(
         app.external_irc_dialog.as_ref().unwrap().chat_page(),
         NetDlgChatPage::Chats
     );
 
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDisconnectConfirmationRequested])
-        .expect("request disconnect again");
+        .test_value();
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("accept disconnect");
+        .test_value();
     assert_eq!(
         app.external_irc_dialog.as_ref().unwrap().chat_page(),
         NetDlgChatPage::Login
@@ -1054,7 +1004,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     assert!(app.external_irc_dialog_visible);
 
     app.process_network_dialog_actions(vec![NetDlgAction::ChatDialogCloseRequested])
-        .expect("outer close hides only the standalone UI");
+        .test_value();
     assert!(!app.external_irc_dialog_visible);
     assert!(app.external_irc_dialog.is_none());
     assert_eq!(
@@ -1062,37 +1012,35 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         embedded_controller_ptr
     );
 
-    app.show_external_irc_dialog()
-        .expect("recreate a fresh standalone controller");
+    app.show_external_irc_dialog().test_value();
     app.external_irc_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .force_chat_mode_and_focus();
-    let original_nick = app.external_irc_dialog.as_ref().unwrap().chat_login().nick;
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("open the standalone login edit context");
+    let original_nick = app
+        .external_irc_dialog
+        .as_ref()
+        .test_value()
+        .chat_login()
+        .nick;
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     assert!(app.context_menu.is_some());
-    app.handle_text_input('x')
-        .expect("an open edit context suppresses parent text input");
+    app.test_text_input('x');
     assert_eq!(
         app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
         original_nick
     );
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Escape closes only the edit context first");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("consume the context-owned Escape release");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     assert!(app.context_menu.is_none());
     assert!(app.external_irc_dialog_visible);
-    app.handle_text_input('x')
-        .expect("text reaches the login edit after its context closes");
+    app.test_text_input('x');
     assert_eq!(
         app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
         format!("{original_nick}x")
     );
     app.hide_external_irc_dialog();
-    app.show_external_irc_dialog()
-        .expect("reopening creates new UI-local state");
+    app.show_external_irc_dialog().test_value();
     assert_eq!(
         app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
         original_nick,
@@ -1103,25 +1051,22 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         .external_irc_dialog
         .as_ref()
         .and_then(|dialog| dialog.chat_bounds_override())
-        .expect("standalone dialog bounds");
+        .test_value();
     let embedded_pointer = GuiPoint::new(17.0, 19.0);
     app.startup_network_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .set_pointer_position(Some(embedded_pointer));
     let drag_start = GuiPoint::new(
         (initial_bounds.x + 20) as f32,
         (initial_bounds.y + 8) as f32,
     );
-    app.handle_touch(TouchPhase::Started, drag_start)
-        .expect("begin standalone caption drag");
-    app.handle_touch(TouchPhase::Cancelled, drag_start)
-        .expect("cancel standalone caption drag");
-    app.handle_touch(
+    app.test_touch(TouchPhase::Started, drag_start);
+    app.test_touch(TouchPhase::Cancelled, drag_start);
+    app.test_touch(
         TouchPhase::Moved,
         GuiPoint::new(drag_start.x + 50.0, drag_start.y + 40.0),
-    )
-    .expect("a move after cancellation is not captured");
+    );
     assert_eq!(
         app.external_irc_dialog
             .as_ref()
@@ -1199,14 +1144,14 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
     app.clear_message_board_log();
     app.engine
         .set_hostility(7, app.local_owner, true)
-        .expect("sender hostility sets");
+        .test_value();
     let hostile_team =
         app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hidden", 7));
     assert!(!hostile_team.displayed);
     assert!(app.message_board.log_history.is_empty());
     app.engine
         .set_hostility(7, app.local_owner, false)
-        .expect("sender hostility clears");
+        .test_value();
     assert!(
         app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"allied", 7,))
             .displayed
@@ -1244,26 +1189,24 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         &app.snapshot,
     )
     .expect("parse private")
-    .expect("private message");
+    .test_value();
     assert_eq!(private.message_type, MESSAGE_TYPE_PRIVATE);
     assert_eq!(private.to_player, 7);
     assert_eq!(private.message.as_bytes(), b"secret");
 
     let say = parse_running_message_control("\"hello", app.local_owner, false, &app.snapshot)
         .expect("parse say")
-        .expect("say message");
+        .test_value();
     assert_eq!(say.message_type, MESSAGE_TYPE_SAY);
     assert_eq!(say.message.as_bytes(), b"\"hello\"");
 
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("open running chat");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     for character in "hello".chars() {
-        app.handle_text_input(character).expect("type running chat");
+        app.test_text_input(character);
     }
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("submit running chat");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(app.running_chat.is_none());
     assert_eq!(
         commands.take_submitted_messages(),
@@ -1277,23 +1220,15 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
         }]
     );
 
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("reopen running chat");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     for character in "Sen".chars() {
-        app.handle_text_input(character).expect("type nick prefix");
+        app.test_text_input(character);
     }
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("complete nick before scoreboard routing");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert_eq!(app.running_chat_text(), Some("Sender"));
-    let sound_enabled = app
-        .audio
-        .as_ref()
-        .expect("sandbox audio context")
-        .options
-        .sound_enabled;
+    let sound_enabled = app.audio.test_ref().options.sound_enabled;
     app.keyboard_modifiers = ModifiersState::CONTROL;
-    app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
-        .expect("control-modified chat key forwards to player controls");
+    app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     assert_eq!(
         app.audio
             .as_ref()
@@ -1351,18 +1286,14 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     assert!(app.network_chart_renders_elevated());
     assert!(!app.network_chart_is_active_dialog());
 
-    let resources = app
-        .assets
-        .network_chart_resources()
-        .expect("synthetic chart resources");
+    let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
     );
     let chart = app
         .network_chart_dialog
-        .as_ref()
-        .expect("open chart")
+        .test_ref()
         .layout(preferred, resources)
         .chart;
     let chart_point = GuiPoint::new(
@@ -1371,11 +1302,11 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     );
     app.running_pointer_position = Some(chart_point);
     app.handle_mouse_button_classified(ElementState::Pressed, false)
-        .expect("visually elevated chart receives LeftDown");
+        .test_value();
     assert!(app.network_chart_is_active_dialog());
     assert!(!app.running_chat_active());
     app.handle_mouse_button_classified(ElementState::Released, false)
-        .expect("release chart gesture");
+        .test_value();
 
     app.set_running_chat_active(true);
     app.toggle_network_chart();
@@ -1401,7 +1332,7 @@ fn chart_restores_projected_successor_after_active_underlay_is_removed() {
             ),
             MessageDialogContinuation::None,
         )
-        .expect("show chart underlay message");
+        .test_value();
     }
     let successor = app.message_dialogs[0].running_stack_id;
     let removed = app.message_dialogs[1].running_stack_id;
@@ -1415,9 +1346,7 @@ fn chart_restores_projected_successor_after_active_underlay_is_removed() {
     assert!(app.network_chart_renders_elevated());
     assert!(!app.network_chart_is_active_dialog());
 
-    let (_, was_active) = app
-        .remove_message_dialog_at(1)
-        .expect("remove active chart underlay");
+    let (_, was_active) = app.remove_message_dialog_at(1).test_value();
     assert!(was_active);
     assert_eq!(
         app.running_active_dialog,
@@ -1444,7 +1373,7 @@ fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
         ),
         MessageDialogContinuation::None,
     )
-    .expect("show chart underlay message");
+    .test_value();
     let message = app.message_dialogs[0].running_stack_id;
     app.start_running_chat(RunningChatMode::All);
     app.set_running_chat_active(false);
@@ -1472,14 +1401,13 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
     app.snapshot = app.engine.snapshot();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
     app.network = Some(network);
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("open running chat");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
 
-    let layout = app.game_option_input_layout().expect("chat layout");
-    let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+    let layout = app.game_option_input_layout().test_value();
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     let actions = app
         .running_chat_controller_mut()
-        .expect("chat controller")
+        .test_value()
         .apply_context_command(
             InputDialogContextCommand::Paste,
             Some("first\nsecond"),
@@ -1487,7 +1415,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
             &fonts.text,
         );
     app.finish_game_option_input_dialog_actions(actions)
-        .expect("process multiline chat paste");
+        .test_value();
     assert_eq!(app.running_chat_text(), Some("second"));
     assert_eq!(
         commands.take_submitted_messages(),
@@ -1505,8 +1433,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
         Some("first")
     );
 
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("submit retained final line");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(app.running_chat.is_none());
     assert_eq!(
         commands.take_submitted_messages(),
@@ -1527,21 +1454,19 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
     app.message_input_history.push_front("history".to_string());
     app.start_running_chat(RunningChatMode::All);
     for character in "long text ".repeat(100).chars() {
-        app.handle_text_input(character)
-            .expect("type horizontally scrolling chat");
+        app.test_text_input(character);
     }
     let long_scroll = app
         .running_chat_controller()
-        .expect("running chat controller")
+        .test_value()
         .horizontal_scroll();
     assert!(long_scroll > 0);
 
-    app.handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
-        .expect("replace chat with older history");
+    app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     assert_eq!(app.running_chat_text(), Some("history"));
     let history_scroll = app
         .running_chat_controller()
-        .expect("history chat controller")
+        .test_value()
         .horizontal_scroll();
     assert!(history_scroll < long_scroll);
     assert_eq!(
@@ -1551,8 +1476,7 @@ fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() 
         Some((0, "history".len()))
     );
 
-    app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-        .expect("clear chat past newest history");
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     assert_eq!(app.running_chat_text(), Some(""));
     assert_eq!(
         app.running_chat_controller()
@@ -1570,20 +1494,16 @@ fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
     app.pressed_engine_keys.insert(VirtualKeyCode::Tab);
     app.scoreboard_tab_raw_pressed = true;
 
-    app.handle_key(VirtualKeyCode::KeyA, ElementState::Released)
-        .expect("chat owns held gameplay-key release");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("chat owns held scoreboard-key release");
+    app.test_key(VirtualKeyCode::KeyA, ElementState::Released);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     assert!(app.scoreboard_tab_raw_pressed);
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("close running chat");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(app.pressed_engine_keys.is_empty());
     assert!(!app.scoreboard_tab_raw_pressed);
 
-    app.handle_key(VirtualKeyCode::KeyA, ElementState::Pressed)
-        .expect("first gameplay down after chat is not a stale repeat");
+    app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
     assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
 }
 
@@ -1596,21 +1516,16 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
 
     for context_open in [false, true] {
         if context_open {
-            app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-                .expect("open chat edit context");
-            app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
-                .expect("release context key");
+            app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
             assert!(app.context_menu.is_some());
         }
         app.engine
-            .player_mut(app.local_owner)
-            .expect("local sandbox player")
+            .test_player_mut(app.local_owner)
             .control
             .pressed_coms = 0;
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("chat scope owns rebound Tab down");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("chat scope owns rebound Tab up");
+        app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Tab, ElementState::Released);
         assert_eq!(
             app.engine
                 .player(app.local_owner)
@@ -1621,10 +1536,8 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
             0
         );
         if context_open {
-            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-                .expect("close chat edit context");
-            app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-                .expect("release context close key");
+            app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+            app.test_key(VirtualKeyCode::Escape, ElementState::Released);
         }
     }
 }
@@ -1642,111 +1555,73 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     let mut app = new_classic_running_sandbox_app();
     app.start_running_chat(RunningChatMode::All);
     for character in "alpha beta".chars() {
-        app.handle_text_input(character).expect("type chat text");
+        app.test_text_input(character);
     }
-    app.handle_modifiers_changed(ModifiersState::ALT)
-        .expect("hold Alt over compact chat");
+    app.test_modifiers(ModifiersState::ALT);
     assert!(!app
         .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Pressed)
         .expect("non-character Alt key has no input-dialog mnemonic"));
     assert!(!app
         .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Released)
         .expect("non-character Alt release is also down-only fallthrough"));
-    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-        .expect("compact chat yields to the global Alt+C dialog toggle");
+    app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     assert!(app.external_irc_dialog_visible);
     assert!(app.running_chat.is_none());
-    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
-        .expect("global Alt+C release passes compact chat");
-    app.handle_key(VirtualKeyCode::KeyC, ElementState::Pressed)
-        .expect("second Alt+C closes the standalone dialog");
-    app.handle_key(VirtualKeyCode::KeyC, ElementState::Released)
-        .expect("release the closing Alt+C chord");
+    app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
+    app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     assert!(!app.external_irc_dialog_visible);
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("release Alt over compact chat");
+    app.test_modifiers(ModifiersState::empty());
     app.start_running_chat(RunningChatMode::All);
     for character in "alpha beta".chars() {
-        app.handle_text_input(character)
-            .expect("restore compact chat after the standalone toggle probe");
+        app.test_text_input(character);
     }
     app.push_message_dialog(notice(), MessageDialogContinuation::None)
-        .expect("push lower shared-screen message");
+        .test_value();
     assert_eq!(app.game_option_input_activity(), (true, true));
-    let message_layout = app.top_message_dialog_layout().expect("message layout");
+    let message_layout = app.top_message_dialog_layout().test_value();
     let message_button = message_layout.buttons[0].rect;
     let message_point = PhysicalPosition::new(
         f64::from(message_button.x + message_button.w / 2),
         f64::from(message_button.y + message_button.h / 2),
     );
-    app.handle_cursor_moved(message_point)
-        .expect("hover lower message through chat");
+    app.test_cursor(message_point);
     assert!(app.message_dialogs[0].state.has_pointer_hover());
 
-    let chat_layout = app.game_option_input_layout().expect("chat layout");
+    let chat_layout = app.game_option_input_layout().test_value();
     let chat_point = PhysicalPosition::new(
         f64::from(chat_layout.edit.x + 5),
         f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
     );
-    app.handle_cursor_moved(chat_point)
-        .expect("move back into chat edit");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("activate chat edit");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release chat activation");
-    app.handle_cursor_moved(message_point)
-        .expect("hover lower message while chat keeps keyboard focus");
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("open chat context above hovered lower message");
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
-        .expect("release chat context key");
-    let context_row = app
-        .context_menu
-        .as_ref()
-        .expect("chat context menu")
-        .layout()
-        .panels[0]
-        .rows[0]
-        .rect;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(chat_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    app.test_cursor(message_point);
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
+    let context_row = app.context_menu.test_ref().layout().panels[0].rows[0].rect;
+    app.test_cursor(PhysicalPosition::new(
         f64::from(context_row.x + 1),
         f64::from(context_row.y + 1),
-    ))
-    .expect("move into chat context menu");
+    ));
     assert!(!app.message_dialogs[0].state.has_pointer_hover());
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("close chat context");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release context Escape");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
-    app.handle_cursor_moved(chat_point)
-        .expect("return to chat edit before retained drag");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("start retained chat edit drag");
+    app.test_cursor(chat_point);
+    app.test_left_button(ElementState::Pressed);
     assert!(app
         .running_chat_controller()
         .expect("chat controller during drag")
         .has_positional_pointer_drag());
-    let caret_before_context_drag = app
-        .running_chat_controller()
-        .expect("chat controller before context drag")
-        .caret();
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("open context during retained chat drag");
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
-        .expect("release context key during retained chat drag");
-    let context_panel = app
-        .context_menu
-        .as_ref()
-        .expect("chat drag context")
-        .layout()
-        .panels[0]
-        .bounds;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    let caret_before_context_drag = app.running_chat_controller().test_value().caret();
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
+    let context_panel = app.context_menu.test_ref().layout().panels[0].bounds;
+    app.test_cursor(PhysicalPosition::new(
         f64::from(context_panel.x + context_panel.w - 2),
         f64::from(context_panel.y + 1),
-    ))
-    .expect("retained edit drag updates before context captures motion");
+    ));
     assert_ne!(
         app.running_chat_controller()
             .expect("chat controller after context drag")
@@ -1757,29 +1632,23 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         .running_chat_controller()
         .expect("chat drag remains retained until up")
         .has_positional_pointer_drag());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("context captures retained chat drag release");
+    app.test_left_button(ElementState::Released);
     assert!(!app
         .running_chat_controller()
         .expect("chat remains after context drag release")
         .has_pointer_capture());
     if app.context_menu.is_some() {
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("close context after retained chat drag");
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .expect("release context close after retained chat drag");
+        app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+        app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     }
 
     let lower_point = PhysicalPosition::new(
         f64::from(message_layout.bounds.x + 5),
         f64::from(message_layout.bounds.y + 5),
     );
-    app.handle_cursor_moved(lower_point)
-        .expect("move over lower message client");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("activate lower message without closing it");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release lower message activation");
+    app.test_cursor(lower_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.game_option_input_activity(), (false, true));
 
     let start = GuiPoint::new(
@@ -1790,10 +1659,8 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         (chat_layout.edit.x + 90) as f32,
         (chat_layout.edit.y + chat_layout.edit.h / 2) as f32,
     );
-    app.handle_touch(TouchPhase::Started, start)
-        .expect("start chat selection touch");
-    app.handle_touch(TouchPhase::Ended, end)
-        .expect("finish chat selection without an intermediate move");
+    app.test_touch(TouchPhase::Started, start);
+    app.test_touch(TouchPhase::Ended, end);
     assert!(app
         .running_chat_controller()
         .and_then(InputDialogController::selected_text)
@@ -1807,63 +1674,50 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     let checkbox_dialog = notice().with_checkbox("&Remember", false);
     cursor_exit
         .push_message_dialog(checkbox_dialog, MessageDialogContinuation::None)
-        .expect("push checkbox message");
-    let checkbox_layout = cursor_exit
-        .top_message_dialog_layout()
-        .expect("checkbox message layout");
-    let checkbox = checkbox_layout.checkbox.expect("checkbox layout").square;
+        .test_value();
+    let checkbox_layout = cursor_exit.top_message_dialog_layout().test_value();
+    let checkbox = checkbox_layout.checkbox.test_value().square;
     let checkbox_point = PhysicalPosition::new(
         f64::from(checkbox.x + checkbox.w / 2),
         f64::from(checkbox.y + checkbox.h / 2),
     );
-    cursor_exit
-        .handle_cursor_moved(checkbox_point)
-        .expect("hover checkbox before cursor exit");
+    cursor_exit.test_cursor(checkbox_point);
     assert!(cursor_exit.message_dialogs[0].state.has_pointer_hover());
-    cursor_exit.pointer_left().expect("cursor leaves window");
+    cursor_exit.pointer_left().test_value();
     assert!(cursor_exit.running_pointer_position.is_none());
     assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
-    cursor_exit
-        .handle_mouse_button(ElementState::Released)
-        .expect("outside release cannot reuse the stale checkbox point");
+    cursor_exit.test_left_button(ElementState::Released);
     assert_eq!(
         cursor_exit.message_dialogs[0].state.checkbox_checked(),
         Some(false)
     );
 
     let button = checkbox_layout.buttons[0].rect;
-    cursor_exit
-        .handle_cursor_moved(PhysicalPosition::new(
-            f64::from(button.x + button.w / 2),
-            f64::from(button.y + button.h / 2),
-        ))
-        .expect("hover message button before resize");
-    cursor_exit
-        .handle_mouse_button(ElementState::Pressed)
-        .expect("capture message button before resize");
+    cursor_exit.test_cursor(PhysicalPosition::new(
+        f64::from(button.x + button.w / 2),
+        f64::from(button.y + button.h / 2),
+    ));
+    cursor_exit.test_left_button(ElementState::Pressed);
     assert_eq!(cursor_exit.message_dialog_pointer_capture_index, Some(0));
-    cursor_exit.resize(360, 240).expect("resize running screen");
+    cursor_exit.resize(360, 240).test_value();
     assert_eq!(cursor_exit.message_dialog_pointer_capture_index, None);
     assert!(!cursor_exit.message_dialogs[0].state.has_pointer_capture());
     assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
 
     let mut menu = new_menu_app(320, 200);
     let stationary_dialog = notice();
-    let fonts = menu.assets.clonk_fonts.clone().expect("classic fonts");
+    let fonts = menu.assets.clonk_fonts.clone().test_value();
     let stationary_layout = stationary_dialog.layout(320, 200, &fonts.text);
     let button = stationary_layout.buttons[0].rect;
     let stationary_point = PhysicalPosition::new(
         f64::from(button.x + button.w / 2),
         f64::from(button.y + button.h / 2),
     );
-    menu.handle_cursor_moved(stationary_point)
-        .expect("position menu cursor before asynchronous dialog insertion");
+    menu.test_cursor(stationary_point);
     menu.push_message_dialog(stationary_dialog, MessageDialogContinuation::None)
-        .expect("insert menu message under stationary cursor");
-    menu.handle_mouse_button(ElementState::Pressed)
-        .expect("stationary menu click presses inserted button");
-    menu.handle_mouse_button(ElementState::Released)
-        .expect("stationary menu click activates inserted button");
+        .test_value();
+    menu.test_left_button(ElementState::Pressed);
+    menu.test_left_button(ElementState::Released);
     assert!(menu.message_dialogs.is_empty());
 
     menu.open_game_option_input_dialog(GameOptionInputDialogRequest {
@@ -1875,40 +1729,28 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         initial_text: "alpha beta".to_string(),
         chat_layout: false,
     })
-    .expect("open regular input dialog for context-captured drag");
-    let input_layout = menu.game_option_input_layout().expect("input layout");
+    .test_value();
+    let input_layout = menu.game_option_input_layout().test_value();
     let input_start = PhysicalPosition::new(
         f64::from(input_layout.edit.x + 5),
         f64::from(input_layout.edit.y + input_layout.edit.h / 2),
     );
-    menu.handle_cursor_moved(input_start)
-        .expect("move into regular input edit");
-    menu.handle_mouse_button(ElementState::Pressed)
-        .expect("start regular input edit drag");
+    menu.test_cursor(input_start);
+    menu.test_left_button(ElementState::Pressed);
     assert!(menu
         .game_option_input_dialog
         .as_ref()
         .expect("regular input dialog")
         .controller
         .has_positional_pointer_drag());
-    menu.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("open regular input context during drag");
-    menu.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
-        .expect("release regular input context key");
-    let input_context = menu
-        .context_menu
-        .as_ref()
-        .expect("regular input context")
-        .layout()
-        .panels[0]
-        .bounds;
-    menu.handle_cursor_moved(PhysicalPosition::new(
+    menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
+    menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
+    let input_context = menu.context_menu.test_ref().layout().panels[0].bounds;
+    menu.test_cursor(PhysicalPosition::new(
         f64::from(input_context.x + input_context.w - 2),
         f64::from(input_context.y + 1),
-    ))
-    .expect("regular input drag updates before context motion");
-    menu.handle_mouse_button(ElementState::Released)
-        .expect("context captures regular input drag release");
+    ));
+    menu.test_left_button(ElementState::Released);
     assert!(!menu
         .game_option_input_dialog
         .as_ref()
@@ -1928,9 +1770,8 @@ fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
         app.message_board_line().as_deref(),
         Some(full_message.as_str())
     );
-    let visible_len = clonk_script::c4_string_byte_len(
-        app.message_board_line().as_deref().expect("physical tail"),
-    );
+    let visible_len =
+        clonk_script::c4_string_byte_len(app.message_board_line().as_deref().test_value());
     app.message_board.empty = false;
     app.message_board.fader = 0;
     app.message_board.delay = -1;
@@ -1943,9 +1784,9 @@ fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
     let full_history = app.message_board.log_history.clone();
 
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
-        .expect("cycle Full to Small");
+        .test_value();
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
-        .expect("cycle Small to Mini");
+        .test_value();
     assert_eq!(
         app.message_board.log_history, full_history,
         "reinitializing LBWidth does not reflow existing native log lines"
@@ -1963,14 +1804,12 @@ fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
 #[test]
 fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     let mut app = new_classic_running_sandbox_app();
-    app.handle_modifiers_changed(ModifiersState::SUPER)
-        .expect("set keyboard modifiers");
+    app.test_modifiers(ModifiersState::SUPER);
     let frame_before_pause = app.engine.frame();
-    app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
-        .expect("Logo+Pause halts the offline round without an error");
+    app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     assert_ne!(app.offline_halt_count, 0);
     for _ in 0..3 {
-        app.update().expect("the halted app loop remains live");
+        app.test_update();
     }
     assert_eq!(app.engine.frame(), frame_before_pause);
     let mut schedule = frame_schedule_for_mode(
@@ -1980,20 +1819,18 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
         app.max_refresh_delay_ms,
     );
     let mut accumulator = schedule.simulation_interval;
-    let halted_pass = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
-        .expect("the scheduler consumes a halted app pass");
+    let halted_pass =
+        advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     assert!(halted_pass.did_update);
     assert_eq!(halted_pass.executed_frames, 0);
     assert!(!halted_pass.skip_redraw);
     assert_eq!(app.engine.frame(), frame_before_pause);
 
     let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
-    app.render_ordered_native_base(&mut frame)
-        .expect("the frozen world continues rendering");
+    app.render_ordered_native_base(&mut frame).test_value();
     let hold_messages = app
         .pending_native_presentation
-        .as_ref()
-        .expect("ordered render captures its text layers")
+        .test_ref()
         .batches
         .iter()
         .flat_map(|batch| batch.text.iter())
@@ -2002,7 +1839,7 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     let [hold] = hold_messages.as_slice() else {
         panic!("expected one fullscreen Pause hold message, got {hold_messages:?}");
     };
-    let font = &app.assets.clonk_fonts.as_ref().expect("classic fonts").text;
+    let font = &app.assets.clonk_fonts.test_ref().text;
     assert_eq!(
         hold.role,
         clonk_graphics::clonk_font::ClonkFontRole::GuiText
@@ -2011,17 +1848,14 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     assert_eq!(hold.color, [255, 255, 255, 255]);
     assert_eq!(hold.align, clonk_graphics::clonk_font::TextAlign::Center);
 
-    app.handle_key(VirtualKeyCode::Pause, ElementState::Released)
-        .expect("runtime Pause release is consumed");
+    app.test_key(VirtualKeyCode::Pause, ElementState::Released);
     assert_ne!(app.offline_halt_count, 0, "release does not toggle");
-    app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
-        .expect("a repeated Pause down resumes the offline round");
+    app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     assert_eq!(app.offline_halt_count, 0);
-    app.update().expect("resumed simulation advances");
+    app.test_update();
     assert_eq!(app.engine.frame(), frame_before_pause + 1);
 
-    app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
-        .expect("pause before teardown");
+    app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     assert!(!app.take_exit_request());
     app.return_to_menu();
     assert_eq!(app.offline_halt_count, 0, "Game::Default clears the halt");
@@ -2041,8 +1875,7 @@ fn c4script_log_lines_reach_the_running_message_board() {
     // so what the board drains is the message alone.
     let write_line = |text: &str| {
         let mut writer = capture.make_writer();
-        std::io::Write::write_all(&mut writer, format!("{text}\n").as_bytes())
-            .expect("record a script log line");
+        std::io::Write::write_all(&mut writer, format!("{text}\n").as_bytes()).test_value();
     };
 
     let mut app = new_state_only_running_sandbox_app();

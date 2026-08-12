@@ -8,7 +8,7 @@ fn string(value: &str) -> Value {
 
 #[test]
 fn get_material_val_reflects_compiled_material_core() {
-    let library = MaterialLibrary::parse(
+    let library = crate::support::TestValueExt::test_value(MaterialLibrary::parse(
         r#"
         [Material CoreProbe]
         Name=CoreProbe
@@ -44,128 +44,123 @@ fn get_material_val_reflects_compiled_material_core() {
         Density=80
         Placement=-7
         "#,
-    )
-    .expect("compiled-core material fixture parses");
+    ));
 
     let mut engine = Engine::new();
     engine.configure_materials_from_library(&library);
-    engine
-        .register_definition(
-            Definition::from_script(
-                "GMVL",
-                "GetMaterialVal compiled-core probe",
-                r#"#strict 2
-public func Probe()
-{
-    var core = Material("CoreProbe");
-    var negative = Material("NegativePlace");
-    return [
-        // Section, entry, material, and entry-number matching is exact.
-        [GetMaterialVal("Density", "Material", core),
-         GetMaterialVal("density", "Material", core),
-         GetMaterialVal("Density", "material", core),
-         GetMaterialVal("Missing", "Material", core),
-         GetMaterialVal("Density", "Material", -1),
-         GetMaterialVal("Density", "Material", 99),
-         GetMaterialVal("Density", "Material", core, -1),
-         GetMaterialVal("Density", "Material", core, 1)],
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_script(
+            "GMVL",
+            "GetMaterialVal compiled-core probe",
+            r#"#strict 2
+                public func Probe()
+                {
+                var core = Material("CoreProbe");
+                var negative = Material("NegativePlace");
+                return [
+                    // Section, entry, material, and entry-number matching is exact.
+                    [GetMaterialVal("Density", "Material", core),
+                     GetMaterialVal("density", "Material", core),
+                     GetMaterialVal("Density", "material", core),
+                     GetMaterialVal("Missing", "Material", core),
+                     GetMaterialVal("Density", "Material", -1),
+                     GetMaterialVal("Density", "Material", 99),
+                     GetMaterialVal("Density", "Material", core, -1),
+                     GetMaterialVal("Density", "Material", core, 1)],
 
-        // Defaults retain the native compiled type. Placement=0 is replaced
-        // by C4MaterialCore::Load's density/flags calculation, while an
-        // explicitly negative Placement remains a nonzero live value.
-        [GetMaterialVal("Name", "Material", core),
-         GetMaterialVal("Shape", "Material", core),
-         GetMaterialVal("DigFree", "Material", core),
-         GetMaterialVal("BlastFree", "Material", core),
-         GetMaterialVal("TextureOverlay", "Material", core),
-         GetMaterialVal("TextureOverlay", "Material", negative),
-         GetMaterialVal("SplashRate", "Material", core),
-         GetMaterialVal("Placement", "Material", core),
-         GetMaterialVal("Placement", "Material", negative)],
+                    // Defaults retain the native compiled type. Placement=0 is replaced
+                    // by C4MaterialCore::Load's density/flags calculation, while an
+                    // explicitly negative Placement remains a nonzero live value.
+                    [GetMaterialVal("Name", "Material", core),
+                     GetMaterialVal("Shape", "Material", core),
+                     GetMaterialVal("DigFree", "Material", core),
+                     GetMaterialVal("BlastFree", "Material", core),
+                     GetMaterialVal("TextureOverlay", "Material", core),
+                     GetMaterialVal("TextureOverlay", "Material", negative),
+                     GetMaterialVal("SplashRate", "Material", core),
+                     GetMaterialVal("Placement", "Material", core),
+                     GetMaterialVal("Placement", "Material", negative)],
 
-        // Color and ColorX decompile the same final nine-element array. A
-        // short ColorX replaces Color and zero-fills its missing elements;
-        // StdArrayDefaultAdapt then omits those trailing zero defaults.
-        [GetMaterialVal("Color", "Material", core, 0),
-         GetMaterialVal("Color", "Material", core, 1),
-         GetMaterialVal("Color", "Material", core, 2),
-         GetMaterialVal("Color", "Material", core, 3),
-         GetMaterialVal("Color", "Material", core, 4),
-         GetMaterialVal("Color", "Material", core, 5),
-         GetMaterialVal("Color", "Material", core, 6),
-         GetMaterialVal("Color", "Material", core, 7),
-         GetMaterialVal("Color", "Material", core, 8),
-         GetMaterialVal("Color", "Material", core, 9),
-         GetMaterialVal("ColorX", "Material", core, 0),
-         GetMaterialVal("ColorX", "Material", core, 1),
-         GetMaterialVal("ColorX", "Material", core, 2),
-         GetMaterialVal("ColorX", "Material", core, 3),
-         GetMaterialVal("ColorX", "Material", core, 4),
-         GetMaterialVal("ColorX", "Material", core, 5),
-         GetMaterialVal("ColorX", "Material", core, 6),
-         GetMaterialVal("ColorX", "Material", core, 7),
-         GetMaterialVal("ColorX", "Material", core, 8),
-         GetMaterialVal("ColorX", "Material", core, 9)],
+                    // Color and ColorX decompile the same final nine-element array. A
+                    // short ColorX replaces Color and zero-fills its missing elements;
+                    // StdArrayDefaultAdapt then omits those trailing zero defaults.
+                    [GetMaterialVal("Color", "Material", core, 0),
+                     GetMaterialVal("Color", "Material", core, 1),
+                     GetMaterialVal("Color", "Material", core, 2),
+                     GetMaterialVal("Color", "Material", core, 3),
+                     GetMaterialVal("Color", "Material", core, 4),
+                     GetMaterialVal("Color", "Material", core, 5),
+                     GetMaterialVal("Color", "Material", core, 6),
+                     GetMaterialVal("Color", "Material", core, 7),
+                     GetMaterialVal("Color", "Material", core, 8),
+                     GetMaterialVal("Color", "Material", core, 9),
+                     GetMaterialVal("ColorX", "Material", core, 0),
+                     GetMaterialVal("ColorX", "Material", core, 1),
+                     GetMaterialVal("ColorX", "Material", core, 2),
+                     GetMaterialVal("ColorX", "Material", core, 3),
+                     GetMaterialVal("ColorX", "Material", core, 4),
+                     GetMaterialVal("ColorX", "Material", core, 5),
+                     GetMaterialVal("ColorX", "Material", core, 6),
+                     GetMaterialVal("ColorX", "Material", core, 7),
+                     GetMaterialVal("ColorX", "Material", core, 8),
+                     GetMaterialVal("ColorX", "Material", core, 9)],
 
-        [GetMaterialVal("Alpha", "Material", core, 0),
-         GetMaterialVal("Alpha", "Material", core, 1),
-         GetMaterialVal("Alpha", "Material", core, 2),
-         GetMaterialVal("Alpha", "Material", core, 3),
-         GetMaterialVal("Alpha", "Material", core, 4),
-         GetMaterialVal("Alpha", "Material", core, 5),
-         GetMaterialVal("Alpha", "Material", core, 6)],
+                    [GetMaterialVal("Alpha", "Material", core, 0),
+                     GetMaterialVal("Alpha", "Material", core, 1),
+                     GetMaterialVal("Alpha", "Material", core, 2),
+                     GetMaterialVal("Alpha", "Material", core, 3),
+                     GetMaterialVal("Alpha", "Material", core, 4),
+                     GetMaterialVal("Alpha", "Material", core, 5),
+                     GetMaterialVal("Alpha", "Material", core, 6)],
 
-        // PXSGfxSize defaults to the compiled rectangle width.
-        [GetMaterialVal("PXSGfxRt", "Material", core, 0),
-         GetMaterialVal("PXSGfxRt", "Material", core, 1),
-         GetMaterialVal("PXSGfxRt", "Material", core, 2),
-         GetMaterialVal("PXSGfxRt", "Material", core, 3),
-         GetMaterialVal("PXSGfxRt", "Material", core, 4),
-         GetMaterialVal("PXSGfxRt", "Material", core, 5),
-         GetMaterialVal("PXSGfxRt", "Material", core, 6),
-         GetMaterialVal("PXSGfxSize", "Material", core, 0),
-         GetMaterialVal("PXSGfxSize", "Material", core, 1)],
+                    // PXSGfxSize defaults to the compiled rectangle width.
+                    [GetMaterialVal("PXSGfxRt", "Material", core, 0),
+                     GetMaterialVal("PXSGfxRt", "Material", core, 1),
+                     GetMaterialVal("PXSGfxRt", "Material", core, 2),
+                     GetMaterialVal("PXSGfxRt", "Material", core, 3),
+                     GetMaterialVal("PXSGfxRt", "Material", core, 4),
+                     GetMaterialVal("PXSGfxRt", "Material", core, 5),
+                     GetMaterialVal("PXSGfxRt", "Material", core, 6),
+                     GetMaterialVal("PXSGfxSize", "Material", core, 0),
+                     GetMaterialVal("PXSGfxSize", "Material", core, 1)],
 
-        // C4ID fields remain IDs; a compiled zero C4ID is canonical nil.
-        [GetMaterialVal("Dig2Object", "Material", core),
-         GetMaterialVal("Dig2Object", "Material", core, 1),
-         GetMaterialVal("Blast2Object", "Material", core),
-         GetMaterialVal("Blast2Object", "Material", negative)],
+                    // C4ID fields remain IDs; a compiled zero C4ID is canonical nil.
+                    [GetMaterialVal("Dig2Object", "Material", core),
+                     GetMaterialVal("Dig2Object", "Material", core, 1),
+                     GetMaterialVal("Blast2Object", "Material", core),
+                     GetMaterialVal("Blast2Object", "Material", negative)],
 
-        // Reaction is nested below Material. Its leaf compile names still
-        // index across every reaction, including native defaults and bools.
-        [GetMaterialVal("Type", "Material", core, 0),
-         GetMaterialVal("Type", "Material", core, 1),
-         GetMaterialVal("Type", "Material", core, 2),
-         GetMaterialVal("type", "Material", core, 0),
-         GetMaterialVal("TargetSpec", "Material", core, 0),
-         GetMaterialVal("TargetSpec", "Material", core, 1),
-         GetMaterialVal("ScriptFunc", "Material", core, 0),
-         GetMaterialVal("ExecMask", "Material", core, 0),
-         GetMaterialVal("ExecMask", "Material", core, 1),
-         GetMaterialVal("Reverse", "Material", core, 0),
-         GetMaterialVal("Reverse", "Material", core, 1),
-         GetMaterialVal("InverseSpec", "Material", core, 0),
-         GetMaterialVal("InverseSpec", "Material", core, 1),
-         GetMaterialVal("CheckSlide", "Material", core, 0),
-         GetMaterialVal("CheckSlide", "Material", core, 1),
-         GetMaterialVal("Depth", "Material", core, 0),
-         GetMaterialVal("Depth", "Material", core, 1),
-         GetMaterialVal("ConvertMat", "Material", core, 0),
-         GetMaterialVal("ConvertMat", "Material", core, 1),
-         GetMaterialVal("CorrosionRate", "Material", core, 0),
-         GetMaterialVal("CorrosionRate", "Material", core, 1)]
-    ];
-}
-"#,
-            )
-            .expect("GetMaterialVal probe compiles"),
-        )
-        .expect("GetMaterialVal probe registers");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("GMVL"))
-        .expect("GetMaterialVal probe spawns");
-    let probe_index = engine.find_object_index(probe).expect("probe remains live");
+                    // Reaction is nested below Material. Its leaf compile names still
+                    // index across every reaction, including native defaults and bools.
+                    [GetMaterialVal("Type", "Material", core, 0),
+                     GetMaterialVal("Type", "Material", core, 1),
+                     GetMaterialVal("Type", "Material", core, 2),
+                     GetMaterialVal("type", "Material", core, 0),
+                     GetMaterialVal("TargetSpec", "Material", core, 0),
+                     GetMaterialVal("TargetSpec", "Material", core, 1),
+                     GetMaterialVal("ScriptFunc", "Material", core, 0),
+                     GetMaterialVal("ExecMask", "Material", core, 0),
+                     GetMaterialVal("ExecMask", "Material", core, 1),
+                     GetMaterialVal("Reverse", "Material", core, 0),
+                     GetMaterialVal("Reverse", "Material", core, 1),
+                     GetMaterialVal("InverseSpec", "Material", core, 0),
+                     GetMaterialVal("InverseSpec", "Material", core, 1),
+                     GetMaterialVal("CheckSlide", "Material", core, 0),
+                     GetMaterialVal("CheckSlide", "Material", core, 1),
+                     GetMaterialVal("Depth", "Material", core, 0),
+                     GetMaterialVal("Depth", "Material", core, 1),
+                     GetMaterialVal("ConvertMat", "Material", core, 0),
+                     GetMaterialVal("ConvertMat", "Material", core, 1),
+                     GetMaterialVal("CorrosionRate", "Material", core, 0),
+                     GetMaterialVal("CorrosionRate", "Material", core, 1)]
+                ];
+                }
+                "#,
+        )),
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("GMVL")));
+    let probe_index = crate::support::TestValueExt::test_value(engine.find_object_index(probe));
 
     assert_eq!(
         engine

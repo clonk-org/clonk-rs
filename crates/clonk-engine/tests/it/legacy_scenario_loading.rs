@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use std::fs;
 
 use clonk_engine::effect::EffectVarValue;
@@ -44,9 +45,7 @@ fn defcore_rct_all_timer_call_trailing_space_misses_exact_runtime_lookup(
     let object = engine.spawn_object(SpawnConfig::new("RCTA"))?;
     engine.tick_without_snapshot()?;
 
-    let snapshot = engine
-        .object_snapshot(object)
-        .expect("timer object survives");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.timer, 0, "Timer=1 reached the callback gate");
     assert_eq!(snapshot.local_vars.get("iFired"), None);
     Ok(())
@@ -91,7 +90,7 @@ fn empty_def_core_name_survives_both_engine_load_paths() -> Result<(), Box<dyn s
         |engine: &mut Engine, id: &str, expected: &str| -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(engine.definition_name(id), Some(expected));
             let object = engine.spawn_object(SpawnConfig::new(id))?;
-            let index = engine.find_object_index(object).expect("name probe exists");
+            let index = engine.test_object_index(object);
             let expected = Value::String(expected.to_string().into());
             assert_eq!(
                 engine.call_object_function(index, "ProbeName", Vec::new())?,
@@ -181,7 +180,7 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
     let mut engine = Engine::new();
     scenario.apply(&mut engine)?;
 
-    let landscape = engine.landscape().expect("legacy Map.bmp should load");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
     // No MapZoom key → the C4S default of 10 (C4Scenario.cpp:307,353):
     // the rendered map is 40x40 and ground starts at map row 1 → y=10;
     // C4Landscape::Init pads both dimensions to the 100px minimum.
@@ -199,9 +198,7 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
 
     assert!(engine.definition_ids().any(|id| id == "TEST"));
     let snapshot = engine.snapshot();
-    let spawned = snapshot
-        .object(ObjectId::new(100))
-        .expect("object from Objects.txt");
+    let spawned = crate::support::TestValueExt::test_value(snapshot.object(ObjectId::new(100)));
     assert_eq!(spawned.definition_id, "TEST");
     assert_eq!(spawned.position, Vector2::new(50, 60));
 
@@ -291,9 +288,7 @@ fn legacy_objects_names_are_exact_case_like_cpp() -> Result<(), Box<dyn std::err
     scenario.apply(&mut engine)?;
 
     assert!(engine.object_snapshot(ObjectId::new(99)).is_none());
-    let wrong_object_names = engine
-        .object_snapshot(ObjectId::new(1))
-        .expect("wrong-case Object names leave the exact object intact");
+    let wrong_object_names = engine.test_object_snapshot(ObjectId::new(1));
     assert_eq!(wrong_object_names.category, 0);
     assert_eq!(wrong_object_names.energy, 0);
     assert_eq!(wrong_object_names.position, Vector2::new(0, 0));
@@ -306,9 +301,7 @@ fn legacy_objects_names_are_exact_case_like_cpp() -> Result<(), Box<dyn std::err
         "wrong-case [physical] is not followed"
     );
 
-    let wrong_nested_names = engine
-        .object_snapshot(ObjectId::new(2))
-        .expect("object with wrong-case nested names loads");
+    let wrong_nested_names = engine.test_object_snapshot(ObjectId::new(2));
     assert_eq!(
         wrong_nested_names
             .temporary_physical
@@ -321,14 +314,11 @@ fn legacy_objects_names_are_exact_case_like_cpp() -> Result<(), Box<dyn std::err
     assert!(wrong_nested_names.command_stack.is_empty());
 
     assert!(engine
-        .object_snapshot(ObjectId::new(3))
-        .expect("object with wrong-case command names loads")
+        .test_object_snapshot(ObjectId::new(3))
         .command_stack
         .is_empty());
 
-    let exact = engine
-        .object_snapshot(ObjectId::new(4))
-        .expect("exact Object section loads");
+    let exact = engine.test_object_snapshot(ObjectId::new(4));
     assert_eq!(exact.category, 17);
     assert_eq!(exact.energy, 1234);
     assert_eq!(exact.position, Vector2::new(40, 50));
@@ -397,10 +387,7 @@ fn legacy_objects_restore_effect_chain_and_variables() -> Result<(), Box<dyn std
     let mut engine = Engine::with_seed(0);
     scenario.apply(&mut engine)?;
 
-    let effects = engine
-        .object_snapshot(ObjectId::new(1))
-        .expect("effect carrier loads")
-        .effects;
+    let effects = engine.test_object_snapshot(ObjectId::new(1)).effects;
     assert_eq!(
         effects
             .iter()
@@ -465,9 +452,7 @@ fn legacy_objects_restore_effect_chain_and_variables() -> Result<(), Box<dyn std
         ]
     );
 
-    let target = engine
-        .object_snapshot(ObjectId::new(2))
-        .expect("command target loads after the carrier");
+    let target = engine.test_object_snapshot(ObjectId::new(2));
     assert_eq!(
         target
             .local_vars
@@ -479,18 +464,16 @@ fn legacy_objects_restore_effect_chain_and_variables() -> Result<(), Box<dyn std
     );
 
     let mut saved = engine.capture_state();
-    let saved_carrier = saved
-        .objects
-        .iter_mut()
-        .find(|object| object.snapshot.id == ObjectId::new(1))
-        .expect("carrier persists");
+    let saved_carrier = crate::support::TestValueExt::test_value(
+        saved
+            .objects
+            .iter_mut()
+            .find(|object| object.snapshot.id == ObjectId::new(1)),
+    );
     saved_carrier.snapshot.effects[1].command_id = Some("WRNG".to_string());
     engine.restore_state(&saved)?;
     assert_eq!(
-        engine
-            .object_snapshot(ObjectId::new(1))
-            .expect("restored carrier exists")
-            .effects[1]
+        engine.test_object_snapshot(ObjectId::new(1)).effects[1]
             .command_id
             .as_deref(),
         Some("CARR"),
@@ -499,10 +482,7 @@ fn legacy_objects_restore_effect_chain_and_variables() -> Result<(), Box<dyn std
 
     engine.tick_without_snapshot()?;
 
-    let effects = engine
-        .object_snapshot(ObjectId::new(1))
-        .expect("effect carrier survives")
-        .effects;
+    let effects = engine.test_object_snapshot(ObjectId::new(1)).effects;
     assert_eq!(
         effects
             .iter()
@@ -511,9 +491,7 @@ fn legacy_objects_restore_effect_chain_and_variables() -> Result<(), Box<dyn std
         [("Later", 41), ("Restored", 6)],
         "timers resume from the saved time in linked-list order"
     );
-    let target = engine
-        .object_snapshot(ObjectId::new(2))
-        .expect("command target survives");
+    let target = engine.test_object_snapshot(ObjectId::new(2));
     assert_eq!(
         target
             .local_vars
@@ -592,20 +570,14 @@ fn scenario_section_effects_resolve_retained_object_references(
     let mut engine = Engine::with_seed(0);
     scenario.apply(&mut engine)?;
     assert_eq!(
-        engine
-            .object_snapshot(ObjectId::new(42))
-            .expect("retained object loads")
-            .status,
+        engine.test_object_snapshot(ObjectId::new(42)).status,
         ObjectStatus::Inactive
     );
 
     engine.call_scenario_script_function("Switch", Vec::new())?;
 
     assert_eq!(engine.debug_current_scenario_section(), "Next");
-    let mut effects = engine
-        .object_snapshot(ObjectId::new(500))
-        .expect("section effect carrier loads")
-        .effects;
+    let mut effects = engine.test_object_snapshot(ObjectId::new(500)).effects;
     let effect = effects.remove(0);
     assert_eq!(effect.command_target, Some(42));
     assert_eq!(effect.command_id.as_deref(), Some("CARR"));
@@ -699,8 +671,8 @@ fn legacy_scenario_landscape_insert_thrust_zero_controls_script_insert_material(
     // This path also invalidates the script host's shared material table;
     // set_materials alone is intended for pre-script synthetic fixtures.
     engine.configure_materials_from_library(&library);
-    let source = engine.materials().id_of("Source").expect("Source exists");
-    let support = engine.materials().id_of("Support").expect("Support exists");
+    let source = crate::support::TestValueExt::test_value(engine.materials().id_of("Source"));
+    let support = crate::support::TestValueExt::test_value(engine.materials().id_of("Support"));
 
     let mut densities = vec![0i32; 128];
     densities[10] = 50;
@@ -721,7 +693,7 @@ fn legacy_scenario_landscape_insert_thrust_zero_controls_script_insert_material(
     engine.set_landscape(landscape);
 
     engine.call_scenario_script_function("ProbeInsert", Vec::new())?;
-    let landscape = engine.landscape().expect("landscape remains set");
+    let landscape = crate::support::TestValueExt::test_value(engine.landscape());
     assert_eq!(landscape.material_at(3, 5), Some(source));
     assert_eq!(landscape.grid_byte_at(3, 5), Some(10));
     assert_eq!(
@@ -763,7 +735,7 @@ fn fresh_resource_object_keeps_dormant_defcore_vertex_attributes(
     let mut engine = Engine::new();
     engine.register_definition(definition)?;
     let object = engine.spawn_object(clonk_engine::SpawnConfig::new("DVTX"))?;
-    let snapshot = engine.object_snapshot(object).expect("fresh DVTX survives");
+    let snapshot = engine.test_object_snapshot(object);
 
     assert_eq!(snapshot.vertices.len(), 2);
     assert_eq!(
@@ -787,9 +759,7 @@ fn fresh_resource_object_keeps_dormant_defcore_vertex_attributes(
     let mut scenario_engine = Engine::new();
     scenario.apply(&mut scenario_engine)?;
     let scenario_object = scenario_engine.spawn_object(clonk_engine::SpawnConfig::new("DVTX"))?;
-    let scenario_snapshot = scenario_engine
-        .object_snapshot(scenario_object)
-        .expect("scenario DVTX survives");
+    let scenario_snapshot = scenario_engine.test_object_snapshot(scenario_object);
     assert_eq!(
         (
             scenario_snapshot.vertices[1].x,
@@ -835,9 +805,7 @@ fn dormant_defcore_vertex_attributes_survive_save_before_add(
     restored.restore_state(&state)?;
     restored.tick_without_snapshot()?;
 
-    let snapshot = restored
-        .object_snapshot(object)
-        .expect("restored DVTS survives");
+    let snapshot = restored.test_object_snapshot(object);
     assert_eq!(snapshot.vertices.len(), 2);
     assert_eq!(
         (snapshot.vertices[1].cnat, snapshot.vertices[1].friction),

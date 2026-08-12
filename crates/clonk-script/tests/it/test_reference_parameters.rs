@@ -4,36 +4,31 @@ use std::sync::Arc;
 
 use clonk_script::{Engine, Script, Value};
 
-#[test]
-fn simple_reference_parameter() {
-    let source = r#"func SetValues(&x, &y) { x = 10; y = 20; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    simple_reference_parameter,
+    r#"func SetValues(&x, &y) { x = 10; y = 20; }"#
+);
 
-#[test]
-fn reference_with_type_annotation() {
-    let source = r#"func SetValues(int &x, int &y) { x = 10; y = 20; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    reference_with_type_annotation,
+    r#"func SetValues(int &x, int &y) { x = 10; y = 20; }"#
+);
 
-#[test]
-fn mixed_reference_and_value_parameters() {
-    let source = r#"func GetSum(a, b, &result) { result = a + b; }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    mixed_reference_and_value_parameters,
+    r#"func GetSum(a, b, &result) { result = a + b; }"#
+);
 
-#[test]
-fn mgwp_pattern() {
-    // The actual pattern from MGWP script
-    let source = r#"private func GetWarpPosition(&x, &y) { x = 10; y = 20; }"#;
-    crate::support::assert_compiles(source);
-}
+// The actual pattern from MGWP script
+crate::support::compile_case!(
+    mgwp_pattern,
+    r#"private func GetWarpPosition(&x, &y) { x = 10; y = 20; }"#
+);
 
-#[test]
-fn reference_parameter_with_object_type() {
-    let source = r#"func GetObject(object &obj) { obj = FindObject(CLNK); }"#;
-    crate::support::assert_compiles(source);
-}
+crate::support::compile_case!(
+    reference_parameter_with_object_type,
+    r#"func GetObject(object &obj) { obj = FindObject(CLNK); }"#
+);
 
 #[test]
 fn reference_parameter_mutates_variable() {

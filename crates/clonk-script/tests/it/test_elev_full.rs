@@ -1,8 +1,8 @@
 // Test with full ELEV script content
 
-#[test]
-fn elev_full_script() {
-    let source = r#"
+crate::support::compile_case!(
+    elev_full_script,
+    r#"
 /*-- Fahrstuhl --*/
 
 #strict
@@ -71,6 +71,5 @@ public func IsNotInPermanentMode()
 protected func Incineration() { if(pCase) RemoveObject(pCase); }
 protected func IncinerationEx() { if(pCase) RemoveObject(pCase); }
 protected func Destruction() { if(pCase) RemoveObject(pCase); return(_inherited()); }
-    "#;
-    crate::support::assert_compiles(source);
-}
+    "#,
+);

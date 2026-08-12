@@ -4,12 +4,8 @@ use crate::player::CountedControlType;
 #[test]
 fn control_counts_drain_without_resetting_action_deduplication() {
     let mut engine = Engine::new();
-    engine
-        .register_player(PlayerConfig::new(5, "First"))
-        .expect("first player registers");
-    engine
-        .register_player(PlayerConfig::new(2, "Second"))
-        .expect("second player registers");
+    crate::TestValueExt::test_value(engine.register_player(PlayerConfig::new(5, "First")));
+    crate::TestValueExt::test_value(engine.register_player(PlayerConfig::new(2, "Second")));
 
     engine.count_player_control(5, CountedControlType::Command, 77, 1);
     engine.count_player_control(5, CountedControlType::Command, 77, 1);

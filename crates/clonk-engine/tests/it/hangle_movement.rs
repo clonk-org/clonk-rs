@@ -32,9 +32,7 @@ fn hangle_procedure_moves_along_ledges() -> Result<(), Box<dyn std::error::Error
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after first hangle tick");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 3);
     assert_eq!(object.velocity.y, 0);
     assert_eq!(object.direction, Direction::Right);
@@ -45,9 +43,7 @@ fn hangle_procedure_moves_along_ledges() -> Result<(), Box<dyn std::error::Error
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after braking on ledge");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, 0);
     assert_eq!(object.velocity.y, 0);
     assert_eq!(object.direction, Direction::Right);
@@ -60,9 +56,7 @@ fn hangle_procedure_moves_along_ledges() -> Result<(), Box<dyn std::error::Error
     )?;
 
     let snapshot = engine.tick()?;
-    let object = snapshot
-        .object(object_id)
-        .expect("object must exist after traversing up-left");
+    let object = crate::support::TestValueExt::test_value(snapshot.object(object_id));
     assert_eq!(object.velocity.x, -3);
     assert_eq!(object.velocity.y, 0);
     assert_eq!(object.direction, Direction::Left);

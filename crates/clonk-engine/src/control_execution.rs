@@ -3289,6 +3289,25 @@ pub fn prepare_join_player_config(
 }
 
 #[cfg(test)]
+fn player_info_data(client_id: i32, players: Vec<ControlPlayerInfoEntry>) -> PlayerInfoControlData {
+    flagged_player_info_data(client_id, 0, players)
+}
+
+#[cfg(test)]
+fn flagged_player_info_data(
+    client_id: i32,
+    flags: u32,
+    players: Vec<ControlPlayerInfoEntry>,
+) -> PlayerInfoControlData {
+    PlayerInfoControlData {
+        client_id,
+        flags,
+        players,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3395,6 +3414,42 @@ mod tests {
         }
     }
 
+    fn initial_team(
+        id: i32,
+        player_ids: Vec<i32>,
+        color: u32,
+        max_players: i32,
+    ) -> crate::InitialNetworkTeam {
+        crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: LegacyCString::default(),
+            max_players,
+        }
+    }
+
+    fn initial_team_metadata() -> crate::InitialNetworkTeamMetadata {
+        let active = true;
+        let custom = true;
+        crate::InitialNetworkTeamMetadata {
+            active,
+            custom,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        }
+    }
+
     /// A runtime participant row carrying the published NRT_Player resource
     /// and the profile filename an `ActivateNewPlayer` request repeats. One
     /// profile file owns one resource, so both identify the same participant.
@@ -3420,11 +3475,7 @@ mod tests {
         let mut joined = player(3);
         joined.flags = PLAYER_INFO_FLAG_JOINED;
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 1,
-            players: vec![player(1), removed, joined],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(1, vec![player(1), removed, joined]));
 
         assert_eq!(registry.player_count(), 3);
         assert_eq!(registry.nonremoved_player_count(), 2);
@@ -3436,28 +3487,13 @@ mod tests {
         // therefore remains teamless, while Random disables that choice and
         // runs the complete least-used SafeRandom tie scan (pristine 9ffa0a5d
         // src/C4PlayerInfo.cpp:717-730; src/C4Teams.cpp:446-462,474-543).
-        let team = |id, color| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, color| initial_team(id, Vec::new(), color, 0);
         let initial_teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, 0x00f4_0000), team(2, 0x0000_c800)],
+            ..initial_team_metadata()
         };
 
         let mut free_teams = initial_teams.clone();
@@ -3511,28 +3547,13 @@ mod tests {
         // list is also assigned when teams already exist, but empty default
         // melee metadata is not team-needed yet and must not generate a team
         // (pristine 9ffa0a5d src/C4Teams.cpp:503-507,510-541,605-610).
-        let team = |id| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id| initial_team(id, Vec::new(), 0x0010_0000 + u32::try_from(id).unwrap(), 0);
         let initial_teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1), team(2)],
+            ..initial_team_metadata()
         };
 
         let mut script_teams = initial_teams.clone();
@@ -3594,33 +3615,19 @@ mod tests {
         // SafeRandom(2), SafeRandom(3), ... for equal minima in team-list
         // order. AddPlayer changes the current color, not OriginalColor
         // (src/C4PlayerInfo.cpp:810-817; src/C4Teams.cpp:53-81,446-462,474-543).
-        let team = |id, player_ids, color, max_players| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players,
-        };
+        let team =
+            |id, player_ids, color, max_players| initial_team(id, player_ids, color, max_players);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 4,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![
                 team(1, vec![], 0x00f4_0000, 0),
                 team(2, vec![99], 0x0000_c800, 1),
                 team(3, vec![], 0x0020_20ff, 0),
                 team(4, vec![], 0x00fc_f41c, 0),
             ],
+            ..initial_team_metadata()
         };
         let mut players = vec![
             ControlPlayerInfoEntry {
@@ -3757,17 +3764,9 @@ mod tests {
         // draws (src/C4Teams.cpp:53-81,181-218,386-395,446-462,525-539).
         let first_team_color = 0x00aa_5500;
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 1,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![crate::InitialNetworkTeam {
                 id: 1,
                 name: LegacyCString::from_bytes(b"Only team".to_vec()).unwrap(),
@@ -3777,6 +3776,7 @@ mod tests {
                 icon_spec: LegacyCString::default(),
                 max_players: 1,
             }],
+            ..initial_team_metadata()
         };
         let mut players = vec![ControlPlayerInfoEntry {
             id: 7,
@@ -3806,16 +3806,8 @@ mod tests {
         // C4ClientPlayerInfos unless CIF_AddPlayers is set
         // (src/C4PlayerInfo.cpp:834-880).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![player(7)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![player(8)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![player(7)]));
+        registry.apply(player_info_data(3, vec![player(8)]));
 
         assert!(registry.get(7).is_none());
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
@@ -3828,17 +3820,12 @@ mod tests {
         // C4ClientPlayerInfos::GrabMergeFrom, which appends in packet order
         // (src/C4PlayerInfo.cpp:458-482,834-880).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![player(7)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![player(8)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![player(7)]));
+        registry.apply(flagged_player_info_data(
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![player(8)],
+        ));
 
         assert_eq!(registry.get(7).map(|entry| entry.id), Some(7));
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
@@ -3859,30 +3846,24 @@ mod tests {
         let mut second = player(8);
         second.flags = PLAYER_INFO_FLAG_HAS_RESOURCE | PLAYER_INFO_FLAG_JOINED;
         second.resource = Some(resource(8));
-        let original = PlayerInfoControlData {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![first.clone()],
-            ..Default::default()
-        };
+        let original =
+            flagged_player_info_data(3, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, vec![first.clone()]);
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(original.clone());
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![second.clone()],
-            ..Default::default()
-        });
+        registry.apply(flagged_player_info_data(
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![second.clone()],
+        ));
         let mut echoed_first = first;
         echoed_first.name = LegacyCString::from_bytes(b"Must not replace".to_vec()).unwrap();
         echoed_first.flags = PLAYER_INFO_FLAG_JOINED;
         echoed_first.resource = None;
-        let echo = PlayerInfoControlData {
-            client_id: 3,
-            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-            players: vec![echoed_first, player(99)],
-            ..Default::default()
-        };
+        let echo = flagged_player_info_data(
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            vec![echoed_first, player(99)],
+        );
 
         assert!(registry.apply_player_resource_normalization(&original, &echo));
         let normalized = registry.get(7).expect("the first Add row remains retained");
@@ -3904,28 +3885,16 @@ mod tests {
         let mut original_player = player(7);
         original_player.flags = PLAYER_INFO_FLAG_HAS_RESOURCE;
         original_player.resource = Some(resource(7));
-        let original = PlayerInfoControlData {
-            client_id: 3,
-            players: vec![original_player.clone()],
-            ..Default::default()
-        };
+        let original = player_info_data(3, vec![original_player.clone()]);
         let mut replacement = original_player;
         replacement.flags |= crate::PLAYER_INFO_FLAG_IN_SCENARIO_FILE;
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(original.clone());
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![replacement.clone()],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![replacement.clone()]));
         let mut echoed_player = original.players[0].clone();
         echoed_player.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
         echoed_player.resource = None;
-        let echo = PlayerInfoControlData {
-            client_id: 3,
-            players: vec![echoed_player],
-            ..Default::default()
-        };
+        let echo = player_info_data(3, vec![echoed_player]);
 
         assert!(!registry.apply_player_resource_normalization(&original, &echo));
         assert_eq!(registry.get(7), Some(&replacement));
@@ -3940,12 +3909,11 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             41,
-            [PlayerInfoControlData {
-                client_id: 7,
-                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: vec![player(41)],
-                ..Default::default()
-            }],
+            [flagged_player_info_data(
+                7,
+                CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                vec![player(41)],
+            )],
         );
 
         assert!(registry.mark_joined(41, 3, 77));
@@ -3971,9 +3939,9 @@ mod tests {
         registry.replace_snapshot(
             30,
             [
-                PlayerInfoControlData {
-                    client_id: 7,
-                    players: vec![
+                player_info_data(
+                    7,
+                    vec![
                         player(10),
                         ControlPlayerInfoEntry {
                             id: 11,
@@ -3981,13 +3949,8 @@ mod tests {
                             ..Default::default()
                         },
                     ],
-                    ..Default::default()
-                },
-                PlayerInfoControlData {
-                    client_id: 8,
-                    players: vec![player(20)],
-                    ..Default::default()
-                },
+                ),
+                player_info_data(8, vec![player(20)]),
             ],
         );
 
@@ -4027,16 +3990,11 @@ mod tests {
         let retained_null = player(3);
 
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![first_nine, retained_empty, retained_null],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![five, duplicate_nine],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            3,
+            vec![first_nine, retained_empty, retained_null],
+        ));
+        registry.apply(player_info_data(4, vec![five, duplicate_nine]));
 
         assert_eq!(
             registry.league_progress_data_snapshot(),
@@ -4069,16 +4027,8 @@ mod tests {
         two.league_score = -20;
 
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![first_nine, five_with_zero],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![duplicate_nine, two],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![first_nine, five_with_zero]));
+        registry.apply(player_info_data(4, vec![duplicate_nine, two]));
 
         assert_eq!(
             registry.league_scores_snapshot(),
@@ -4095,18 +4045,16 @@ mod tests {
         let mut second_changed = player(20);
         second_changed.league_projected_gain = 1;
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL | CLIENT_PLAYER_INFO_FLAG_UPDATED,
-            players: vec![unchanged, first_changed],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![second_changed],
-            ..Default::default()
-        });
+        registry.apply(flagged_player_info_data(
+            4,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL | CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            vec![unchanged, first_changed],
+        ));
+        registry.apply(flagged_player_info_data(
+            7,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![second_changed],
+        ));
 
         let updates =
             registry.apply_league_projected_gains([(20, 8), (999, 44), (10, 3), (11, 5), (11, 99)]);
@@ -4137,17 +4085,12 @@ mod tests {
         let mut positive = player(21);
         positive.league_projected_gain = 7;
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![unknown, other_negative],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            flags: CLIENT_PLAYER_INFO_FLAG_UPDATED,
-            players: vec![zero, positive],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(4, vec![unknown, other_negative]));
+        registry.apply(flagged_player_info_data(
+            7,
+            CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            vec![zero, positive],
+        ));
 
         let updates = registry.reset_league_projected_gains();
 
@@ -4172,25 +4115,13 @@ mod tests {
         let mut valid = player(20);
         valid.league_projected_gain = 7;
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![unchanged_invalid],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            players: vec![valid],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(4, vec![unchanged_invalid]));
+        registry.apply(player_info_data(7, vec![valid]));
         let mut incoming_valid = player(30);
         incoming_valid.league_projected_gain = 9;
         let mut admission = PlayerInfoAdmission {
             updated_existing: vec![registry.client_packets(&HashSet::from([4]))[0].clone()],
-            admitted: PlayerInfoControlData {
-                client_id: 9,
-                players: vec![incoming_valid],
-                ..Default::default()
-            },
+            admitted: player_info_data(9, vec![incoming_valid]),
             joined_player_team_updates: Vec::new(),
         };
 
@@ -4212,9 +4143,9 @@ mod tests {
     #[test]
     fn recreation_order_contains_only_currently_joined_players() {
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        registry.apply(player_info_data(
+            3,
+            vec![
                 ControlPlayerInfoEntry {
                     id: 7,
                     flags: PLAYER_INFO_FLAG_JOINED,
@@ -4227,17 +4158,15 @@ mod tests {
                 },
                 player(9),
             ],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![ControlPlayerInfoEntry {
+        ));
+        registry.apply(player_info_data(
+            4,
+            vec![ControlPlayerInfoEntry {
                 id: 10,
                 flags: PLAYER_INFO_FLAG_JOINED,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+        ));
 
         assert_eq!(registry.recreation_players(), vec![(3, 7), (4, 10)]);
         assert_eq!(registry.recreation_info_ids(), vec![7, 10]);
@@ -4290,19 +4219,8 @@ mod tests {
         assert!(live_clients[1].lobby_ready);
 
         let mut players = ControlPlayerInfoRegistry::default();
-        players.apply(PlayerInfoControlData {
-            client_id: 99,
-            players: vec![player(3)],
-            ..Default::default()
-        });
-        players.replace_snapshot(
-            40,
-            [PlayerInfoControlData {
-                client_id: 0,
-                players: vec![player(12)],
-                ..Default::default()
-            }],
-        );
+        players.apply(player_info_data(99, vec![player(3)]));
+        players.replace_snapshot(40, [player_info_data(0, vec![player(12)])]);
         assert!(players.get(3).is_none());
         assert!(players.get(12).is_some());
         let admitted = players
@@ -4465,9 +4383,9 @@ mod tests {
         // history for evaluation and replay state
         // (src/C4Network2Players.cpp:425-459).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        registry.apply(player_info_data(
+            3,
+            vec![
                 player(7),
                 ControlPlayerInfoEntry {
                     id: 8,
@@ -4475,8 +4393,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        });
+        ));
 
         registry.on_client_part(3);
 
@@ -4492,11 +4409,7 @@ mod tests {
         // prunes unjoined records (src/C4PlayerList.cpp:219-239;
         // src/C4PlayerInfo.cpp:327-334).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![player(7), player(8)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![player(7), player(8)]));
 
         assert_eq!(registry.client_info_ids(3), vec![7, 8]);
         assert!(registry.mark_joined(7, 3, 17));
@@ -4565,11 +4478,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![resource_player(7, 61)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![resource_player(7, 61)]));
         registry.reserve_player_ids_through(7);
         let mut callback_resource_ids = Vec::new();
 
@@ -4611,11 +4520,7 @@ mod tests {
         // request is an ordinary runtime join and takes the next player ID
         // (src/C4PlayerList.cpp:398-409; src/C4PlayerInfo.cpp:568-580,781-807).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![profile_row(7, 61)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![profile_row(7, 61)]));
         registry.reserve_player_ids_through(7);
         assert!(registry.mark_retired(7, 120));
         assert!(registry.rejoin_after_elimination_allowed());
@@ -4648,11 +4553,10 @@ mod tests {
         // CID_RemovePlr — never entered the eliminated set at all
         // (src/C4PlayerList.cpp:219-239; src/C4PlayerInfo.cpp:327-334).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![profile_row(7, 61), profile_row(8, 62)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            3,
+            vec![profile_row(7, 61), profile_row(8, 62)],
+        ));
         registry.reserve_player_ids_through(8);
         assert!(registry.mark_removed(7, false, 120));
         assert!(registry.mark_retired(8, 130));
@@ -4689,11 +4593,7 @@ mod tests {
         // exactly like the double join that request otherwise would be
         // (src/C4Network2Players.cpp:166-181).
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![profile_row(7, 61)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, vec![profile_row(7, 61)]));
         registry.reserve_player_ids_through(7);
         assert!(registry.mark_retired(7, 120));
         registry.set_rejoin_after_elimination_allowed(false);
@@ -4725,11 +4625,10 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![resource_player(7, 61, 0), resource_player(8, 62, 0)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            3,
+            vec![resource_player(7, 61, 0), resource_player(8, 62, 0)],
+        ));
         registry.reserve_player_ids_through(8);
         let before = registry.retained_rows_snapshot();
         let mut callback_called = false;
@@ -4770,14 +4669,13 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        registry.apply(player_info_data(
+            3,
+            vec![
                 resource_player(7, 61, 0),
                 resource_player(8, 62, PLAYER_INFO_FLAG_REMOVED),
             ],
-            ..Default::default()
-        });
+        ));
         registry.reserve_player_ids_through(8);
 
         let same_client = registry
@@ -4857,11 +4755,10 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 1,
-            players: vec![named(1, b"\xc4lice", 0x00f4_0000)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            1,
+            vec![named(1, b"\xc4lice", 0x00f4_0000)],
+        ));
         registry.reserve_player_ids_through(1);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -4911,17 +4808,15 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 9,
-            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            players: vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![named(2, crate::PLAYER_INFO_TYPE_SCRIPT, 0x0000_c800)],
-            ..Default::default()
-        });
+        registry.apply(flagged_player_info_data(
+            9,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
+        ));
+        registry.apply(player_info_data(
+            3,
+            vec![named(2, crate::PLAYER_INFO_TYPE_SCRIPT, 0x0000_c800)],
+        ));
         registry.reserve_player_ids_through(2);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -4983,28 +4878,26 @@ mod tests {
                 ..Default::default()
             };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 10,
-            players: vec![named(
+        registry.apply(player_info_data(
+            10,
+            vec![named(
                 1,
                 PLAYER_INFO_TYPE_USER,
                 b"Same (2)",
                 b"Same (3)",
                 0x00f4_0000,
             )],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 20,
-            players: vec![named(
+        ));
+        registry.apply(player_info_data(
+            20,
+            vec![named(
                 2,
                 crate::PLAYER_INFO_TYPE_SCRIPT,
                 b"Same",
                 b"Same (3)",
                 0x0000_c800,
             )],
-            ..Default::default()
-        });
+        ));
         registry.reserve_player_ids_through(2);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -5061,35 +4954,29 @@ mod tests {
                 ..Default::default()
             };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 10,
-            players: vec![named(
+        registry.apply(player_info_data(
+            10,
+            vec![named(
                 1,
                 PLAYER_INFO_TYPE_USER,
                 b"Same (2)",
                 b"Same (3)",
                 0x00f4_0000,
             )],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 20,
-            players: vec![named(
+        ));
+        registry.apply(player_info_data(
+            20,
+            vec![named(
                 2,
                 crate::PLAYER_INFO_TYPE_SCRIPT,
                 b"Same",
                 b"Same (3)",
                 0x0000_c800,
             )],
-            ..Default::default()
-        });
+        ));
         let mut fixed = named(3, PLAYER_INFO_TYPE_USER, b"Same", b"", 0x0000_00f4);
         fixed.flags |= PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
-        registry.apply(PlayerInfoControlData {
-            client_id: 30,
-            players: vec![fixed],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(30, vec![fixed]));
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
             ranges: Vec::new(),
@@ -5121,11 +5008,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 1,
-            players: vec![named(1, b"One")],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(1, vec![named(1, b"One")]));
         registry.reserve_player_ids_through(1);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [10, 20, 30].into(),
@@ -5160,17 +5043,16 @@ mod tests {
     #[test]
     fn admission_reclaims_free_original_color_without_random_draws() {
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 1,
-            players: vec![ControlPlayerInfoEntry {
+        registry.apply(player_info_data(
+            1,
+            vec![ControlPlayerInfoEntry {
                 id: 1,
                 name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
                 color: 0x0000_00f4,
                 original_color: 0x0000_00f4,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+        ));
         registry.reserve_player_ids_through(1);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -5211,17 +5093,16 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             1,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                1,
+                vec![ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Shifted".to_vec()).unwrap(),
                     color: 0x0000_00f4,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
         let before = registry.retained_rows_snapshot();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -5259,9 +5140,9 @@ mod tests {
     #[test]
     fn higher_priority_shifted_color_reclaims_from_one_lower_blocker_and_readds_it() {
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 1,
-            players: vec![ControlPlayerInfoEntry {
+        registry.apply(player_info_data(
+            1,
+            vec![ControlPlayerInfoEntry {
                 id: 1,
                 player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
                 name: LegacyCString::from_bytes(b"Lower".to_vec()).unwrap(),
@@ -5269,8 +5150,7 @@ mod tests {
                 original_color: 0x00f4_0000,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+        ));
         registry.reserve_player_ids_through(1);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [10, 20, 30].into(),
@@ -5313,17 +5193,16 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             1,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                1,
+                vec![ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
         let before = registry.retained_rows_snapshot();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -5366,17 +5245,16 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             1,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                1,
+                vec![ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
         let resource_id = 77;
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -5434,14 +5312,13 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             2,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![
+            [player_info_data(
+                1,
+                vec![
                     named(1, b"Original blocker", 0x00f4_0000),
                     named(2, b"Current blocker", 0x0000_00f4),
                 ],
-                ..Default::default()
-            }],
+            )],
         );
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [10, 20, 30].into(),
@@ -5478,40 +5355,24 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             1,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                1,
+                vec![ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
-        let team = |id| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id| initial_team(id, Vec::new(), 0x0010_0000 + u32::try_from(id).unwrap(), 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1), team(2)],
+            ..initial_team_metadata()
         };
         let teams_before = teams.clone();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -5560,11 +5421,10 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            3,
+            vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
+        ));
         registry.reserve_player_ids_through(1);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -5600,28 +5460,13 @@ mod tests {
 
     #[test]
     fn lobby_free_admission_uses_safe_random_tie_for_smallest_team() {
-        let team = |id| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id| initial_team(id, Vec::new(), 0x0010_0000 + u32::try_from(id).unwrap(), 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1), team(2)],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -5732,32 +5577,24 @@ mod tests {
                 second_team,
                 expected_team,
             } = case;
-            let team = |id, max_players, player_ids| crate::InitialNetworkTeam {
-                id,
-                name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-                player_start_index: 0,
-                player_ids,
-                color: 0x0010_0000 + u32::try_from(id).unwrap(),
-                icon_spec: LegacyCString::default(),
-                max_players,
+            let team = |id, max_players, player_ids| {
+                initial_team(
+                    id,
+                    player_ids,
+                    0x0010_0000 + u32::try_from(id).unwrap(),
+                    max_players,
+                )
             };
             let mut team_rows = vec![team(1, 0, vec![10])];
             if let Some((max_players, player_ids)) = second_team {
                 team_rows.push(team(2, max_players, player_ids));
             }
             let mut teams = crate::InitialNetworkTeamMetadata {
-                active: true,
-                custom: true,
-                allow_hostility_change: false,
-                allow_team_switch: false,
-                auto_generate_teams: false,
                 last_team_id: 2,
                 team_distribution: distribution,
                 team_colors: false,
-                max_script_players: 0,
-                script_player_names: LegacyCString::default(),
-                random_team_count: 0,
                 teams: team_rows,
+                ..initial_team_metadata()
             };
             let existing = ControlPlayerInfoEntry {
                 id: 10,
@@ -5768,14 +5605,7 @@ mod tests {
                 ..Default::default()
             };
             let mut registry = ControlPlayerInfoRegistry::default();
-            registry.replace_snapshot(
-                10,
-                [PlayerInfoControlData {
-                    client_id: 3,
-                    players: vec![existing.clone()],
-                    ..Default::default()
-                }],
-            );
+            registry.replace_snapshot(10, [player_info_data(3, vec![existing.clone()])]);
             let mut requested = existing;
             requested.team = target_team;
             let mut oracle = RecordingTeamAssignmentOracle {
@@ -5811,28 +5641,15 @@ mod tests {
 
     #[test]
     fn host_authored_script_runtime_packet_is_team_assigned_without_lobby() {
-        let team = |id, player_ids| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
+        let team = |id, player_ids| {
+            initial_team(id, player_ids, 0x0010_0000 + u32::try_from(id).unwrap(), 0)
         };
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, vec![41]), team(2, Vec::new())],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -5870,28 +5687,15 @@ mod tests {
 
     #[test]
     fn free_custom_user_team_assignment_obeys_lobby_state() {
-        let team = |id, player_ids| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
+        let team = |id, player_ids| {
+            initial_team(id, player_ids, 0x0010_0000 + u32::try_from(id).unwrap(), 0)
         };
         let base_teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, vec![41]), team(2, Vec::new())],
+            ..initial_team_metadata()
         };
 
         for (has_lobby, expected_team) in [(false, 0), (true, 2)] {
@@ -5930,29 +5734,14 @@ mod tests {
 
     #[test]
     fn free_custom_runtime_shifted_color_ignores_unreachable_team_color() {
-        let team = |id, color| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, color| initial_team(id, Vec::new(), color, 0);
         let original_color = 0x00f4_0000;
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, original_color), team(2, 0x0000_00f4)],
+            ..initial_team_metadata()
         };
         let teams_before = teams.clone();
         let mut registry = ControlPlayerInfoRegistry::default();
@@ -5996,40 +5785,25 @@ mod tests {
 
     #[test]
     fn unique_team_assignment_forces_color_before_shifted_conflict_preflight() {
-        let team = |id, player_ids, color| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids, color| initial_team(id, player_ids, color, 0);
         let conflicting_original = 0x00f4_0000;
         let assigned_color = 0x0000_c800;
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![
                 team(1, vec![1], conflicting_original),
                 team(2, Vec::new(), assigned_color),
             ],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             1,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                1,
+                vec![ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
                     team: 1,
@@ -6037,8 +5811,7 @@ mod tests {
                     original_color: conflicting_original,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -6081,15 +5854,7 @@ mod tests {
 
     #[test]
     fn automatic_team_assignment_reports_exact_duplicate_id_team_color_for_joined_player() {
-        let team = |id, player_ids, color| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids, color| initial_team(id, player_ids, color, 0);
         let joined = ControlPlayerInfoEntry {
             id: 7,
             name: LegacyCString::from_bytes(b"Joined".to_vec()).unwrap(),
@@ -6100,31 +5865,17 @@ mod tests {
         };
         let assigned_color = 0x0000_c800;
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 1,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![
                 team(1, vec![99], 0x00f4_0000),
                 team(1, Vec::new(), assigned_color),
             ],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.replace_snapshot(
-            7,
-            [PlayerInfoControlData {
-                client_id: 3,
-                players: vec![joined.clone()],
-                ..Default::default()
-            }],
-        );
+        registry.replace_snapshot(7, [player_info_data(3, vec![joined.clone()])]);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
             ranges: Vec::new(),
@@ -6168,44 +5919,28 @@ mod tests {
 
     #[test]
     fn free_lobby_attribute_rejection_precedes_team_tie_rng() {
-        let team = |id| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id| initial_team(id, Vec::new(), 0x0010_0000 + u32::try_from(id).unwrap(), 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1), team(2)],
+            ..initial_team_metadata()
         };
         let teams_before = teams.clone();
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             1,
-            [PlayerInfoControlData {
-                client_id: 1,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                1,
+                vec![ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
                     color: 0x00f4_0000,
                     original_color: 0x00f4_0000,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
         let registry_before = registry.retained_rows_snapshot();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -6250,28 +5985,13 @@ mod tests {
         // the current color without changing OriginalColor
         // (src/C4Network2Players.cpp:160-205;
         // src/C4Teams.cpp:53-81,474-542).
-        let team = |id, color| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, color| initial_team(id, Vec::new(), color, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, 0x00f4_0000), team(2, 0x0000_c800)],
+            ..initial_team_metadata()
         };
         let original_color = 0x0012_3456;
         let request = crate::PlayerInfoUpdateRequest {
@@ -6311,28 +6031,13 @@ mod tests {
         // RandomInvisible is a random distribution, so a runtime user cannot
         // defer team selection: the host runs the same least-used reservoir
         // assignment as Random (src/C4Teams.cpp:465-471,474-542).
-        let team = |id| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0x0010_0000 + u32::try_from(id).unwrap(),
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id| initial_team(id, Vec::new(), 0x0010_0000 + u32::try_from(id).unwrap(), 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::RandomInvisible,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1), team(2)],
+            ..initial_team_metadata()
         };
         let request = crate::PlayerInfoUpdateRequest {
             client_id: 3,
@@ -6363,28 +6068,13 @@ mod tests {
         // ascending positive ID order; PIF_Joined alone does not exclude one
         // (src/C4Teams.cpp:151-176; src/C4PlayerInfo.h:212;
         // src/C4PlayerInfo.cpp:997-1009,1060-1074).
-        let team = |id, player_ids| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids| initial_team(id, player_ids, 0, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, vec![5, 99, 1, 2, 5]), team(2, vec![4, 6, 77])],
+            ..initial_team_metadata()
         };
         let info = |id, team, flags| ControlPlayerInfoEntry {
             id,
@@ -6393,24 +6083,22 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 9,
-            players: vec![
+        registry.apply(player_info_data(
+            9,
+            vec![
                 info(5, 1, 0),
                 info(1, 2, 0),
                 info(4, 2, PLAYER_INFO_FLAG_REMOVED),
             ],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        ));
+        registry.apply(player_info_data(
+            3,
+            vec![
                 info(6, 2, PLAYER_INFO_FLAG_JOINED),
                 info(3, 1, 0),
                 info(2, 1, 0),
             ],
-            ..Default::default()
-        });
+        ));
 
         registry.recheck_team_players(&mut teams);
 
@@ -6427,41 +6115,34 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            players: vec![info(1, 0, PLAYER_INFO_FLAG_REMOVED), info(2, 3, 0)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 9,
-            players: vec![info(3, 0, 0), info(4, 3, 0)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            7,
+            vec![info(1, 0, PLAYER_INFO_FLAG_REMOVED), info(2, 3, 0)],
+        ));
+        registry.apply(player_info_data(9, vec![info(3, 0, 0), info(4, 3, 0)]));
 
         assert!(registry.has_same_team_players(7, 9));
         assert!(!registry.has_same_team_players(7, 8));
 
-        registry.apply(PlayerInfoControlData {
-            client_id: 9,
-            players: vec![info(4, 3, PLAYER_INFO_FLAG_REMOVED)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            9,
+            vec![info(4, 3, PLAYER_INFO_FLAG_REMOVED)],
+        ));
         assert!(!registry.has_same_team_players(7, 9));
     }
 
     #[test]
     fn random_invisible_lobby_color_requires_the_assigned_team_to_exist() {
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            players: vec![ControlPlayerInfoEntry {
+        registry.apply(player_info_data(
+            7,
+            vec![ControlPlayerInfoEntry {
                 team: 4,
                 color: 0x0012_3456,
                 original_color: 0x0065_4321,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+        ));
 
         assert_eq!(
             registry.first_user_lobby_color(7, true, |team| team == 5),
@@ -6483,39 +6164,24 @@ mod tests {
             crate::InitialNetworkTeamDistribution::Random,
             crate::InitialNetworkTeamDistribution::RandomInvisible,
         ] {
-            let team = |id, player_ids, color| crate::InitialNetworkTeam {
-                id,
-                name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-                player_start_index: 0,
-                player_ids,
-                color,
-                icon_spec: LegacyCString::default(),
-                max_players: 0,
-            };
+            let team = |id, player_ids, color| initial_team(id, player_ids, color, 0);
             let team_one_color = 0x00f4_0000;
             let team_two_color = 0x0000_c800;
             let original_color = 0x0012_3456;
             let mut teams = crate::InitialNetworkTeamMetadata {
-                active: true,
-                custom: true,
-                allow_hostility_change: false,
-                allow_team_switch: false,
-                auto_generate_teams: false,
                 last_team_id: 2,
                 team_distribution: distribution,
                 team_colors: true,
-                max_script_players: 0,
-                script_player_names: LegacyCString::default(),
-                random_team_count: 0,
                 teams: vec![
                     team(1, vec![1, 2, 3, 4], team_one_color),
                     team(2, vec![5], team_two_color),
                 ],
+                ..initial_team_metadata()
             };
             let mut registry = ControlPlayerInfoRegistry::default();
-            registry.apply(PlayerInfoControlData {
-                client_id: 3,
-                players: (1..=5)
+            registry.apply(player_info_data(
+                3,
+                (1..=5)
                     .map(|id| ControlPlayerInfoEntry {
                         id,
                         flags: if id == 1 { PLAYER_INFO_FLAG_JOINED } else { 0 },
@@ -6533,8 +6199,7 @@ mod tests {
                         ..Default::default()
                     })
                     .collect(),
-                ..Default::default()
-            });
+            ));
             let mut oracle = RecordingTeamAssignmentOracle {
                 outcomes: [].into(),
                 ranges: Vec::new(),
@@ -6567,28 +6232,13 @@ mod tests {
 
     #[test]
     fn random_team_recheck_three_to_zero_moves_one_and_flushes_one_clean_packet() {
-        let team = |id, player_ids| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids| initial_team(id, player_ids, 0, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, vec![1, 2, 3]), team(2, vec![])],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(PlayerInfoControlData {
@@ -6621,41 +6271,25 @@ mod tests {
 
     #[test]
     fn delayed_echo_reservation_excludes_player_from_random_team_recheck() {
-        let team = |id, player_ids| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids| initial_team(id, player_ids, 0, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, vec![1, 2, 3]), team(2, Vec::new())],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            players: (1..=3)
+        registry.apply(player_info_data(
+            7,
+            (1..=3)
                 .map(|id| ControlPlayerInfoEntry {
                     id,
                     team: 1,
                     ..Default::default()
                 })
                 .collect(),
-            ..Default::default()
-        });
+        ));
         let reserved = registry.get(1).expect("reserved player exists").clone();
         registry.reserve_unjoined_player_snapshots(&[reserved]);
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -6674,33 +6308,18 @@ mod tests {
 
     #[test]
     fn balanced_random_team_recheck_still_consumes_the_lowest_team_tie_draw() {
-        let team = |id, player_id| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids: vec![player_id],
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_id| initial_team(id, vec![player_id], 0, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, 1), team(2, 2)],
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        registry.apply(player_info_data(
+            3,
+            vec![
                 ControlPlayerInfoEntry {
                     id: 1,
                     team: 1,
@@ -6712,8 +6331,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        });
+        ));
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [1].into(),
             ranges: Vec::new(),
@@ -6729,28 +6347,13 @@ mod tests {
 
     #[test]
     fn random_team_recheck_deduplicates_owners_in_registry_order() {
-        let team = |id, player_ids| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids| initial_team(id, player_ids, 0, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::RandomInvisible,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![team(1, vec![1, 2, 3, 4, 5]), team(2, vec![])],
+            ..initial_team_metadata()
         };
         let info = |id| ControlPlayerInfoEntry {
             id,
@@ -6758,16 +6361,11 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 9,
-            players: vec![info(2), info(3), info(4), info(5)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![info(1)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            9,
+            vec![info(2), info(3), info(4), info(5)],
+        ));
+        registry.apply(player_info_data(3, vec![info(1)]));
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
             ranges: Vec::new(),
@@ -6841,9 +6439,9 @@ mod tests {
                 }],
             };
             let mut registry = ControlPlayerInfoRegistry::default();
-            registry.apply(PlayerInfoControlData {
-                client_id: 9,
-                players: vec![
+            registry.apply(player_info_data(
+                9,
+                vec![
                     ControlPlayerInfoEntry {
                         id: 3,
                         team: 7,
@@ -6867,8 +6465,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
-                ..Default::default()
-            });
+            ));
             let mut oracle = GeneratingTeamAssignmentOracle {
                 outcomes: oracle_outcomes.into(),
                 ..Default::default()
@@ -6922,31 +6519,16 @@ mod tests {
 
     #[test]
     fn full_reassignment_walks_player_ids_but_flushes_packets_in_registry_order() {
-        let team = |id, player_ids, color| crate::InitialNetworkTeam {
-            id,
-            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
-            player_start_index: 0,
-            player_ids,
-            color,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        };
+        let team = |id, player_ids, color| initial_team(id, player_ids, color, 0);
         let mut teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Random,
             team_colors: true,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![
                 team(1, vec![2, 3, 4, 5], 0x00f4_0000),
                 team(2, vec![1], 0x0000_00f4),
             ],
+            ..initial_team_metadata()
         };
         let info = |id, team, flags| ControlPlayerInfoEntry {
             id,
@@ -6957,21 +6539,15 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 9,
-            players: vec![info(3, 1, 0), info(1, 2, PLAYER_INFO_FLAG_JOINED)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![info(4, 1, 0), info(2, 1, PLAYER_INFO_FLAG_JOINED)],
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 7,
-            players: vec![info(5, 1, 0)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(
+            9,
+            vec![info(3, 1, 0), info(1, 2, PLAYER_INFO_FLAG_JOINED)],
+        ));
+        registry.apply(player_info_data(
+            3,
+            vec![info(4, 1, 0), info(2, 1, PLAYER_INFO_FLAG_JOINED)],
+        ));
+        registry.apply(player_info_data(7, vec![info(5, 1, 0)]));
         registry.issued_join_ids.insert(5);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [1].into(),
@@ -7000,17 +6576,9 @@ mod tests {
     #[test]
     fn team_color_update_clears_safe_forced_names_and_rolls_back_name_conflicts() {
         let teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 2,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![
                 crate::InitialNetworkTeam {
                     id: 1,
@@ -7031,6 +6599,7 @@ mod tests {
                     max_players: 0,
                 },
             ],
+            ..initial_team_metadata()
         };
         let named =
             |id, team, name: &[u8], forced_name: &[u8], original_color| ControlPlayerInfoEntry {
@@ -7043,14 +6612,13 @@ mod tests {
                 ..Default::default()
             };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 5,
-            players: vec![
+        registry.apply(player_info_data(
+            5,
+            vec![
                 named(1, 1, b"Alice", b"Alice (2)", 0x00f4_0000),
                 named(2, 2, b"Bob", b"", 0x0000_00f4),
             ],
-            ..Default::default()
-        });
+        ));
 
         let packets = registry
             .update_team_colors(&teams, true, &[])
@@ -7079,23 +6647,16 @@ mod tests {
     #[test]
     fn team_color_conflict_error_preserves_the_complete_registry() {
         let teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 0,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: Vec::new(),
+            ..initial_team_metadata()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![
+        registry.apply(player_info_data(
+            4,
+            vec![
                 ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
@@ -7111,8 +6672,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        });
+        ));
         let before = registry.retained_rows_snapshot();
 
         let error = registry
@@ -7129,24 +6689,17 @@ mod tests {
     #[test]
     fn ordered_current_attribute_blockers_fail_before_mutation() {
         let teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 0,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: Vec::new(),
+            ..initial_team_metadata()
         };
 
         let mut color_blocked = ControlPlayerInfoRegistry::default();
-        color_blocked.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![
+        color_blocked.apply(player_info_data(
+            4,
+            vec![
                 ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
@@ -7162,8 +6715,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        });
+        ));
         let color_before = color_blocked.retained_rows_snapshot();
         assert!(matches!(
             color_blocked.update_team_colors(&teams, true, &[]),
@@ -7172,9 +6724,9 @@ mod tests {
         assert_eq!(color_blocked.retained_rows_snapshot(), color_before);
 
         let mut name_blocked = ControlPlayerInfoRegistry::default();
-        name_blocked.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![
+        name_blocked.apply(player_info_data(
+            4,
+            vec![
                 ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
@@ -7192,8 +6744,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        });
+        ));
         let name_before = name_blocked.retained_rows_snapshot();
         assert!(matches!(
             name_blocked.update_team_colors(&teams, true, &[]),
@@ -7206,17 +6757,9 @@ mod tests {
     fn missing_restore_color_falls_back_to_team_or_preserves_current_color() {
         let team_color = 0x0000_00f4;
         let teams = crate::InitialNetworkTeamMetadata {
-            active: true,
-            custom: true,
-            allow_hostility_change: false,
-            allow_team_switch: false,
-            auto_generate_teams: false,
             last_team_id: 1,
             team_distribution: crate::InitialNetworkTeamDistribution::Free,
             team_colors: false,
-            max_script_players: 0,
-            script_player_names: LegacyCString::default(),
-            random_team_count: 0,
             teams: vec![crate::InitialNetworkTeam {
                 id: 1,
                 name: LegacyCString::from_bytes(b"Blue".to_vec()).unwrap(),
@@ -7226,12 +6769,13 @@ mod tests {
                 icon_spec: LegacyCString::default(),
                 max_players: 0,
             }],
+            ..initial_team_metadata()
         };
         let unchanged_color = 0x0012_3456;
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 4,
-            players: vec![
+        registry.apply(player_info_data(
+            4,
+            vec![
                 ControlPlayerInfoEntry {
                     id: 1,
                     name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
@@ -7251,8 +6795,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        });
+        ));
 
         let packets = registry
             .update_team_colors(&teams, true, &[])
@@ -7403,16 +6946,8 @@ mod tests {
         };
         let earlier_players = vec![script(7)];
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: earlier_players.clone(),
-            ..Default::default()
-        });
-        registry.apply(PlayerInfoControlData {
-            client_id: 3,
-            players: vec![script(8)],
-            ..Default::default()
-        });
+        registry.apply(player_info_data(3, earlier_players.clone()));
+        registry.apply(player_info_data(3, vec![script(8)]));
 
         let earlier_echo = registry.issue_unjoined_player_snapshots(3, &earlier_players, |_| None);
 
@@ -7815,14 +7350,7 @@ mod tests {
             ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.replace_snapshot(
-            10,
-            [PlayerInfoControlData {
-                client_id: 3,
-                players: vec![associated(10, b"Existing")],
-                ..Default::default()
-            }],
-        );
+        registry.replace_snapshot(10, [player_info_data(3, vec![associated(10, b"Existing")])]);
         let admit = |registry: &mut ControlPlayerInfoRegistry, client_id, flags, name: &[u8]| {
             let mut oracle = RecordingTeamAssignmentOracle {
                 outcomes: [].into(),
@@ -7871,9 +7399,9 @@ mod tests {
     #[test]
     fn savegame_resume_promotes_associated_unjoined_info_before_recreation() {
         let mut registry = ControlPlayerInfoRegistry::default();
-        registry.apply(PlayerInfoControlData {
-            client_id: 0,
-            players: vec![ControlPlayerInfoEntry {
+        registry.apply(player_info_data(
+            0,
+            vec![ControlPlayerInfoEntry {
                 id: 91,
                 savegame_player: 7,
                 flags: PLAYER_INFO_FLAG_REMOVED
@@ -7884,8 +7412,7 @@ mod tests {
                 team: 3,
                 ..Default::default()
             }],
-            ..Default::default()
-        });
+        ));
 
         assert!(registry.resume_joined_savegame_player(7, 5, false));
 
@@ -7911,9 +7438,9 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             8,
-            [PlayerInfoControlData {
-                client_id: 0,
-                players: vec![
+            [player_info_data(
+                0,
+                vec![
                     ControlPlayerInfoEntry {
                         id: 91,
                         savegame_player: 7,
@@ -7924,8 +7451,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
-                ..Default::default()
-            }],
+            )],
         );
         let joined = |id| ControlPlayerInfoEntry {
             id,
@@ -7962,9 +7488,9 @@ mod tests {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
             100,
-            [PlayerInfoControlData {
-                client_id: 3,
-                players: vec![ControlPlayerInfoEntry {
+            [player_info_data(
+                3,
+                vec![ControlPlayerInfoEntry {
                     name: current_name.clone(),
                     filename: current_filename.clone(),
                     flags: current_flags,
@@ -7976,8 +7502,7 @@ mod tests {
                     league_score: 55,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
+            )],
         );
         let restore = ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Saved identity".to_vec()).unwrap(),

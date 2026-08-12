@@ -6,17 +6,17 @@ fn direct_runtime_repairs_urls_truncated_by_the_old_rust_parser() {
     // C++ defaults both fields to the complete HTTPS URL
     // (C4Config.h:35-38; C4Config.cpp:545-550). The old Rust parser
     // treated `//` as a comment and persisted only the scheme.
-    let dir = tempdir().expect("config directory");
+    let dir = tempdir();
     let path = dir.path().join("clonk-rust.config");
     fs::write(
         &path,
         "[Network]\nServerAddress = https:\nAlternateServerAddress = http:\n",
     )
-    .expect("seed truncated config");
+    .test_value();
 
     assert!(repair_rust_truncated_masterserver_urls(&path).expect("repair config"));
 
-    let config = Config::load(path).expect("load repaired config");
+    let config = Config::load(path).test_value();
     assert_eq!(
         config.get_in(Some("Network"), "ServerAddress"),
         Some(OFFICIAL_LEAGUE_SERVER)
@@ -36,18 +36,18 @@ fn reference_query_settings_use_cpp_configured_locale() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create config directory");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut config = Config::new();
     config.set_in(Some("General"), "LanguageCharset", "RUSSIAN");
     config.set_in(Some("General"), "LanguageEx", "RU,US,DE");
-    config.save(paths.config_file()).expect("persist locale");
+    config.save(paths.config_file()).test_value();
 
     assert_eq!(
         load_reference_query_settings(Some(&paths)),
@@ -68,19 +68,19 @@ fn client_network_settings_preserve_configured_ports_and_zero_disables_protocol(
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create config directory");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut config = Config::new();
     config.set_in(Some("General"), "Name", "Exact maker");
     config.set_in(Some("Network"), "PortTCP", "0");
     config.set_in(Some("Network"), "PortUDP", "22113");
-    config.save(paths.config_file()).expect("persist ports");
+    config.save(paths.config_file()).test_value();
 
     let settings = client_settings_for_paths(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
@@ -162,19 +162,19 @@ fn zero_ports_flow_to_disabled_app_network_services() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create config directory");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     fs::write(
         paths.config_file(),
         b"[Network]\nPortTCP=0\nPortUDP=0\nPortDiscovery=0\nPortRefServer=0\n",
     )
-    .expect("persist disabled ports");
+    .test_value();
 
     assert_eq!(load_network_startup_settings(Some(&paths)).1, 0);
     assert_eq!(load_network_reference_port(Some(&paths)), 0);
@@ -205,17 +205,18 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     let mut app = new_classic_menu_app(640, 480);
     app.open_options_menu();
     {
-        let network = app.startup_options_dialog.as_mut().unwrap().network_mut();
+        let network = app
+            .startup_options_dialog
+            .as_mut()
+            .test_value()
+            .network_mut();
         let tcp = network.port(NetworkPortId::Tcp).port;
         network.port_mut(NetworkPortId::Reference).port = tcp;
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
-        .expect("show TCP/reference validation");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::Options);
-    let tcp_error = app
-        .message_dialogs
-        .last()
-        .expect("TCP/reference validation dialog");
+    let tcp_error = app.message_dialogs.last().test_value();
     assert_eq!(tcp_error.state.caption(), "Configuration error");
     assert_eq!(
         tcp_error.state.message(),
@@ -223,21 +224,22 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     );
     assert_eq!(tcp_error.state.icon(), MessageDialogIcon::ERROR);
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss TCP error");
+        .test_value();
 
     {
-        let network = app.startup_options_dialog.as_mut().unwrap().network_mut();
+        let network = app
+            .startup_options_dialog
+            .as_mut()
+            .test_value()
+            .network_mut();
         network.port_mut(NetworkPortId::Reference).port = 11_111;
         let udp = network.port(NetworkPortId::Udp).port;
         network.port_mut(NetworkPortId::Discovery).port = udp;
     }
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
-        .expect("show UDP/discovery validation");
+        .test_value();
     assert_eq!(app.startup_view, StartupView::Options);
-    let udp_error = app
-        .message_dialogs
-        .last()
-        .expect("UDP/discovery validation dialog");
+    let udp_error = app.message_dialogs.last().test_value();
     assert_eq!(udp_error.state.caption(), "Configuration error");
     assert_eq!(
         udp_error.state.message(),
@@ -245,24 +247,24 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
     );
     assert_eq!(udp_error.state.icon(), MessageDialogIcon::ERROR);
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("dismiss UDP error");
+        .test_value();
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::NetworkCheckboxChanged {
         id: NetworkCheckboxId::UseAlternateServer,
         checked: true,
     }])
-    .expect("show alternate-server notice");
+    .test_value();
     assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::OptionsAlternateServerNotice
     )));
     app.message_dialogs
         .last_mut()
-        .unwrap()
+        .test_value()
         .state
         .handle_hotkey('D');
     app.finish_message_dialog(MessageDialogResult::Ok)
-        .expect("accept don't-show gate");
+        .test_value();
     assert!(
         app.startup_options_dialog
             .as_ref()
@@ -274,7 +276,7 @@ fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
         id: NetworkCheckboxId::UseAlternateServer,
         checked: true,
     }])
-    .expect("hidden alternate-server notice");
+    .test_value();
     assert!(app.message_dialogs.is_empty());
 }
 
@@ -292,7 +294,7 @@ fn network_create_selects_a_scenario_before_binding_a_host() {
     app.process_network_dialog_actions(vec![
         clonk_frontend::startup_netdlg::NetDlgAction::CreateGame,
     ])
-    .expect("open network scenario selector");
+    .test_value();
 
     assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
     assert_eq!(
@@ -303,8 +305,7 @@ fn network_create_selects_a_scenario_before_binding_a_host() {
     assert!(app.network.is_none());
     assert!(app.network_game_advertiser.is_none());
 
-    app.scensel_do_back()
-        .expect("return from network scenario selector");
+    app.scensel_do_back().test_value();
     assert_eq!(app.startup_view, StartupView::NetworkGame);
 }
 
@@ -315,13 +316,13 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
     // sorted startup player-selection rows never reorder the host's
     // initial packet or NRT_Player IDs (pristine 9ffa0a5d
     // src/C4Game.cpp:361-364; src/C4PlayerInfo.cpp:70-104,357-395).
-    let install = tempdir().expect("install root");
+    let install = tempdir();
     install_global_gui_and_loader_test_root(install.path());
     let content = install.path().join("content");
     let scenario_path = content.join("Order.c4s");
-    fs::create_dir_all(&scenario_path).expect("create scenario group");
+    fs::create_dir_all(&scenario_path).test_value();
     let players = install.path().join("Players");
-    fs::create_dir_all(&players).expect("create player directory");
+    fs::create_dir_all(&players).test_value();
     let write_player = |filename: &str, name: &[u8]| {
         let path = players.join(filename);
         let mut group = clonk_resources::MutableGroup::new(filename);
@@ -330,19 +331,19 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
         player_core.extend_from_slice(b"\n[Preferences]\nColorDw=255\n");
         group
             .add_file_with_metadata("Player.txt", player_core, 1, false)
-            .expect("add player core");
-        fs::write(&path, group.pack().expect("pack player")).expect("write player");
+            .test_value();
+        fs::write(&path, group.pack().test_value()).test_value();
         path
     };
     let bravo = write_player("Bravo.c4p", b"Br\xc3\xa4vo");
     let alpha = write_player("Alpha.c4p", b"Alpha");
-    let user_data = tempdir().expect("user data");
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
-    paths.ensure_user_dirs().expect("create user directories");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
     let mut config = b"[General]\nName=\"M\xc3\xa4ker\"\nPlayerPath=Players\nParticipants=Players/Bravo.c4p;Players/Alpha.c4p\n\n[Network]\nLocalName=\"H\xc3\xa4st\"\nNick=\"N\xc3\xa4ck\"\nComment=\"".to_vec();
     for _ in 0..129 {
         config.extend_from_slice(b"\xc3\xa4");
@@ -350,9 +351,8 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
     config.extend_from_slice(
                 b"\"\nControlRate=7\nControlMode=1\nPortTCP=12345\nPortUDP=12346\nMaxLoadFileSize=123456\nNoRuntimeJoin=0\nEnableUPnP=0\n",
             );
-    fs::write(paths.config_file(), config).expect("write native configured participants");
-    let app =
-        test_game_app(320, 200, AudioOptions::default(), Some(&paths)).expect("initialize app");
+    fs::write(paths.config_file(), config).test_value();
+    let app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     assert_eq!(
         app.startup_player_files
             .iter()
@@ -377,7 +377,7 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
         None,
         None,
     )
-    .expect("prepare host inputs");
+    .test_value();
 
     assert_eq!(
         clonk_resources::encode_legacy_script_text(&preparation.group_maker),
@@ -414,10 +414,7 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
     assert!(!preparation.config.no_runtime_join);
     assert!(!preparation.config.enable_upnp);
 
-    let publication = preparation
-        .league
-        .as_ref()
-        .expect("master-server signup creates a lifecycle client");
+    let publication = preparation.league.test_ref();
     assert!(!publication.league_server_signup);
     assert_eq!(
         preparation
@@ -440,34 +437,27 @@ fn network_host_preparation_keeps_cpp_configured_participant_order() {
 #[test]
 fn command_line_definition_selection_is_published_to_network_clients() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("command-line host user data");
-    let content = tempdir().expect("command-line host content");
+    let user_data = tempdir();
+    let content = tempdir();
     let content_root = content.path();
-    fs::create_dir_all(content_root.join("Material.c4g")).expect("global material group");
+    fs::create_dir_all(content_root.join("Material.c4g")).test_value();
     let base = install_network_definition_pack(content_root, "Base.c4d", "BAS1");
     let extra_one = install_network_definition_pack(content_root, "ExtraOne.c4d", "EXT1");
     let extra_two = install_network_definition_pack(content_root, "ExtraTwo.c4d", "EXT2");
     let objects = install_network_definition_pack(content_root, "Objects.c4d", "OBJS");
     let scenario_path = content_root.join("CommandLine.c4s");
-    fs::create_dir_all(&scenario_path).expect("command-line scenario group");
-    fs::write(
-                scenario_path.join("Scenario.txt"),
-                "[Head]\nTitle=Command Line Definitions\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
-            )
-            .expect("command-line scenario core");
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::write(scenario_path.join("Scenario.txt"), "[Head]\nTitle=Command Line Definitions\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n").test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
-    persist_config_value(&paths, "General", "Definitions", "Base.c4d")
-        .expect("configure default definition seed");
+    persist_config_value(&paths, "General", "Definitions", "Base.c4d").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let classic = parse_classic_command_line(&[
         OsString::from("./ExtraOne.c4d"),
         OsString::from("ExtraTwo.c4d"),
     ]);
-    app.apply_classic_command_line(&classic)
-        .expect("apply classic definition arguments");
-    persist_config_value(&paths, "General", "Definitions", "ChangedAfterParse.c4d")
-        .expect("mutate config after ParseCommandLine snapshot");
+    app.apply_classic_command_line(&classic).test_value();
+    persist_config_value(&paths, "General", "Definitions", "ChangedAfterParse.c4d").test_value();
     let definition_load = app.take_scenario_seed_definition_load();
     assert!(matches!(
         &definition_load,
@@ -482,7 +472,7 @@ fn command_line_definition_selection_is_published_to_network_clients() {
     };
     let staged = app
         .prepare_network_host_scenario(frontend, definition_load)
-        .expect("stage the consumed command-line definition host");
+        .test_value();
     assert!(matches!(
         app.scenario_seed_definition_load(),
         ScenarioDefinitionLoad::Seed { modules, .. }
@@ -509,11 +499,7 @@ fn command_line_definition_selection_is_published_to_network_clients() {
     );
 
     let host = prepared.host_config();
-    let snapshot = host
-        .initial_join_snapshot
-        .as_ref()
-        .expect("prepared JoinData")
-        .clone();
+    let snapshot = host.initial_join_snapshot.test_ref().clone();
     assert_eq!(
         snapshot
             .parameters
@@ -532,13 +518,13 @@ fn command_line_definition_selection_is_published_to_network_clients() {
         .find(|resource| {
             resource.core.resource_type == clonk_network::HostResourceType::Dynamic as u8
         })
-        .expect("published dynamic")
+        .test_value()
         .path
         .clone();
     let dynamic_scenario = Group::open(&dynamic_path)
-        .expect("open published dynamic")
+        .test_value()
         .read_file("Scenario.txt")
-        .expect("dynamic Scenario.txt");
+        .test_value();
     let expected_definitions =
         b"Definitions=\"Base.c4d\",\"./ExtraOne.c4d\",\"ExtraTwo.c4d\",\"Objects.c4d\"";
     assert!(dynamic_scenario
@@ -560,15 +546,15 @@ fn command_line_definition_selection_is_published_to_network_clients() {
             .map(|resource| resource.path.clone())
     };
     let scenario_resources =
-        resolve_client_scenario_resources(&join_data, complete_path).expect("client scenario");
+        resolve_client_scenario_resources(&join_data, complete_path).test_value();
     let game_resources = resolve_client_game_resources(&join_data, |core| {
         host_files
             .iter()
             .find(|resource| resource.core.id == core.id)
             .map(|resource| resource.path.clone())
     })
-    .expect("client game resources");
-    let client_directory = tempdir().expect("client preload directory");
+    .test_value();
+    let client_directory = tempdir();
     let combined_path = client_directory.path().join("Combined2.c4s");
     let mut artifact = GameApp::run_lobby_preload_job(LobbyPreloadJob {
         graphics: LobbyPreloadGraphicsContext {
@@ -586,13 +572,13 @@ fn command_line_definition_selection_is_published_to_network_clients() {
             staging_path: None,
         },
     })
-    .expect("client loads published definition vector");
+    .test_value();
     let mut client_definition_ids = Vec::new();
     artifact
         .client
         .as_mut()
         .and_then(|client| client.scenario.take())
-        .expect("preloaded client Scenario")
+        .test_value()
         .visit_definition_groups(|id, _| client_definition_ids.push(id.to_string()));
     assert_eq!(
         client_definition_ids,
@@ -606,7 +592,7 @@ fn command_line_definition_selection_is_published_to_network_clients() {
     let mut host_definition_ids = Vec::new();
     prepared
         .claim_scenario()
-        .expect("prepared host Scenario")
+        .test_value()
         .visit_definition_groups(|id, _| host_definition_ids.push(id.to_string()));
     assert_eq!(host_definition_ids, client_definition_ids);
 }
@@ -614,11 +600,10 @@ fn command_line_definition_selection_is_published_to_network_clients() {
 #[test]
 fn packed_scenario_alias_is_skipped_as_an_external_definition() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("scenario-alias user data");
-    let content = tempdir().expect("scenario-alias content");
+    let user_data = tempdir();
+    let content = tempdir();
     let content_root = content.path();
-    fs::create_dir_all(content_root.join("Material.c4g"))
-        .expect("scenario-alias global material group");
+    fs::create_dir_all(content_root.join("Material.c4g")).test_value();
     let scenario_path = content_root.join("AliasScenario.c4s");
     let mut scenario_group = clonk_resources::MutableGroup::new("AliasScenario.c4s");
     scenario_group
@@ -626,19 +611,14 @@ fn packed_scenario_alias_is_skipped_as_an_external_definition() {
                     "Scenario.txt",
                     b"[Head]\nTitle=Scenario Alias\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n"
                         .to_vec(),
-                )
-                .expect("add packed scenario core");
+                ).test_value();
     scenario_group
         .add_child(
             "ScenarioDef.c4d",
             packed_network_definition("ScenarioDef.c4d", "SCEN"),
         )
-        .expect("add packed scenario definition");
-    fs::write(
-        &scenario_path,
-        scenario_group.pack().expect("pack aliased scenario"),
-    )
-    .expect("write aliased scenario");
+        .test_value();
+    fs::write(&scenario_path, scenario_group.pack().test_value()).test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
     let app = new_menu_app_with_paths(640, 480, &paths);
@@ -655,18 +635,14 @@ fn packed_scenario_alias_is_skipped_as_an_external_definition() {
                 definition_root: None,
             },
         )
-        .expect("stage packed scenario alias");
+        .test_value();
     assert_eq!(
         staged.scenario.definition_resource_paths(),
         std::slice::from_ref(&scenario_path)
     );
 
     let prepared = prepare_staged_network_host(&app, &staged);
-    let snapshot = prepared
-        .host_config()
-        .initial_join_snapshot
-        .as_ref()
-        .expect("scenario-alias JoinData");
+    let snapshot = prepared.host_config().initial_join_snapshot.test_ref();
     assert_eq!(
         snapshot.parameters.game_resources[0].id,
         snapshot.parameters.scenario.id
@@ -681,9 +657,7 @@ fn packed_scenario_alias_is_skipped_as_an_external_definition() {
         [path_as_legacy_text(&scenario_path)]
     );
 
-    let scenario = prepared
-        .claim_scenario()
-        .expect("claim post-publication scenario alias");
+    let scenario = prepared.claim_scenario().test_value();
     assert!(scenario.definition_resource_paths().is_empty());
     let mut definition_ids = Vec::new();
     scenario.visit_definition_groups(|id, _| definition_ids.push(id.to_string()));
@@ -693,8 +667,8 @@ fn packed_scenario_alias_is_skipped_as_an_external_definition() {
 #[test]
 fn packed_system_alias_becomes_a_repeated_definition_row() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("system-alias user data");
-    let content = tempdir().expect("system-alias content");
+    let user_data = tempdir();
+    let content = tempdir();
     let content_root = content.path();
     let system_path = content_root.join("System.c4g");
     let mut system_group = clonk_resources::MutableGroup::new("System.c4g");
@@ -703,21 +677,16 @@ fn packed_system_alias_becomes_a_repeated_definition_row() {
             "SystemDef.c4d",
             packed_network_definition("SystemDef.c4d", "SYSD"),
         )
-        .expect("add definition to packed System");
-    fs::write(
-        &system_path,
-        system_group.pack().expect("pack aliased System"),
-    )
-    .expect("write aliased System");
-    fs::create_dir_all(content_root.join("Material.c4g"))
-        .expect("system-alias global material group");
+        .test_value();
+    fs::write(&system_path, system_group.pack().test_value()).test_value();
+    fs::create_dir_all(content_root.join("Material.c4g")).test_value();
     let scenario_path = content_root.join("SystemAlias.c4s");
-    fs::create_dir_all(&scenario_path).expect("system-alias scenario");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=System Alias\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
     )
-    .expect("system-alias scenario core");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
     let app = new_menu_app_with_paths(640, 480, &paths);
@@ -734,7 +703,7 @@ fn packed_system_alias_becomes_a_repeated_definition_row() {
                 definition_root: None,
             },
         )
-        .expect("stage packed System alias");
+        .test_value();
     assert_eq!(
         staged.scenario.definition_resource_paths(),
         std::slice::from_ref(&system_path)
@@ -744,8 +713,7 @@ fn packed_system_alias_becomes_a_repeated_definition_row() {
     let game_resources = &prepared
         .host_config()
         .initial_join_snapshot
-        .as_ref()
-        .expect("system-alias JoinData")
+        .test_ref()
         .parameters
         .game_resources;
     assert_eq!(game_resources[0], game_resources[1]);
@@ -759,9 +727,7 @@ fn packed_system_alias_becomes_a_repeated_definition_row() {
     );
     assert_eq!(prepared.definition_modules(), ["System.c4g"]);
 
-    let scenario = prepared
-        .claim_scenario()
-        .expect("claim post-publication System alias");
+    let scenario = prepared.claim_scenario().test_value();
     assert_eq!(
         scenario.definition_resource_paths(),
         [system_path.clone(), system_path]
@@ -774,10 +740,10 @@ fn packed_system_alias_becomes_a_repeated_definition_row() {
 #[test]
 fn packed_material_alias_removes_the_host_material_projection() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("material-alias user data");
-    let content = tempdir().expect("material-alias content");
+    let user_data = tempdir();
+    let content = tempdir();
     let content_root = content.path();
-    fs::create_dir_all(content_root.join("System.c4g")).expect("material-alias System group");
+    fs::create_dir_all(content_root.join("System.c4g")).test_value();
     let material_path = content_root.join("Material.c4g");
     let mut material_group = clonk_resources::MutableGroup::new("Material.c4g");
     material_group
@@ -785,19 +751,15 @@ fn packed_material_alias_removes_the_host_material_projection() {
             "MaterialDef.c4d",
             packed_network_definition("MaterialDef.c4d", "MATD"),
         )
-        .expect("add definition to packed Material");
-    fs::write(
-        &material_path,
-        material_group.pack().expect("pack aliased Material"),
-    )
-    .expect("write aliased Material");
+        .test_value();
+    fs::write(&material_path, material_group.pack().test_value()).test_value();
     let scenario_path = content_root.join("MaterialAlias.c4s");
-    fs::create_dir_all(&scenario_path).expect("material-alias scenario");
+    fs::create_dir_all(&scenario_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Material Alias\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
     )
-    .expect("material-alias scenario core");
+    .test_value();
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
     let mut app = new_menu_app_with_paths(640, 480, &paths);
@@ -814,14 +776,13 @@ fn packed_material_alias_removes_the_host_material_projection() {
                 definition_root: None,
             },
         )
-        .expect("stage packed Material alias");
+        .test_value();
 
     let prepared = prepare_staged_network_host(&app, &staged);
     let game_resources = &prepared
         .host_config()
         .initial_join_snapshot
-        .as_ref()
-        .expect("material-alias JoinData")
+        .test_ref()
         .parameters
         .game_resources;
     assert_eq!(game_resources[0], game_resources[2]);
@@ -839,8 +800,7 @@ fn packed_material_alias_removes_the_host_material_projection() {
         frozen_definition_paths,
         game_save_definition_paths(Some(&paths), &load_native_config_bytes(Some(&paths)),)
     );
-    persist_config_value(&paths, "General", "DefinitionPath", "Changed/")
-        .expect("rewrite DefinitionPath after host preparation");
+    persist_config_value(&paths, "General", "DefinitionPath", "Changed/").test_value();
     assert_eq!(
         prepared.definition_save_paths(),
         (
@@ -871,9 +831,7 @@ fn packed_material_alias_removes_the_host_material_projection() {
         "an authoritative empty host material vector bypasses staged local preload data"
     );
 
-    let scenario = prepared
-        .claim_scenario()
-        .expect("claim post-publication Material alias");
+    let scenario = prepared.claim_scenario().test_value();
     app.prepare_recording_for(
         &staged.frontend,
         &scenario,
@@ -881,11 +839,8 @@ fn packed_material_alias_removes_the_host_material_projection() {
         Some(prepared.definition_modules()),
         Some(prepared.definition_save_paths()),
     )
-    .expect("prepare recording from frozen host definition identity");
-    let recording_seed = app
-        .live_save_seed
-        .as_ref()
-        .expect("prepared-host recording seed");
+    .test_value();
+    let recording_seed = app.live_save_seed.test_ref();
     assert_eq!(recording_seed.definition_modules, ["Material.c4g"]);
     assert_eq!(
                 (
@@ -927,10 +882,10 @@ fn reference_state_survives_initial_and_final_advertiser_bind_failure() {
     // template or leave its retained value at GS_Lobby.
     let (snapshot, reference) = default_exact_host_reference();
     let parameters = snapshot.parameters.clone();
-    let occupied = std::net::TcpListener::bind("[::]:0").expect("occupy a reference port");
+    let occupied = std::net::TcpListener::bind("[::]:0").test_value();
     let config = clonk_network::NetworkGameAdvertiserConfig {
         discovery_port: 0,
-        reference_port: Some(occupied.local_addr().expect("occupied address").port()),
+        reference_port: Some(occupied.local_addr().test_value().port()),
         language_charset: String::new(),
     };
     let mut app = new_state_only_menu_app(320, 200);
@@ -962,10 +917,7 @@ fn reference_state_survives_initial_and_final_advertiser_bind_failure() {
     app.publish_game_over_host_reference_with_config(config);
 
     assert!(app.network_game_advertiser.is_none());
-    let retained = app
-        .advertised_game_reference
-        .as_ref()
-        .expect("final state survives rebind failure");
+    let retained = app.advertised_game_reference.test_ref();
     assert_eq!(retained.summary().state, "Running");
     assert!(!retained.summary().join_allowed);
     assert_eq!(
@@ -1024,15 +976,11 @@ fn netpuncher_assignment_refreshes_the_retained_host_reference() {
             },
             local_addresses: addresses.clone(),
         })
-        .unwrap();
+        .test_value();
 
-    app.process_network_events()
-        .expect("apply netpuncher reference invalidation");
+    app.test_network_events();
 
-    let updated = app
-        .advertised_game_reference
-        .as_ref()
-        .expect("host reference remains retained");
+    let updated = app.advertised_game_reference.test_ref();
     assert_eq!(updated.summary().netpuncher_ipv4, 0xaabb_ccdd);
     assert_eq!(updated.metadata().netpuncher_ipv4, 0xaabb_ccdd);
     assert_eq!(updated.summary().addresses, addresses);
@@ -1067,10 +1015,9 @@ fn recoverable_route_diagnostic_keeps_the_classic_host_lobby_open() {
             client_id: None,
             error: warning.to_string(),
         })
-        .expect("queue recoverable route warning");
+        .test_value();
 
-    app.process_network_events()
-        .expect("recoverable route warning keeps the lobby alive");
+    app.test_network_events();
 
     assert!(app.classic_host_lobby_active());
     assert!(app.network.is_some());
@@ -1100,10 +1047,9 @@ fn peer_protocol_error_logs_and_keeps_the_classic_lobby_open() {
         .send(NetworkEvent::Error(
             "failed to decode direct control packet".to_string(),
         ))
-        .expect("queue non-route network error");
+        .test_value();
 
-    app.process_network_events()
-        .expect("peer protocol error keeps the host lobby open");
+    app.test_network_events();
 
     assert!(app.classic_host_lobby_active());
     assert!(app.network.is_some());
@@ -1135,10 +1081,9 @@ fn typed_peer_transport_diagnostic_keeps_the_classic_lobby_open() {
             client_id: Some(7),
             error: "failed to unpack forwarded packet".to_string(),
         })
-        .expect("queue typed peer transport diagnostic");
+        .test_value();
 
-    app.process_network_events()
-        .expect("typed peer diagnostic keeps the host lobby open");
+    app.test_network_events();
 
     assert!(app.classic_host_lobby_active());
     assert!(app.network.is_some());
@@ -1174,27 +1119,22 @@ fn network_diagnostics_are_visible_in_a_joined_client_lobby() {
             client_id: Some(3),
             error: "secondary route unavailable".to_string(),
         })
-        .expect("queue client route warning");
+        .test_value();
     events
         .send(NetworkEvent::TransportDiagnostic {
             client_id: Some(3),
             error: "malformed peer packet".to_string(),
         })
-        .expect("queue client transport diagnostic");
+        .test_value();
     events
         .send(NetworkEvent::Error("network scheduler warning".to_string()))
-        .expect("queue client network diagnostic");
+        .test_value();
 
-    app.process_network_events()
-        .expect("client diagnostics keep the joined lobby open");
+    app.test_network_events();
 
     assert!(app.joined_network_lobby_active());
     assert!(app.network.is_some());
-    let logs = &app
-        .network_lobby
-        .as_ref()
-        .expect("joined lobby remains")
-        .logs;
+    let logs = &app.network_lobby.test_ref().logs;
     assert_eq!(
         logs.iter()
             .rev()
@@ -1230,23 +1170,22 @@ fn failed_client_connection_reaches_cleanup_and_keeps_classic_lobby_open() {
         .send(NetworkEvent::PeerConnectionFailed {
             client_id: failed_client_id,
         })
-        .expect("queue failed logical client");
+        .test_value();
     events
         .send(NetworkEvent::PeerDisconnected {
             client_id: failed_client_id,
             reason: None,
         })
-        .expect("queue logical client departure");
+        .test_value();
     let diagnostic = "read failed: connection reset by peer";
     events
         .send(NetworkEvent::RecoverableRouteDiagnostic {
             client_id: Some(failed_client_id),
             error: diagnostic.to_string(),
         })
-        .expect("queue final-route diagnostic");
+        .test_value();
 
-    app.process_network_events()
-        .expect("complete failed-client sequence keeps the lobby alive");
+    app.test_network_events();
 
     assert!(app.classic_host_lobby_active());
     assert!(app.network.is_some());
@@ -1286,10 +1225,9 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
         .send(NetworkEvent::FatalError(
             "network worker stopped unexpectedly".to_string(),
         ))
-        .expect("queue fatal worker failure");
+        .test_value();
 
-    app.process_network_events()
-        .expect("fatal lobby worker failure restores startup");
+    app.test_network_events();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -1312,8 +1250,7 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     );
     assert_eq!(app.snapshot.round_results, engine_results);
     let mut frame = vec![0x4c; 320 * 200 * 4];
-    app.render(&mut frame)
-        .expect("render restored network dialog and fatal worker error");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
 }
 
@@ -1333,10 +1270,9 @@ fn fatal_worker_failure_after_lobby_while_loading_changes_to_local_control() {
         .send(NetworkEvent::FatalError(
             "network worker stopped during start".to_string(),
         ))
-        .expect("queue fatal loading worker failure");
+        .test_value();
 
-    app.process_network_events()
-        .expect("fatal loading worker failure changes to local");
+    app.test_network_events();
 
     assert_eq!(app.mode, AppMode::Loading);
     assert!(app.network.is_none());
@@ -1380,9 +1316,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     let (_sender, receiver) = mpsc::channel();
     app.loading_state = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
-        app.assets
-            .loader_resources()
-            .expect("startup loader resources"),
+        app.assets.loader_resources().test_value(),
         HashMap::new(),
         Vec::new(),
         receiver,
@@ -1392,7 +1326,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
         "Unable to activate synchronized scenario".to_string(),
         true,
     )
-    .expect("restore startup after prepared network loading failure");
+    .test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -1421,7 +1355,7 @@ fn direct_join_loading_failure_clears_session_before_exit() {
         "Unable to activate direct-join scenario".to_string(),
         true,
     )
-    .expect("failed direct join requests process exit");
+    .test_value();
 
     assert!(app.network.is_none());
     assert!(app.network_mode.is_none());
@@ -1435,7 +1369,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     // partial network game through QuitGame; it is not an invisible
     // status line behind a deleted lobby (src/C4Network2.cpp:493-525;
     // src/C4Application.cpp:373-400,442-451).
-    let dir = tempdir().expect("client preparation tempdir");
+    let dir = tempdir();
     let mut app = new_real_classic_menu_app(320, 200);
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Client);
     app.startup_view = StartupView::NetworkLobby;
@@ -1443,7 +1377,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     app.network_lobby = None;
     let snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     let go = clonk_network::NetworkStatus {
         state: clonk_network::NETWORK_STATE_GO,
         control_mode: 0,
@@ -1459,8 +1393,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     });
     app.client_combined_scenario_path = Some(dir.path().join("MissingCombined3.c4s"));
 
-    app.prepare_client_network_scenario_if_ready()
-        .expect("preparation failure returns through startup");
+    app.prepare_client_network_scenario_if_ready().test_value();
 
     assert_eq!(app.mode, AppMode::Menu);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -1490,12 +1423,11 @@ fn fatal_worker_failure_during_running_round_changes_to_local_control() {
     let local_client = 7;
     let local_player = app.local_owner;
     app.engine
-        .player_mut(local_player)
-        .expect("local runtime player")
+        .test_player_mut(local_player)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     app.engine.set_network_game(true);
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(31, 4).expect("valid network timing"),
+        clonk_engine::NetworkControlTiming::new(31, 4).test_value(),
     );
     app.snapshot = app.engine.snapshot();
     let (manager, events) = NetworkManager::test_stub_for_client_id(local_client as u32);
@@ -1515,15 +1447,14 @@ fn fatal_worker_failure_during_running_round_changes_to_local_control() {
             client_id: Some(0),
             error: "host transport read failed".to_string(),
         })
-        .expect("queue terminal transport precursor");
+        .test_value();
     events
         .send(NetworkEvent::FatalError(
             "network worker stopped unexpectedly".to_string(),
         ))
-        .expect("queue fatal running worker failure");
+        .test_value();
 
-    app.process_network_events()
-        .expect("fatal running worker failure changes to local");
+    app.test_network_events();
 
     assert!(matches!(app.mode, AppMode::Running));
     assert!(app.network.is_none());
@@ -1561,10 +1492,9 @@ fn fatal_worker_failure_during_game_over_preserves_the_network_halt() {
         .send(NetworkEvent::FatalError(
             "host disconnected during evaluation".to_string(),
         ))
-        .expect("queue fatal evaluation failure");
+        .test_value();
 
-    app.process_network_events()
-        .expect("change evaluated round to local control");
+    app.test_network_events();
 
     assert!(app.game_over_dialog.is_some());
     assert!(app.network.is_none());
@@ -1588,7 +1518,7 @@ fn fatal_worker_failure_during_game_over_preserves_the_network_halt() {
     assert_eq!(app.snapshot.round_results, engine_results);
 
     app.handle_game_over_action(GameOverAction::Continue)
-        .expect("continue the now-local evaluated round");
+        .test_value();
     assert!(app.game_over_dialog.is_none());
     assert_eq!(app.offline_halt_count, 0);
     assert!(app.network_control_running);
@@ -1598,9 +1528,7 @@ fn fatal_worker_failure_during_game_over_preserves_the_network_halt() {
 fn back_history_and_fresh_app_match_native_dialog_memory() {
     let mut backed_out = new_menu_app(640, 480);
     backed_out.open_scenario_browser();
-    backed_out
-        .scensel_do_back()
-        .expect("leave root scenario browser");
+    backed_out.scensel_do_back().test_value();
     assert_eq!(backed_out.startup_view, StartupView::MainMenu);
     assert_eq!(
         backed_out.last_startup_dialog,
@@ -1608,12 +1536,10 @@ fn back_history_and_fresh_app_match_native_dialog_memory() {
     );
     backed_out
         .start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start round after reusing the retained Main dialog");
+        .test_value();
     confirm_abort_dialog(&mut backed_out);
     assert_l038_browser_return(&backed_out, ScenarioSelectorMode::Local);
-    backed_out
-        .scensel_do_back()
-        .expect("fresh restored selector backs to explicit Main");
+    backed_out.scensel_do_back().test_value();
     assert_eq!(backed_out.startup_view, StartupView::MainMenu);
     assert_eq!(backed_out.last_startup_dialog, StartupDialog::MainMenu);
 
@@ -1627,10 +1553,10 @@ fn back_history_and_fresh_app_match_native_dialog_memory() {
     assert_eq!(fresh.last_startup_dialog, StartupDialog::MainMenu);
     fresh
         .start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start fresh-session sandbox round");
+        .test_value();
     fresh
         .handle_game_over_action(GameOverAction::End)
-        .expect("end fresh-session round");
+        .test_value();
     assert_eq!(fresh.startup_view, StartupView::MainMenu);
     assert_eq!(fresh.last_startup_dialog, StartupDialog::MainMenu);
 }
@@ -1641,10 +1567,9 @@ fn immediate_relaunch_retains_destination_without_background_discovery() {
     app.open_network_game_dialog();
     app.open_network_lobby();
     app.start_sandbox_scenario(FrontendScenario::fallback())
-        .expect("start network-origin relaunch probe");
+        .test_value();
 
-    app.restart_current_scenario()
-        .expect("restart network-origin probe");
+    app.restart_current_scenario().test_value();
 
     assert!(matches!(app.mode, AppMode::Running));
     assert_eq!(app.last_startup_dialog, StartupDialog::NetworkGame);
@@ -1669,12 +1594,12 @@ fn refresh_generation_ignores_results_queued_before_worker_clear() {
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
         vec![stale],
     ))
-    .expect("old generation result is ignored");
+    .test_value();
     assert!(app.startup_network_refresh_waiting_for_clear);
     assert!(app.startup_game_references.is_empty());
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::Cleared)
-        .expect("new generation clear is acknowledged");
+        .test_value();
     assert!(!app.startup_network_refresh_waiting_for_clear);
     assert!(app.status_text.is_empty());
 
@@ -1685,7 +1610,7 @@ fn refresh_generation_ignores_results_queued_before_worker_clear() {
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
         vec![fresh.clone()],
     ))
-    .expect("new generation result is applied");
+    .test_value();
     assert_eq!(app.startup_game_references, [fresh]);
     assert!(app.status_text.is_empty());
 }
@@ -1701,7 +1626,7 @@ fn network_search_results_render_only_in_native_rows() {
             ..Default::default()
         },
     ))
-    .expect("project native masterserver count row");
+    .test_value();
     let references = (0..3)
         .map(|index| clonk_network::NetworkGameReference {
             title: format!("Discovered game {index}"),
@@ -1714,23 +1639,22 @@ fn network_search_results_render_only_in_native_rows() {
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
         references,
     ))
-    .expect("project discovered games into native rows");
+    .test_value();
 
     assert!(app.status_text.is_empty());
-    let dialog = app.startup_network_dialog.as_ref().expect("network dialog");
+    let dialog = app.startup_network_dialog.test_ref();
     assert_eq!(dialog.games().len(), 3);
     assert_eq!(dialog.masterserver_entry().details, "3 game(s) found.");
 
     let mut frame = vec![0x4d; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("native query and game rows render without a generic status boundary");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4d));
 
     app.status_text = "Querying game infos…".to_string();
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
         Vec::new(),
     ))
-    .expect("native row updates do not erase an unrelated diagnostic");
+    .test_value();
     assert_eq!(app.status_text, "Querying game infos…");
     frame.fill(0x6e);
     let error = app
@@ -1756,7 +1680,7 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
         source: Some(clonk_network::ReferenceQuerySource::GameDiscovery),
         message: detail.to_string(),
     })
-    .expect("discovery failure opens its modal");
+    .test_value();
 
     assert_eq!(app.message_dialogs.len(), 1);
     let modal = &app.message_dialogs[0].state;
@@ -1779,7 +1703,7 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     assert!(!app.take_exit_request());
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("dismiss discovery failure");
+        .test_value();
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
 
@@ -1787,14 +1711,10 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
         source: Some(clonk_network::ReferenceQuerySource::Masterserver),
         message: "masterserver unavailable".to_string(),
     })
-    .expect("masterserver failure remains in its native query row");
+    .test_value();
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
-    let masterserver = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .masterserver_entry();
+    let masterserver = app.startup_network_dialog.test_ref().masterserver_entry();
     assert_eq!(masterserver.details, "masterserver unavailable");
     assert_eq!(
         masterserver.row_icon,
@@ -1808,12 +1728,12 @@ fn join_progress_lists_logical_routes_once_without_collapsing_dial_attempts() {
     // C++ expands a local address over every interface for NetIO.Connect,
     // but appends the original C4Network2Address only once to the progress
     // message (oracle-src-pinned src/C4Network2.cpp:375-405,412-423).
-    let original = "[fe80::cafe]:11112".parse().unwrap();
+    let original = "[fe80::cafe]:11112".parse().test_value();
     let scoped = |protocol, scope_id| {
         clonk_network::NetworkAddress::new(
             protocol,
             std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
-                "fe80::cafe".parse().unwrap(),
+                "fe80::cafe".parse().test_value(),
                 11_112,
                 0,
                 scope_id,
@@ -1864,8 +1784,7 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
     app.startup_network_dialog
-        .as_mut()
-        .expect("initial network dialog")
+        .test_mut()
         .set_join_address("stale.example:11112");
     let (sender, receiver) = mpsc::channel();
     let target = "UDP:192.0.2.10:11112, TCP:192.0.2.10:11112";
@@ -1876,7 +1795,7 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
         None,
         Some(StartupJoinTarget::Addresses(target.to_string())),
     )
-    .expect("show raw-connect progress");
+    .test_value();
 
     assert!(app.startup_network_transition_active());
     assert_eq!(app.message_dialogs.len(), 1);
@@ -1896,9 +1815,8 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
         .send(Err(NetworkStartError::Other(
             "controlled connection failure".to_string(),
         )))
-        .expect("resolve controlled raw connect");
-    app.poll_startup_network_connection()
-        .expect("poll controlled raw connect");
+        .test_value();
+    app.poll_startup_network_connection().test_value();
 
     assert!(app.startup_network_connection.is_none());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -1914,8 +1832,7 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
         "Unable to start network session: controlled connection failure",
     );
     let mut frame = vec![0x4c; 800 * 600 * 4];
-    app.render(&mut frame)
-        .expect("render fresh NetDlg and Error Log");
+    app.test_render(&mut frame);
     assert!(frame.iter().any(|byte| *byte != 0x4c));
 }
 
@@ -1933,16 +1850,12 @@ fn a_reference_join_names_the_game_rather_than_its_transport_addresses() {
     app.activate_network_reference_join(clonk_network::NetworkGameReference {
         title: "Clonk Party".to_string(),
         host_name: "archlinux".to_string(),
-        source_address: "127.0.0.1:1".parse().unwrap(),
+        source_address: "127.0.0.1:1".parse().test_value(),
         ..Default::default()
     })
-    .expect("a reference without a password joins immediately");
+    .test_value();
 
-    let progress = &app
-        .message_dialogs
-        .last()
-        .expect("the launched join raises its progress dialog")
-        .state;
+    let progress = &app.message_dialogs.last().test_value().state;
     assert_eq!(
         progress.message(),
         "Connecting to Clonk Party on archlinux..."
@@ -1962,22 +1875,18 @@ fn a_password_prompt_does_not_cost_the_join_the_name_of_its_game() {
         title: "Clonk Party".to_string(),
         host_name: "archlinux".to_string(),
         password_needed: true,
-        source_address: "127.0.0.1:1".parse().unwrap(),
+        source_address: "127.0.0.1:1".parse().test_value(),
         ..Default::default()
     })
-    .expect("a passworded reference prompts before joining");
+    .test_value();
     assert!(app.game_option_input_dialog.is_some());
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "hunter2".to_string(),
     )])
-    .expect("an accepted password launches the join");
+    .test_value();
 
-    let progress = &app
-        .message_dialogs
-        .last()
-        .expect("the launched join raises its progress dialog")
-        .state;
+    let progress = &app.message_dialogs.last().test_value().state;
     assert_eq!(
         progress.message(),
         "Connecting to Clonk Party on archlinux..."
@@ -1988,7 +1897,7 @@ fn a_password_prompt_does_not_cost_the_join_the_name_of_its_game() {
 fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    let address: SocketAddr = "192.0.2.20:11112".parse().unwrap();
+    let address: SocketAddr = "192.0.2.20:11112".parse().test_value();
     app.pending_network_join = Some(ClientSettings::new(address, "Player"));
     let (sender, receiver) = mpsc::channel();
 
@@ -1998,9 +1907,8 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
         None,
         Some(StartupJoinTarget::Addresses(address.to_string())),
     )
-    .expect("show abortable raw-connect progress");
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("Escape aborts raw connect");
+    .test_value();
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
     assert!(app.startup_network_connection.is_none());
     assert!(app.pending_network_join.is_none());
@@ -2015,10 +1923,8 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
         .send(Err(NetworkStartError::Other("stale result".to_string())))
         .is_err());
 
-    app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("Escape release remains owned by dismissed progress");
-    app.poll_startup_network_connection()
-        .expect("poll after aborted raw connect");
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    app.poll_startup_network_connection().test_value();
     assert!(app.message_dialog_consumed_keys.is_empty());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.status_text.is_empty());
@@ -2037,25 +1943,23 @@ fn cancel_button_aborts_inflight_join() {
             "198.51.100.40:11112".to_string(),
         )),
     )
-    .expect("show clickable raw-connect progress");
+    .test_value();
     let cancel = app
         .top_message_dialog_layout()
-        .expect("progress layout")
+        .test_value()
         .buttons
         .first()
-        .expect("Cancel button")
+        .test_value()
         .rect;
     let point = PhysicalPosition::new(
         f64::from(cancel.x + cancel.w / 2),
         f64::from(cancel.y + cancel.h / 2),
     );
 
-    app.handle_cursor_moved(point).expect("hover Cancel");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press Cancel");
+    app.test_cursor(point);
+    app.test_left_button(ElementState::Pressed);
     assert!(app.startup_network_connection.is_some());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release Cancel");
+    app.test_left_button(ElementState::Released);
 
     assert!(app.startup_network_connection.is_none());
     assert!(app.message_dialogs.is_empty());
@@ -2076,15 +1980,15 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
         Receiver<()>,
         thread::JoinHandle<()>,
     ) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled host");
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).test_value();
+        let address = listener.local_addr().test_value();
         let (accepted_tx, accepted_rx) = mpsc::channel();
         let (closed_tx, closed_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept startup transport");
+            let (mut stream, _) = listener.accept().test_value();
             stream
                 .set_read_timeout(Some(Duration::from_millis(100)))
-                .unwrap();
+                .test_value();
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut bytes = [0_u8; 512];
             loop {
@@ -2103,7 +2007,7 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
                     Err(error) => panic!("startup handshake read failed: {error}"),
                 }
             }
-            accepted_tx.send(()).unwrap();
+            accepted_tx.send(()).test_value();
             loop {
                 match stream.read(&mut bytes) {
                     Ok(0) => break,
@@ -2128,16 +2032,16 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
                     Err(error) => panic!("stalled startup transport read failed: {error}"),
                 }
             }
-            closed_tx.send(()).unwrap();
+            closed_tx.send(()).test_value();
         });
         (address, accepted_rx, closed_rx, worker)
     }
 
     fn reserve_mesh_addresses() -> (SocketAddr, SocketAddr) {
-        let tcp = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let tcp_address = tcp.local_addr().unwrap();
-        let udp = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-        let udp_address = udp.local_addr().unwrap();
+        let tcp = TcpListener::bind(("127.0.0.1", 0)).test_value();
+        let tcp_address = tcp.local_addr().test_value();
+        let udp = UdpSocket::bind(("127.0.0.1", 0)).test_value();
+        let udp_address = udp.local_addr().test_value();
         (tcp_address, udp_address)
     }
 
@@ -2161,30 +2065,27 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
     let (first_server, first_accepted, first_closed, first_server_worker) =
         stalled_handshake_server();
     app.activate_network_join(first_server.to_string())
-        .expect("launch direct cancellable join");
+        .test_value();
     first_accepted
         .recv_timeout(Duration::from_secs(4))
-        .expect("direct TCP transport sends its handshake to the stalled host");
+        .test_value();
 
     // Cancel and Escape use this same continuation and are retained in
     // the adjacent raw-connect progress-dialog input-route regressions.
     let close = app
         .top_message_dialog_layout()
-        .expect("direct join progress layout")
+        .test_value()
         .close_button
-        .expect("direct join progress title close");
+        .test_value();
     let close_point = PhysicalPosition::new(
         f64::from(close.x + close.w / 2),
         f64::from(close.y + close.h / 2),
     );
-    app.handle_cursor_moved(close_point)
-        .expect("hover direct join title close");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press direct join title close");
+    app.test_cursor(close_point);
+    app.test_left_button(ElementState::Pressed);
     assert!(app.startup_network_connection.is_some());
     let cancellation_started = Instant::now();
-    app.handle_mouse_button(ElementState::Released)
-        .expect("title close cancels and joins the direct transport");
+    app.test_left_button(ElementState::Released);
     assert!(
         cancellation_started.elapsed() < Duration::from_secs(1),
         "transport cancellation must not wait for the stalled handshake"
@@ -2192,14 +2093,13 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
 
     first_closed
         .recv_timeout(Duration::from_secs(1))
-        .expect("cancel closes the admitted TCP transport before returning");
-    first_server_worker.join().unwrap();
+        .test_value();
+    first_server_worker.join().test_value();
     assert!(app.startup_network_connection.is_none());
     assert!(app.pending_network_join.is_none());
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
-    app.poll_startup_network_connection()
-        .expect("cancelled direct result remains silent");
+    app.poll_startup_network_connection().test_value();
     assert!(app.message_dialogs.is_empty());
 
     let (second_server, second_accepted, second_closed, second_server_worker) =
@@ -2210,25 +2110,21 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
         second_mesh_tcp,
         second_mesh_udp,
     ));
-    app.launch_pending_network_join()
-        .expect("launch independent second join");
+    app.launch_pending_network_join().test_value();
     second_accepted
         .recv_timeout(Duration::from_secs(4))
-        .expect("the later join attempt sends an independent handshake");
+        .test_value();
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("cancel and join the second transport independently");
+        .test_value();
     second_closed
         .recv_timeout(Duration::from_secs(1))
-        .expect("second attempt closes only after its own cancellation");
-    second_server_worker.join().unwrap();
-    let rebound_tcp =
-        TcpListener::bind(second_mesh_tcp).expect("cancel releases the client mesh TCP listener");
-    let rebound_udp =
-        UdpSocket::bind(second_mesh_udp).expect("cancel releases UDP and puncher state");
+        .test_value();
+    second_server_worker.join().test_value();
+    let rebound_tcp = TcpListener::bind(second_mesh_tcp).test_value();
+    let rebound_udp = UdpSocket::bind(second_mesh_udp).test_value();
     drop((rebound_tcp, rebound_udp));
-    app.poll_startup_network_connection()
-        .expect("cancelled reference result remains silent");
+    app.poll_startup_network_connection().test_value();
     assert!(app.message_dialogs.is_empty());
     assert!(app.status_text.is_empty());
 }
@@ -2305,13 +2201,13 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
 
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    let address: SocketAddr = "127.0.0.1:30111".parse().unwrap();
+    let address: SocketAddr = "127.0.0.1:30111".parse().test_value();
     app.apply_startup_game_search_event(
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
     )
-    .expect("show LAN reference query row");
+    .test_value();
     assert_eq!(app.startup_discovery_reference_queries.len(), 1);
-    let row = &app.startup_network_dialog.as_ref().unwrap().games()[0];
+    let row = &app.startup_network_dialog.as_ref().test_value().games()[0];
     assert_eq!(row.title, "Local network on 127.0.0.1:30111");
     assert_eq!(row.row_icon, NetDlgRowIcon::Query);
 
@@ -2339,14 +2235,14 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
             message: "reference connection refused".to_string(),
         },
     )
-    .expect("show LAN reference error row");
+    .test_value();
     assert!(app.message_dialogs.is_empty());
-    let row = &app.startup_network_dialog.as_ref().unwrap().games()[0];
+    let row = &app.startup_network_dialog.as_ref().test_value().games()[0];
     assert_eq!(row.details, "reference connection refused");
     assert_eq!(row.row_icon, NetDlgRowIcon::Error);
     let expires_at = app.startup_discovery_reference_queries[0]
         .expires_at
-        .expect("failed LAN query expiry");
+        .test_value();
     app.tick_startup_network_query_rows_at(expires_at);
     assert!(app.startup_discovery_reference_queries.is_empty());
     assert!(app
@@ -2359,12 +2255,12 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
     app.apply_startup_game_search_event(
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
     )
-    .expect("show next LAN reference query row");
+    .test_value();
     // Repeated multicast replies do not duplicate a live native query.
     app.apply_startup_game_search_event(
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
     )
-    .expect("deduplicate repeated LAN query start");
+    .test_value();
     assert_eq!(app.startup_discovery_reference_queries.len(), 1);
     let reference = clonk_network::NetworkGameReference {
         icon: 12,
@@ -2380,7 +2276,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
             selected_index: Some(0),
         },
     )
-    .expect("replace LAN query with resolved reference");
+    .test_value();
     assert!(app.startup_discovery_reference_queries.is_empty());
     assert_eq!(app.startup_game_references, [reference]);
     assert_eq!(
@@ -2395,7 +2291,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
             message: "late duplicate failure".to_string(),
         },
     )
-    .expect("ignore late duplicate LAN completion");
+    .test_value();
     assert!(app.startup_discovery_reference_queries.is_empty());
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().games().len(),
@@ -2423,7 +2319,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
             .selected_game(),
         Some(1)
     );
-    let second_address: SocketAddr = "127.0.0.1:30112".parse().unwrap();
+    let second_address: SocketAddr = "127.0.0.1:30112".parse().test_value();
     selection_app.begin_startup_discovery_reference_query(second_address);
     assert_eq!(
         selection_app
@@ -2477,7 +2373,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
                 ..Default::default()
             }],
         ))
-        .expect("preserve selected LAN retry row");
+        .test_value();
     assert_eq!(
         retry_app
             .startup_network_dialog
@@ -2528,12 +2424,15 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
     attach_l040_network_dialog(&mut app);
     app.startup_game_references = vec![a.clone(), b.clone()];
     app.sync_startup_network_game_rows();
-    app.startup_network_dialog.as_mut().unwrap().focus_game(1);
+    app.startup_network_dialog
+        .as_mut()
+        .test_value()
+        .focus_game(1);
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
         vec![b.clone(), a.clone()],
     ))
-    .expect("preserve selected reference through sorted update");
+    .test_value();
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().selected_game(),
         Some(0)
@@ -2543,7 +2442,7 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
         "B on Host B"
     );
 
-    let discovery_address: SocketAddr = "127.0.0.1:30113".parse().unwrap();
+    let discovery_address: SocketAddr = "127.0.0.1:30113".parse().test_value();
     app.begin_startup_discovery_reference_query(discovery_address);
     app.finish_startup_discovery_reference_query(
         discovery_address,
@@ -2577,7 +2476,7 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
             reference("C newer", "Host C", "127.0.0.1:31003"),
         ],
     ))
-    .expect("remove selected resolved reference");
+    .test_value();
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().selected_game(),
         Some(1),
@@ -2621,10 +2520,10 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     app.set_startup_masterserver_error("stale query error".to_string());
     let overdue_refresh = Instant::now()
         .checked_sub(clonk_network::GAME_SEARCH_INTERVAL + Duration::from_secs(1))
-        .expect("represent an overdue refresh");
+        .test_value();
     let overdue_masterserver_query = Instant::now()
         .checked_sub(Duration::from_secs(1))
-        .expect("represent an overdue masterserver query");
+        .test_value();
     app.startup_network_last_refresh = Some(overdue_refresh);
     app.startup_masterserver_next_query_at = Some(overdue_masterserver_query);
     app.request_network_reference_join(clonk_network::NetworkGameReference {
@@ -2634,11 +2533,10 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
         join_allowed: false,
         ..Default::default()
     })
-    .expect("open no-runtime-join modal");
+    .test_value();
     assert_eq!(app.message_dialogs.len(), 1);
 
-    app.poll_startup_game_search()
-        .expect("covered network dialog remains frozen");
+    app.poll_startup_game_search().test_value();
     assert_eq!(app.startup_game_search_test_events.len(), 1);
     assert_eq!(
         app.startup_game_references.as_slice(),
@@ -2671,9 +2569,8 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     );
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
-        .expect("dismiss no-runtime-join modal");
-    app.poll_startup_game_search()
-        .expect("resume network dialog polling");
+        .test_value();
+    app.poll_startup_game_search().test_value();
     assert!(app.startup_game_search_test_events.is_empty());
     assert!(app.startup_game_references.is_empty());
     assert!(app
@@ -2708,16 +2605,14 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
         },
         clonk_network::StartupGameSearchEvent::ReferencesUpdated(Vec::new()),
     ]);
-    app.poll_startup_game_search()
-        .expect("first event opens discovery error modal");
+    app.poll_startup_game_search().test_value();
     assert_eq!(app.message_dialogs.len(), 1);
     assert_eq!(app.startup_game_search_test_events.len(), 1);
     assert_eq!(app.startup_game_references, [nearly_expired_reference]);
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("dismiss discovery error modal");
-    app.poll_startup_game_search()
-        .expect("apply event left behind the discovery modal");
+        .test_value();
+    app.poll_startup_game_search().test_value();
     assert!(app.startup_game_search_test_events.is_empty());
     assert!(app.startup_game_references.is_empty());
 }
@@ -2734,21 +2629,21 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("isolated internet-toggle config");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(repository)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     if let Some(parent) = paths.config_file().parent() {
-        fs::create_dir_all(parent).expect("create native config directory");
+        fs::create_dir_all(parent).test_value();
     }
     fs::write(
         paths.config_file(),
         b"[Network]\r\nMasterServerSignUp=1\r\n",
     )
-    .expect("seed an enabled masterserver signup");
+    .test_value();
 
     let mut app = new_classic_menu_app(800, 600);
     app.app_paths = Some(paths.clone());
@@ -2763,13 +2658,12 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
 
     // The controller flips its own flag before emitting the action.
     app.startup_network_dialog
-        .as_mut()
-        .expect("network dialog")
+        .test_mut()
         .sync_masterserver_signup_from_config(false);
     app.process_network_dialog_actions(vec![
         clonk_frontend::startup_netdlg::NetDlgAction::MasterserverSignupChanged(false),
     ])
-    .expect("turn the Internet row off");
+    .test_value();
     assert_eq!(
         app.deferred_config.get("Network", "MasterServerSignUp"),
         Some("0")
@@ -2831,12 +2725,11 @@ fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
             ..Default::default()
         },
     ))
-    .expect("project a masterserver reply with a message of the day");
+    .test_value();
 
     let replied = app
         .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
+        .test_ref()
         .masterserver_entry()
         .clone();
     assert_eq!(replied.details, "3 game(s) found.");
@@ -2846,16 +2739,10 @@ fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
         [NetDlgTextLine::Plain(_), NetDlgTextLine::Hyperlink { .. }]
     ));
 
-    let requery_at = app
-        .startup_masterserver_next_query_at
-        .expect("a reply schedules the next masterserver query");
+    let requery_at = app.startup_masterserver_next_query_at.test_value();
     app.tick_startup_network_query_rows_at(requery_at);
 
-    let requerying = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .masterserver_entry();
+    let requerying = app.startup_network_dialog.test_ref().masterserver_entry();
     assert_eq!(
         requerying.row_icon,
         NetDlgRowIcon::Query,
@@ -2924,8 +2811,7 @@ fn masterserver_row_reports_a_reference_request_timeout_when_no_reply_arrives() 
     app.tick_startup_network_query_rows_at(timed_out_at);
     let entry = app
         .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
+        .test_ref()
         .masterserver_entry()
         .clone();
     assert_eq!(entry.row_icon, NetDlgRowIcon::Error);
@@ -2944,12 +2830,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
     };
 
     let mut app = new_real_classic_menu_app(640, 480);
-    let metrics = NetDlgFontMetrics::from_fonts(
-        app.assets
-            .clonk_fonts
-            .as_deref()
-            .expect("classic startup fonts"),
-    );
+    let metrics = NetDlgFontMetrics::from_fonts(app.assets.clonk_fonts.as_deref().test_value());
     let layout = net_dlg_layout(640, 480, &metrics);
     let mut controller = NetDlgController::new(
         NetDlgConfig {
@@ -2977,13 +2858,11 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
     app.startup_network_dialog = Some(controller);
     app.startup_game_search = None;
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_viewport.x + 4),
         f64::from(layout.list_viewport.y + 4),
-    ))
-    .expect("point inside network game list");
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("wheel down through app shell");
+    ));
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -2991,8 +2870,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
             .list_scroll_offset(),
         60
     );
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
-        .expect("wheel up through app shell");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3001,30 +2879,19 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
         0
     );
 
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
         f64::from(layout.list_scrollbar.y + layout.list_scrollbar.h - 8),
-    ))
-    .expect("point at bottom scrollbar arrow");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("hold bottom scrollbar arrow");
+    ));
+    app.test_left_button(ElementState::Pressed);
     let mut frame = vec![0_u8; 640 * 480 * 4];
-    app.render(&mut frame).expect("first held-arrow frame");
-    let first = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .list_scroll_offset();
-    app.render(&mut frame).expect("second held-arrow frame");
-    let second = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .list_scroll_offset();
+    app.test_render(&mut frame);
+    let first = app.startup_network_dialog.test_ref().list_scroll_offset();
+    app.test_render(&mut frame);
+    let second = app.startup_network_dialog.test_ref().list_scroll_offset();
     assert!(first > 0 && second > first);
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release bottom scrollbar arrow");
-    app.render(&mut frame).expect("post-release frame");
+    app.test_left_button(ElementState::Released);
+    app.test_render(&mut frame);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3033,13 +2900,8 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
         second
     );
 
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("hold arrow before network transition");
-    let before_transition = app
-        .startup_network_dialog
-        .as_ref()
-        .expect("network dialog")
-        .list_scroll_offset();
+    app.test_left_button(ElementState::Pressed);
+    let before_transition = app.startup_network_dialog.test_ref().list_scroll_offset();
     let (_sender, receiver) = mpsc::channel();
     app.begin_startup_network_connection(
         receiver,
@@ -3047,7 +2909,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
         None,
         Some(StartupJoinTarget::Addresses("127.0.0.1:11112".to_string())),
     )
-    .expect("begin join transition");
+    .test_value();
     assert!(
         !app.startup_network_dialog
             .as_mut()
@@ -3056,8 +2918,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
         "transition start must cancel the held arrow"
     );
     app.status_text.clear();
-    app.render(&mut frame)
-        .expect("transition frame does not repeat stale arrow");
+    app.test_render(&mut frame);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3067,8 +2928,7 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
     );
     app.startup_network_connection = None;
     app.dismiss_startup_network_connect_progress();
-    app.render(&mut frame)
-        .expect("post-transition frame does not resume stale arrow");
+    app.test_render(&mut frame);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3086,13 +2946,13 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("repository root");
-    let user_data = tempdir().expect("user data");
+        .test_value();
+    let user_data = tempdir();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root)),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover app paths");
+    let paths = test_app_paths();
     let mut app = GameApp::new(
         1280,
         720,
@@ -3111,14 +2971,12 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
             record_enabled: false,
         },
     )
-    .expect("initialise app");
+    .test_value();
     wait_for_menu(&mut app);
     app.open_network_game_dialog();
 
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("activate empty game list");
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("release opening key into modal");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.startup_network_connection.is_none());
@@ -3152,27 +3010,22 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
         f64::from(back.x + back.w / 2),
         f64::from(back.y + back.h / 2),
     );
-    app.handle_cursor_moved(back_point).expect("move over Back");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press behind modal");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release behind modal");
+    app.test_cursor(back_point);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert_eq!(app.message_dialogs.len(), 1);
 
     let mut frame = vec![0_u8; 1280 * 720 * 4];
-    app.render(&mut frame)
-        .expect("render exact classic modal resources");
+    app.test_render(&mut frame);
 
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("press focused OK");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert_eq!(
         app.message_dialogs.len(),
         1,
         "Return must show the button-down frame before activation"
     );
-    app.handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("release focused OK");
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert!(app.message_dialogs.is_empty());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
     assert!(app.startup_network_connection.is_none());
@@ -3185,7 +3038,7 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
     app.open_network_game_dialog();
     let address = "127.0.0.1:9".to_string();
     let actions = {
-        let dialog = app.startup_network_dialog.as_mut().expect("network dialog");
+        let dialog = app.startup_network_dialog.test_mut();
         dialog.set_join_address(address.clone());
         assert_eq!(
             dialog.handle_key_down(KeyCode::Tab),
@@ -3207,10 +3060,9 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
         ]
     );
 
-    app.process_network_dialog_actions(actions)
-        .expect("first Enter starts only a reference query");
+    app.process_network_dialog_actions(actions).test_value();
 
-    let dialog = app.startup_network_dialog.as_ref().unwrap();
+    let dialog = app.startup_network_dialog.as_ref().test_value();
     assert_eq!(
         dialog.focused_control(),
         clonk_frontend::startup_netdlg::NetDlgControl::GameList
@@ -3238,7 +3090,7 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
     let actions = app
         .startup_network_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .handle_key_down(KeyCode::Enter);
     assert_eq!(
         actions,
@@ -3246,8 +3098,7 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
             address: Some(address),
         }]
     );
-    app.process_network_dialog_actions(actions)
-        .expect("second Enter starts the unresolved direct join");
+    app.process_network_dialog_actions(actions).test_value();
     assert!(app.active_scenario.is_none());
     match app.active_definition_load.as_ref() {
         Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
@@ -3262,14 +3113,11 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     let mut app = new_classic_menu_app(800, 600);
     app.open_network_game_dialog();
     app.startup_network_dialog
-        .as_mut()
-        .expect("network dialog")
+        .test_mut()
         .set_join_address("replace me");
 
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("focus join edit");
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release join edit focus key");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3278,8 +3126,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         Some((0, "replace me".len()))
     );
 
-    app.handle_text_input('|')
-        .expect("replace selected address");
+    app.test_text_input('|');
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().join_address(),
         "\u{a6}"
@@ -3287,18 +3134,13 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
 
     app.startup_network_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .set_join_address("alpha beta");
-    app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
-        .expect("move edit caret home");
-    app.handle_key(VirtualKeyCode::Home, ElementState::Released)
-        .expect("release edit Home");
-    app.handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("hold control");
-    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
-        .expect("jump to next word");
-    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Released)
-        .expect("release word jump");
+    app.test_key(VirtualKeyCode::Home, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Home, ElementState::Released);
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowRight, ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3307,18 +3149,12 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         6
     );
 
-    app.handle_modifiers_changed(ModifiersState::SHIFT)
-        .expect("hold shift");
-    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
-        .expect("extend selection");
-    app.handle_key(VirtualKeyCode::ArrowRight, ElementState::Released)
-        .expect("release selection key");
-    app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
-        .expect("delete selection before shift-delete no-op");
-    app.handle_key(VirtualKeyCode::Delete, ElementState::Released)
-        .expect("release Delete");
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("clear modifiers");
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowRight, ElementState::Released);
+    app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Delete, ElementState::Released);
+    app.test_modifiers(ModifiersState::empty());
     assert_eq!(
         app.startup_network_dialog.as_ref().unwrap().join_address(),
         "alpha eta"
@@ -3326,9 +3162,9 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
 
     app.startup_network_dialog
         .as_mut()
-        .unwrap()
+        .test_value()
         .set_join_address("alpha beta");
-    let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(&fonts);
     let layout = clonk_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
     let beta_x = layout.join_edit.x
@@ -3339,24 +3175,19 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         f64::from(beta_x),
         f64::from(layout.join_edit.y + layout.join_edit.h / 2),
     );
-    app.handle_cursor_moved(beta).expect("point inside beta");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("press join edit");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release join edit");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("second press synthesizes LeftDouble");
-    let dialog = app.startup_network_dialog.as_ref().unwrap();
-    let selection = dialog.join_address_selection().expect("selected word");
+    app.test_cursor(beta);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    app.test_left_button(ElementState::Pressed);
+    let dialog = app.startup_network_dialog.as_ref().test_value();
+    let selection = dialog.join_address_selection().test_value();
     assert_eq!(&dialog.join_address()[selection.0..selection.1], "beta");
     assert!(app.netdlg_last_click.is_none());
     assert!(app.netdlg_join_edit_last_click.is_none());
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release join edit double-click");
+    app.test_left_button(ElementState::Released);
 
-    app.handle_right_mouse_button(ElementState::Pressed)
-        .expect("open join edit context");
-    let popup = app.context_menu.as_ref().expect("join edit context menu");
+    app.test_right_button(ElementState::Pressed);
+    let popup = app.context_menu.test_ref();
     assert_eq!(
         popup.layout().panels[0].rows.len(),
         4 + usize::from(clipboard_text_available())
@@ -3369,23 +3200,19 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         Some(selection),
         "right click preserves the Edit selection"
     );
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("release context opening button");
+    app.test_right_button(ElementState::Released);
     app.close_context_menu_silently();
 
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Pressed)
-        .expect("open join-edit context from keyboard");
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     assert!(app.context_menu.is_some());
     assert!(!app
         .netdlg_edit_consumed_keys
         .contains(&VirtualKeyCode::ContextMenu));
-    app.handle_key(VirtualKeyCode::ContextMenu, ElementState::Released)
-        .expect("release context-menu key");
+    app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     app.close_context_menu_silently();
 
     app.netdlg_join_edit_last_click = Some(Instant::now() - Duration::from_millis(450));
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("450ms edit pair is not a C++ double-click");
+    app.test_left_button(ElementState::Pressed);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3393,25 +3220,19 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
             .join_address_selection(),
         None
     );
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release non-double edit click");
+    app.test_left_button(ElementState::Released);
 
-    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
-        .expect("focused Left stays inside the edit");
+    app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::NetworkGame);
-    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Released)
-        .expect("release focused edit Left");
+    app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Released);
 
     let list = PhysicalPosition::new(
         f64::from(layout.game_list.x + layout.game_list.w / 2),
         f64::from(layout.game_list.y + layout.game_list.h / 2),
     );
-    app.handle_cursor_moved(list)
-        .expect("point inside game list");
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("focus game list");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release game-list focus click");
+    app.test_cursor(list);
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert_eq!(
         app.startup_network_dialog
             .as_ref()
@@ -3425,18 +3246,13 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
         (ModifiersState::ALT, VirtualKeyCode::ArrowLeft),
         (ModifiersState::CONTROL, VirtualKeyCode::Backspace),
     ] {
-        app.handle_modifiers_changed(modifiers)
-            .expect("set modified Back binding mask");
-        app.handle_key(key, ElementState::Pressed)
-            .expect("modified Back binding is inert");
-        app.handle_key(key, ElementState::Released)
-            .expect("release modified Back binding");
+        app.test_modifiers(modifiers);
+        app.test_key(key, ElementState::Pressed);
+        app.test_key(key, ElementState::Released);
         assert_eq!(app.startup_view, StartupView::NetworkGame);
     }
-    app.handle_modifiers_changed(ModifiersState::empty())
-        .expect("clear Back binding modifiers");
-    app.handle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
-        .expect("plain Left invokes StartupNetBack");
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
     assert_eq!(app.startup_view, StartupView::MainMenu);
 }
 
@@ -3555,8 +3371,7 @@ fn network_version_mismatch_defers_to_runtime_join_policy() {
     app.startup_network_dialog = Some(dialog);
     app.startup_game_references = vec![reference];
 
-    app.process_network_dialog_actions(actions)
-        .expect("the remote version does not block the runtime-join policy");
+    app.process_network_dialog_actions(actions).test_value();
 
     assert_eq!(app.message_dialogs.len(), 1);
     let modal = &app.message_dialogs[0].state;
@@ -3583,11 +3398,11 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     let mut app = new_classic_menu_app(800, 600);
     let global_tcp = clonk_network::NetworkAddress::new(
         clonk_network::NetworkProtocol::Tcp,
-        "8.8.8.8:11112".parse().unwrap(),
+        "8.8.8.8:11112".parse().test_value(),
     );
     let private_udp = clonk_network::NetworkAddress::new(
         clonk_network::NetworkProtocol::Udp,
-        "10.0.0.7:11113".parse().unwrap(),
+        "10.0.0.7:11113".parse().test_value(),
     );
     let reference = clonk_network::NetworkGameReference {
         title: "Running game".to_string(),
@@ -3597,7 +3412,7 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
         join_allowed: false,
         password_needed: true,
         addresses: vec![private_udp, global_tcp],
-        source_address: "127.0.0.1:11111".parse().unwrap(),
+        source_address: "127.0.0.1:11111".parse().test_value(),
         netpuncher_ipv4: 0x1122_3344,
         netpuncher_ipv6: 0x5566_7788,
         netpuncher_address: "puncher.invalid:11115".to_string(),
@@ -3626,7 +3441,7 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     app.startup_game_references = vec![reference];
 
     app.process_network_dialog_actions(actions.clone())
-        .expect("runtime policy opens confirmation");
+        .test_value();
     let modal = &app.message_dialogs[0].state;
     assert_eq!(modal.caption(), "Cannot join game");
     assert_eq!(
@@ -3643,20 +3458,16 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     );
     assert!(app.pending_network_join.is_none());
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
-        .expect("decline runtime join");
+        .test_value();
     assert!(app.pending_network_join.is_none());
     assert!(app.startup_network_connection.is_none());
 
-    app.process_network_dialog_actions(actions)
-        .expect("reopen runtime policy confirmation");
+    app.process_network_dialog_actions(actions).test_value();
     app.startup_game_references.clear();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
-        .expect("accept retained runtime reference");
+        .test_value();
 
-    let settings = app
-        .pending_network_join
-        .as_ref()
-        .expect("accepted reference remains prepared behind password prompt");
+    let settings = app.pending_network_join.test_ref();
     assert_eq!(settings.server_addresses, [global_tcp, private_udp]);
     assert_eq!(
         settings.netpuncher_address.as_deref(),
@@ -3707,18 +3518,14 @@ fn network_row_double_click_joins_another_cpp_build() {
         f64::from(layout.list_entry.x + layout.list_entry.w / 2),
         f64::from(layout.list_entry.y + layout.list_entry.h / 2),
     );
-    app.handle_cursor_moved(point).expect("hover game row");
+    app.test_cursor(point);
 
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("first row press");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("first row release only selects");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(app.message_dialogs.is_empty());
 
-    app.handle_mouse_button(ElementState::Pressed)
-        .expect("second row press");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("second row release activates double click");
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
     assert!(app.message_dialogs.is_empty());
     assert!(app.netdlg_last_click.is_none());
     assert_eq!(
@@ -3740,17 +3547,17 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     let mut app = new_classic_menu_app(800, 600);
     let global_tcp = clonk_network::NetworkAddress::new(
         clonk_network::NetworkProtocol::Tcp,
-        "8.8.8.8:11112".parse().unwrap(),
+        "8.8.8.8:11112".parse().test_value(),
     );
     let private_udp = clonk_network::NetworkAddress::new(
         clonk_network::NetworkProtocol::Udp,
-        "10.0.0.7:11113".parse().unwrap(),
+        "10.0.0.7:11113".parse().test_value(),
     );
     let reference = clonk_network::NetworkGameReference {
         title: "Passworded game".to_string(),
         password_needed: true,
         addresses: vec![private_udp, global_tcp],
-        source_address: "127.0.0.1:11111".parse().unwrap(),
+        source_address: "127.0.0.1:11111".parse().test_value(),
         netpuncher_ipv4: 0x1122_3344,
         netpuncher_ipv6: 0x5566_7788,
         netpuncher_address: "puncher.invalid:11115".to_string(),
@@ -3796,8 +3603,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
         definition_root: None,
     });
 
-    app.process_network_dialog_actions(actions)
-        .expect("selected complete reference opens the exact password prompt");
+    app.process_network_dialog_actions(actions).test_value();
 
     assert!(app.message_dialogs.is_empty());
     assert!(app.active_scenario.is_none());
@@ -3807,10 +3613,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
         }
         other => panic!("reference join must install the Objects seed, got {other:?}"),
     }
-    let settings = app
-        .pending_network_join
-        .as_ref()
-        .expect("prepared join is retained while prompting");
+    let settings = app.pending_network_join.test_ref();
     assert_eq!(
         settings.compatibility_build,
         clonk_network::CURRENT_GAME_BUILD + 2
@@ -3828,10 +3631,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     assert_eq!(settings.netpuncher_game_ids.ipv4, 0x1122_3344);
     assert_eq!(settings.netpuncher_game_ids.ipv6, 0x5566_7788);
     assert!(settings.password.is_empty());
-    let dialog = app
-        .game_option_input_dialog
-        .as_ref()
-        .expect("password prompt is modal");
+    let dialog = app.game_option_input_dialog.test_ref();
     assert_eq!(
         dialog.purpose,
         PendingInputDialogPurpose::NetworkJoinPassword
@@ -3842,7 +3642,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     assert!(dialog.controller.text().is_empty());
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
-        .expect("cancel password prompt");
+        .test_value();
     assert!(app.pending_network_join.is_none());
     assert!(app.game_option_input_dialog.is_none());
 }
@@ -3878,39 +3678,37 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
             master_server_url: String::new(),
             discovery_port: 0,
         })
-        .expect("start network search"),
+        .test_value(),
     );
     let reference = clonk_network::NetworkGameReference {
         title: "Passworded game".to_string(),
         password_needed: true,
-        source_address: "127.0.0.1:11111".parse().unwrap(),
+        source_address: "127.0.0.1:11111".parse().test_value(),
         ..Default::default()
     };
 
     app.activate_network_reference_join(reference.clone())
-        .expect("password-protected reference prompts before joining");
+        .test_value();
     assert!(app.game_option_input_dialog.is_some());
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
-        .expect("cancel password prompt");
+        .test_value();
 
     assert!(app.pending_network_join.is_none());
     assert!(
         app.startup_game_search.is_some(),
         "a cancelled password prompt must leave the dialog's search running"
     );
-    app.request_startup_network_refresh()
-        .expect("refresh the retained search");
+    app.request_startup_network_refresh().test_value();
     assert!(
         app.message_dialogs.is_empty(),
         "refresh must not report a search that was never stopped"
     );
 
     // An empty password aborts the join exactly like Cancel does.
-    app.activate_network_reference_join(reference)
-        .expect("second attempt prompts again");
+    app.activate_network_reference_join(reference).test_value();
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(String::new())])
-        .expect("empty password aborts the join");
+        .test_value();
 
     assert!(app.pending_network_join.is_none());
     assert!(app.startup_network_connection.is_none());
@@ -3956,15 +3754,15 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
             master_server_url: String::new(),
             discovery_port: 0,
         })
-        .expect("start network search"),
+        .test_value(),
     );
 
     app.activate_network_reference_join(clonk_network::NetworkGameReference {
         title: "Unreachable game".to_string(),
-        source_address: "127.0.0.1:1".parse().unwrap(),
+        source_address: "127.0.0.1:1".parse().test_value(),
         ..Default::default()
     })
-    .expect("a reference without a password joins immediately");
+    .test_value();
     assert!(
         app.startup_game_search.is_none(),
         "a join that actually launches stops the search"
@@ -3977,7 +3775,7 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
     ));
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("cancel the connection attempt");
+        .test_value();
 
     assert!(app.startup_network_connection.is_none());
     assert!(app.pending_network_join.is_none());
@@ -3985,8 +3783,7 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
         app.startup_game_search.is_some(),
         "the netdlg must never be left on screen without its search"
     );
-    app.request_startup_network_refresh()
-        .expect("refresh the restored search");
+    app.request_startup_network_refresh().test_value();
     assert!(
         app.message_dialogs.is_empty(),
         "refresh must not report a search that was restored"
@@ -4017,22 +3814,24 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     app.pending_network_join = Some(
         ClientSettings::new(attempts[0].endpoint, "Player")
             .with_join_attempts(attempts.clone())
-            .with_password(clonk_engine::LegacyCString::from_bytes(b"rejected".to_vec()).unwrap()),
+            .with_password(
+                clonk_engine::LegacyCString::from_bytes(b"rejected".to_vec()).test_value(),
+            ),
     );
     let (sender, receiver) = mpsc::channel();
     sender
         .send(Err(NetworkStartError::WrongPassword {
-            message: clonk_engine::LegacyCString::from_bytes(b"wrong password".to_vec()).unwrap(),
+            message: clonk_engine::LegacyCString::from_bytes(b"wrong password".to_vec())
+                .test_value(),
         }))
-        .expect("queue typed wrong-password result");
+        .test_value();
     app.startup_network_connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
     ));
 
-    app.poll_startup_network_connection()
-        .expect("poll wrong-password result");
+    app.poll_startup_network_connection().test_value();
 
     assert!(app.startup_network_connection.is_none());
     assert_eq!(
@@ -4042,10 +3841,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
             .server_addresses,
         attempts
     );
-    let prompt = app
-        .game_option_input_dialog
-        .as_ref()
-        .expect("wrong password reopens prompt");
+    let prompt = app.game_option_input_dialog.test_ref();
     assert_eq!(
         prompt.purpose,
         PendingInputDialogPurpose::NetworkJoinPassword
@@ -4053,7 +3849,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     assert!(prompt.controller.text().is_empty());
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(String::new())])
-        .expect("empty replacement aborts like C++");
+        .test_value();
     assert!(app.pending_network_join.is_none());
     assert!(app.startup_network_connection.is_none());
 
@@ -4062,14 +3858,13 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     let (sender, receiver) = mpsc::channel();
     sender
         .send(Err(NetworkStartError::Other("join denied".to_string())))
-        .expect("queue terminal rejection");
+        .test_value();
     app.startup_network_connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
     ));
-    app.poll_startup_network_connection()
-        .expect("poll terminal join rejection");
+    app.poll_startup_network_connection().test_value();
     assert!(app.pending_network_join.is_none());
     assert!(app.game_option_input_dialog.is_none());
     assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -4079,19 +3874,18 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
 #[test]
 fn client_join_flow_submitted_password_is_frozen_for_the_worker() {
     let mut app = new_classic_menu_app(800, 600);
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = closed.local_addr().unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").test_value();
+    let address = closed.local_addr().test_value();
     drop(closed);
     app.pending_network_join = Some(ClientSettings::new(address, "Player").with_join_attempts([
         clonk_network::NetworkAddress::new(clonk_network::NetworkProtocol::Tcp, address),
     ]));
-    app.open_network_join_password_dialog()
-        .expect("open network password prompt");
+    app.open_network_join_password_dialog().test_value();
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "typed secret".to_string(),
     )])
-    .expect("submit network password");
+    .test_value();
 
     assert_eq!(
         app.pending_network_join
@@ -4103,8 +3897,7 @@ fn client_join_flow_submitted_password_is_frozen_for_the_worker() {
     );
     assert!(app.startup_network_connection.is_some());
     for _ in 0..100 {
-        app.poll_startup_network_connection()
-            .expect("poll submitted-password join");
+        app.poll_startup_network_connection().test_value();
         if app.startup_network_connection.is_none() {
             break;
         }
@@ -4150,8 +3943,7 @@ fn dirty_axis_calibration_updates_cpp_keys_without_rewriting_other_bytes() {
     let mut calibrations = bindings.axis_calibrations();
     calibrations[2][4] = input::GamepadAxisCalibration::new(12, u32::MAX, true);
     bindings.replace_axis_calibrations(calibrations);
-    let updated = update_dirty_gamepad_axis_calibration_config(source, &bindings)
-        .expect("write native calibration triplets");
+    let updated = update_dirty_gamepad_axis_calibration_config(source, &bindings).test_value();
 
     assert!(updated.windows(2).any(|bytes| bytes == b"\x80\xff"));
     assert_eq!(
@@ -4187,7 +3979,7 @@ fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
     let _ = render_ordered_test_frame(&mut app, scale, 480, 300);
 
     app.handle_main_menu_activation(MainMenuItem::About)
-        .expect("switch scaled Main to About");
+        .test_value();
     let mut frame_ten = None;
     for step in 1..=STARTUP_DIALOG_FADE_STEPS {
         let (_, output, plan) = render_ordered_test_frame(&mut app, scale, 480, 300);
@@ -4273,10 +4065,10 @@ fn synchronized_player_file_policy_matches_native_suppression_matrix() {
 
 #[test]
 fn synchronized_player_file_remote_gates_leave_profile_untouched() {
-    let directory = tempdir().expect("player profile directory");
+    let directory = tempdir();
     let profile_path = directory.path().join("Remote.c4p");
     let sentinel = b"profile must not be opened";
-    fs::write(&profile_path, sentinel).expect("write remote sentinel");
+    fs::write(&profile_path, sentinel).test_value();
 
     let mut app = new_state_only_synthetic_crew_running_sandbox_app();
     let player_number = app.local_owner;
@@ -4286,14 +4078,12 @@ fn synchronized_player_file_remote_gates_leave_profile_untouched() {
         .players
         .iter_mut()
         .find(|player| player.id == player_number)
-        .expect("sandbox player state");
+        .test_value();
     player.player_info_id = info_id;
     player.at_client = clonk_engine::PlayerAtClient::new(8);
     player.status = clonk_engine::PlayerStatus::Active;
     player.script_player = false;
-    app.engine
-        .restore_state(&state)
-        .expect("install remote player state");
+    app.engine.restore_state(&state).test_value();
     app.control_player_infos.replace_snapshot(
         info_id,
         [clonk_engine::PlayerInfoControlData {
@@ -4332,9 +4122,8 @@ fn synchronized_player_file_remote_gates_leave_profile_untouched() {
 fn developer_console_latches_no_input_and_reflects_pending_network_pause() {
     let mut app = new_state_only_running_sandbox_app();
     app.console_mode = true;
-    app.control_playback = Some(
-        ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).expect("open replay marker"),
-    );
+    app.control_playback =
+        Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.sync_developer_console_view();
     app.control_playback = None;
     app.sync_developer_console_view();
@@ -4364,8 +4153,7 @@ fn developer_console_player_and_net_menus_use_native_controls() {
     let mut app = new_state_only_running_sandbox_app();
     let player = app.local_owner;
     app.engine
-        .player_mut(player)
-        .expect("console player exists")
+        .test_player_mut(player)
         .set_at_client_name("Host");
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     let mut remote = message_client(7, b"Remote");
@@ -4466,7 +4254,7 @@ fn developer_console_offline_join_and_quit_use_control_cadence() {
 
     let player = app.local_owner;
     app.engine.set_control_rate(3);
-    app.snapshot = app.engine.tick().expect("advance past cadence frame zero");
+    app.snapshot = app.engine.test_tick();
     assert!(app
         .developer_console_quit_player(player, true)
         .expect("queue local CID_EliminatePlayer"));
@@ -4475,16 +4263,13 @@ fn developer_console_offline_join_and_quit_use_control_cadence() {
         Some(clonk_engine::PlayerStatus::Eliminated),
         "Game.Control.Input.Add must not execute the callback immediately"
     );
-    app.update()
-        .expect("frame one is before the control cadence");
-    app.update()
-        .expect("frame two is before the control cadence");
+    app.test_update();
+    app.test_update();
     assert_ne!(
         app.engine.player(player).map(clonk_engine::Player::status),
         Some(clonk_engine::PlayerStatus::Eliminated)
     );
-    app.update()
-        .expect("frame three executes the control input");
+    app.test_update();
     assert_eq!(
         app.engine.player(player).map(clonk_engine::Player::status),
         Some(clonk_engine::PlayerStatus::Eliminated)
@@ -4501,12 +4286,10 @@ fn developer_console_network_join_uses_join_local_player_route() {
     let (manager, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     let mut settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
-    settings.group_maker =
-        LegacyCString::from_bytes(b"Console maker".to_vec()).expect("valid maker");
+    settings.group_maker = LegacyCString::from_bytes(b"Console maker".to_vec()).test_value();
     app.network_mode = Some(NetworkMode::Client(settings));
     app.control_clients.register(7, true, false);
-    let wire_name = LegacyCString::from_bytes(path_to_legacy_bytes(player_path))
-        .expect("fixture path has no NUL");
+    let wire_name = LegacyCString::from_bytes(path_to_legacy_bytes(player_path)).test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 7 << 16,
@@ -4522,8 +4305,7 @@ fn developer_console_network_join_uses_join_local_player_route() {
         1
     );
     drop(app.network.take());
-    let (order, publications, updates, acknowledgements) =
-        observer.join().expect("network command observer");
+    let (order, publications, updates, acknowledgements) = observer.test_join();
     assert_eq!(order, vec!["publish", "player-info"]);
     assert_eq!(publications.len(), 1);
     assert_eq!(publications[0].source_path.as_path(), player_path);
@@ -4540,19 +4322,18 @@ fn developer_console_network_join_uses_join_local_player_route() {
 
 #[test]
 fn developer_console_unpacked_c4f_child_has_native_mother_group() {
-    let directory = tempdir().expect("scenario root");
+    let directory = tempdir();
     let outer = directory.path().join("Outer.c4f");
     let inner_folder = outer.join("Inner.c4f");
     let scenario = inner_folder.join("Game.c4s");
-    fs::create_dir_all(&scenario).expect("unpacked child scenario");
+    fs::create_dir_all(&scenario).test_value();
 
-    let (physical, children) =
-        scenario_logical_storage(&scenario).expect("resolve unpacked child storage");
+    let (physical, children) = scenario_logical_storage(&scenario).test_value();
     assert_eq!(physical, outer);
     assert_eq!(children, vec!["Inner.c4f", "Game.c4s"]);
 
     let standalone = directory.path().join("Standalone.c4s");
-    fs::create_dir(&standalone).expect("unpacked standalone scenario");
+    fs::create_dir(&standalone).test_value();
     assert_eq!(
         scenario_logical_storage(&standalone).unwrap(),
         (standalone, Vec::new())
@@ -4561,18 +4342,18 @@ fn developer_console_unpacked_c4f_child_has_native_mother_group() {
 
 #[test]
 fn folder_live_save_replays_native_prefix_and_writes_packed_children() {
-    let directory = tempdir().expect("folder live-save root");
+    let directory = tempdir();
     let destination = directory.path().join("Live.c4s");
-    fs::create_dir(&destination).expect("create folder scenario");
-    fs::write(destination.join("Remove.txt"), b"remove me").expect("write removed entry");
-    fs::write(destination.join("Untouched.dat"), b"keep me").expect("write unrelated entry");
-    fs::create_dir(destination.join("Blocked.txt")).expect("create failing add target");
+    fs::create_dir(&destination).test_value();
+    fs::write(destination.join("Remove.txt"), b"remove me").test_value();
+    fs::write(destination.join("Untouched.dat"), b"keep me").test_value();
+    fs::create_dir(destination.join("Blocked.txt")).test_value();
 
     let mut child = MutableGroup::new("SectNight.c4g");
     child
         .add_file("Scenario.txt", b"[Head]\nTitle=Night\n".to_vec())
-        .expect("add child core");
-    let child = child.pack_raw().expect("compose raw child");
+        .test_value();
+    let child = child.pack_raw().test_value();
     let mut journal = developer_console_save::FolderSaveJournal::default();
     journal.put_file(
         "Prefix.txt",
@@ -4611,7 +4392,7 @@ fn folder_live_save_replays_native_prefix_and_writes_packed_children() {
     assert!(!destination.join("After.txt").exists());
     let child_path = destination.join("SectNight.c4g");
     assert!(child_path.is_file(), "folder children stay packed files");
-    let child = Group::open(&child_path).expect("open packed section child");
+    let child = Group::open(&child_path).test_value();
     assert_eq!(child.maker(), Some("Folder maker"));
     assert_eq!(
         child.read_file("Scenario.txt").unwrap(),
@@ -4645,16 +4426,15 @@ fn network_set_pre_send_applies_matching_local_target_fps_and_flash_without_fata
             ),
             true,
         )
-        .expect("SetPreSend fixture links");
+        .test_value();
     app.set_runtime_flash_message("unchanged", RuntimeHelpCharset::Windows1252)
-        .expect("seed existing flash");
+        .test_value();
     let unchanged_flash = app.runtime_flash_message.clone();
 
     app.engine
         .call_scenario_script_function("Mismatch", Vec::new())
-        .expect("mismatching SetPreSend returns normally");
-    app.apply_engine_network_target_fps_requests()
-        .expect("mismatch is a successful local no-op");
+        .test_value();
+    app.apply_engine_network_target_fps_requests().test_value();
     assert_eq!(
         app.network_control_clock
             .expect("network clock")
@@ -4665,29 +4445,24 @@ fn network_set_pre_send_applies_matching_local_target_fps_and_flash_without_fata
 
     app.engine
         .call_scenario_script_function("Match", Vec::new())
-        .expect("matching SetPreSend returns normally");
-    app.apply_engine_network_target_fps_requests()
-        .expect("matching request applies");
-    let clock = app.network_control_clock.expect("network clock");
+        .test_value();
+    app.apply_engine_network_target_fps_requests().test_value();
+    let clock = app.network_control_clock.test_value();
     assert_eq!(clock.target_fps(), 76);
     assert_eq!(
         clock.control_presend(),
         1,
         "setter does not recalculate inline"
     );
-    let flash = app
-        .runtime_flash_message
-        .as_ref()
-        .expect("target FPS flash");
+    let flash = app.runtime_flash_message.test_ref();
     assert_eq!(flash.text, "TargetFPS: 76");
     assert_eq!(flash.remaining_draws, 26);
     assert_eq!(flash.y, app.runtime_flash_y());
 
     app.engine
         .call_scenario_script_function("Reset", Vec::new())
-        .expect("zero target returns normally");
-    app.apply_engine_network_target_fps_requests()
-        .expect("zero restores the native target");
+        .test_value();
+    app.apply_engine_network_target_fps_requests().test_value();
     assert_eq!(
         app.network_control_clock
             .expect("network clock")
@@ -4717,8 +4492,8 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
 
     events
         .send(NetworkEvent::StatusRequested(pause))
-        .expect("request runtime Pause");
-    app.process_network_events().expect("arm runtime Pause");
+        .test_value();
+    app.test_network_events();
     assert!(
         app.network_control_running,
         "receipt alone must not halt control"
@@ -4727,14 +4502,14 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
     assert!(commands.take_framed_status_acknowledgements().is_empty());
 
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute control tick zero");
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (1, 1)
     );
-    app.update().expect("advance non-control frame one");
+    app.test_update();
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute control tick one");
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (3, 2)
@@ -4743,9 +4518,8 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
         app.network_control_running,
         "tick target is not a cadence boundary yet"
     );
-    app.update().expect("reach Pause cadence boundary");
-    app.update()
-        .expect("probe reached Pause before another frame");
+    app.test_update();
+    app.test_update();
 
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
@@ -4756,14 +4530,14 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
         commands.take_framed_status_acknowledgements(),
         vec![(pause, 4)]
     );
-    app.update().expect("remain stopped awaiting Pause commit");
-    app.sec1_timer().expect("recheck stopped Pause barrier");
+    app.test_update();
+    app.sec1_timer().test_value();
     assert!(commands.take_framed_status_acknowledgements().is_empty());
 
     events
         .send(NetworkEvent::StatusCommitted(pause))
-        .expect("commit Pause");
-    app.process_network_events().expect("apply Pause commit");
+        .test_value();
+    app.test_network_events();
     assert!(!app.network_control_running);
 
     let go = clonk_network::NetworkStatus {
@@ -4771,22 +4545,20 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
         target_tick: 4,
         ..pause
     };
-    events
-        .send(NetworkEvent::StatusRequested(go))
-        .expect("request runtime Go");
-    app.process_network_events().expect("arm runtime Go");
+    events.send(NetworkEvent::StatusRequested(go)).test_value();
+    app.test_network_events();
     assert!(
         app.network_control_running,
         "Go drives out of committed Pause"
     );
 
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute control tick two");
-    app.update().expect("advance non-control frame five");
+    app.test_update();
+    app.test_update();
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute control tick three");
-    app.update().expect("reach Go cadence boundary");
-    app.update().expect("probe reached Go before another frame");
+    app.test_update();
+    app.test_update();
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (8, 4)
@@ -4800,13 +4572,11 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
         vec![(go, 8)]
     );
 
-    events
-        .send(NetworkEvent::StatusCommitted(go))
-        .expect("commit Go");
-    app.process_network_events().expect("apply Go commit");
+    events.send(NetworkEvent::StatusCommitted(go)).test_value();
+    app.test_network_events();
     assert!(app.network_control_running);
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("resume after committed Go");
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (9, 5)
@@ -4824,18 +4594,18 @@ fn runtime_host_commit_executes_sync_at_the_actual_overshoot_tick() {
     };
     events
         .send(NetworkEvent::StatusRequested(pause))
-        .expect("request runtime Pause");
+        .test_value();
     for tick in 0..=2 {
         events
             .send(NetworkEvent::ReadyTick {
                 tick,
                 controls: Vec::new(),
             })
-            .expect("queue complete control through requested target");
+            .test_value();
     }
     let mut status_commands = Vec::new();
     for _ in 0..7 {
-        app.update().expect("drive through the requested target");
+        app.test_update();
         status_commands.extend(commands.take_runtime_status_commands());
     }
     assert_eq!(
@@ -4861,9 +4631,8 @@ fn runtime_host_commit_executes_sync_at_the_actual_overshoot_tick() {
                 0,
             ))],
         })
-        .expect("queue sync control at the host's actual arrival tick");
-    app.process_network_events()
-        .expect("retain the released sync batch until commit");
+        .test_value();
+    app.test_network_events();
     assert!(app.network_sync.scheduled.contains_key(&3));
     assert!(app
         .message_board
@@ -4872,9 +4641,8 @@ fn runtime_host_commit_executes_sync_at_the_actual_overshoot_tick() {
         .all(|line| !line.contains("overshoot-sync")));
     events
         .send(NetworkEvent::StatusCommitted(pause))
-        .expect("commit the requested Pause");
-    app.process_network_events()
-        .expect("execute sync control before completing Pause");
+        .test_value();
+    app.test_network_events();
 
     assert!(app.network_sync.scheduled.is_empty());
     assert!(app
@@ -4894,7 +4662,7 @@ fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
     // after tick zero, both identify tick one even off cadence
     // (src/C4GameControl.cpp:325-365).
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute host control tick zero");
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (1, 1)
@@ -4909,8 +4677,8 @@ fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
     assert_eq!(pause.target_tick, 1);
     assert!(app.network_control_running);
 
-    app.update().expect("advance to host Pause boundary");
-    app.update().expect("probe reached host Pause");
+    app.test_update();
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (2, 1)
@@ -4923,7 +4691,7 @@ fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
             actual_control_tick: 1,
         }]
     );
-    app.sec1_timer().expect("recheck reached host Pause");
+    app.sec1_timer().test_value();
     assert!(
         commands.take_runtime_status_commands().is_empty(),
         "local reach is sent once"
@@ -4935,18 +4703,17 @@ fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
     };
     events
         .send(NetworkEvent::StatusRequested(retargeted))
-        .expect("surface authoritative higher target");
-    app.process_network_events()
-        .expect("rearm retargeted Pause");
+        .test_value();
+    app.test_network_events();
     assert!(app.network_control_running);
     assert!(commands.take_runtime_status_commands().is_empty());
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute host control tick one");
-    app.update().expect("advance host non-control frame three");
+    app.test_update();
+    app.test_update();
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("execute host control tick two");
-    app.update().expect("advance to retargeted Pause boundary");
-    app.update().expect("probe reached retargeted Pause");
+    app.test_update();
+    app.test_update();
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (6, 3)
@@ -4962,17 +4729,15 @@ fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
 
     events
         .send(NetworkEvent::StatusCommitted(retargeted))
-        .expect("commit retargeted Pause");
-    app.process_network_events()
-        .expect("apply retargeted Pause");
+        .test_value();
+    app.test_network_events();
     assert!(!app.network_control_running);
 
     // A packet received during committed Pause is still raw, not
     // CtrlReady. Start must reach Go before re-enabling control and leave
     // this target batch for execution after the commit.
     queue_empty_ready_tick(&app, &events);
-    app.process_network_events()
-        .expect("retain current control while Pause is committed");
+    app.test_network_events();
     app.finish_host_vote_pause(clonk_engine::VoteControlData {
         vote_type: clonk_engine::VOTE_TYPE_PAUSE,
         approve: true,
@@ -4998,13 +4763,10 @@ fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
     );
     assert!(!app.network_control_running);
     assert!(app.network_ticks.ready.contains_key(&3));
-    events
-        .send(NetworkEvent::StatusCommitted(go))
-        .expect("commit follow-up Go");
-    app.process_network_events().expect("resume committed Go");
+    events.send(NetworkEvent::StatusCommitted(go)).test_value();
+    app.test_network_events();
     assert!(app.network_control_running);
-    app.update()
-        .expect("execute retained control after Go commit");
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (7, 4)
@@ -5029,7 +4791,7 @@ fn runtime_host_rechecks_unreported_arrival_on_sec1_timer() {
         actual_control_tick: None,
     });
 
-    app.sec1_timer().expect("one-second status reach probe");
+    app.sec1_timer().test_value();
 
     assert!(!app.network_control_running);
     assert_eq!(
@@ -5083,9 +4845,9 @@ fn message_board_change_mode_and_execute_match_native_faders() {
 #[test]
 fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     let _lock = env_lock().lock();
-    let root = tempdir().expect("message-board config root");
+    let root = tempdir();
     let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
-    paths.ensure_user_dirs().expect("message-board user dirs");
+    paths.ensure_user_dirs().test_value();
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     let line_height = app.graphics.message_board_line_height();
@@ -5104,7 +4866,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
         "three".to_string(),
         "four".to_string(),
     ]));
-    let config = Config::load(paths.config_file()).expect("persisted message-board config");
+    let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("Graphics"), "MsgBoard"), Some("1"));
 
     let mut reloaded = ClassicMessageBoardState::default();
@@ -5118,7 +4880,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
 
     app.process_running_chat_text("/msgboard 0");
     assert_eq!(app.message_board.mode, MessageBoardMode::Hidden);
-    let config = Config::load(paths.config_file()).expect("hidden message-board config");
+    let config = Config::load(paths.config_file()).test_value();
     assert_eq!(config.get_in(Some("Graphics"), "MsgBoard"), Some("0"));
     let mut hidden_reloaded = ClassicMessageBoardState::default();
     hidden_reloaded.initialize(load_message_board_enabled(Some(&paths)), line_height);
@@ -5135,7 +4897,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
 #[test]
 fn running_set_comment_is_direct_host_effect() {
     let _lock = env_lock().lock();
-    let fixture = tempdir().expect("running comment configuration");
+    let fixture = tempdir();
     let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
@@ -5369,20 +5131,17 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
 
     for _ in 0..3 {
         queue_empty_ready_tick(&app, &events);
-        app.update().expect("execute one network-sandbox frame");
+        app.test_update();
     }
-    app.sec1_timer().expect("sample the running second");
+    app.sec1_timer().test_value();
 
-    let cursor = app
-        .engine
-        .crew_cursor(app.local_owner)
-        .expect("sandbox crew");
+    let cursor = app.engine.test_crew_cursor(app.local_owner);
     app.engine
         .apply_object_update(
             cursor,
             ObjectUpdate::new().with_status(clonk_engine::ObjectStatus::Inactive),
         )
-        .expect("deactivate sandbox crew");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     assert!(app
         .snapshot
@@ -5395,12 +5154,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
         .iter()
         .filter(|object| object.status != clonk_engine::ObjectStatus::Deleted)
         .count() as f32;
-    let object_sample_time = app
-        .network_stats
-        .as_ref()
-        .expect("live stats")
-        .object_count_graph()
-        .end_time();
+    let object_sample_time = app.network_stats.test_ref().object_count_graph().end_time();
     app.record_network_stats_frame();
     assert_eq!(
         app.network_stats
@@ -5412,11 +5166,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
         "native object count includes inactive objects"
     );
 
-    let second_counter = app
-        .network_stats
-        .as_ref()
-        .expect("live stats")
-        .second_counter();
+    let second_counter = app.network_stats.test_ref().second_counter();
     app.mode = AppMode::Loading;
     app.record_network_stats_second();
     assert_eq!(
@@ -5430,10 +5180,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
     app.mode = AppMode::Running;
 
     app.process_running_chat_text("/chart");
-    let dialog = app
-        .network_chart_dialog
-        .as_ref()
-        .expect("/chart opens the singleton dialog");
+    let dialog = app.network_chart_dialog.test_ref();
     assert_eq!(
         dialog.tab_names(),
         ["oc", "FPS", "NetIO", "Pings", "Control", "APM"]
@@ -5442,24 +5189,18 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
         dialog.tabs().iter().all(|tab| !tab.graph.is_empty()),
         "every live graph receives at least one frame/second/control sample"
     );
-    let object_graph = dialog
-        .active_graph()
-        .expect("object-count graph is selected");
+    let object_graph = dialog.active_graph().test_value();
     assert!(object_graph.end_time() - object_graph.start_time() >= 3);
 
     let chart_point = {
-        let resources = app
-            .assets
-            .network_chart_resources()
-            .expect("synthetic chart resources");
+        let resources = app.assets.network_chart_resources().test_value();
         let preferred = scoreboard_preferred_rect(
             app.graphics
                 .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
         );
         let layout = app
             .network_chart_dialog
-            .as_ref()
-            .expect("open chart")
+            .test_ref()
             .layout(preferred, resources);
         GuiPoint::new(
             layout.caption.x.saturating_add(8) as f32,
@@ -5471,13 +5212,12 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
     assert!(app.network_chart_pointer_capture);
     app.ingame_pointer = None;
     app.ingame_edge_scroll = None;
-    app.handle_cursor_moved(PhysicalPosition::new(10_000.0, 10_000.0))
-        .expect("captured chart drag stays GUI-owned outside its bounds");
+    app.test_cursor(PhysicalPosition::new(10_000.0, 10_000.0));
     assert!(app.network_chart_pointer_capture);
     assert!(app.ingame_pointer.is_none());
     assert!(app.ingame_edge_scroll.is_none());
     app.handle_mouse_button_classified(ElementState::Released, false)
-        .expect("outside release clears chart capture");
+        .test_value();
     assert!(!app.network_chart_pointer_capture);
 
     app.process_running_chat_text("/chart");
@@ -5505,8 +5245,8 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         app.runtime_key_config_cache = OnceLock::new();
         let source = format!("[Keys]\nChartToggle={binding}\n");
         app.runtime_key_config_cache
-            .set(Ok(parse_runtime_key_config(source.as_bytes()).unwrap()))
-            .expect("install chart key registry");
+            .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
+            .test_value();
         app
     };
 
@@ -5516,8 +5256,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         ("F7", VirtualKeyCode::F7),
     ] {
         let mut app = configured(name);
-        app.handle_key(key, ElementState::Pressed)
-            .expect("bare function key reaches ChartToggle");
+        app.test_key(key, ElementState::Pressed);
         assert!(app.network_chart_dialog.is_some(), "{name}");
     }
 
@@ -5570,32 +5309,23 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         .handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed));
 
     let mut irc = configured("F8");
-    irc.show_external_irc_dialog()
-        .expect("show standalone IRC dialog");
-    irc.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-        .expect("unclaimed IRC key reaches ChartToggle");
+    irc.show_external_irc_dialog().test_value();
+    irc.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(irc.external_irc_dialog_visible);
     assert!(irc.network_chart_dialog.is_some());
     assert!(irc.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart));
 
     let mut irc_unclaimed = configured("Alt+Z");
-    irc_unclaimed
-        .show_external_irc_dialog()
-        .expect("show standalone IRC dialog");
+    irc_unclaimed.show_external_irc_dialog().test_value();
     irc_unclaimed.keyboard_modifiers = ModifiersState::ALT;
-    irc_unclaimed
-        .handle_key(VirtualKeyCode::KeyZ, ElementState::Pressed)
-        .expect("unowned IRC mnemonic falls through");
+    irc_unclaimed.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
     assert!(irc_unclaimed.network_chart_dialog.is_some());
 
     let mut irc_edit = configured("Ctrl+Shift+Left");
-    irc_edit
-        .show_external_irc_dialog()
-        .expect("show standalone IRC edit");
+    irc_edit.show_external_irc_dialog().test_value();
     irc_edit
         .external_irc_dialog
-        .as_mut()
-        .expect("standalone IRC controller")
+        .test_mut()
         .force_chat_mode_and_focus();
     irc_edit.keyboard_modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
     assert!(
@@ -5603,12 +5333,8 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     );
 
     let mut irc_connect = configured("Up");
-    irc_connect
-        .show_external_irc_dialog()
-        .expect("show standalone IRC login");
-    irc_connect
-        .handle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed)
-        .expect("Connect-focused login has no arrow callback");
+    irc_connect.show_external_irc_dialog().test_value();
+    irc_connect.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     assert!(irc_connect.network_chart_dialog.is_some());
 
     let mut game_over = new_game_over_keyboard_app();
@@ -5616,9 +5342,9 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     game_over
         .runtime_key_config_cache
         .set(Ok(
-            parse_runtime_key_config(b"[Keys]\nChartToggle=Alt+E\n").unwrap()
+            parse_runtime_key_config(b"[Keys]\nChartToggle=Alt+E\n").test_value()
         ))
-        .expect("install game-over chart key");
+        .test_value();
     game_over.keyboard_modifiers = ModifiersState::ALT;
     assert!(!game_over.handle_runtime_chart_toggle_key(VirtualKeyCode::KeyE, ElementState::Pressed));
 
@@ -5627,16 +5353,12 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     game_over_list
         .runtime_key_config_cache
         .set(Ok(
-            parse_runtime_key_config(b"[Keys]\nChartToggle=Up\n").unwrap()
+            parse_runtime_key_config(b"[Keys]\nChartToggle=Up\n").test_value()
         ))
-        .expect("install player-list chart key");
+        .test_value();
     for _ in 0..2 {
-        game_over_list
-            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("advance evaluation focus");
-        game_over_list
-            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release evaluation focus key");
+        game_over_list.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+        game_over_list.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
     assert!(matches!(
         game_over_list
@@ -5660,7 +5382,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         ),
         MessageDialogContinuation::LeagueSurrender,
     )
-    .expect("show exclusive vote");
+    .test_value();
     vote.keyboard_modifiers = ModifiersState::ALT;
     assert!(!vote.handle_runtime_chart_toggle_key(VirtualKeyCode::KeyY, ElementState::Pressed));
 
@@ -5681,39 +5403,28 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         ControlBindingId::Left,
         VirtualKeyCode::Escape,
     ));
-    player_escape
-        .handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-        .expect("open chart above a player Escape binding");
-    player_escape
-        .handle_key(VirtualKeyCode::F8, ElementState::Released)
-        .expect("release chart toggle");
+    player_escape.test_key(VirtualKeyCode::F8, ElementState::Pressed);
+    player_escape.test_key(VirtualKeyCode::F8, ElementState::Released);
     assert!(!player_escape.network_chart_owns_stronger_escape());
-    player_escape
-        .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-        .expect("PRIO_PlrControl Escape wins");
+    player_escape.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     assert!(player_escape.network_chart_dialog.is_some());
-    player_escape
-        .handle_key(VirtualKeyCode::Escape, ElementState::Released)
-        .expect("release player Escape");
+    player_escape.test_key(VirtualKeyCode::Escape, ElementState::Released);
 }
 
 #[test]
 fn chart_uses_native_placement_caption_drag_and_close_control() {
     let mut app = new_running_sandbox_app();
-    app.resize(1280, 720).expect("resize chart chrome fixture");
+    app.resize(1280, 720).test_value();
     app.toggle_network_chart();
     let assets = Arc::clone(&app.assets);
-    let resources = assets
-        .network_chart_resources()
-        .expect("synthetic chart resources");
+    let resources = assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
     );
     let layout = app
         .network_chart_dialog
-        .as_ref()
-        .expect("open chart")
+        .test_ref()
         .layout(preferred, resources);
     assert_eq!(
         (layout.bounds.x, layout.bounds.y),
@@ -5734,8 +5445,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     assert!(!app.network_chart_pointer_capture);
     let moved_layout = app
         .network_chart_dialog
-        .as_ref()
-        .expect("dragged chart")
+        .test_ref()
         .layout(preferred, resources);
     assert_eq!(
         (moved_layout.bounds.x, moved_layout.bounds.y),
@@ -5770,7 +5480,7 @@ fn control_mode_targets_native_current_tick_after_cadence_consumption() {
     let mut app = new_running_sandbox_app();
     let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     queue_empty_ready_tick(&app, &events);
-    app.update().expect("consume cadence tick zero");
+    app.test_update();
     assert_eq!(
         (app.engine.frame(), app.expected_network_control_tick()),
         (1, 1)
@@ -5811,11 +5521,9 @@ fn frozen_runtime_sync_executes_immediately_but_pending_barrier_queues() {
             tick: 0,
             controls: vec![disable_debug()],
         })
-        .expect("queue frozen runtime Sync");
+        .test_value();
 
-    frozen
-        .process_network_events()
-        .expect("execute frozen runtime Sync immediately");
+    frozen.test_network_events();
     assert!(!frozen.engine.debug_mode());
     assert!(frozen.network_sync.scheduled.is_empty());
 
@@ -5839,11 +5547,9 @@ fn frozen_runtime_sync_executes_immediately_but_pending_barrier_queues() {
             tick: 0,
             controls: vec![disable_debug()],
         })
-        .expect("queue transitioning runtime Sync");
+        .test_value();
 
-    transitioning
-        .process_network_events()
-        .expect("retain Sync for the pending status commit");
+    transitioning.test_network_events();
     assert!(transitioning.engine.debug_mode());
     assert!(transitioning.network_sync.scheduled.contains_key(&0));
 }
@@ -5860,18 +5566,16 @@ fn menu_touch_title_drag_uses_touch_coordinates_through_release() {
         false,
     );
     app.push_message_dialog(dialog, MessageDialogContinuation::None)
-        .expect("open message dialog");
-    let layout = app.top_message_dialog_layout().expect("message layout");
-    let caption = layout.caption.expect("caption");
+        .test_value();
+    let layout = app.top_message_dialog_layout().test_value();
+    let caption = layout.caption.test_value();
     let start = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
     let end = GuiPoint::new(start.x + 41.0, start.y + 27.0);
     app.running_pointer_position = Some(GuiPoint::new(1.0, 1.0));
 
-    app.handle_touch(TouchPhase::Started, start)
-        .expect("start title touch drag despite stale mouse point");
+    app.test_touch(TouchPhase::Started, start);
     assert!(app.message_dialogs[0].state.has_positional_pointer_drag());
-    app.handle_touch(TouchPhase::Ended, end)
-        .expect("finish title touch drag without an intermediate move");
+    app.test_touch(TouchPhase::Ended, end);
 
     assert_eq!(app.message_dialogs[0].state.dialog_offset(), (41, 27));
     assert!(!app.message_dialogs[0].state.has_pointer_capture());
@@ -5975,18 +5679,10 @@ fn message_control_host_system_and_inactive_attention_match_cpp() {
 #[test]
 fn portrait_crew_label_decodes_native_info_name_for_presentation() {
     let mut app = new_state_only_running_sandbox_app();
-    let crew = app
-        .engine
-        .crew_cursor(app.local_owner)
-        .expect("sandbox player has cursor crew");
+    let crew = app.engine.test_crew_cursor(app.local_owner);
     let raw_name = clonk_script::c4_string_from_bytes(b"Ren\xe9");
     let mut state = app.engine.capture_state();
-    let definition_id = app
-        .snapshot
-        .object(crew)
-        .expect("cursor object is visible")
-        .definition_id
-        .clone();
+    let definition_id = app.snapshot.object(crew).test_value().definition_id.clone();
     assert!(
         app.engine
             .definition_portrait_graphics_image(&definition_id)
@@ -6014,9 +5710,7 @@ fn portrait_crew_label_decodes_native_info_name_for_presentation() {
             portraits: Default::default(),
         },
     );
-    app.engine
-        .restore_state(&state)
-        .expect("native crew info restores");
+    app.engine.restore_state(&state).test_value();
     app.snapshot = app.engine.snapshot();
 
     let mut players = collect_player_overlays(
@@ -6034,7 +5728,7 @@ fn portrait_crew_label_decodes_native_info_name_for_presentation() {
         .iter()
         .flat_map(|player| &player.crew)
         .find(|overlay| overlay.object_id == crew)
-        .expect("cursor overlay exists");
+        .test_value();
     assert_eq!(overlay.info_name.as_deref(), Some("Ren\u{e9}"));
     assert_eq!(overlay.label, "Ren\u{e9}");
     assert!(
@@ -6067,14 +5761,14 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
         .iter()
         .find(|player| player.id == local_owner)
         .cloned()
-        .expect("sandbox local player");
+        .test_value();
     let focus = local
         .viewports
         .first()
         .and_then(|viewport| viewport.focus)
         .or(local.cursor)
         .or_else(|| local.crew.first().copied())
-        .expect("sandbox local viewport focus");
+        .test_value();
     let mut second = local.clone();
     second.id = local_owner + 1;
     second.name = "Second".to_string();
@@ -6093,7 +5787,7 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
     // Two local players may also retain the same focus object.
     snapshot.players = vec![second.clone(), local_with_split.clone()];
     snapshot.hud.local_players = vec![local_owner, second.id];
-    let viewports = collect_viewport_inputs(&snapshot).expect("valid local viewports");
+    let viewports = collect_viewport_inputs(&snapshot).test_value();
     assert_eq!(viewports.len(), 3);
     assert_eq!(
         viewports
@@ -6117,8 +5811,7 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
         ]
     );
     let mut ordinary_frame = vec![0x73; app.graphics.surface().pixels().len()];
-    app.render_running(&mut ordinary_frame, false)
-        .expect("ordinary local viewport remains renderable");
+    app.render_running(&mut ordinary_frame, false).test_value();
 
     // An unset or deleted slot focus follows only the owning player's
     // live cursor and then first live crew entry. It never consults
@@ -6157,8 +5850,7 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
     eliminated.viewports[0].zoom = 1.75;
     snapshot.players = vec![eliminated.clone()];
     snapshot.hud.local_players = vec![local_owner];
-    let eliminated_views =
-        collect_viewport_inputs(&snapshot).expect("eliminated viewport remains valid");
+    let eliminated_views = collect_viewport_inputs(&snapshot).test_value();
     assert_eq!(eliminated_views.len(), 1);
     assert_eq!(eliminated_views[0].owner, local_owner);
     assert_eq!(eliminated_views[0].center, Vector2::new(123, 456));
@@ -6167,8 +5859,7 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
     app.snapshot.players = vec![eliminated];
     app.snapshot.hud.local_players = vec![local_owner];
     let mut frame = vec![0x91; app.graphics.surface().pixels().len()];
-    app.render_running(&mut frame, false)
-        .expect("eliminated local viewport remains renderable");
+    app.render_running(&mut frame, false).test_value();
 }
 
 #[test]
@@ -6186,7 +5877,7 @@ fn viewport_selection_uses_cpp_keyboard_layout_order_across_joins() {
         .iter()
         .find(|player| player.id == app.local_owner)
         .cloned()
-        .expect("sandbox local player");
+        .test_value();
     let make_player = |id, control_set, center| {
         let mut player = template.clone();
         player.id = id;
@@ -6206,7 +5897,7 @@ fn viewport_selection_uses_cpp_keyboard_layout_order_across_joins() {
     let keyboard1 = make_player(40, 0, Vector2::new(400, 40));
     let viewport_owners = |snapshot: &SimulationSnapshot| {
         collect_viewport_inputs(snapshot)
-            .expect("local viewports resolve")
+            .test_value()
             .into_iter()
             .map(|viewport| viewport.owner)
             .collect::<Vec<_>>()
@@ -6271,10 +5962,7 @@ fn pending_preflight_retains_the_exact_network_tick() {
 #[test]
 fn synchronized_team_configuration_keeps_all_join_data_query_values() {
     let host_config = clonk_network::HostConfig::default();
-    let mut parameters = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData")
-        .parameters;
+    let mut parameters = host_config.initial_join_snapshot.test_value().parameters;
     parameters.teams.custom = 1;
     parameters.teams.active = 0;
     parameters.teams.allow_hostility_change = 1;
@@ -6307,22 +5995,18 @@ fn client_join_data_replaces_authoritative_control_registries() {
     let mut app = new_state_only_menu_app(320, 200);
     app.control_clients.register(99, true, false);
     app.network_client_activity.mark_activated(99, 123);
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 99,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 3,
-                ..Default::default()
-            }],
+    app.control_player_infos.apply(netplay_player_info_data(
+        99,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: 3,
             ..Default::default()
-        });
+        }],
+    ));
     let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(manager);
 
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     snapshot.parameters.clients = clonk_network::JoinClientRegistrySnapshot {
         clients: vec![
             clonk_engine::ClientCoreControlData {
@@ -6364,9 +6048,9 @@ fn client_join_data_replaces_authoritative_control_registries() {
     };
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
-        .expect("queue JoinData");
+        .test_value();
 
-    app.process_network_events().expect("apply JoinData");
+    app.test_network_events();
 
     assert_eq!(app.pending_network_join_data, Some(join_data));
     assert!(!app.control_clients.contains(99));
@@ -6374,10 +6058,10 @@ fn client_join_data_replaces_authoritative_control_registries() {
         app.network_client_activity.last_frame,
         BTreeMap::from([(0, 0), (7, 0)])
     );
-    let host = app.control_clients.state(0).expect("host core restored");
+    let host = app.control_clients.state(0).test_value();
     assert!(host.activated);
     assert!(host.lobby_ready);
-    let local = app.control_clients.state(7).expect("local core restored");
+    let local = app.control_clients.state(7).test_value();
     assert_eq!(local.name.as_bytes(), b"Joining client");
     assert_eq!(local.nick.as_bytes(), b"Joiner");
     assert!(app.control_player_infos.get(3).is_none());
@@ -6392,7 +6076,7 @@ fn client_join_data_replaces_authoritative_control_registries() {
             },
             4,
         )
-        .expect("one player slot remains");
+        .test_value();
     assert_eq!(admitted.players[0].id, 41);
 }
 
@@ -6483,8 +6167,7 @@ fn main_menu_player_join_uses_active_network_max_players() {
     }];
 
     let conditions = app.main_menu_conditions();
-    let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default())
-        .expect("main menu has entries");
+    let menu = IngameMenuState::main_menu(&conditions, &IngameMenuLabels::default()).test_value();
 
     assert_eq!(conditions.max_players, 1);
     assert!(!menu
@@ -6505,13 +6188,13 @@ fn offline_runtime_join_player_local_no_network() {
         env!("CARGO_MANIFEST_DIR"),
         "/../clonk-engine/tests/fixtures/embedded_player.c4p"
     ));
-    let player_file = PlayerFile::load_from_path(player_path).expect("load player fixture");
+    let player_file = PlayerFile::load_from_path(player_path).test_value();
     let mut app = new_synthetic_running_sandbox_app();
     app.startup_player_files.push(StartupPlayerFile {
         path: player_path.to_path_buf(),
         file_name: player_path
             .file_name()
-            .expect("fixture has a basename")
+            .test_value()
             .to_string_lossy()
             .into_owned(),
         player_file: player_file.clone(),
@@ -6534,17 +6217,16 @@ fn offline_runtime_join_player_local_no_network() {
     let before_players = app.engine.snapshot().players.len();
     let before_info_ids = app.control_player_infos.client_info_ids(0);
     app.status_text = "offline join sentinel".to_string();
-    let recording_directory = tempdir().expect("create recording directory");
+    let recording_directory = tempdir();
     let recording_path = recording_directory.path().join("001-OfflineRuntime.c4s");
     install_test_recording_template(&mut app, recording_path.clone());
-    app.start_recording(true)
-        .expect("start offline runtime recording");
-    let recorded_frame = u32::try_from(app.engine.frame()).expect("fixture frame fits u32");
+    app.start_recording(true).test_value();
+    let recorded_frame = u32::try_from(app.engine.frame()).test_value();
 
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("offline runtime player joins");
+    .test_value();
 
     let joined_info_ids = app
         .control_player_infos
@@ -6555,10 +6237,7 @@ fn offline_runtime_join_player_local_no_network() {
     let [joined_info_id] = joined_info_ids.as_slice() else {
         panic!("expected one new local player info, got {joined_info_ids:?}");
     };
-    let info = app
-        .control_player_infos
-        .get(*joined_info_id)
-        .expect("offline AddPlayers info is retained");
+    let info = app.control_player_infos.get(*joined_info_id).test_value();
     assert_eq!(
         info.filename.as_bytes(),
         clonk_script::c4_string_bytes(player_path.to_string_lossy().as_ref())
@@ -6587,7 +6266,7 @@ fn offline_runtime_join_player_local_no_network() {
         .players
         .iter()
         .find(|player| player.player_info_id == *joined_info_id)
-        .expect("PlayerInfo execution joins the runtime player");
+        .test_value();
     assert_eq!(
         app.engine
             .player(joined.id)
@@ -6603,7 +6282,7 @@ fn offline_runtime_join_player_local_no_network() {
         .any(|viewport| viewport.displayed_player == joined.id));
     assert_eq!(app.status_text, "offline join sentinel");
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
-        .expect("reopen runtime player menu");
+        .test_value();
     assert!(app
         .ingame_menu
         .as_ref()
@@ -6615,13 +6294,10 @@ fn offline_runtime_join_player_local_no_network() {
         }));
 
     assert!(app.finish_recording().is_none());
-    let recording = Group::open(&recording_path).expect("open offline runtime recording");
-    let mut playback = ControlRecordPlayback::from_bytes(
-        &recording
-            .read_file("CtrlRec.c4b")
-            .expect("read offline runtime control stream"),
-    )
-    .expect("decode offline runtime control stream");
+    let recording = Group::open(&recording_path).test_value();
+    let mut playback =
+        ControlRecordPlayback::from_bytes(&recording.read_file("CtrlRec.c4b").test_value())
+            .test_value();
     let recorded_controls = playback.take_controls(recorded_frame);
     assert!(recorded_controls.iter().any(|packet| {
         matches!(
@@ -6642,9 +6318,9 @@ fn offline_runtime_join_player_local_no_network() {
         )
     }));
 
-    let malformed_directory = tempdir().expect("create malformed player directory");
+    let malformed_directory = tempdir();
     let malformed = malformed_directory.path().join("Malformed.c4p");
-    fs::write(&malformed, b"not a packed player group").expect("write malformed player");
+    fs::write(&malformed, b"not a packed player group").test_value();
     let before_failure_players = app.engine.snapshot().players;
     let before_failure_infos = app.control_player_infos.retained_rows_snapshot();
     let error = app
@@ -6677,13 +6353,13 @@ fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejo
         env!("CARGO_MANIFEST_DIR"),
         "/../clonk-engine/tests/fixtures/embedded_player.c4p"
     ));
-    let player_file = PlayerFile::load_from_path(player_path).expect("load player fixture");
+    let player_file = PlayerFile::load_from_path(player_path).test_value();
     let mut app = new_synthetic_running_sandbox_app();
     app.startup_player_files.push(StartupPlayerFile {
         path: player_path.to_path_buf(),
         file_name: player_path
             .file_name()
-            .expect("fixture has a basename")
+            .test_value()
             .to_string_lossy()
             .into_owned(),
         player_file: player_file.clone(),
@@ -6706,24 +6382,21 @@ fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejo
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("join the runtime player");
+    .test_value();
 
     let retired_info_id = app
         .control_player_infos
         .client_info_ids(0)
         .into_iter()
         .find(|info_id| !before_info_ids.contains(info_id))
-        .expect("runtime player info was added");
+        .test_value();
     let retired_owner = app
         .engine
         .players()
         .find(|player| player.player_info_id() == retired_info_id)
         .map(clonk_engine::Player::id)
-        .expect("runtime player joined");
-    let original_control = app
-        .local_controls
-        .assignment(retired_owner)
-        .expect("runtime player has local controls");
+        .test_value();
+    let original_control = app.local_controls.assignment(retired_owner).test_value();
 
     assert!(app
         .engine
@@ -6733,14 +6406,11 @@ fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejo
         })
         .expect("execute host elimination"));
     for _ in 0..60 {
-        app.update().expect("advance retirement delay");
+        app.test_update();
     }
 
     assert!(app.engine.player(retired_owner).is_none());
-    let retired_info = app
-        .control_player_infos
-        .get(retired_info_id)
-        .expect("retired player info remains as history");
+    let retired_info = app.control_player_infos.get(retired_info_id).test_value();
     assert_ne!(
         retired_info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED,
         0,
@@ -6755,24 +6425,21 @@ fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejo
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("rejoin the retired profile");
+    .test_value();
 
     let rejoined_info_id = app
         .control_player_infos
         .client_info_ids(0)
         .into_iter()
         .find(|info_id| !info_ids_before_rejoin.contains(info_id))
-        .expect("rejoined player info was added");
+        .test_value();
     let rejoined_owner = app
         .engine
         .players()
         .find(|player| player.player_info_id() == rejoined_info_id)
         .map(clonk_engine::Player::id)
-        .expect("retired profile rejoins as a new player");
-    let rejoined_control = app
-        .local_controls
-        .assignment(rejoined_owner)
-        .expect("rejoined player has local controls");
+        .test_value();
+    let rejoined_control = app.local_controls.assignment(rejoined_owner).test_value();
     assert_eq!(rejoined_control.set, original_control.set);
     assert_eq!(rejoined_control.mouse, original_control.mouse);
 }
@@ -6785,7 +6452,7 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
     // (pristine 9ffa0a5d src/C4MainMenu.cpp:760-771;
     // src/C4PlayerInfo.cpp:70-104,357-395;
     // src/C4Network2Players.cpp:78-137).
-    let directory = tempdir().expect("create runtime player directory");
+    let directory = tempdir();
     let player_path = directory.path().join("Runtime.c4p");
     let mut player_group = clonk_resources::MutableGroup::new("Runtime.c4p");
     player_group
@@ -6795,12 +6462,8 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
             1,
             false,
         )
-        .expect("add runtime player core");
-    fs::write(
-        &player_path,
-        player_group.pack().expect("pack runtime player"),
-    )
-    .expect("write runtime player");
+        .test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
 
     let mut app = new_running_sandbox_app();
     app.player_name = "Exact maker".to_string();
@@ -6808,7 +6471,7 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
     app.network = Some(manager);
     let mut client_settings =
         ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
-    client_settings.group_maker = LegacyCString::from_bytes(b"Exact maker".to_vec()).unwrap();
+    client_settings.group_maker = LegacyCString::from_bytes(b"Exact maker".to_vec()).test_value();
     app.network_mode = Some(NetworkMode::Client(client_settings));
     app.control_clients.register(7, true, false);
     let before_players = app.engine.snapshot().players;
@@ -6816,7 +6479,7 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
     let wire_name = clonk_engine::LegacyCString::from_bytes(
         player_path.as_os_str().as_encoded_bytes().to_vec(),
     )
-    .expect("fixture player path is NUL-free");
+    .test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 7 << 16,
@@ -6831,7 +6494,7 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("runtime player menu action");
+    .test_value();
     assert_eq!(
         app.engine.snapshot().players,
         before_players,
@@ -6844,8 +6507,7 @@ fn active_network_client_runtime_join_publishes_before_add_request() {
     );
     drop(app.network.take());
 
-    let (order, publications, player_infos, acknowledgements) =
-        command_observer.join().expect("command observer");
+    let (order, publications, player_infos, acknowledgements) = command_observer.test_join();
     assert_eq!(order, vec!["publish", "player-info"]);
     assert_eq!(publications.len(), 1);
     assert_eq!(publications[0].source_path, player_path);
@@ -6875,7 +6537,7 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
     // the running-host handler then queues JoinPlayer with the resource
     // file (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
     // src/C4Network2Players.cpp:78-137,160-239,245-270,353-388).
-    let directory = tempdir().expect("create runtime player directory");
+    let directory = tempdir();
     let player_path = directory.path().join("HostRuntime.c4p");
     let mut player_group = clonk_resources::MutableGroup::new("HostRuntime.c4p");
     player_group
@@ -6885,12 +6547,8 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
             1,
             false,
         )
-        .expect("add runtime player core");
-    fs::write(
-        &player_path,
-        player_group.pack().expect("pack runtime player"),
-    )
-    .expect("write runtime player");
+        .test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
 
     let mut app = new_running_sandbox_app();
     app.player_name = "Exact host maker".to_string();
@@ -6908,7 +6566,7 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
     let wire_name = clonk_engine::LegacyCString::from_bytes(
         player_path.as_os_str().as_encoded_bytes().to_vec(),
     )
-    .expect("fixture player path is NUL-free");
+    .test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -6925,16 +6583,14 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("runtime host player menu action");
+    .test_value();
     direct_wait
         .recv_timeout(Duration::from_secs(1))
-        .expect("authoritative PlayerInfo broadcast");
-    app.process_network_events()
-        .expect("execute authoritative PlayerInfo");
+        .test_value();
+    app.test_network_events();
     drop(app.network.take());
 
-    let (order, publications, player_infos, joins) =
-        command_observer.join().expect("command observer");
+    let (order, publications, player_infos, joins) = command_observer.test_join();
     assert_eq!(order, vec!["publish", "player-info", "join-player"]);
     assert_eq!(publications.len(), 1);
     assert_eq!(publications[0].source_path, player_path);
@@ -6976,7 +6632,7 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     // "double join" HandlePlayerInfoUpdRequest denies without message
     // (src/C4PlayerList.cpp:219-267,398-409; src/C4Network2Players.cpp:160-181;
     // src/C4PlayerInfo.cpp:568-580).
-    let directory = tempdir().expect("create runtime player directory");
+    let directory = tempdir();
     let player_path = directory.path().join("HostRejoin.c4p");
     let mut player_group = clonk_resources::MutableGroup::new("HostRejoin.c4p");
     player_group
@@ -6986,12 +6642,8 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
             1,
             false,
         )
-        .expect("add runtime player core");
-    fs::write(
-        &player_path,
-        player_group.pack().expect("pack runtime player"),
-    )
-    .expect("write runtime player");
+        .test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
 
     let mut app = new_running_sandbox_app();
     app.player_name = "Exact host maker".to_string();
@@ -7000,7 +6652,7 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     let wire_name = clonk_engine::LegacyCString::from_bytes(
         player_path.as_os_str().as_encoded_bytes().to_vec(),
     )
-    .expect("fixture player path is NUL-free");
+    .test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -7029,7 +6681,7 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     let retiring = app.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(retiring, "Host Rejoin").with_player_info_id(41))
-        .expect("register the host's joined runtime player");
+        .test_value();
     app.snapshot = app.engine.snapshot();
 
     let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
@@ -7053,17 +6705,14 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     // that removes the player exactly as the running app does.
     let players_before_tick = app.player_info_ids_by_player();
     for _ in 0..60 {
-        app.snapshot = app.engine.tick().expect("advance retirement delay");
+        app.snapshot = app.engine.test_tick();
     }
     app.mirror_retired_player_info(&players_before_tick);
     assert!(
         app.engine.player(retiring).is_none(),
         "the eliminated player retires after the 60-frame delay"
     );
-    let retired = app
-        .control_player_infos
-        .get(41)
-        .expect("the retired row remains as history");
+    let retired = app.control_player_infos.get(41).test_value();
     assert_ne!(
         retired.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED,
         0,
@@ -7078,20 +6727,18 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("runtime host player menu action");
+    .test_value();
     let broadcast = direct_wait.recv_timeout(Duration::from_secs(1));
     assert!(
         !app.status_text.starts_with("Unable to join player"),
         "the readmitted profile must not be refused: {}",
         app.status_text
     );
-    broadcast.expect("authoritative PlayerInfo broadcast");
-    app.process_network_events()
-        .expect("execute authoritative PlayerInfo");
+    broadcast.test_value();
+    app.test_network_events();
     drop(app.network.take());
 
-    let (order, _publications, player_infos, joins) =
-        command_observer.join().expect("command observer");
+    let (order, _publications, player_infos, joins) = command_observer.test_join();
     assert_eq!(order, vec!["publish", "player-info", "join-player"]);
     let [info] = player_infos.as_slice() else {
         panic!("expected one authoritative PlayerInfo");
@@ -7109,18 +6756,16 @@ fn rejoin_after_elimination_policy_reads_its_network_config_key() {
     // clonk-org/clonk-rs#240. The key is a clonk-rs extension with no C4Config
     // counterpart, so an absent one must leave the oracle behaviour in place.
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated rejoin-policy user data");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(640, 480, &paths);
 
     assert!(app.rejoin_after_elimination_allowed());
 
-    persist_config_value(&paths, "Network", "NoRejoinAfterElimination", "1")
-        .expect("bar rejoining after elimination");
+    persist_config_value(&paths, "Network", "NoRejoinAfterElimination", "1").test_value();
     assert!(!app.rejoin_after_elimination_allowed());
 
-    persist_config_value(&paths, "Network", "NoRejoinAfterElimination", "0")
-        .expect("restore the oracle policy");
+    persist_config_value(&paths, "Network", "NoRejoinAfterElimination", "0").test_value();
     assert!(app.rejoin_after_elimination_allowed());
 
     // A host that changed the policy for this session outranks the file, the
@@ -7135,7 +6780,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
     // refused because this host set Config.Network.NoRejoinAfterElimination.
     // Admission still denies without a synchronized message, exactly like the
     // double join it is treated as (src/C4Network2Players.cpp:160-181).
-    let directory = tempdir().expect("create runtime player directory");
+    let directory = tempdir();
     let player_path = directory.path().join("HostRejoin.c4p");
     let mut player_group = clonk_resources::MutableGroup::new("HostRejoin.c4p");
     player_group
@@ -7145,12 +6790,8 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
             1,
             false,
         )
-        .expect("add runtime player core");
-    fs::write(
-        &player_path,
-        player_group.pack().expect("pack runtime player"),
-    )
-    .expect("write runtime player");
+        .test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
 
     let mut app = new_running_sandbox_app();
     app.player_name = "Exact host maker".to_string();
@@ -7160,7 +6801,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
     let wire_name = clonk_engine::LegacyCString::from_bytes(
         player_path.as_os_str().as_encoded_bytes().to_vec(),
     )
-    .expect("fixture player path is NUL-free");
+    .test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -7187,7 +6828,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
     let retiring = app.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(retiring, "Host Rejoin").with_player_info_id(41))
-        .expect("register the host's joined runtime player");
+        .test_value();
     app.snapshot = app.engine.snapshot();
 
     let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
@@ -7207,7 +6848,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
         .expect("execute host elimination"));
     let players_before_tick = app.player_info_ids_by_player();
     for _ in 0..60 {
-        app.snapshot = app.engine.tick().expect("advance retirement delay");
+        app.snapshot = app.engine.test_tick();
     }
     app.mirror_retired_player_info(&players_before_tick);
     assert!(
@@ -7223,7 +6864,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
     app.apply_ingame_menu_action(MenuAction::JoinPlayer(
         player_path.to_string_lossy().into_owned(),
     ))
-    .expect("runtime host player menu action");
+    .test_value();
     assert!(
         app.status_text.starts_with("Unable to join player"),
         "the eliminated profile must be refused: {}",
@@ -7233,8 +6874,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
 
     // The resource is published before admission runs, as in C++, but nothing
     // is broadcast and no player is queued to join.
-    let (order, _publications, player_infos, joins) =
-        command_observer.join().expect("command observer");
+    let (order, _publications, player_infos, joins) = command_observer.test_join();
     assert_eq!(order, vec!["publish"]);
     assert!(player_infos.is_empty());
     assert!(joins.is_empty());
@@ -7251,7 +6891,7 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
     // its ID and team before broadcasting authoritative PlayerInfo
     // (src/C4Network2Players.cpp:78-137,160-205;
     // src/C4Teams.cpp:53-81,474-542).
-    let directory = tempdir().expect("create runtime player directory");
+    let directory = tempdir();
     let player_path = directory.path().join("HostTeamRuntime.c4p");
     let mut player_group = clonk_resources::MutableGroup::new("HostTeamRuntime.c4p");
     player_group
@@ -7260,17 +6900,13 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
                     b"[Player]\nName=Host Team Runtime\n[Preferences]\nColorDw=1193046\nAlternateColorDw=6636321\n".to_vec(),
                     1,
                     false,
-                )
-                .expect("add runtime player core");
-    fs::write(
-        &player_path,
-        player_group.pack().expect("pack runtime player"),
-    )
-    .expect("write runtime player");
+                ).test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
 
     let team = |id, player_ids, color| clonk_engine::InitialNetworkTeam {
         id,
-        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes())
+            .test_value(),
         player_start_index: 0,
         player_ids,
         color,
@@ -7282,17 +6918,16 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
     app.control_clients.register(0, true, false);
     app.control_player_infos.replace_snapshot(
         1,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        [netplay_player_info_data(
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 team: 1,
                 color: 0x0012_3456,
                 original_color: 0x0012_3456,
                 ..Default::default()
             }],
-            ..Default::default()
-        }],
+        )],
     );
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         clonk_engine::InitialNetworkTeamMetadata {
@@ -7323,7 +6958,7 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
     let wire_name = clonk_engine::LegacyCString::from_bytes(
         player_path.as_os_str().as_encoded_bytes().to_vec(),
     )
-    .expect("fixture player path is NUL-free");
+    .test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -7337,15 +6972,14 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
     });
 
     app.submit_runtime_network_player(&player_path.to_string_lossy())
-        .expect("submit local host runtime player");
+        .test_value();
     direct_wait
         .recv_timeout(Duration::from_secs(1))
-        .expect("authoritative PlayerInfo broadcast");
-    app.process_network_events()
-        .expect("execute authoritative PlayerInfo");
+        .test_value();
+    app.test_network_events();
     drop(app.network.take());
 
-    let (_, _, player_infos, _) = command_observer.join().expect("command observer");
+    let (_, _, player_infos, _) = command_observer.test_join();
     let [info] = player_infos.as_slice() else {
         panic!("expected one authoritative PlayerInfo");
     };
@@ -7364,11 +6998,7 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
         "a successful local runtime join extends the persistent sidecar"
     );
     assert!(app.host_local_player_info_ids.contains(&2));
-    let teams = app
-        .network_team_assignment
-        .as_mut()
-        .expect("prepared host team state remains installed")
-        .teams_mut();
+    let teams = app.network_team_assignment.test_mut().teams_mut();
     assert_eq!(teams.teams[0].player_ids, vec![1]);
     assert_eq!(teams.teams[1].player_ids, vec![2]);
 }
@@ -7392,17 +7022,14 @@ fn client_join_data_submits_an_empty_initial_player_info_for_an_observer() {
     app.selected_player_file = None;
 
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     snapshot
         .parameters
         .clients
         .clients
         .push(clonk_engine::ClientCoreControlData {
             client_id: 7,
-            name: clonk_engine::LegacyCString::from_bytes(b"Observer".to_vec())
-                .expect("valid client name"),
+            name: clonk_engine::LegacyCString::from_bytes(b"Observer".to_vec()).test_value(),
             ..Default::default()
         });
     snapshot.parameters.clients.local_client_id = Some(7);
@@ -7415,9 +7042,9 @@ fn client_join_data_submits_an_empty_initial_player_info_for_an_observer() {
     };
     event_tx
         .send(NetworkEvent::JoinData(join_data))
-        .expect("queue JoinData");
+        .test_value();
 
-    app.process_network_events().expect("apply JoinData");
+    app.test_network_events();
 
     assert_eq!(
         commands.take_player_info_updates(),
@@ -7432,18 +7059,17 @@ fn client_join_data_submits_an_empty_initial_player_info_for_an_observer() {
 #[test]
 fn startup_host_auth_players_stay_with_their_connection_and_cancel_cleanly() {
     let _lock = env_lock().lock();
-    let user_data = tempdir().expect("isolated startup Auth configuration");
+    let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    persist_config_value(&paths, "Network", "LeagueAutoLogin", "0")
-        .expect("disable league auto-login");
+    persist_config_value(&paths, "Network", "LeagueAutoLogin", "0").test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let auth = clonk_network::LeagueAuthRequestHead {
-        account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
-        password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+        account: LegacyCString::from_bytes(b"account".to_vec()).test_value(),
+        password: LegacyCString::from_bytes(b"password".to_vec()).test_value(),
         ..Default::default()
     };
     let player = |name: &[u8]| clonk_engine::ControlPlayerInfoEntry {
-        name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+        name: LegacyCString::from_bytes(name.to_vec()).test_value(),
         ..Default::default()
     };
 
@@ -7471,18 +7097,11 @@ fn startup_host_auth_players_stay_with_their_connection_and_cancel_cleanly() {
             b"[Response]\r\nStatus=Success\r\nAUID=first-token\r\n",
         ),
     )));
-    app.poll_league_player_auth()
-        .expect("resolve first host Auth");
+    app.poll_league_player_auth().test_value();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
-        .expect("approve first host Auth");
-    let first_connection = app
-        .startup_network_connection
-        .take()
-        .expect("first manager is requeued with its players");
-    let first_players = first_connection
-        .authenticated_league_players
-        .as_ref()
-        .expect("authenticated players are connection-scoped");
+        .test_value();
+    let first_connection = app.startup_network_connection.take().test_value();
+    let first_players = first_connection.authenticated_league_players.test_ref();
     assert_eq!(first_players[0].name.as_bytes(), b"First Host");
     assert_eq!(first_players[0].auth_id.as_bytes(), b"first-token");
     drop(first_connection);
@@ -7526,24 +7145,24 @@ fn client_rejects_a_combined_scenario_without_network_game_flag() {
     // After RetrieveScenario and RetrieveFiles, C4Game aborts before
     // InitScriptEngine when the combined C4S Head.NetworkGame flag is false
     // (pristine 9ffa0a5d src/C4Game.cpp:2526-2564).
-    let directory = tempdir().expect("scenario directory");
+    let directory = tempdir();
     let scenario_path = directory.path().join("Combined7.c4s");
     let definition_path = scenario_path.join("Defs.c4d");
-    fs::create_dir_all(&definition_path).expect("create definition");
+    fs::create_dir_all(&definition_path).test_value();
     fs::write(
         scenario_path.join("Scenario.txt"),
         "[Head]\nTitle=Offline payload\nNetworkGame=false\n\n[Definitions]\nDefinition1=Defs.c4d\n",
     )
-    .expect("write scenario core");
+    .test_value();
     fs::write(
         definition_path.join("DefCore.txt"),
         "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
     )
-    .expect("write definition core");
+    .test_value();
     write_test_definition_graphics(&definition_path);
     let scenario =
         Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
-            .expect("offline-marked scenario parses");
+            .test_value();
 
     assert_eq!(
         validate_client_network_scenario(&scenario),
@@ -7573,10 +7192,9 @@ fn host_player_info_request_queues_authoritative_direct_broadcast() {
             },
             by_host: false,
         })
-        .expect("queue PlayerInfo update request");
+        .test_value();
 
-    app.process_network_events()
-        .expect("process PlayerInfo update request");
+    app.test_network_events();
 
     let broadcasts = commands.take_broadcast_player_infos();
     let [info] = broadcasts.as_slice() else {
@@ -7600,14 +7218,14 @@ fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
             resource_type: clonk_network::HostResourceType::Player as u8,
             id: 17,
             loadable: true,
-            filename: clonk_engine::LegacyCString::from_bytes(b"First.c4p".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"First.c4p".to_vec()).test_value(),
             ..Default::default()
         },
         clonk_engine::NetworkResourceCore {
             resource_type: clonk_network::HostResourceType::Player as u8,
             id: 18,
             loadable: true,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Second.c4p".to_vec()).unwrap(),
+            filename: clonk_engine::LegacyCString::from_bytes(b"Second.c4p".to_vec()).test_value(),
             ..Default::default()
         },
     ];
@@ -7644,11 +7262,10 @@ fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
                 },
                 by_host: false,
             })
-            .expect("queue same-client admission");
+            .test_value();
     }
 
-    app.process_network_events()
-        .expect("preexecute both same-client admissions");
+    app.test_network_events();
     let controls = commands.take_preexecuted_player_infos();
     assert_eq!(controls.len(), 2);
     assert_eq!(
@@ -7677,9 +7294,8 @@ fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
             info: first_echo,
             join_players_on_echo: controls[0].1.clone(),
         })
-        .expect("queue first admission echo");
-    app.process_network_events()
-        .expect("merge first admission echo");
+        .test_value();
+    app.test_network_events();
     let first_joins = commands.take_submitted_join_players();
     assert_eq!(
         first_joins
@@ -7701,9 +7317,8 @@ fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
             info: controls[1].0.clone(),
             join_players_on_echo: controls[1].1.clone(),
         })
-        .expect("queue second admission echo");
-    app.process_network_events()
-        .expect("merge second admission echo");
+        .test_value();
+    app.test_network_events();
     let second_joins = commands.take_submitted_join_players();
     assert_eq!(
         second_joins
@@ -7728,7 +7343,7 @@ fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id,
         loadable: true,
-        filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+        filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).test_value(),
         ..Default::default()
     };
     let first_resource = resource(17, b"First.c4p");
@@ -7774,11 +7389,10 @@ fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
                 request,
                 by_host: false,
             })
-            .expect("queue add/replacement admission");
+            .test_value();
     }
 
-    app.process_network_events()
-        .expect("preexecute add before replacement");
+    app.test_network_events();
     let controls = commands.take_preexecuted_player_infos();
     assert_eq!(controls.len(), 2);
     assert_eq!(controls[0].1[0].resource.as_ref(), Some(&first_resource));
@@ -7797,8 +7411,8 @@ fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
             info: controls[0].0.clone(),
             join_players_on_echo: controls[0].1.clone(),
         })
-        .expect("queue stale add echo");
-    app.process_network_events().expect("merge stale add echo");
+        .test_value();
+    app.test_network_events();
     let first_joins = commands.take_submitted_join_players();
     assert_eq!(first_joins.len(), 1);
     assert_eq!(
@@ -7817,9 +7431,8 @@ fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
             info: controls[1].0.clone(),
             join_players_on_echo: controls[1].1.clone(),
         })
-        .expect("queue latest replacement echo");
-    app.process_network_events()
-        .expect("merge latest replacement echo");
+        .test_value();
+    app.test_network_events();
     assert!(commands.take_submitted_join_players().is_empty());
 }
 
@@ -7829,20 +7442,20 @@ fn preexecuted_join_snapshot_is_client_scoped_for_duplicate_info_id() {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id,
         loadable: true,
-        filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+        filename: clonk_engine::LegacyCString::from_bytes(filename.to_vec()).test_value(),
         ..Default::default()
     };
     let wrong_resource = resource(17, b"Wrong.c4p");
     let target_resource = resource(18, b"Target.c4p");
     let wrong = clonk_engine::ControlPlayerInfoEntry {
         id: 7,
-        name: clonk_engine::LegacyCString::from_bytes(b"Wrong".to_vec()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(b"Wrong".to_vec()).test_value(),
         resource: Some(wrong_resource),
         ..Default::default()
     };
     let target = clonk_engine::ControlPlayerInfoEntry {
         id: 7,
-        name: clonk_engine::LegacyCString::from_bytes(b"Target".to_vec()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(b"Target".to_vec()).test_value(),
         player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
         resource: Some(target_resource.clone()),
         ..Default::default()
@@ -7853,16 +7466,8 @@ fn preexecuted_join_snapshot_is_client_scoped_for_duplicate_info_id() {
     app.control_player_infos.replace_snapshot(
         7,
         [
-            clonk_engine::PlayerInfoControlData {
-                client_id: 4,
-                players: vec![wrong],
-                ..Default::default()
-            },
-            clonk_engine::PlayerInfoControlData {
-                client_id: 3,
-                players: vec![target.clone()],
-                ..Default::default()
-            },
+            netplay_player_info_data(4, vec![wrong]),
+            netplay_player_info_data(3, vec![target.clone()]),
         ],
     );
     let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
@@ -7879,7 +7484,7 @@ fn preexecuted_join_snapshot_is_client_scoped_for_duplicate_info_id() {
         false,
         true,
     )
-    .expect("preexecute target-client PlayerInfo");
+    .test_value();
 
     let controls = commands.take_preexecuted_player_infos();
     let [(_, captured)] = controls.as_slice() else {
@@ -7918,15 +7523,14 @@ fn host_direct_remote_player_info_refreshes_join_data_for_later_consumers() {
             },
             by_host: false,
         })
-        .expect("queue runtime PlayerInfo request");
-    app.process_network_events()
-        .expect("admit runtime PlayerInfo request");
+        .test_value();
+    app.test_network_events();
     let (broadcasts, published) = commands.take_team_control_updates();
     let [authoritative] = broadcasts.as_slice() else {
         panic!("expected one authoritative PlayerInfo control");
     };
     assert_eq!(authoritative.players[0].id, 1);
-    let latest = published.last().expect("updated JoinData is published");
+    let latest = published.last().test_value();
     assert_eq!(published.len(), 1);
     assert_eq!(latest.parameters.player_infos.last_player_id, 1);
     let [client] = latest.parameters.player_infos.clients.as_slice() else {
@@ -7958,13 +7562,13 @@ fn host_synchronized_player_info_refreshes_join_data() {
             },
             app.network_max_players,
         )
-        .expect("runtime PlayerInfo is admitted");
+        .test_value();
 
     app.apply_ready_controls(7, vec![NetworkControl::PlayerInfo(authoritative)])
-        .expect("synchronized PlayerInfo executes");
+        .test_value();
 
     let published = commands.take_published_join_snapshots();
-    let latest = published.last().expect("updated JoinData is published");
+    let latest = published.last().test_value();
     assert_eq!(latest.parameters.player_infos.last_player_id, 1);
     assert_eq!(latest.parameters.player_infos.clients[0].client_id, 4);
     assert_eq!(latest.parameters.player_infos.clients[0].players[0].id, 1);
@@ -7993,14 +7597,13 @@ fn client_direct_player_info_does_not_rebalance_random_teams_or_echo_updates() {
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.control_player_infos.replace_snapshot(
         30,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        [netplay_player_info_data(
+            3,
+            vec![
                 set_control_test_player(10, 1, 0),
                 set_control_test_player(20, 1, 0),
             ],
-            ..Default::default()
-        }],
+        )],
     );
 
     event_tx
@@ -8016,15 +7619,10 @@ fn client_direct_player_info_does_not_rebalance_random_teams_or_echo_updates() {
                 ..Default::default()
             },
         )))
-        .expect("queue host-authored PlayerInfo replacement");
-    app.process_network_events()
-        .expect("apply host-authored PlayerInfo replacement");
+        .test_value();
+    app.test_network_events();
 
-    let teams = app
-        .network_team_assignment
-        .as_ref()
-        .expect("client team assignment remains installed")
-        .teams();
+    let teams = app.network_team_assignment.test_ref().teams();
     assert_eq!(teams.teams[0].player_ids, vec![10, 20, 30]);
     assert!(teams.teams[1].player_ids.is_empty());
     assert_eq!(app.control_player_infos.get(10).unwrap().team, 1);
@@ -8040,7 +7638,8 @@ fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
     // src/C4Teams.cpp:53-81,474-542).
     let team = |id, player_ids, color| clonk_engine::InitialNetworkTeam {
         id,
-        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes())
+            .test_value(),
         player_start_index: 0,
         player_ids,
         color,
@@ -8050,17 +7649,16 @@ fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
     let mut app = new_state_only_menu_app(320, 200);
     app.control_player_infos.replace_snapshot(
         1,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        [netplay_player_info_data(
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 name: clonk_engine::LegacyCString::from_bytes(b"Existing".to_vec())
                     .expect("valid existing player name"),
                 team: 1,
                 ..Default::default()
             }],
-            ..Default::default()
-        }],
+        )],
     );
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         clonk_engine::InitialNetworkTeamMetadata {
@@ -8100,10 +7698,9 @@ fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
             },
             by_host: false,
         })
-        .expect("queue teamless remote PlayerInfo update request");
+        .test_value();
 
-    app.process_network_events()
-        .expect("process teamless remote PlayerInfo update request");
+    app.test_network_events();
 
     let broadcasts = commands.take_broadcast_player_infos();
     let [info] = broadcasts.as_slice() else {
@@ -8117,11 +7714,7 @@ fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
         (player.color, player.original_color),
         (0x0000_c800, original_color)
     );
-    let teams = app
-        .network_team_assignment
-        .as_mut()
-        .expect("prepared host team state remains installed")
-        .teams_mut();
+    let teams = app.network_team_assignment.test_mut().teams_mut();
     assert_eq!(teams.teams[0].player_ids, vec![1]);
     assert_eq!(teams.teams[1].player_ids, vec![2]);
 }
@@ -8135,7 +7728,8 @@ fn host_authored_script_player_info_assigns_a_runtime_host_team() {
     // src/C4Teams.cpp:474-542).
     let team = |id, player_ids, color| clonk_engine::InitialNetworkTeam {
         id,
-        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+        name: clonk_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes())
+            .test_value(),
         player_start_index: 0,
         player_ids,
         color,
@@ -8145,17 +7739,16 @@ fn host_authored_script_player_info_assigns_a_runtime_host_team() {
     let mut app = new_state_only_running_sandbox_app();
     app.control_player_infos.replace_snapshot(
         1,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        [netplay_player_info_data(
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 name: clonk_engine::LegacyCString::from_bytes(b"Existing".to_vec())
                     .expect("valid existing player name"),
                 team: 1,
                 ..Default::default()
             }],
-            ..Default::default()
-        }],
+        )],
     );
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
         clonk_engine::InitialNetworkTeamMetadata {
@@ -8194,10 +7787,9 @@ fn host_authored_script_player_info_assigns_a_runtime_host_team() {
             },
             by_host: true,
         })
-        .expect("queue host script PlayerInfo request");
+        .test_value();
 
-    app.process_network_events()
-        .expect("process host script PlayerInfo request");
+    app.test_network_events();
 
     let broadcasts = commands.take_broadcast_player_infos();
     let [info] = broadcasts.as_slice() else {
@@ -8208,11 +7800,7 @@ fn host_authored_script_player_info_assigns_a_runtime_host_team() {
     };
     assert_eq!((player.id, player.team), (2, 2));
     assert_eq!(player.color, 0x0000_c800);
-    let teams = app
-        .network_team_assignment
-        .as_mut()
-        .expect("prepared host team state remains installed")
-        .teams_mut();
+    let teams = app.network_team_assignment.test_mut().teams_mut();
     assert_eq!(teams.teams[0].player_ids, vec![1]);
     assert_eq!(teams.teams[1].player_ids, vec![2]);
 }
@@ -8229,14 +7817,13 @@ fn host_player_info_request_uses_active_network_player_limit() {
     app.network_max_players = 1;
     app.control_player_infos.replace_snapshot(
         1,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+        [netplay_player_info_data(
+            0,
+            vec![clonk_engine::ControlPlayerInfoEntry {
                 id: 1,
                 ..Default::default()
             }],
-            ..Default::default()
-        }],
+        )],
     );
     event_tx
         .send(NetworkEvent::PlayerInfoUpdateRequest {
@@ -8248,10 +7835,9 @@ fn host_player_info_request_uses_active_network_player_limit() {
             },
             by_host: false,
         })
-        .expect("queue over-capacity PlayerInfo request");
+        .test_value();
 
-    app.process_network_events()
-        .expect("process over-capacity PlayerInfo request");
+    app.test_network_events();
 
     assert!(commands.take_broadcast_player_infos().is_empty());
 }
@@ -8283,10 +7869,9 @@ fn running_host_direct_script_info_queues_one_synchronized_join() {
                 ..Default::default()
             },
         )))
-        .expect("queue direct script PlayerInfo");
+        .test_value();
 
-    app.process_network_events()
-        .expect("process direct script PlayerInfo");
+    app.test_network_events();
 
     assert_eq!(
         commands.take_submitted_join_players(),
@@ -8306,38 +7891,32 @@ fn running_host_direct_script_info_queues_one_synchronized_join() {
 #[test]
 fn offline_create_script_player_joins_through_player_info_control_path() {
     let mut app = new_state_only_running_sandbox_app();
-    let existing_player_info_id = app
-        .engine
-        .player(app.local_owner)
-        .expect("sandbox has a low-level local player")
-        .player_info_id();
+    let existing_player_info_id = app.engine.test_player(app.local_owner).player_info_id();
     assert!(existing_player_info_id > 0);
     app.engine
         .install_scenario_script_with_convention(
             "CreateScriptPlayer fixture",
             r#"
-                    global func SpawnBot()
-                    {
-                        return CreateScriptPlayer("Bot", 0x445566, 2, 15, __AI);
-                    }
-                    "#,
+            global func SpawnBot()
+            {
+                return CreateScriptPlayer("Bot", 0x445566, 2, 15, __AI);
+            }
+            "#,
             true,
         )
-        .expect("fixture script installs");
+        .test_value();
     let before = app.engine.snapshot().players.len();
     app.engine
         .call_scenario_script_function("SpawnBot", Vec::new())
-        .expect("script call succeeds");
+        .test_value();
     assert_eq!(
         app.engine.snapshot().players.len(),
         before,
         "CreateScriptPlayer must not join synchronously inside the VM call"
     );
 
-    app.handle_script_player_info_updates()
-        .expect("offline control path joins script player");
-    app.handle_script_player_info_updates()
-        .expect("drained request is not replayed");
+    app.handle_script_player_info_updates().test_value();
+    app.handle_script_player_info_updates().test_value();
 
     let infos = app
         .control_player_infos
@@ -8376,7 +7955,7 @@ fn offline_create_script_player_joins_through_player_info_control_path() {
         .players
         .into_iter()
         .find(|player| player.player_info_id == info.id)
-        .expect("script player joined from its PlayerInfo");
+        .test_value();
     assert_eq!(runtime.name, "Bot");
     assert_eq!(runtime.team, Some(2));
     assert_eq!(
@@ -8404,12 +7983,11 @@ fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
     // ff 1a 00 00 00 42 02 85 64 00 32 00 6d 03 00 00 74 80 01 00
     // 00 00 00 00 98 01 99 01 56 02 00.
     let mut app = new_state_only_running_sandbox_app();
-    let sound_dir = tempdir().expect("desync sound fixture directory");
+    let sound_dir = tempdir();
     let sound_scenario = sound_dir.path().join("DesyncAudio.c4s");
-    fs::create_dir_all(&sound_scenario).expect("create desync sound fixture");
-    fs::write(sound_scenario.join("SyncError.wav"), silent_pcm_wav(100))
-        .expect("write SyncError fixture");
-    let audio = app.audio.as_mut().expect("sandbox audio context");
+    fs::create_dir_all(&sound_scenario).test_value();
+    fs::write(sound_scenario.join("SyncError.wav"), silent_pcm_wav(100)).test_value();
+    let audio = app.audio.test_mut();
     audio.options.sound_enabled = true;
     audio.configure_scenario(Some(&sound_scenario));
     assert!(app.snapshot.audio.is_empty());
@@ -8418,18 +7996,16 @@ fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
     let local_client = 1;
     let remote_player = 17;
     app.engine
-        .player_mut(local_player)
-        .expect("local runtime player")
+        .test_player_mut(local_player)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     app.engine
         .register_player(PlayerConfig::new(remote_player, "Host player"))
-        .expect("register host runtime player");
+        .test_value();
     app.engine
-        .player_mut(remote_player)
-        .expect("host runtime player")
+        .test_player_mut(remote_player)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(37, 4).expect("valid network timing"),
+        clonk_engine::NetworkControlTiming::new(37, 4).test_value(),
     );
     app.snapshot = app.engine.snapshot();
     let (manager, event_tx, _commands) =
@@ -8465,10 +8041,9 @@ fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
         .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
             remote,
         )))
-        .expect("queue direct C++ SyncCheck");
+        .test_value();
 
-    app.process_network_events()
-        .expect("execute direct C++ SyncCheck");
+    app.test_network_events();
 
     assert!(matches!(app.mode, AppMode::Running));
     assert!(app.network.is_none());
@@ -8541,10 +8116,9 @@ fn host_ignores_remote_sync_check_without_desync_side_effects() {
         .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
             remote,
         )))
-        .expect("queue client sync check");
+        .test_value();
 
-    app.process_network_events()
-        .expect("host ignores client sync check");
+    app.test_network_events();
 
     assert!(app.network.is_some());
     assert!(matches!(app.network_mode, Some(NetworkMode::Host(_))));
@@ -8572,9 +8146,9 @@ fn synchronized_raw_player_control_counts_before_byte_narrowing() {
             },
         )],
     )
-    .expect("raw synchronized control executes");
+    .test_value();
 
-    let player = app.engine.player(owner).expect("local player remains");
+    let player = app.engine.test_player(owner);
     assert_eq!((player.control_count(), player.action_count()), (1, 1));
     assert_eq!(app.executing_ready_tick, None);
 }
@@ -8583,7 +8157,7 @@ fn synchronized_raw_player_control_counts_before_byte_narrowing() {
 fn synchronized_player_command_executes_stack_data_and_count() {
     let mut app = new_state_only_running_sandbox_app();
     let owner = app.local_owner;
-    let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let crew = app.engine.test_crew_cursor(owner);
 
     app.apply_ready_controls(
         12,
@@ -8599,12 +8173,11 @@ fn synchronized_player_command_executes_stack_data_and_count() {
             by_client: 0,
         })],
     )
-    .expect("synchronized player command executes");
+    .test_value();
 
     let commands = app
         .engine
-        .object_snapshot(crew)
-        .expect("cursor remains")
+        .test_object_snapshot(crew)
         .command_stack
         .command_views();
     assert_eq!(commands.len(), 1);
@@ -8613,7 +8186,7 @@ fn synchronized_player_command_executes_stack_data_and_count() {
     assert_eq!(commands[0].tx, Some(12));
     assert_eq!(commands[0].ty, Some(-7));
     assert_eq!(commands[0].data, CommandData::Integer(23));
-    let player = app.engine.player(owner).expect("local player remains");
+    let player = app.engine.test_player(owner);
     assert_eq!((player.control_count(), player.action_count()), (1, 1));
     assert_eq!(app.executing_ready_tick, None);
 }
@@ -8622,10 +8195,8 @@ fn synchronized_player_command_executes_stack_data_and_count() {
 fn synchronized_custom_command_executes_only_while_game_is_running() {
     let mut app = new_state_only_running_sandbox_app();
     let command = NetworkControl::CustomCommand(clonk_engine::CustomCommandControlData {
-        command: clonk_engine::LegacyCString::from_bytes(b"speed".to_vec())
-            .expect("command is NUL-free"),
-        argument: clonk_engine::LegacyCString::from_bytes(b"100".to_vec())
-            .expect("argument is NUL-free"),
+        command: clonk_engine::LegacyCString::from_bytes(b"speed".to_vec()).test_value(),
+        argument: clonk_engine::LegacyCString::from_bytes(b"100".to_vec()).test_value(),
         player: -1,
         by_client: 91,
     });
@@ -8633,20 +8204,17 @@ fn synchronized_custom_command_executes_only_while_game_is_running() {
 
     app.mode = AppMode::Loading;
     app.apply_ready_controls(11, vec![command.clone()])
-        .expect("non-running custom command is rejected without aborting the tick");
+        .test_value();
     assert_eq!(app.engine.game_tick_delay_ms(), initial_delay);
 
     app.mode = AppMode::Running;
-    app.apply_ready_controls(12, vec![command])
-        .expect("running custom command executes at its ready tick");
+    app.apply_ready_controls(12, vec![command]).test_value();
     assert_eq!(app.engine.game_tick_delay_ms(), 10);
 
     app.engine.set_debug_mode(true);
     let disabled_speed = NetworkControl::CustomCommand(clonk_engine::CustomCommandControlData {
-        command: clonk_engine::LegacyCString::from_bytes(b"speed".to_vec())
-            .expect("command is NUL-free"),
-        argument: clonk_engine::LegacyCString::from_bytes(b"50".to_vec())
-            .expect("argument is NUL-free"),
+        command: clonk_engine::LegacyCString::from_bytes(b"speed".to_vec()).test_value(),
+        argument: clonk_engine::LegacyCString::from_bytes(b"50".to_vec()).test_value(),
         player: -1,
         by_client: 91,
     });
@@ -8661,7 +8229,7 @@ fn synchronized_custom_command_executes_only_while_game_is_running() {
             disabled_speed,
         ],
     )
-    .expect("DisableDebug precedes the later custom command in the same batch");
+    .test_value();
     assert_eq!(
         app.engine.game_tick_delay_ms(),
         10,
@@ -8674,26 +8242,17 @@ fn synchronized_custom_command_executes_only_while_game_is_running() {
 fn synchronized_goal_menu_evaluates_before_opening_only_for_local_player() {
     let mut app = new_running_sandbox_app();
     let player = app.local_owner;
-    let mut goal = Definition::from_script(
+    let mut goal = test_definition(
         "IGOL",
         "Integrated Goal",
         "#strict 3\nfunc IsFulfilled() { return true; }",
-    )
-    .expect("goal definition compiles");
+    );
     goal.set_category(C4D_GOAL);
     goal.set_description(Some("Reach the target".to_string()));
+    app.engine.register_test_definition(goal);
     app.engine
-        .register_definition(goal)
-        .expect("goal definition registers");
-    app.engine
-        .spawn_object(clonk_engine::SpawnConfig::new("IGOL"))
-        .expect("goal object spawns");
-    let by_client = app
-        .engine
-        .player(player)
-        .expect("local player remains")
-        .at_client()
-        .get();
+        .spawn_test_object(clonk_engine::SpawnConfig::new("IGOL"));
+    let by_client = app.engine.test_player(player).at_client().get();
     let control =
         NetworkControl::ActivateGameGoalMenu(clonk_engine::ActivateGameGoalMenuControlData {
             player,
@@ -8702,8 +8261,8 @@ fn synchronized_goal_menu_evaluates_before_opening_only_for_local_player() {
 
     app.engine.set_local_players([player]);
     app.apply_ready_controls(12, vec![control.clone()])
-        .expect("local goal menu control executes");
-    let menu = app.ingame_menu.get(player).expect("local menu opens");
+        .test_value();
+    let menu = app.ingame_menu.get(player).test_value();
     assert_eq!(menu.page(), ingame_menu::MenuPage::Goals);
     assert_eq!(menu.items().len(), 1);
     assert_eq!(
@@ -8717,8 +8276,7 @@ fn synchronized_goal_menu_evaluates_before_opening_only_for_local_player() {
 
     app.ingame_menu.replace(player, None);
     app.engine.set_local_players([]);
-    app.apply_ready_controls(13, vec![control])
-        .expect("remote peer still evaluates goal control");
+    app.apply_ready_controls(13, vec![control]).test_value();
     assert!(app.ingame_menu.get(player).is_none());
     assert_eq!(app.executing_ready_tick, None);
 }
@@ -8728,36 +8286,24 @@ fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
     let mut app = new_state_only_running_sandbox_app();
     let player = app.local_owner;
     app.engine
-        .player_mut(player)
-        .expect("local player remains")
+        .test_player_mut(player)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
-    app.engine
-        .register_definition(
-            Definition::from_script(
-                "MBAT",
-                "Message-board answer target",
-                r#"#strict 2
-    local callback_answer, callback_count;
-    public func Open(int player) { return CallMessageBoard(this(), false, "answer", player); }
-    protected func InputCallback(string answer, int player)
-    {
-        callback_answer = answer;
-        callback_count = callback_count + 1;
-        return 1;
-    }
-    "#,
-            )
-            .expect("message-board target compiles"),
-        )
-        .expect("message-board target registers");
-    let target = app
-        .engine
-        .spawn_object(SpawnConfig::new("MBAT"))
-        .expect("message-board target spawns");
-    let target_index = app
-        .engine
-        .find_object_index(target)
-        .expect("message-board target is live");
+    app.engine.register_test_definition(test_definition(
+        "MBAT",
+        "Message-board answer target",
+        r#"#strict 2
+        local callback_answer, callback_count;
+        public func Open(int player) { return CallMessageBoard(this(), false, "answer", player); }
+        protected func InputCallback(string answer, int player)
+        {
+            callback_answer = answer;
+            callback_count = callback_count + 1;
+            return 1;
+        }
+        "#,
+    ));
+    let target = app.engine.spawn_test_object(SpawnConfig::new("MBAT"));
+    let target_index = app.engine.find_object_index(target).test_value();
     assert_eq!(
         app.engine
             .call_object_function(target_index, "Open", vec![Value::Int(player)])
@@ -8770,7 +8316,7 @@ fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
             .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
     }
     assert!(app.engine.active_message_board_input().is_some());
-    let object = i32::try_from(target.as_u64()).expect("object number fits the wire field");
+    let object = i32::try_from(target.as_u64()).test_value();
 
     app.apply_ready_controls(
         11,
@@ -8784,7 +8330,7 @@ fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
             },
         )],
     )
-    .expect("spoofed answer is ignored without aborting the tick");
+    .test_value();
     assert_ne!(
         app.engine
             .object_snapshot(target)
@@ -8806,15 +8352,14 @@ fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
                 .expect("answer is NUL-free"),
             -1,
         )
-        .expect("active query produces a queued answer");
+        .test_value();
     assert!(app.engine.active_message_board_input().is_none());
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
     app.network
-        .as_ref()
-        .expect("network manager installed")
+        .test_ref()
         .submit_message_board_answer(12, answer)
-        .expect("queue message-board answer");
+        .test_value();
     assert_ne!(
         app.engine
             .object_snapshot(target)
@@ -8827,15 +8372,12 @@ fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
     let (_, answer) = commands
         .take_submitted_message_board_answers()
         .pop()
-        .expect("worker receives the queued answer");
+        .test_value();
     assert_eq!(answer.by_client, 0, "manager stamps the local client ID");
 
     app.apply_ready_controls(12, vec![NetworkControl::MessageBoardAnswer(answer)])
-        .expect("owner-authored answer executes at its ready tick");
-    let target = app
-        .engine
-        .object_snapshot(target)
-        .expect("target remains live");
+        .test_value();
+    let target = app.engine.test_object_snapshot(target);
     assert_eq!(
         target.local_vars.get("callback_answer"),
         Some(&Value::String("q\"\\z".to_string().into()))
@@ -8854,14 +8396,9 @@ fn host_control_rate_set_changes_both_clocks_and_keeps_batch_order() {
     app.network = Some(manager);
     app.network_control_clock = Some(NetworkControlClock::new(37, 4));
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(37, 4).expect("valid timing"),
+        clonk_engine::NetworkControlTiming::new(37, 4).test_value(),
     );
-    let initial_pressed = app
-        .engine
-        .player(app.local_owner)
-        .expect("local player")
-        .control
-        .pressed_coms;
+    let initial_pressed = app.engine.test_player(app.local_owner).control.pressed_coms;
 
     app.apply_ready_controls(
         37,
@@ -8877,7 +8414,7 @@ fn host_control_rate_set_changes_both_clocks_and_keeps_batch_order() {
             }),
         ],
     )
-    .expect("ControlRate executes after the preceding ordered control");
+    .test_value();
 
     assert_ne!(
         app.engine
@@ -8913,7 +8450,7 @@ fn host_control_rate_set_changes_both_clocks_and_keeps_batch_order() {
                 by_client: 0,
             })],
         )
-        .expect("ControlRate clamp executes");
+        .test_value();
         assert_eq!(app.engine.control_rate(), expected);
         assert_eq!(
             app.network_control_clock
@@ -8955,7 +8492,7 @@ fn host_parameter_sets_update_live_game_state_without_boundaries() {
                 by_client: 0,
             })],
         )
-        .expect("team Set executes or ignores invalid data without a boundary");
+        .test_value();
     }
     assert_eq!(app.engine.team_distribution(), 4);
     assert!(!app.engine.team_colors());
@@ -8968,7 +8505,7 @@ fn host_parameter_sets_update_live_game_state_without_boundaries() {
             by_client: 0,
         })],
     )
-    .expect("negative FairCrew disables the option");
+    .test_value();
     assert!(!app.engine.use_fair_crew());
     assert_eq!(app.engine.fair_crew_strength(), 0);
 
@@ -8981,7 +8518,7 @@ fn host_parameter_sets_update_live_game_state_without_boundaries() {
             by_client: 0,
         })],
     )
-    .expect("forced FairCrew ignores the packet without an error");
+    .test_value();
     assert!(!app.engine.use_fair_crew());
     assert_eq!(app.engine.fair_crew_strength(), 0);
 
@@ -8994,7 +8531,7 @@ fn host_parameter_sets_update_live_game_state_without_boundaries() {
             by_client: 0,
         })],
     )
-    .expect("league MaxPlayer refusal is a synchronized no-op");
+    .test_value();
     assert_eq!(app.engine.max_players(), Some(37));
 
     for value_type in [-1, 6, i32::MAX] {
@@ -9006,7 +8543,7 @@ fn host_parameter_sets_update_live_game_state_without_boundaries() {
                 by_client: 0,
             })],
         )
-        .expect("None and unknown Set values are release-build no-ops");
+        .test_value();
     }
     assert_eq!(app.executing_ready_tick, None);
 }
@@ -9030,14 +8567,13 @@ fn network_host_distribution_reassigns_and_publishes_full_team_state() {
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.control_player_infos.replace_snapshot(
         20,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        [netplay_player_info_data(
+            3,
+            vec![
                 set_control_test_player(20, 1, 0),
                 set_control_test_player(10, 1, clonk_engine::PLAYER_INFO_FLAG_JOINED),
             ],
-            ..Default::default()
-        }],
+        )],
     );
 
     app.execute_control_set(clonk_network::LegacyControlSet {
@@ -9048,10 +8584,10 @@ fn network_host_distribution_reassigns_and_publishes_full_team_state() {
 
     assert_eq!(app.control_player_infos.get(20).unwrap().team, 2);
     assert_eq!(app.engine.team_distribution(), 2);
-    let assignment = app.network_team_assignment.as_ref().unwrap().teams();
+    let assignment = app.network_team_assignment.as_ref().test_value().teams();
     assert_eq!(assignment.teams[0].player_ids, vec![10]);
     assert_eq!(assignment.teams[1].player_ids, vec![20]);
-    let snapshot = app.host_join_snapshot.as_ref().unwrap();
+    let snapshot = app.host_join_snapshot.as_ref().test_value();
     assert_eq!(snapshot.parameters.teams.teams[0].player_ids, vec![10]);
     assert_eq!(snapshot.parameters.teams.teams[1].player_ids, vec![20]);
     assert_eq!(
@@ -9076,11 +8612,10 @@ fn generated_distribution_rebuilds_default_teams_and_publishes() {
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.control_player_infos.replace_snapshot(
         20,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![set_control_test_player(20, 1, 0)],
-            ..Default::default()
-        }],
+        [netplay_player_info_data(
+            3,
+            vec![set_control_test_player(20, 1, 0)],
+        )],
     );
     app.execute_control_set(clonk_network::LegacyControlSet {
         value_type: 3,
@@ -9088,7 +8623,7 @@ fn generated_distribution_rebuilds_default_teams_and_publishes() {
         by_client: 0,
     });
 
-    let assignment = app.network_team_assignment.as_ref().unwrap().teams();
+    let assignment = app.network_team_assignment.as_ref().test_value().teams();
     assert_eq!(
         assignment.team_distribution,
         clonk_engine::InitialNetworkTeamDistribution::Random
@@ -9105,7 +8640,7 @@ fn generated_distribution_rebuilds_default_teams_and_publishes() {
             (2, b"Team 2".as_slice(), 0x0000_c800),
         ]
     );
-    let assigned_team = app.control_player_infos.get(20).unwrap().team;
+    let assigned_team = app.control_player_infos.get(20).test_value().team;
     assert!((1..=2).contains(&assigned_team));
     assert_eq!(
         assignment
@@ -9117,7 +8652,7 @@ fn generated_distribution_rebuilds_default_teams_and_publishes() {
         vec![20]
     );
     assert_eq!(app.engine.team_distribution(), 3);
-    let snapshot = app.host_join_snapshot.as_ref().unwrap();
+    let snapshot = app.host_join_snapshot.as_ref().test_value();
     assert_eq!(snapshot.parameters.teams.team_distribution, 3);
     assert_eq!(snapshot.parameters.teams.teams.len(), 2);
     let (player_infos, snapshots) = commands.take_team_control_updates();
@@ -9152,18 +8687,17 @@ fn invalid_host_team_distribution_is_a_silent_no_op() {
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.control_player_infos.replace_snapshot(
         20,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![set_control_test_player(20, 2, 0)],
-            ..Default::default()
-        }],
+        [netplay_player_info_data(
+            3,
+            vec![set_control_test_player(20, 2, 0)],
+        )],
     );
     app.status_text = "unchanged".to_string();
     let before_distribution = app.engine.team_distribution();
     let before_teams = app
         .network_team_assignment
         .as_ref()
-        .unwrap()
+        .test_value()
         .teams()
         .clone();
     let before_infos = app.control_player_infos.retained_rows_snapshot();
@@ -9215,14 +8749,8 @@ fn network_host_team_colors_broadcasts_attributes_and_full_join_data() {
     let mut joined = set_control_test_player(10, 1, clonk_engine::PLAYER_INFO_FLAG_JOINED);
     joined.color = 0x00f4_0000;
     joined.original_color = 0x00f4_0000;
-    app.control_player_infos.replace_snapshot(
-        20,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![unjoined, joined],
-            ..Default::default()
-        }],
-    );
+    app.control_player_infos
+        .replace_snapshot(20, [netplay_player_info_data(3, vec![unjoined, joined])]);
 
     app.execute_control_set(clonk_network::LegacyControlSet {
         value_type: 4,
@@ -9239,7 +8767,7 @@ fn network_host_team_colors_broadcasts_attributes_and_full_join_data() {
             .team_colors
     );
     assert_eq!(app.control_player_infos.get(20).unwrap().color, 0x0000_00f4);
-    let snapshot = app.host_join_snapshot.as_ref().unwrap();
+    let snapshot = app.host_join_snapshot.as_ref().test_value();
     assert_eq!(snapshot.parameters.teams.team_colors, 1);
     assert_eq!(snapshot.parameters.teams.teams.len(), 2);
     assert_eq!(
@@ -9281,17 +8809,11 @@ fn wire_known_zero_color_and_name_conflicts_resolve_and_publish_team_colors() {
             first.original_color = 0x00f4_0000;
             second.color = 0x0000_00f4;
             second.original_color = 0x0000_00f4;
-            first.name = clonk_engine::LegacyCString::from_bytes(b"Same".to_vec()).unwrap();
-            second.name = clonk_engine::LegacyCString::from_bytes(b"same".to_vec()).unwrap();
+            first.name = clonk_engine::LegacyCString::from_bytes(b"Same".to_vec()).test_value();
+            second.name = clonk_engine::LegacyCString::from_bytes(b"same".to_vec()).test_value();
         }
-        app.control_player_infos.replace_snapshot(
-            21,
-            [clonk_engine::PlayerInfoControlData {
-                client_id: 3,
-                players: vec![first, second],
-                ..Default::default()
-            }],
-        );
+        app.control_player_infos
+            .replace_snapshot(21, [netplay_player_info_data(3, vec![first, second])]);
         app.execute_control_set(clonk_network::LegacyControlSet {
             value_type: 4,
             data: 1,
@@ -9307,8 +8829,8 @@ fn wire_known_zero_color_and_name_conflicts_resolve_and_publish_team_colors() {
                 .team_colors,
             "{conflict_kind}"
         );
-        let first = app.control_player_infos.get(20).unwrap();
-        let second = app.control_player_infos.get(21).unwrap();
+        let first = app.control_player_infos.get(20).test_value();
+        let second = app.control_player_infos.get(21).test_value();
         if conflict_kind == "color" {
             assert_ne!(first.color, second.color);
         } else {
@@ -9321,7 +8843,7 @@ fn wire_known_zero_color_and_name_conflicts_resolve_and_publish_team_colors() {
             }
             assert!(!effective_name(first).eq_ignore_ascii_case(effective_name(second)));
         }
-        let snapshot = app.host_join_snapshot.as_ref().unwrap();
+        let snapshot = app.host_join_snapshot.as_ref().test_value();
         assert_eq!(snapshot.parameters.teams.team_colors, 1);
         let (player_infos, snapshots) = commands.take_team_control_updates();
         assert_eq!(player_infos.len(), 1, "{conflict_kind}");
@@ -9342,14 +8864,13 @@ fn offline_host_reassigns_but_replay_only_changes_the_distribution_flag() {
             set_control_test_team(2, Vec::new(), 0),
         ],
     );
-    let packet = clonk_engine::PlayerInfoControlData {
-        client_id: 0,
-        players: vec![
+    let packet = netplay_player_info_data(
+        0,
+        vec![
             set_control_test_player(20, 1, 0),
             set_control_test_player(10, 1, clonk_engine::PLAYER_INFO_FLAG_JOINED),
         ],
-        ..Default::default()
-    };
+    );
 
     let mut offline = new_state_only_running_sandbox_app();
     offline.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
@@ -9385,63 +8906,30 @@ fn client_player_info_rechecks_prepared_team_memberships_before_activation() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState {
-        scenario: FrontendScenario::fallback(),
-        refreshed_resources: None,
-        refreshed_tooltip_font: None,
-        refreshed_native_font_source: None,
-        refreshed_global_gui_failures: None,
-        refreshed_gui_sheet_overrides: None,
-        refresh_requested: false,
+    app.loading_state = Some(test_loading_state(
+        FrontendScenario::fallback(),
         receiver,
-        finished: false,
-        last_progress: 0,
-        log: Vec::new(),
-        prepared_go: Some(PreparedGoLoadingState {
-            status: clonk_network::NetworkStatus {
-                state: clonk_network::NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            local_reached: false,
-            save_game: false,
-            network_runtime_join: false,
-            restore_player_infos: Vec::new(),
-            runtime_join_players: Vec::new(),
-            pending_client_runtime_join: None,
-            initial_game_data: None,
-            random_seed: 0,
-            use_fair_crew: false,
-            fair_crew_strength: 0,
-            fair_crew_forced: false,
-            allow_debug: true,
-            auto_frame_skip: true,
-            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
-                Vec::new(),
-                Vec::new(),
-            ),
-            team_configuration: TeamConfiguration::default(),
-            team_registry: vec![
+        false,
+        test_prepared_go(
+            0,
+            false,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+            vec![
                 clonk_engine::TeamInfo::new(1, "One", 0).with_player_ids(vec![20]),
                 clonk_engine::TeamInfo::new(2, "Two", 0),
             ],
-            definition_modules: None,
-        }),
-        offline_startup_players: None,
-        offline_savegame: None,
-        offline_random_seed: None,
-    });
+        ),
+    ));
     event_tx
         .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
-            clonk_engine::PlayerInfoControlData {
-                client_id: 3,
-                players: vec![set_control_test_player(20, 2, 0)],
-                ..Default::default()
-            },
+            netplay_player_info_data(3, vec![set_control_test_player(20, 2, 0)]),
         )))
-        .unwrap();
+        .test_value();
 
-    app.process_network_events().unwrap();
+    app.process_network_events().test_value();
 
     let teams = &app
         .loading_state
@@ -9449,7 +8937,7 @@ fn client_player_info_rechecks_prepared_team_memberships_before_activation() {
         .unwrap()
         .prepared_go
         .as_ref()
-        .unwrap()
+        .test_value()
         .team_registry;
     assert!(teams[0].player_ids.is_empty());
     assert_eq!(teams[1].player_ids, vec![20]);
@@ -9466,9 +8954,7 @@ fn client_player_info_generates_missing_autogenerated_teams_before_activation() 
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
 
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     let mut metadata = set_control_test_metadata(true, Vec::new());
     metadata.custom = true;
     snapshot.parameters.teams = clonk_network::join_team_list_snapshot(metadata);
@@ -9480,24 +8966,19 @@ fn client_player_info_generates_missing_autogenerated_teams_before_activation() 
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
         }))
-        .unwrap();
+        .test_value();
 
     event_tx
         .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
-            clonk_engine::PlayerInfoControlData {
-                client_id: 3,
-                players: vec![set_control_test_player(20, 4, 0)],
-                ..Default::default()
-            },
+            netplay_player_info_data(3, vec![set_control_test_player(20, 4, 0)]),
         )))
-        .unwrap();
+        .test_value();
 
-    app.process_network_events().unwrap();
+    app.process_network_events().test_value();
 
     let teams = &app
         .pending_network_join_data
-        .as_ref()
-        .expect("retained JoinData")
+        .test_ref()
         .parameters
         .teams
         .teams;
@@ -9512,11 +8993,7 @@ fn client_player_info_generates_missing_autogenerated_teams_before_activation() 
 #[test]
 fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_player() {
     let mut app = new_state_only_synthetic_crew_running_sandbox_app();
-    let existing_info_id = app
-        .engine
-        .player(app.local_owner)
-        .expect("sandbox local player")
-        .player_info_id();
+    let existing_info_id = app.engine.test_player(app.local_owner).player_info_id();
     let bot_info_id = existing_info_id + 1;
     let metadata = set_control_test_metadata(
         false,
@@ -9535,11 +9012,7 @@ fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_pla
     bot.player_type = clonk_engine::PLAYER_INFO_TYPE_SCRIPT;
     app.control_player_infos.replace_snapshot(
         bot_info_id,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![existing.clone(), bot],
-            ..Default::default()
-        }],
+        [netplay_player_info_data(0, vec![existing.clone(), bot])],
     );
 
     let mut moved_bot = set_control_test_player(bot_info_id, 2, 0);
@@ -9554,20 +9027,16 @@ fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_pla
             },
         )],
     )
-    .expect("offline PlayerInfo control executes");
+    .test_value();
 
-    let teams = app
-        .network_team_assignment
-        .as_ref()
-        .expect("offline team state")
-        .teams();
+    let teams = app.network_team_assignment.test_ref().teams();
     assert_eq!(teams.teams[0].player_ids, vec![existing_info_id]);
     assert_eq!(teams.teams[1].player_ids, vec![bot_info_id]);
     let bot = app
         .engine
         .players()
         .find(|player| player.player_info_id() == bot_info_id)
-        .expect("offline PlayerInfo queues its unjoined script player");
+        .test_value();
     assert_eq!(bot.team(), Some(2));
 }
 
@@ -9580,9 +9049,7 @@ fn mutable_set_parameters_round_trip_and_legacy_absence_preserves_bootstrap() {
     let state = engine.capture_state();
 
     let mut restored = Engine::new();
-    restored
-        .restore_state(&state)
-        .expect("modern state restores");
+    restored.restore_state(&state).test_value();
     assert!(restored.fair_crew_forced());
     assert!(!restored.allow_debug());
     assert_eq!(restored.control_rate(), 7);
@@ -9595,9 +9062,7 @@ fn mutable_set_parameters_round_trip_and_legacy_absence_preserves_bootstrap() {
     seeded.set_fair_crew_forced(true);
     seeded.set_allow_debug(false);
     seeded.set_control_rate(9);
-    seeded
-        .restore_state(&legacy)
-        .expect("legacy state keeps bootstrap-owned parameters");
+    seeded.restore_state(&legacy).test_value();
     assert!(seeded.fair_crew_forced());
     assert!(!seeded.allow_debug());
     assert_eq!(seeded.control_rate(), 9);
@@ -9683,12 +9148,7 @@ fn disable_debug_set_executes_for_every_author_and_does_not_preflight_batch() {
                 show_solid_mask: true,
                 show_net_status: true,
             });
-        let initial_pressed = app
-            .engine
-            .player(app.local_owner)
-            .expect("local player")
-            .control
-            .pressed_coms;
+        let initial_pressed = app.engine.test_player(app.local_owner).control.pressed_coms;
         app.apply_ready_controls(
             5,
             vec![
@@ -9703,7 +9163,7 @@ fn disable_debug_set_executes_for_every_author_and_does_not_preflight_batch() {
                 }),
             ],
         )
-        .expect("DisableDebug executes without a host gate");
+        .test_value();
         assert_ne!(
             app.engine
                 .player(app.local_owner)
@@ -9736,7 +9196,7 @@ fn immediate_control_sets_execute_for_host_and_non_host_disable_debug() {
                 by_client: 0,
             },
         )))
-        .expect("queue immediate host CID_Set");
+        .test_value();
     event_tx
         .send(NetworkEvent::DirectControl(NetworkControl::Set(
             clonk_network::LegacyControlSet {
@@ -9745,10 +9205,9 @@ fn immediate_control_sets_execute_for_host_and_non_host_disable_debug() {
                 by_client: 7,
             },
         )))
-        .expect("queue immediate non-host DisableDebug");
+        .test_value();
 
-    app.process_network_events()
-        .expect("both immediate CID_Set packets execute");
+    app.test_network_events();
     assert!(app.engine.team_colors());
     assert!(!app.engine.debug_mode());
     assert!(!app.engine.allow_debug());
@@ -9772,7 +9231,7 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
     app.ui_sound_log.clear();
     let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
-    let tick = u32::try_from(app.engine.frame()).expect("frame fits control tick");
+    let tick = u32::try_from(app.engine.frame()).test_value();
     let script = format!("EliminatePlayer({player}, true)");
     event_tx
         .send(NetworkEvent::ReadyTick {
@@ -9785,9 +9244,9 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
                 by_client: 0,
             })],
         })
-        .expect("queue direct-elimination script");
+        .test_value();
 
-    app.update().expect("execute calling frame");
+    app.test_update();
 
     assert!(app.engine.player(player).is_some());
     assert!(
@@ -9805,15 +9264,15 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
     );
     app.engine
         .replace_player_viewports(player, Vec::new())
-        .expect("clear camera payload without closing the physical viewport");
+        .test_value();
 
     event_tx
         .send(NetworkEvent::ReadyTick {
             tick: tick.saturating_add(1),
             controls: vec![NetworkControl::RemovePlayer(remove)],
         })
-        .expect("queue recorded RemovePlr");
-    app.update().expect("execute later removal control");
+        .test_value();
+    app.test_update();
 
     assert!(app.engine.player(player).is_none());
     assert_eq!(
@@ -9828,13 +9287,11 @@ fn host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
 
     app.ui_sound_log.clear();
     for _ in 0..2 {
-        let viewports = collect_viewport_inputs(&app.snapshot)
-            .expect("removed last player falls back to an observer viewport");
+        let viewports = collect_viewport_inputs(&app.snapshot).test_value();
         assert_eq!(viewports.len(), 1);
         assert_eq!(viewports[0].owner, OWNER_NONE);
     }
-    app.execute_remove_player_control(remove)
-        .expect("missing-player removal is a synchronized no-op");
+    app.execute_remove_player_control(remove).test_value();
     assert!(
         app.ui_sound_log.is_empty(),
         "the ownerless fallback and missing-player close are silent"
@@ -9859,7 +9316,7 @@ fn non_control_host_direct_elimination_returns_success_without_queuing() {
             },
             ScriptControlPolicy::live(false),
         )
-        .expect("direct elimination call executes");
+        .test_value();
 
     assert_eq!(result, Some(Value::Int(1)));
     assert!(app.engine.take_pending_remove_player_controls().is_empty());
@@ -9871,7 +9328,7 @@ fn offline_direct_elimination_waits_for_next_control_rate_frame() {
     let mut app = new_classic_running_sandbox_app();
     let player = app.local_owner;
     app.engine.set_control_rate(3);
-    app.snapshot = app.engine.tick().expect("advance past cadence frame zero");
+    app.snapshot = app.engine.test_tick();
     let script = format!("EliminatePlayer({player}, true)");
     app.engine
         .execute_script_control(
@@ -9884,13 +9341,13 @@ fn offline_direct_elimination_waits_for_next_control_rate_frame() {
             },
             ScriptControlPolicy::live(false),
         )
-        .expect("host direct elimination queues local input");
+        .test_value();
 
-    app.update().expect("frame one does not execute control");
+    app.test_update();
     assert!(app.engine.player(player).is_some());
-    app.update().expect("frame two does not execute control");
+    app.test_update();
     assert!(app.engine.player(player).is_some());
-    app.update().expect("frame three executes queued control");
+    app.test_update();
     assert!(app.engine.player(player).is_none());
 }
 
@@ -9905,7 +9362,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
             .register_player(
                 PlayerConfig::new(player, format!("Player {player}")).with_player_info_id(info_id),
             )
-            .expect("register removable player");
+            .test_value();
     }
     let player_infos = vec![
         clonk_engine::ControlPlayerInfoEntry {
@@ -9921,17 +9378,11 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
             ..Default::default()
         },
     ];
-    app.control_player_infos.replace_snapshot(
-        8,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: player_infos.clone(),
-            ..Default::default()
-        }],
-    );
+    app.control_player_infos
+        .replace_snapshot(8, [netplay_player_info_data(3, player_infos.clone())]);
     let mut host_snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
-        .expect("default host JoinData");
+        .test_value();
     host_snapshot.parameters.player_infos = clonk_network::PlayerInfoListSnapshot {
         last_player_id: 8,
         clients: vec![clonk_network::ClientPlayerInfosSnapshot {
@@ -9952,7 +9403,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
             },
         )],
     )
-    .expect("non-host removal is a synchronized no-op");
+    .test_value();
     assert!(app.engine.player(17).is_some());
     assert_eq!(
         app.control_player_infos
@@ -9986,11 +9437,11 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
             }),
         ],
     )
-    .expect("host removals execute in packet order");
+    .test_value();
 
     assert!(app.engine.player(17).is_none());
     assert!(app.engine.player(18).is_none());
-    let disconnected = app.control_player_infos.get(7).expect("history retained");
+    let disconnected = app.control_player_infos.get(7).test_value();
     assert_ne!(
         disconnected.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED,
         0
@@ -10000,7 +9451,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
         0
     );
     assert_eq!(disconnected.game_part_frame, 0);
-    let ordinary = app.control_player_infos.get(8).expect("history retained");
+    let ordinary = app.control_player_infos.get(8).test_value();
     assert_ne!(ordinary.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED, 0);
     assert_eq!(
         ordinary.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED,
@@ -10012,7 +9463,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
     assert_eq!(published.last(), app.host_join_snapshot.as_ref());
     let published_players = &published
         .last()
-        .expect("latest JoinData")
+        .test_value()
         .parameters
         .player_infos
         .clients[0]
@@ -10056,18 +9507,15 @@ fn synchronized_activation_admits_later_remote_player_info() {
                     client_id: 3,
                     activated: false,
                     observer: false,
-                    name: clonk_engine::LegacyCString::from_bytes(b"Remote".to_vec())
-                        .expect("valid client name"),
-                    nick: clonk_engine::LegacyCString::from_bytes(b"R".to_vec())
-                        .expect("valid client nick"),
+                    name: clonk_engine::LegacyCString::from_bytes(b"Remote".to_vec()).test_value(),
+                    nick: clonk_engine::LegacyCString::from_bytes(b"R".to_vec()).test_value(),
                     lobby_ready: false,
                 },
                 by_client: 0,
             },
         )))
-        .expect("queue direct ClientJoin");
-    app.process_network_events()
-        .expect("execute direct ClientJoin");
+        .test_value();
+    app.test_network_events();
     assert!(app.control_clients.contains(3));
     assert!(!app.control_clients.is_activated(3));
     let tick = app.local_control_submission_tick();
@@ -10083,7 +9531,7 @@ fn synchronized_activation_admits_later_remote_player_info() {
             },
         )],
     )
-    .expect("execute synchronized activation");
+    .test_value();
     assert!(commands.take_submitted_join_players().is_empty());
 
     event_tx
@@ -10099,9 +9547,8 @@ fn synchronized_activation_admits_later_remote_player_info() {
                 ..Default::default()
             },
         )))
-        .expect("queue direct remote PlayerInfo");
-    app.process_network_events()
-        .expect("process direct remote PlayerInfo");
+        .test_value();
+    app.test_network_events();
 
     let joins = commands.take_submitted_join_players();
     assert_eq!(joins.len(), 1);
@@ -10124,7 +9571,7 @@ fn host_activation_request_submits_cpp_eligible_synchronized_update() {
     }));
     app.control_clients.register(3, false, false);
     app.frames_per_second = 60;
-    let frame = i32::try_from(app.engine.frame()).expect("test frame fits i32");
+    let frame = i32::try_from(app.engine.frame()).test_value();
     event_tx
         .send(NetworkEvent::ActivationRequest {
             client_id: 3,
@@ -10132,10 +9579,9 @@ fn host_activation_request_submits_cpp_eligible_synchronized_update() {
             waited_for: true,
             ping_ms: 25,
         })
-        .expect("queue activation request");
+        .test_value();
 
-    app.process_network_events()
-        .expect("handle activation request");
+    app.test_network_events();
 
     assert_eq!(
         commands.take_submitted_client_updates(),
@@ -10173,10 +9619,9 @@ fn classic_host_lobby_activation_request_has_no_presentation_child() {
             waited_for: true,
             ping_ms: 25,
         })
-        .expect("queue lobby activation request");
+        .test_value();
 
-    app.process_network_events()
-        .expect("handle lobby activation request without a presentation child");
+    app.test_network_events();
 
     assert_eq!(
         commands.take_submitted_client_updates(),
@@ -10216,10 +9661,9 @@ fn classic_host_lobby_status_commit_has_no_presentation_child() {
     };
     event_tx
         .send(NetworkEvent::StatusCommitted(lobby))
-        .expect("queue committed lobby status");
+        .test_value();
 
-    app.process_network_events()
-        .expect("commit lobby status without a presentation child");
+    app.test_network_events();
 
     assert_eq!(app.runtime_network_committed_status, Some(lobby));
     assert!(!app.network_control_running);
@@ -10266,20 +9710,17 @@ fn runtime_player_refreshes_inactive_client_even_when_eliminated() {
     // delayed path from selecting its client (src/C4PlayerList.cpp:487-496).
     let mut app = new_running_sandbox_app();
     for _ in 0..501 {
-        app.engine
-            .tick()
-            .expect("advance beyond deactivation delay");
+        app.engine.test_tick();
     }
     app.engine
         .register_player(PlayerConfig::new(17, "Remote"))
-        .expect("register remote runtime player");
+        .test_value();
     app.engine
-        .player_mut(17)
-        .expect("remote runtime player")
+        .test_player_mut(17)
         .set_at_client(clonk_engine::PlayerAtClient::new(3));
     app.engine
         .set_player_status(17, clonk_engine::PlayerStatus::Eliminated)
-        .expect("eliminate remote runtime player");
+        .test_value();
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -10290,8 +9731,7 @@ fn runtime_player_refreshes_inactive_client_even_when_eliminated() {
     app.network_control_running = false;
     app.control_clients.register(3, true, false);
 
-    app.update()
-        .expect("refresh activity from eliminated player");
+    app.test_update();
 
     assert!(commands.take_submitted_client_updates().is_empty());
     assert!(app.control_clients.is_activated(3));
@@ -10315,7 +9755,7 @@ fn control_rate_two_client_executes_scheduled_activation_at_the_control_tick() {
     app.control_clients.register(3, false, false);
     app.network_control_clock = Some(NetworkControlClock::new(0, 2));
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(0, 2).expect("valid network timing"),
+        clonk_engine::NetworkControlTiming::new(0, 2).test_value(),
     );
 
     for tick in 0..3 {
@@ -10324,10 +9764,10 @@ fn control_rate_two_client_executes_scheduled_activation_at_the_control_tick() {
                 tick,
                 controls: Vec::new(),
             })
-            .expect("queue prerequisite control tick");
-        app.update().expect("execute prerequisite control tick");
+            .test_value();
+        app.test_update();
         if tick < 2 {
-            app.update().expect("execute non-control frame");
+            app.test_update();
         }
     }
     assert_eq!(app.engine.frame(), 5);
@@ -10344,10 +9784,9 @@ fn control_rate_two_client_executes_scheduled_activation_at_the_control_tick() {
             tick: 3,
             controls: vec![NetworkControl::ClientUpdate(update.clone())],
         })
-        .expect("queue synchronized activation");
+        .test_value();
 
-    app.update()
-        .expect("retain activation across the non-control frame");
+    app.test_update();
     assert_eq!(app.engine.frame(), 6);
     assert!(!app.control_clients.is_activated(3));
     assert!(commands.take_executed_client_updates().is_empty());
@@ -10357,8 +9796,8 @@ fn control_rate_two_client_executes_scheduled_activation_at_the_control_tick() {
             tick: 3,
             controls: Vec::new(),
         })
-        .expect("queue activation control tick");
-    app.update().expect("execute activation at control tick 3");
+        .test_value();
+    app.test_update();
 
     assert_eq!(app.engine.frame(), 7);
     assert!(app.control_clients.is_activated(3));
@@ -10389,40 +9828,36 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
         set_control_test_metadata(false, vec![set_control_test_team(1, vec![7, 8, 9], 0)]);
     app.engine
         .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
-        .expect("register remote runtime player");
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
-                clonk_engine::ControlPlayerInfoEntry {
-                    id: 7,
-                    team: 1,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-                    ..Default::default()
-                },
-                clonk_engine::ControlPlayerInfoEntry {
-                    id: 8,
-                    team: 1,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        });
-    let retained_color = 0x0000_f400;
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 4,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 9,
+        .test_value();
+    app.control_player_infos.apply(netplay_player_info_data(
+        3,
+        vec![
+            clonk_engine::ControlPlayerInfoEntry {
+                id: 7,
                 team: 1,
-                color: retained_color,
-                original_color: 0x00f4_0000,
-                forced_name: clonk_engine::LegacyCString::from_bytes(b"Alias".to_vec()).unwrap(),
-                league_projected_gain: 5,
+                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
                 ..Default::default()
-            }],
+            },
+            clonk_engine::ControlPlayerInfoEntry {
+                id: 8,
+                team: 1,
+                ..Default::default()
+            },
+        ],
+    ));
+    let retained_color = 0x0000_f400;
+    app.control_player_infos.apply(netplay_player_info_data(
+        4,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: 9,
+            team: 1,
+            color: retained_color,
+            original_color: 0x00f4_0000,
+            forced_name: clonk_engine::LegacyCString::from_bytes(b"Alias".to_vec()).unwrap(),
+            league_projected_gain: 5,
             ..Default::default()
-        });
+        }],
+    ));
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
 
@@ -10436,7 +9871,7 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
             },
         )],
     )
-    .expect("execute synchronized client removal");
+    .test_value();
 
     assert!(!app.control_clients.contains(3));
     assert!(app
@@ -10445,10 +9880,7 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
         .players
         .iter()
         .all(|player| player.player_info_id != 7));
-    let retained = app
-        .control_player_infos
-        .get(7)
-        .expect("joined player history remains");
+    let retained = app.control_player_infos.get(7).test_value();
     assert_ne!(retained.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED, 0);
     assert_ne!(
         retained.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED,
@@ -10456,7 +9888,7 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
     );
     assert!(app.control_player_infos.get(8).is_none());
     assert_eq!(app.engine.teams()[0].player_ids, vec![9]);
-    let unaffected = app.control_player_infos.get(9).unwrap();
+    let unaffected = app.control_player_infos.get(9).test_value();
     assert_eq!(unaffected.color, retained_color);
     assert_eq!(unaffected.forced_name.as_bytes(), b"Alias");
     assert_eq!(unaffected.league_projected_gain, 5);
@@ -10477,19 +9909,17 @@ fn synchronized_client_remove_without_player_info_skips_the_part_cascade() {
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
     app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 4,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 77,
-                team: 1,
-                color: 0x0000_f400,
-                original_color: 0x00f4_0000,
-                league_projected_gain: 5,
-                ..Default::default()
-            }],
+    app.control_player_infos.apply(netplay_player_info_data(
+        4,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: 77,
+            team: 1,
+            color: 0x0000_f400,
+            original_color: 0x00f4_0000,
+            league_projected_gain: 5,
             ..Default::default()
-        });
+        }],
+    ));
 
     app.apply_ready_controls(
         0,
@@ -10501,9 +9931,9 @@ fn synchronized_client_remove_without_player_info_skips_the_part_cascade() {
             },
         )],
     )
-    .expect("execute client removal without player infos");
+    .test_value();
 
-    let retained = app.control_player_infos.get(77).unwrap();
+    let retained = app.control_player_infos.get(77).test_value();
     assert_eq!(retained.color, 0x0000_f400);
     assert_eq!(retained.league_projected_gain, 5);
     assert_eq!(
@@ -10527,22 +9957,17 @@ fn network_host_without_control_host_still_runs_client_part_updates() {
     app.control_player_infos.replace_snapshot(
         40,
         [
-            clonk_engine::PlayerInfoControlData {
-                client_id: 3,
-                players: vec![set_control_test_player(30, 0, 0)],
-                ..Default::default()
-            },
-            clonk_engine::PlayerInfoControlData {
-                client_id: 4,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
+            netplay_player_info_data(3, vec![set_control_test_player(30, 0, 0)]),
+            netplay_player_info_data(
+                4,
+                vec![clonk_engine::ControlPlayerInfoEntry {
                     id: 40,
                     flags: clonk_engine::PLAYER_INFO_FLAG_JOINED
                         | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
                     league_projected_gain: 5,
                     ..Default::default()
                 }],
-                ..Default::default()
-            },
+            ),
         ],
     );
 
@@ -10556,7 +9981,7 @@ fn network_host_without_control_host_still_runs_client_part_updates() {
             },
         )],
     )
-    .expect("execute non-control-host client removal");
+    .test_value();
 
     assert_eq!(
         app.control_player_infos
@@ -10586,21 +10011,19 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
     let remote_player = 17;
     let remote_info = 73;
     app.engine
-        .player_mut(local_player)
-        .expect("local runtime player")
+        .test_player_mut(local_player)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     app.engine
         .register_player(
             PlayerConfig::new(remote_player, "Host player").with_player_info_id(remote_info),
         )
-        .expect("register host runtime player");
+        .test_value();
     app.engine
-        .player_mut(remote_player)
-        .expect("host runtime player")
+        .test_player_mut(remote_player)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     app.engine.set_network_game(true);
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(31, 4).expect("valid network timing"),
+        clonk_engine::NetworkControlTiming::new(31, 4).test_value(),
     );
     app.snapshot = app.engine.snapshot();
 
@@ -10616,18 +10039,16 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
     app.control_clients = ControlClientRegistry::default();
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, true, false);
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: remote_info,
-                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-                ..Default::default()
-            }],
+    app.control_player_infos.apply(netplay_player_info_data(
+        0,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: remote_info,
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
             ..Default::default()
-        });
+        }],
+    ));
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
-        .expect("open options menu");
+        .test_value();
     let frame_before = app.engine.frame();
     let control_tick_before = app.engine.sync_check(local_client).control_tick;
 
@@ -10636,8 +10057,8 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
             client_id: 0,
             reason: Some("connection lost".to_string()),
         })
-        .expect("queue host socket loss");
-    app.process_network_events().expect("process host loss");
+        .test_value();
+    app.test_network_events();
 
     assert!(matches!(app.mode, AppMode::Running));
     assert!(app.network.is_none());
@@ -10690,15 +10111,14 @@ fn client_follows_an_announced_host_restart_back_to_the_lobby() {
 
     event_tx
         .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
-        .expect("queue host restart notice");
+        .test_value();
     event_tx
         .send(NetworkEvent::PeerDisconnected {
             client_id: 0,
             reason: Some("connection lost".to_string()),
         })
-        .expect("queue host socket loss");
-    app.process_network_events()
-        .expect("process the announced restart");
+        .test_value();
+    app.test_network_events();
 
     assert_eq!(
         app.mode,
@@ -10738,11 +10158,8 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, true, false);
 
-    event_tx
-        .send(NetworkEvent::HostRestartLobby)
-        .expect("queue the session-preserving restart");
-    app.process_network_events()
-        .expect("process the session-preserving restart");
+    event_tx.send(NetworkEvent::HostRestartLobby).test_value();
+    app.test_network_events();
 
     assert_eq!(
         app.mode,
@@ -10782,11 +10199,7 @@ fn an_oversized_rejoin_window_is_clamped() {
 
     app.arm_pending_host_rejoin(u16::MAX);
 
-    let deadline = app
-        .pending_host_rejoin
-        .as_ref()
-        .expect("the notice still arms a rejoin")
-        .deadline;
+    let deadline = app.pending_host_rejoin.test_ref().deadline;
     assert!(
         deadline
             <= Instant::now() + Duration::from_secs(u64::from(MAX_HOST_RESTART_REJOIN_SECONDS)),
@@ -10825,10 +10238,10 @@ fn cancelling_the_reconnect_dialog_abandons_the_rejoin() {
         ),
         MessageDialogContinuation::StartupNetworkConnectProgress,
     )
-    .expect("push the reconnect progress dialog");
+    .test_value();
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
-        .expect("cancel the reconnect");
+        .test_value();
 
     assert!(app.startup_network_connection.is_none());
     assert!(
@@ -10836,8 +10249,7 @@ fn cancelling_the_reconnect_dialog_abandons_the_rejoin() {
         "Cancel must end the rejoin, not just the attempt in flight"
     );
 
-    app.poll_startup_network_connection()
-        .expect("poll after cancelling");
+    app.poll_startup_network_connection().test_value();
     assert!(
         app.startup_network_connection.is_none(),
         "the cancelled rejoin must not reopen its dialog"
@@ -10860,18 +10272,16 @@ fn a_window_that_closes_mid_attempt_reports_one_failure() {
         .send(Err(NetworkStartError::Other(
             "connection refused".to_string(),
         )))
-        .expect("queue the refused reconnect");
+        .test_value();
     app.startup_network_connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
     ));
 
-    app.poll_startup_network_connection()
-        .expect("poll the attempt that outlived its window");
+    app.poll_startup_network_connection().test_value();
     let after_failure = app.message_dialogs.len();
-    app.poll_startup_network_connection()
-        .expect("poll again once the entry is gone");
+    app.poll_startup_network_connection().test_value();
 
     assert!(app.pending_host_rejoin.is_none());
     assert_eq!(
@@ -10898,21 +10308,17 @@ fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
         .send(Err(NetworkStartError::Other(
             "connection refused".to_string(),
         )))
-        .expect("queue refused reconnect");
+        .test_value();
     app.startup_network_connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
     ));
 
-    app.poll_startup_network_connection()
-        .expect("poll the refused reconnect");
+    app.poll_startup_network_connection().test_value();
 
     assert!(app.startup_network_connection.is_none());
-    let scheduled = app
-        .pending_host_rejoin
-        .as_ref()
-        .expect("a refused reconnect keeps the rejoin armed");
+    let scheduled = app.pending_host_rejoin.test_ref();
     assert!(
         scheduled.next_attempt_at.is_some(),
         "the next attempt waits for the host to finish re-binding"
@@ -10928,8 +10334,7 @@ fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
         next_attempt_at: None,
     });
 
-    app.poll_startup_network_connection()
-        .expect("poll past the rejoin deadline");
+    app.poll_startup_network_connection().test_value();
 
     assert!(
         app.pending_host_rejoin.is_none(),
@@ -10947,8 +10352,7 @@ fn a_rejoin_reuses_the_live_join_settings_rather_than_rebuilding_them() {
     // reconnect would be refused for the whole window.
     let mut app = new_running_sandbox_app();
     let local_client = 7;
-    let password = clonk_engine::LegacyCString::from_bytes(b"hunter2".to_vec())
-        .expect("password fixture is NUL-free");
+    let password = clonk_engine::LegacyCString::from_bytes(b"hunter2".to_vec()).test_value();
     let settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
         .with_password(password.clone())
         .with_compatibility_build(42);
@@ -10959,20 +10363,16 @@ fn a_rejoin_reuses_the_live_join_settings_rather_than_rebuilding_them() {
 
     event_tx
         .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
-        .expect("queue host restart notice");
+        .test_value();
     event_tx
         .send(NetworkEvent::PeerDisconnected {
             client_id: 0,
             reason: None,
         })
-        .expect("queue host socket loss");
-    app.process_network_events()
-        .expect("process the announced restart");
+        .test_value();
+    app.test_network_events();
 
-    let relaunched = app
-        .pending_network_join
-        .as_ref()
-        .expect("the rejoin re-arms the same join it is repeating");
+    let relaunched = app.pending_network_join.test_ref();
     assert_eq!(relaunched.password, password);
     assert_eq!(relaunched.compatibility_build, 42);
     assert_eq!(
@@ -10999,14 +10399,12 @@ fn dropping_to_local_control_abandons_an_armed_rejoin() {
 
     event_tx
         .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
-        .expect("queue host restart notice");
+        .test_value();
     event_tx
         .send(NetworkEvent::FatalError("worker failed".to_string()))
-        .expect("queue worker failure");
-    app.process_network_events()
-        .expect("process the worker failure");
-    app.poll_startup_network_connection()
-        .expect("poll after dropping to local control");
+        .test_value();
+    app.test_network_events();
+    app.poll_startup_network_connection().test_value();
 
     assert_eq!(app.mode, AppMode::Running, "the round continues locally");
     assert!(app.network.is_none());
@@ -11037,11 +10435,9 @@ fn an_announced_restart_alone_does_not_disturb_the_running_round() {
 
     event_tx
         .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
-        .expect("queue host restart notice");
-    app.process_network_events()
-        .expect("process the restart notice");
-    app.poll_startup_network_connection()
-        .expect("poll with the rejoin armed but the host still connected");
+        .test_value();
+    app.test_network_events();
+    app.poll_startup_network_connection().test_value();
 
     assert!(app.pending_host_rejoin.is_some(), "the intent is recorded");
     assert!(
@@ -11075,15 +10471,14 @@ fn a_client_waiting_in_the_lobby_also_follows_an_announced_restart() {
 
     event_tx
         .send(NetworkEvent::HostRestarting { rejoin_seconds: 30 })
-        .expect("queue host restart notice");
+        .test_value();
     event_tx
         .send(NetworkEvent::PeerDisconnected {
             client_id: 0,
             reason: Some("connection lost".to_string()),
         })
-        .expect("queue host socket loss");
-    app.process_network_events()
-        .expect("process the announced restart from the lobby");
+        .test_value();
+    app.test_network_events();
 
     assert_eq!(
         app.startup_network_connection
@@ -11118,7 +10513,7 @@ fn a_rejoin_disarms_when_it_resolves_or_the_player_leaves() {
             )),
             manager,
         )))
-        .expect("queue the completed rejoin");
+        .test_value();
     app.startup_network_connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
@@ -11153,10 +10548,9 @@ fn client_non_host_peer_loss_keeps_the_network_session() {
     let peer_player = 17;
     app.engine
         .register_player(PlayerConfig::new(peer_player, "Peer"))
-        .expect("register peer runtime player");
+        .test_value();
     app.engine
-        .player_mut(peer_player)
-        .expect("peer runtime player")
+        .test_player_mut(peer_player)
         .set_at_client(clonk_engine::PlayerAtClient::new(peer_client));
     app.snapshot = app.engine.snapshot();
     let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
@@ -11174,8 +10568,8 @@ fn client_non_host_peer_loss_keeps_the_network_session() {
             client_id: peer_client as u32,
             reason: Some("peer transport lost".to_string()),
         })
-        .expect("queue peer loss");
-    app.process_network_events().expect("process peer loss");
+        .test_value();
+    app.test_network_events();
 
     assert!(app.network.is_some());
     assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
@@ -11211,7 +10605,7 @@ fn removing_local_network_client_changes_to_local_control() {
             },
         )],
     )
-    .expect("execute local client removal");
+    .test_value();
 
     assert!(app.network.is_none());
     assert!(app.network_mode.is_none());
@@ -11239,10 +10633,9 @@ fn running_stale_lobby_state_cannot_execute_scheduled_sync_immediately() {
                 by_client: 0,
             })],
         })
-        .expect("queue post-GO synchronized control");
+        .test_value();
 
-    app.process_network_events()
-        .expect("queue running synchronized control");
+    app.test_network_events();
 
     assert_ne!(
         app.engine.max_players(),
@@ -11259,15 +10652,15 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
     // PID_ExecSyncCtrl tick 3 must remain valid when ControlRate 2 has
     // already advanced FrameCounter to 6 (src/C4Network2.cpp:2062-2110;
     // src/C4Network2Players.cpp:465-482).
-    let directory = tempdir().expect("record directory");
+    let directory = tempdir();
     let mut app = new_state_only_running_sandbox_app();
     install_test_recording_template(&mut app, directory.path().join("001-FinalGoSync.c4s"));
     app.network_control_clock = Some(NetworkControlClock::new(3, 2));
     app.engine.initialize_network_control_timing(
-        clonk_engine::NetworkControlTiming::new(0, 2).expect("valid network timing"),
+        clonk_engine::NetworkControlTiming::new(0, 2).test_value(),
     );
     for _ in 0..6 {
-        app.engine.tick().expect("advance to frame 6");
+        app.engine.test_tick();
     }
     assert_eq!(app.engine.frame(), 6);
     assert_eq!(app.expected_network_control_tick(), 3);
@@ -11281,26 +10674,22 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
     app.network_control_running = false;
     app.control_clients.register(3, false, false);
     app.control_clients.register(4, true, false);
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 31,
-                player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-                ..Default::default()
-            }],
+    app.control_player_infos.apply(netplay_player_info_data(
+        3,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: 31,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
             ..Default::default()
-        });
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 4,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: 41,
-                player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-                ..Default::default()
-            }],
+        }],
+    ));
+    app.control_player_infos.apply(netplay_player_info_data(
+        4,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: 41,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
             ..Default::default()
-        });
+        }],
+    ));
 
     event_tx
         .send(NetworkEvent::ScheduledSync {
@@ -11324,7 +10713,7 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
                 }),
             ],
         })
-        .expect("queue released lifecycle controls");
+        .test_value();
     event_tx
         .send(NetworkEvent::StatusCommitted(
             clonk_network::NetworkStatus {
@@ -11333,9 +10722,9 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
                 target_tick: 3,
             },
         ))
-        .expect("queue final Go commit");
+        .test_value();
 
-    app.process_network_events().expect("commit final Go");
+    app.test_network_events();
 
     assert!(app.control_clients.is_activated(3));
     assert!(!app.control_clients.contains(4));
@@ -11367,14 +10756,14 @@ fn network_update_uses_join_control_tick_and_cpp_control_rate() {
             tick: 9,
             controls: Vec::new(),
         })
-        .expect("queue start control tick");
-    app.update().expect("execute start control tick");
+        .test_value();
+    app.test_update();
     assert_eq!(app.engine.frame(), 1);
 
-    app.update().expect("simulate non-control frame");
+    app.test_update();
     assert_eq!(app.engine.frame(), 2);
 
-    app.update().expect("wait for next control tick");
+    app.test_update();
     assert_eq!(app.engine.frame(), 2, "stalled control frame is retried");
     assert_eq!(
         app.network_control_clock.map(|clock| clock.current_tick()),
@@ -11386,8 +10775,8 @@ fn network_update_uses_join_control_tick_and_cpp_control_rate() {
             tick: 10,
             controls: Vec::new(),
         })
-        .expect("queue next control tick");
-    app.update().expect("execute next control tick");
+        .test_value();
+    app.test_update();
     assert_eq!(app.engine.frame(), 3);
 }
 
@@ -11456,17 +10845,13 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
             tick: 77,
             controls: Vec::new(),
         })
-        .expect("queue ordinary running control tick");
+        .test_value();
     event_tx
         .send(NetworkEvent::HostPingMeasured { round_trip_ms: 12 })
-        .expect("queue non-roster telemetry");
+        .test_value();
 
-    app.process_network_events()
-        .expect("process non-roster network batch");
-    let clock = app
-        .network_control_clock
-        .as_mut()
-        .expect("running network clock");
+    app.test_network_events();
+    let clock = app.network_control_clock.test_mut();
     assert_eq!(clock.calculate_performance(), None);
     assert_eq!(
         clock.avg_control_send_time(),
@@ -11474,7 +10859,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
         "host-only ping telemetry must not replace the consumed topology sample"
     );
 
-    let lobby = app.network_lobby.as_ref().expect("cached lobby fixture");
+    let lobby = app.network_lobby.test_ref();
     let host = lobby
         .roster_rows
         .iter()
@@ -11482,7 +10867,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
             LobbyRosterRow::Client(client) if client.id == 0 => Some(client),
             _ => None,
         })
-        .expect("host telemetry row");
+        .test_value();
     assert!(!host.connected);
     assert_eq!(host.ping_ms, None);
     assert_eq!(host.resource_progress, None);
@@ -11506,7 +10891,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     // C4PlayerInfoListBox (src/C4Network2.cpp:674-677;
     // src/C4Network2Dialogs.cpp:343-370).
     app.refresh_classic_lobby_client_telemetry();
-    let lobby = app.network_lobby.as_mut().expect("cached lobby fixture");
+    let lobby = app.network_lobby.test_mut();
     let host = lobby
         .roster_rows
         .iter()
@@ -11514,7 +10899,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
             LobbyRosterRow::Client(client) if client.id == 0 => Some(client),
             _ => None,
         })
-        .expect("host telemetry row");
+        .test_value();
     assert!(host.connected);
     assert_eq!(host.ping_ms, Some(12));
     assert_eq!(host.resource_progress, Some(80));
@@ -11548,11 +10933,10 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
             path: PathBuf::from("Objects.c4d"),
             local: false,
         })
-        .expect("queue non-player resource completion");
-    app.process_network_events()
-        .expect("process non-player resource completion");
+        .test_value();
+    app.test_network_events();
 
-    let lobby = app.network_lobby.as_ref().expect("cached lobby fixture");
+    let lobby = app.network_lobby.test_ref();
     assert_eq!(lobby.roster_rows, telemetry_rows);
     assert_eq!(lobby.controller.rows(), telemetry_rows.as_slice());
 
@@ -11568,9 +10952,8 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
             path: PathBuf::from("Player.c4p"),
             local: false,
         })
-        .expect("queue player resource completion");
-    app.process_network_events()
-        .expect("process player resource completion");
+        .test_value();
+    app.test_network_events();
     assert_ne!(
         app.network_lobby
             .as_ref()
@@ -11582,15 +10965,14 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
 
     {
-        let lobby = app.network_lobby.as_mut().expect("cached lobby fixture");
+        let lobby = app.network_lobby.test_mut();
         lobby.roster_rows.clone_from(&cached_rows);
         lobby.controller.set_rows(cached_rows.clone());
     }
     event_tx
         .send(NetworkEvent::ResourceLoadFailed { resource_id: 89 })
-        .expect("queue player resource failure");
-    app.process_network_events()
-        .expect("process player resource failure");
+        .test_value();
+    app.test_network_events();
     assert_ne!(
         app.network_lobby
             .as_ref()
@@ -11602,7 +10984,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
 
     {
-        let lobby = app.network_lobby.as_mut().expect("cached lobby fixture");
+        let lobby = app.network_lobby.test_mut();
         lobby.roster_rows.clone_from(&cached_rows);
         lobby.controller.set_rows(cached_rows.clone());
     }
@@ -11616,11 +10998,10 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
                 by_client: 0,
             },
         )))
-        .expect("queue roster-affecting client join");
-    app.process_network_events()
-        .expect("process roster-affecting client join");
+        .test_value();
+    app.test_network_events();
 
-    let lobby = app.network_lobby.as_mut().expect("cached lobby fixture");
+    let lobby = app.network_lobby.test_mut();
     lobby.sync_classic_controller();
     assert!(
         lobby
@@ -11685,20 +11066,19 @@ fn locally_authored_join_uses_filename_instead_of_embedded_data() {
     let (manager, event_tx) = NetworkManager::test_stub();
     app.network = Some(manager);
     app.engine.set_network_game(true);
-    let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+    let tick = u32::try_from(app.engine.frame()).test_value();
     let player_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../clonk-engine/tests/fixtures/embedded_player.c4p"
     );
     let info = clonk_engine::ControlPlayerInfoEntry {
-        name: clonk_engine::LegacyCString::from_bytes(b"Local Tyler".to_vec())
-            .expect("valid legacy name"),
+        name: clonk_engine::LegacyCString::from_bytes(b"Local Tyler".to_vec()).test_value(),
         id: 8,
         ..Default::default()
     };
     let join = clonk_engine::JoinPlayerControlData {
         filename: clonk_engine::LegacyCString::from_bytes(player_path.as_bytes().to_vec())
-            .expect("valid legacy filename"),
+            .test_value(),
         at_client: 0,
         info_id: 8,
         source: clonk_engine::JoinPlayerSource::Embedded(vec![0, 0]),
@@ -11717,16 +11097,16 @@ fn locally_authored_join_uses_filename_instead_of_embedded_data() {
                 NetworkControl::JoinPlayer(join),
             ],
         })
-        .expect("queue locally authored join");
+        .test_value();
 
-    app.update().expect("execute local join tick");
+    app.test_update();
 
     let joined = app
         .snapshot
         .players
         .iter()
         .find(|player| player.player_info_id == 8)
-        .expect("local filename player joined");
+        .test_value();
     assert_eq!(joined.name, "Local Tyler");
     assert_eq!((joined.score, joined.total_playing_time), (42, 99));
     assert_eq!(
@@ -11744,22 +11124,20 @@ fn network_main_menu_is_local_and_clears_only_when_user_closes_it() {
     let mut app = new_running_sandbox_app();
     let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
-    let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+    let tick = u32::try_from(app.engine.frame()).test_value();
     let player_menu = ControlEvent::Command {
         command: ControlCommand::PlayerMenu,
         kind: CommandKind::Press,
     };
 
-    app.dispatch_control_event(player_menu)
-        .expect("open local player menu");
+    app.dispatch_control_event(player_menu).test_value();
     assert!(app.ingame_menu.is_some(), "player menu opens immediately");
     assert!(
         commands.take_submitted_local().is_empty(),
         "opening C4MainMenu does not submit synchronized control"
     );
 
-    app.dispatch_control_event(player_menu)
-        .expect("close local player menu");
+    app.dispatch_control_event(player_menu).test_value();
     assert!(app.ingame_menu.is_none(), "player menu closes immediately");
     assert_eq!(
         commands.take_submitted_local(),
@@ -11786,9 +11164,8 @@ fn eliminated_owner_cannot_submit_cached_valid_construction_drop() {
 
     app.engine
         .set_player_status(owner, PlayerStatus::Eliminated)
-        .expect("eliminate construction owner before button-up");
-    app.handle_mouse_button(ElementState::Released)
-        .expect("release cached-valid construction drag");
+        .test_value();
+    app.test_left_button(ElementState::Released);
 
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     assert!(controls.is_empty());
@@ -11805,7 +11182,7 @@ fn network_cursor_menu_converts_exact_press_coms_before_submission() {
     // (C4Game.cpp:3616-3623; C4Menu.cpp:1040-1069).
     let mut app = new_state_only_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let cursor = app.engine.test_crew_cursor(owner);
     install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
@@ -11858,7 +11235,7 @@ fn network_cursor_menu_converts_exact_press_coms_before_submission() {
     ] {
         let tick = app.local_control_submission_tick();
         app.dispatch_control_event_for_local_player(owner, raw)
-            .expect("queue local cursor-menu control");
+            .test_value();
         let submitted = commands.take_submitted_local();
         assert_eq!(
             submitted,
@@ -11876,7 +11253,7 @@ fn network_cursor_menu_converts_exact_press_coms_before_submission() {
             event: submitted[0].1,
         }
         .into_packet()
-        .expect("converted event has a legacy packet");
+        .test_value();
         let clonk_engine::ControlPacket::PlayerControl(packet) = packet else {
             panic!("cursor-menu event must encode as PlayerControl");
         };
@@ -11890,7 +11267,7 @@ fn network_cursor_menu_converts_exact_press_coms_before_submission() {
 fn network_progressing_cursor_menu_submits_show_text_before_execution() {
     let mut app = new_state_only_running_sandbox_app();
     let owner = app.local_owner;
-    let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let cursor = app.engine.test_crew_cursor(owner);
     let mut menu = two_item_script_menu(cursor);
     menu.text_progressing = true;
     for item in &mut menu.items {
@@ -11907,11 +11284,8 @@ fn network_progressing_cursor_menu_submits_show_text_before_execution() {
             kind: CommandKind::Press,
         },
     )
-    .expect("queue first progressive-menu press");
-    let (_, event, tick) = commands
-        .take_submitted_local()
-        .pop()
-        .expect("show-text control was queued");
+    .test_value();
+    let (_, event, tick) = commands.take_submitted_local().pop().test_value();
     assert_eq!(
         event,
         ControlEvent::Command {
@@ -11921,7 +11295,7 @@ fn network_progressing_cursor_menu_submits_show_text_before_execution() {
     );
     let packet = NetworkControl::Player { owner, event }
         .into_packet()
-        .expect("show-text event has a legacy packet");
+        .test_value();
     let clonk_engine::ControlPacket::PlayerControl(packet) = packet else {
         panic!("show-text event must encode as PlayerControl");
     };
@@ -11934,11 +11308,8 @@ fn network_progressing_cursor_menu_submits_show_text_before_execution() {
     );
 
     app.apply_ready_controls(tick, vec![NetworkControl::Player { owner, event }])
-        .expect("execute synchronized show-text control");
-    let (_, menu) = app
-        .engine
-        .cursor_object_menu(owner)
-        .expect("progressive menu remains open");
+        .test_value();
+    let (_, menu) = app.engine.cursor_object_menu(owner).test_value();
     assert_eq!(menu.selection, 0);
     assert!(!menu.text_progressing);
     assert!(menu
@@ -11979,29 +11350,22 @@ fn runtime_network_role_requires_consistent_manager_identity_and_mode() {
 fn saved_game_reapplies_current_player_info_identity_and_preferences() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let info_id = app
-        .engine
-        .player(owner)
-        .expect("sandbox player")
-        .player_info_id();
+    let info_id = app.engine.test_player(owner).player_info_id();
     let text = |value: &str| {
-        clonk_engine::LegacyCString::from_bytes(value.as_bytes().to_vec())
-            .expect("test string has no NUL")
+        clonk_engine::LegacyCString::from_bytes(value.as_bytes().to_vec()).test_value()
     };
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: info_id,
-                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-                name: text("Base name"),
-                forced_name: text("Forced name"),
-                league_account: clonk_engine::LegacyCString::from_bytes(b"League Ren\xe9".to_vec())
-                    .expect("valid native player name"),
-                ..Default::default()
-            }],
+    app.control_player_infos.apply(netplay_player_info_data(
+        0,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: info_id,
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            name: text("Base name"),
+            forced_name: text("Forced name"),
+            league_account: clonk_engine::LegacyCString::from_bytes(b"League Ren\xe9".to_vec())
+                .expect("valid native player name"),
             ..Default::default()
-        });
+        }],
+    ));
     let scenario = app
         .active_scenario
         .clone()
@@ -12011,7 +11375,7 @@ fn saved_game_reapplies_current_player_info_identity_and_preferences() {
         .players
         .iter_mut()
         .find(|player| player.id == owner)
-        .expect("saved sandbox player");
+        .test_value();
     saved_player.name = "Stale saved name".to_string();
     saved_player.script_player = true;
     saved_player.no_elimination_check = true;
@@ -12035,9 +11399,9 @@ fn saved_game_reapplies_current_player_info_identity_and_preferences() {
         engine_state,
     };
 
-    app.apply_loaded_game(save).expect("restore sandbox save");
+    app.apply_loaded_game(save).test_value();
 
-    let player = app.engine.player(owner).expect("player is recreated");
+    let player = app.engine.test_player(owner);
     assert_eq!(
         clonk_script::c4_string_bytes(player.name()),
         b"League Ren\xe9"
@@ -12052,29 +11416,22 @@ fn saved_game_reapplies_current_player_info_identity_and_preferences() {
 fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
     let mut app = new_running_sandbox_app();
     let owner = app.local_owner;
-    let saved_info_id = app
-        .engine
-        .player(owner)
-        .expect("sandbox player")
-        .player_info_id();
+    let saved_info_id = app.engine.test_player(owner).player_info_id();
     assert!(saved_info_id > 0);
     let text = |value: &str| {
-        clonk_engine::LegacyCString::from_bytes(value.as_bytes().to_vec())
-            .expect("test string has no NUL")
+        clonk_engine::LegacyCString::from_bytes(value.as_bytes().to_vec()).test_value()
     };
     app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: saved_info_id + 100,
-                savegame_player: saved_info_id,
-                name: text("Current takeover"),
-                flags: 0,
-                ..Default::default()
-            }],
+    app.control_player_infos.apply(netplay_player_info_data(
+        0,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: saved_info_id + 100,
+            savegame_player: saved_info_id,
+            name: text("Current takeover"),
+            flags: 0,
             ..Default::default()
-        });
+        }],
+    ));
     let scenario = app
         .active_scenario
         .clone()
@@ -12084,7 +11441,7 @@ fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
         .players
         .iter_mut()
         .find(|player| player.id == owner)
-        .expect("saved player");
+        .test_value();
     saved_player.name = "Saved identity".to_string();
     saved_player.no_elimination_check = true;
     let save = SavedGameFile {
@@ -12105,9 +11462,9 @@ fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
         engine_state,
     };
 
-    app.apply_loaded_game(save).expect("restore sandbox save");
+    app.apply_loaded_game(save).test_value();
 
-    let player = app.engine.player(owner).expect("takeover recreates player");
+    let player = app.engine.test_player(owner);
     assert_eq!(player.player_info_id(), saved_info_id);
     assert_eq!(player.name(), "Current takeover");
     assert!(player.no_elimination_check());
@@ -12122,9 +11479,9 @@ fn network_restore_routes_associated_info_away_from_plain_join_queue() {
     let mut player_infos = ControlPlayerInfoRegistry::default();
     player_infos.replace_snapshot(
         92,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 3,
-            players: vec![
+        [netplay_player_info_data(
+            3,
+            vec![
                 clonk_engine::ControlPlayerInfoEntry {
                     id: 91,
                     savegame_player: 7,
@@ -12136,8 +11493,7 @@ fn network_restore_routes_associated_info_away_from_plain_join_queue() {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
-        }],
+        )],
     );
     let restore = clonk_engine::ControlPlayerInfoEntry {
         id: 7,
@@ -12161,7 +11517,7 @@ fn network_restore_routes_associated_info_away_from_plain_join_queue() {
     assert_eq!(recreation, vec![(3, 7)]);
     assert_eq!(plain_joins.len(), 1);
     assert_eq!(plain_joins[0].info_id, 92);
-    let resumed = player_infos.get(7).expect("associated row takes saved ID");
+    let resumed = player_infos.get(7).test_value();
     assert_eq!((resumed.color, resumed.team), (restore.color, restore.team));
     assert_ne!(resumed.flags & clonk_engine::PLAYER_INFO_FLAG_JOINED, 0);
 }
@@ -12171,35 +11527,31 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     // Network::FinalInit reaches the GO barrier before InitPlayers enters
     // RecreatePlayers and starts RetrieveRes (C4Network2.cpp:558-616;
     // C4Game.cpp:459-483,2805-2850; C4PlayerInfo.cpp:1566-1576).
-    let fixture = tempdir().expect("post-GO resource wait fixture");
+    let fixture = tempdir();
     let scenario_path = fixture.path().join("NetworkSave.c4s");
-    fs::create_dir(&scenario_path).expect("create post-GO save group");
-    fs::write(
-        scenario_path.join("Game.txt"),
-        b"[Player7]\nStatus=1\nIndex=2\nID=7\nWealth=19\n\n[Player9]\nStatus=1\nIndex=3\nID=9\nWealth=23\n\n[Player11]\nStatus=1\nIndex=4\nID=11\nWealth=29\n",
-    )
-    .expect("write post-GO player runtime");
+    fs::create_dir(&scenario_path).test_value();
+    fs::write(scenario_path.join("Game.txt"), b"[Player7]\nStatus=1\nIndex=2\nID=7\nWealth=19\n\n[Player9]\nStatus=1\nIndex=3\nID=9\nWealth=23\n\n[Player11]\nStatus=1\nIndex=4\nID=11\nWealth=29\n").test_value();
     let player_path = fixture.path().join("Alice.c4p");
-    fs::create_dir(&player_path).expect("create post-GO player profile");
+    fs::create_dir(&player_path).test_value();
     fs::write(
         player_path.join("Player.txt"),
         b"[Player]\nName=Alice profile\nScore=31\n",
     )
-    .expect("write post-GO player profile");
+    .test_value();
     let script_player_path = fixture.path().join("ScriptResource.c4p");
-    fs::create_dir(&script_player_path).expect("create post-GO script profile");
+    fs::create_dir(&script_player_path).test_value();
     fs::write(
         script_player_path.join("Player.txt"),
         b"[Player]\nName=Script resource profile\nScore=37\n",
     )
-    .expect("write post-GO script profile");
+    .test_value();
     let embedded_script_path = scenario_path.join("ScriptPlr-11.c4p");
-    fs::create_dir(&embedded_script_path).expect("create staged embedded script profile");
+    fs::create_dir(&embedded_script_path).test_value();
     fs::write(
         embedded_script_path.join("Player.txt"),
         b"[Player]\nName=Embedded script profile\nScore=41\n",
     )
-    .expect("write staged embedded script profile");
+    .test_value();
     let mut app = new_running_sandbox_app();
     let provisional_owner = app.local_owner;
     app.remove_local_control_assignment(provisional_owner);
@@ -12209,10 +11561,8 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     let (network, events, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(network);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    let native = |bytes: &[u8]| {
-        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
-            .expect("test native string has no NUL")
-    };
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     app.control_clients
         .replace_snapshot([clonk_engine::ClientCoreControlData {
             client_id: 0,
@@ -12271,15 +11621,14 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     app.control_player_infos = ControlPlayerInfoRegistry::default();
     app.control_player_infos.replace_snapshot(
         script_current.id,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![
+        [netplay_player_info_data(
+            0,
+            vec![
                 current.clone(),
                 script_current.clone(),
                 embedded_script_current,
             ],
-            ..Default::default()
-        }],
+        )],
     );
     app.admission_resources
         .register_player_info_resources(std::slice::from_ref(&current));
@@ -12288,28 +11637,16 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     let (_sender, receiver) = mpsc::channel();
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
-    app.loading_state = Some(ScenarioLoadingState {
+    app.loading_state = Some(test_loading_state(
         scenario,
-        refreshed_resources: None,
-        refreshed_tooltip_font: None,
-        refreshed_native_font_source: None,
-        refreshed_global_gui_failures: None,
-        refreshed_gui_sheet_overrides: None,
-        refresh_requested: false,
         receiver,
-        finished: true,
-        last_progress: 0,
-        log: Vec::new(),
-        prepared_go: Some(PreparedGoLoadingState {
-            status: clonk_network::NetworkStatus {
-                state: clonk_network::NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            local_reached: false,
-            save_game: true,
-            network_runtime_join: false,
-            restore_player_infos: vec![
+        true,
+        test_prepared_go(
+            0,
+            false,
+            true,
+            false,
+            vec![
                 clonk_engine::ControlPlayerInfoEntry {
                     id: 7,
                     flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
@@ -12329,30 +11666,12 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
                     ..Default::default()
                 },
             ],
-            runtime_join_players: Vec::new(),
-            pending_client_runtime_join: None,
-            initial_game_data: None,
-            random_seed: 0,
-            use_fair_crew: false,
-            fair_crew_strength: 0,
-            fair_crew_forced: false,
-            allow_debug: true,
-            auto_frame_skip: true,
-            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
-                Vec::new(),
-                Vec::new(),
-            ),
-            team_configuration: TeamConfiguration::default(),
-            team_registry: Vec::new(),
-            definition_modules: None,
-        }),
-        offline_startup_players: None,
-        offline_savegame: None,
-        offline_random_seed: None,
-    });
+            Vec::new(),
+            Vec::new(),
+        ),
+    ));
 
-    app.try_reach_loaded_network_go_barrier()
-        .expect("reach GO before associated player resource wait");
+    app.try_reach_loaded_network_go_barrier().test_value();
 
     assert_eq!(commands.take_status_reached(), 1);
     assert_eq!(
@@ -12369,7 +11688,7 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
         control_mode: 0,
         target_tick: 0,
     })
-    .expect("commit GO and begin associated player resource wait");
+    .test_value();
 
     assert!(app.blocking_resource_wait.as_ref().is_some_and(|wait| {
         wait.scope == BlockingResourceScope::PlayerJoin
@@ -12380,10 +11699,7 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     // RecreatePlayerFiles stages every embedded script profile and discards
     // its live resource before RecreatePlayers reaches the first user pRes
     // wait (C4Game.cpp:2841-2847; C4PlayerInfo.cpp:1448-1521).
-    let staged_script = app
-        .control_player_infos
-        .get(11)
-        .expect("later embedded script info is already staged");
+    let staged_script = app.control_player_infos.get(11).test_value();
     assert!(staged_script.resource.is_none());
     assert_eq!(
         staged_script.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
@@ -12393,8 +11709,7 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     app.admission_resources
         .mark_complete(resource.id, player_path);
     app.clear_blocking_resource_wait();
-    app.poll_loading()
-        .expect("advance committed GO to the associated script resource");
+    app.poll_loading().test_value();
 
     // A script player whose embedded extraction is absent still uses its live
     // pRes before Filename and waits in RecreatePlayers when that resource is
@@ -12405,18 +11720,14 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
             && wait.player_info_id == Some(9)
     }));
     assert_eq!(app.mode, AppMode::Loading);
-    let user = app
-        .engine
-        .player(2)
-        .expect("ready user is recreated before waiting for the later script resource");
+    let user = app.engine.test_player(2);
     assert_eq!(
         (user.player_info_id(), user.wealth(), user.score()),
         (7, 19, 31)
     );
     assert!(app.engine.player(3).is_none());
 
-    app.poll_loading()
-        .expect("polling the same wait does not recreate the ready prefix twice");
+    app.poll_loading().test_value();
     assert_eq!(
         app.engine
             .players()
@@ -12430,36 +11741,28 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
             tick: ready_tick,
             controls: Vec::new(),
         })
-        .expect("queue initial lockstep tick while profile retrieval pumps network events");
-    app.process_network_events()
-        .expect("retain initial lockstep tick during profile retrieval");
+        .test_value();
+    app.test_network_events();
     assert!(app.network_ticks.ready.contains_key(&ready_tick));
 
     app.admission_resources
         .mark_complete(script_resource.id, script_player_path);
     app.clear_blocking_resource_wait();
-    app.poll_loading()
-        .expect("resume committed GO after associated script profile completes");
+    app.poll_loading().test_value();
 
     assert_eq!(app.mode, AppMode::Running);
-    let player = app.engine.player(2).expect("recreated player after wait");
+    let player = app.engine.test_player(2);
     assert_eq!(
         (player.player_info_id(), player.wealth(), player.score()),
         (7, 19, 31)
     );
-    let script = app
-        .engine
-        .player(3)
-        .expect("recreated script player after resource wait");
+    let script = app.engine.test_player(3);
     assert_eq!(
         (script.player_info_id(), script.wealth(), script.score()),
         (9, 23, 37)
     );
     assert!(script.is_script_player());
-    let embedded = app
-        .engine
-        .player(4)
-        .expect("staged embedded script player after resource wait");
+    let embedded = app.engine.test_player(4);
     assert_eq!(
         (
             embedded.player_info_id(),
@@ -12476,13 +11779,11 @@ fn change_to_local_during_savegame_recreation_retains_completed_profile_files() 
     // ChangeToLocal clears the network while RecreatePlayers remains on its
     // native stack: completed pRes files stay usable and pending retrievals
     // fail (C4GameControl.cpp:93-127; C4PlayerInfo.cpp:1566-1577).
-    let fixture = tempdir().expect("change-to-local resource fixture");
+    let fixture = tempdir();
     let completed_path = fixture.path().join("Complete.c4p");
-    fs::create_dir(&completed_path).expect("create completed player resource");
-    let native = |bytes: &[u8]| {
-        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
-            .expect("test native string has no NUL")
-    };
+    fs::create_dir(&completed_path).test_value();
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let completed = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 31,
@@ -12526,10 +11827,7 @@ fn change_to_local_during_savegame_recreation_retains_completed_profile_files() 
             AdmissionResourceUnavailable::TransferFailed
         ))
     ));
-    let retained_client = app
-        .control_clients
-        .state(7)
-        .expect("local client survives ChangeToLocal");
+    let retained_client = app.control_clients.state(7).test_value();
     assert_eq!(retained_client.name.as_bytes(), b"Local survivor");
     assert_eq!(retained_client.nick.as_bytes(), b"Survivor nick");
 }
@@ -12540,57 +11838,51 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     // current lobby profile, then joins the saved runtime player and reruns
     // InitControl (C4Game.cpp:2827-2850; C4PlayerInfo.cpp:1524-1607;
     // C4Player.cpp:354-386).
-    let fixture = tempdir().expect("ordinary network save fixture");
+    let fixture = tempdir();
     let scenario_path = fixture.path().join("NetworkSave.c4s");
-    fs::create_dir(&scenario_path).expect("create network save group");
-    fs::write(
-        scenario_path.join("Game.txt"),
-        b"[Player7]\nStatus=1\nAtClient=9\nAtClientName=stale\nIndex=2\nID=7\nWealth=19\n\n[Player9]\nStatus=1\nIndex=4\nID=9\n\n[Player10]\nStatus=1\nIndex=5\nID=10\nWealth=29\n\n[Player8]\nStatus=1\nIndex=3\nID=8\nWealth=23\n\n[Player12]\nStatus=1\nIndex=6\nID=12\n",
-    )
-    .expect("write saved player runtime section");
+    fs::create_dir(&scenario_path).test_value();
+    fs::write(scenario_path.join("Game.txt"), b"[Player7]\nStatus=1\nAtClient=9\nAtClientName=stale\nIndex=2\nID=7\nWealth=19\n\n[Player9]\nStatus=1\nIndex=4\nID=9\n\n[Player10]\nStatus=1\nIndex=5\nID=10\nWealth=29\n\n[Player8]\nStatus=1\nIndex=3\nID=8\nWealth=23\n\n[Player12]\nStatus=1\nIndex=6\nID=12\n").test_value();
     let player_path = fixture.path().join("Alice.c4p");
-    fs::create_dir(&player_path).expect("create current player group");
+    fs::create_dir(&player_path).test_value();
     fs::write(
         player_path.join("Player.txt"),
         b"[Player]\nName=Alice profile\nScore=31\n[Preferences]\nControl=0\nMouse=0\n",
     )
-    .expect("write current player profile");
+    .test_value();
     let filename_player_path = fixture.path().join("Bob.c4p");
-    fs::create_dir(&filename_player_path).expect("create filename-only player group");
+    fs::create_dir(&filename_player_path).test_value();
     fs::write(
         filename_player_path.join("Player.txt"),
         b"[Player]\nName=Bob profile\nScore=37\n[Preferences]\nControl=0\nMouse=0\n",
     )
-    .expect("write filename-only player profile");
+    .test_value();
     let script_player_path = scenario_path.join("ScriptPlr-10.c4p");
-    fs::create_dir(&script_player_path).expect("create embedded script player group");
+    fs::create_dir(&script_player_path).test_value();
     fs::write(
         script_player_path.join("Player.txt"),
         b"[Player]\nName=Script profile\nScore=41\n",
     )
-    .expect("write embedded script player profile");
+    .test_value();
     let installed_script_player_path = fixture.path().join("InstalledScript.c4p");
-    fs::create_dir(&installed_script_player_path).expect("create installed script player group");
+    fs::create_dir(&installed_script_player_path).test_value();
     fs::write(
         installed_script_player_path.join("Player.txt"),
         b"[Player]\nName=Installed script profile\nScore=43\n",
     )
-    .expect("write installed script player profile");
+    .test_value();
     let packed_scenario_path = fixture.path().join("PackedNetworkSave.c4s");
-    let scenario_group = Group::open(&scenario_path).expect("open folder save group");
+    let scenario_group = Group::open(&scenario_path).test_value();
     fs::write(
         &packed_scenario_path,
         MutableGroup::from_group(&scenario_group)
-            .expect("copy folder save group")
+            .test_value()
             .pack()
-            .expect("pack network save group"),
+            .test_value(),
     )
-    .expect("write packed network save group");
+    .test_value();
 
-    let native = |bytes: &[u8]| {
-        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
-            .expect("test native string has no NUL")
-    };
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let resource = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: 17,
@@ -12636,7 +11928,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         filename: clonk_engine::LegacyCString::from_bytes(clonk_resources::path_to_legacy_bytes(
             &filename_player_path,
         ))
-        .expect("filename-only profile path has no NUL"),
+        .test_value(),
         flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
         player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
         resource: Some(unavailable_filename_resource),
@@ -12656,7 +11948,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         filename: clonk_engine::LegacyCString::from_bytes(clonk_resources::path_to_legacy_bytes(
             &fixture.path().join("MissingUser.c4p"),
         ))
-        .expect("missing filename-only profile path has no NUL"),
+        .test_value(),
         player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
         ..Default::default()
     };
@@ -12710,23 +12002,16 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
 
     let mut app = new_state_only_running_sandbox_app();
     app.engine
-        .register_definition(
-            Definition::from_script("UCRW", "Unassociated crew", "")
-                .expect("compile unassociated crew definition"),
-        )
-        .expect("register unassociated crew definition");
+        .register_test_definition(test_definition("UCRW", "Unassociated crew", ""));
     let provisional_owner = app.local_owner;
     app.remove_local_control_assignment(provisional_owner);
     app.engine.retain_restored_players([]);
     app.engine.set_local_players([]);
-    let unassociated_crew = app
-        .engine
-        .spawn_object(
-            SpawnConfig::new("UCRW")
-                .with_owner(6)
-                .with_category(1 << 18),
-        )
-        .expect("spawn unassociated savegame crew");
+    let unassociated_crew = app.engine.spawn_test_object(
+        SpawnConfig::new("UCRW")
+            .with_owner(6)
+            .with_category(1 << 18),
+    );
     let (network, _events) = NetworkManager::test_stub();
     app.network = Some(network);
     app.control_clients
@@ -12739,17 +12024,16 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     app.control_player_infos = ControlPlayerInfoRegistry::default();
     app.control_player_infos.replace_snapshot(
         missing_filename_current.id,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![
+        [netplay_player_info_data(
+            0,
+            vec![
                 current.clone(),
                 missing_script_current.clone(),
                 script_current,
                 filename_current,
                 missing_filename_current,
             ],
-            ..Default::default()
-        }],
+        )],
     );
     app.admission_resources
         .register_player_info_resources(std::slice::from_ref(&current));
@@ -12762,28 +12046,16 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(packed_scenario_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState {
+    app.loading_state = Some(test_loading_state(
         scenario,
-        refreshed_resources: None,
-        refreshed_tooltip_font: None,
-        refreshed_native_font_source: None,
-        refreshed_global_gui_failures: None,
-        refreshed_gui_sheet_overrides: None,
-        refresh_requested: false,
         receiver,
-        finished: false,
-        last_progress: 0,
-        log: Vec::new(),
-        prepared_go: Some(PreparedGoLoadingState {
-            status: clonk_network::NetworkStatus {
-                state: clonk_network::NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            local_reached: true,
-            save_game: true,
-            network_runtime_join: false,
-            restore_player_infos: vec![
+        false,
+        test_prepared_go(
+            0,
+            true,
+            true,
+            false,
+            vec![
                 restore,
                 missing_script_restore,
                 script_restore,
@@ -12797,44 +12069,22 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
                     ..Default::default()
                 },
             ],
-            runtime_join_players: Vec::new(),
-            pending_client_runtime_join: None,
-            initial_game_data: None,
-            random_seed: 0,
-            use_fair_crew: false,
-            fair_crew_strength: 0,
-            fair_crew_forced: false,
-            allow_debug: true,
-            auto_frame_skip: true,
-            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
-                Vec::new(),
-                Vec::new(),
-            ),
-            team_configuration: TeamConfiguration::default(),
-            team_registry: Vec::new(),
-            definition_modules: None,
-        }),
-        offline_startup_players: None,
-        offline_savegame: None,
-        offline_random_seed: None,
-    });
+            Vec::new(),
+            Vec::new(),
+        ),
+    ));
     let record_path = fixture.path().join("001-RecreatedPlayers.c4s");
     install_test_recording_template(&mut app, record_path.clone());
-    app.start_recording(true)
-        .expect("start recreation recording");
+    app.start_recording(true).test_value();
 
-    app.finalize_network_loaded_scenario(true)
-        .expect("finalize ordinary network savegame");
+    app.finalize_network_loaded_scenario(true).test_value();
 
-    let player = app.engine.player(2).expect("saved runtime player 2");
+    let player = app.engine.test_player(2);
     assert_eq!((player.player_info_id(), player.wealth()), (7, 19));
     assert_eq!((player.name(), player.score()), ("Alice current", 31));
     assert_eq!(player.at_client(), clonk_engine::PlayerAtClient::HOST);
     assert_eq!(player.at_client_name(), "Current client");
-    let filename_player = app
-        .engine
-        .player(3)
-        .expect("filename-only runtime player 3");
+    let filename_player = app.engine.test_player(3);
     // LoadResource clears an unavailable pRes but retains Filename, which
     // GetLocalJoinFilename then uses for RecreatePlayers
     // (C4PlayerInfo.cpp:124-130,275-292,1566-1601).
@@ -12847,19 +12097,13 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         ),
         (8, "Bob current", 23, 37)
     );
-    let filename_info = app
-        .control_player_infos
-        .get(8)
-        .expect("retained unavailable-resource filename info");
+    let filename_info = app.control_player_infos.get(8).test_value();
     assert!(filename_info.resource.is_none());
     assert_eq!(
         filename_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
         0
     );
-    let installed_script = app
-        .engine
-        .player(4)
-        .expect("installed script runtime player 4");
+    let installed_script = app.engine.test_player(4);
     assert_eq!(
         (
             installed_script.player_info_id(),
@@ -12869,10 +12113,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         (9, "Installed script player", 43)
     );
     assert!(installed_script.is_script_player());
-    let script_player = app
-        .engine
-        .player(5)
-        .expect("embedded script runtime player 5");
+    let script_player = app.engine.test_player(5);
     assert_eq!(
         (
             script_player.player_info_id(),
@@ -12907,10 +12148,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         clonk_engine::ObjectStatus::Deleted,
         "RemoveUnassociatedPlayers removes raw-category crew before recreation"
     );
-    let script_info = app
-        .control_player_infos
-        .get(10)
-        .expect("retained recreated script info");
+    let script_info = app.control_player_infos.get(10).test_value();
     // RecreatePlayerFiles extracts script profiles to a temporary path and
     // DeleteTempFile clears that filename/resource after the attempted join
     // (C4PlayerInfo.cpp:1460-1504,1601-1603).
@@ -12925,7 +12163,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     assert_eq!(app.engine.snapshot().hud.local_players, vec![2, 3]);
     assert_eq!(app.local_owner, 2);
     assert!(app.finish_recording().is_none());
-    let record = Group::open(record_path).expect("open recreation record");
+    let record = Group::open(record_path).test_value();
     // RecreatePlayers records every filename-backed profile, including
     // embedded script players that the initial record cleanup removed
     // (C4PlayerInfo.cpp:1594-1598).
@@ -12940,13 +12178,11 @@ fn regular_network_scenario_recreates_fileless_script_player_without_runtime_dat
     // A non-savegame script player may have no [Player<ID>] runtime section;
     // C4Player::Init then retains the restore-info defaults instead of
     // failing recreation (C4Player.cpp:355-371).
-    let fixture = tempdir().expect("regular network scenario fixture");
+    let fixture = tempdir();
     let scenario_path = fixture.path().join("NetworkScenario.c4s");
-    fs::create_dir(&scenario_path).expect("create regular scenario group");
-    let native = |bytes: &[u8]| {
-        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
-            .expect("test native string has no NUL")
-    };
+    fs::create_dir(&scenario_path).test_value();
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let restore = clonk_engine::ControlPlayerInfoEntry {
         id: 7,
         name: native(b"Scenario script player"),
@@ -12974,65 +12210,21 @@ fn regular_network_scenario_recreates_fileless_script_player_without_runtime_dat
             ..Default::default()
         }]);
     app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos.replace_snapshot(
-        current.id,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![current],
-            ..Default::default()
-        }],
-    );
+    app.control_player_infos
+        .replace_snapshot(current.id, [netplay_player_info_data(0, vec![current])]);
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState {
+    app.loading_state = Some(test_loading_state(
         scenario,
-        refreshed_resources: None,
-        refreshed_tooltip_font: None,
-        refreshed_native_font_source: None,
-        refreshed_global_gui_failures: None,
-        refreshed_gui_sheet_overrides: None,
-        refresh_requested: false,
         receiver,
-        finished: false,
-        last_progress: 0,
-        log: Vec::new(),
-        prepared_go: Some(PreparedGoLoadingState {
-            status: clonk_network::NetworkStatus {
-                state: clonk_network::NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            local_reached: true,
-            save_game: false,
-            network_runtime_join: false,
-            restore_player_infos: vec![restore],
-            runtime_join_players: Vec::new(),
-            pending_client_runtime_join: None,
-            initial_game_data: None,
-            random_seed: 0,
-            use_fair_crew: false,
-            fair_crew_strength: 0,
-            fair_crew_forced: false,
-            allow_debug: true,
-            auto_frame_skip: true,
-            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
-                Vec::new(),
-                Vec::new(),
-            ),
-            team_configuration: TeamConfiguration::default(),
-            team_registry: Vec::new(),
-            definition_modules: None,
-        }),
-        offline_startup_players: None,
-        offline_savegame: None,
-        offline_random_seed: None,
-    });
+        false,
+        test_prepared_go(0, true, false, false, vec![restore], Vec::new(), Vec::new()),
+    ));
 
-    app.finalize_network_loaded_scenario(false)
-        .expect("finalize regular network scenario");
+    app.finalize_network_loaded_scenario(false).test_value();
 
-    let player = app.engine.player(10).expect("fileless script player 10");
+    let player = app.engine.test_player(10);
     assert!(player.is_script_player());
     assert_eq!(player.player_info_id(), 7);
     assert!(app.engine.snapshot().hud.local_players.is_empty());
@@ -13045,19 +12237,17 @@ fn dragon_rock_network_restore_makes_script_npcs_hostile_to_joined_users() {
     // the synchronized user JoinPlayer runs. Native RecreatePlayers owns that
     // order, and the later ScenarioInit writes mutual team hostility
     // (C4Game.cpp:2827-2863; C4Player.cpp:756-757,1022-1033).
-    let fixture = tempdir().expect("Dragon Rock network fixture");
+    let fixture = tempdir();
     let scenario_path = fixture.path().join("Drachenfels.c4s");
     let script_player_path = scenario_path.join("ScriptPlr-1.c4p");
-    fs::create_dir_all(&script_player_path).expect("create embedded script player group");
+    fs::create_dir_all(&script_player_path).test_value();
     fs::write(
         script_player_path.join("Player.txt"),
         b"[Player]\nName=Ala Kadabra\n",
     )
-    .expect("write embedded script player core");
-    let native = |bytes: &[u8]| {
-        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
-            .expect("test native string has no NUL")
-    };
+    .test_value();
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let restore = clonk_engine::ControlPlayerInfoEntry {
         id: 1,
         name: native(b"Ala Kadabra"),
@@ -13106,72 +12296,26 @@ fn dragon_rock_network_restore_makes_script_npcs_hostile_to_joined_users() {
     app.control_player_infos.replace_snapshot(
         user_info_id,
         [
-            clonk_engine::PlayerInfoControlData {
-                client_id: 0,
-                players: vec![current_script],
-                ..Default::default()
-            },
-            clonk_engine::PlayerInfoControlData {
-                client_id: 3,
-                players: vec![current_user],
-                ..Default::default()
-            },
+            netplay_player_info_data(0, vec![current_script]),
+            netplay_player_info_data(3, vec![current_user]),
         ],
     );
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState {
+    app.loading_state = Some(test_loading_state(
         scenario,
-        refreshed_resources: None,
-        refreshed_tooltip_font: None,
-        refreshed_native_font_source: None,
-        refreshed_global_gui_failures: None,
-        refreshed_gui_sheet_overrides: None,
-        refresh_requested: false,
         receiver,
-        finished: false,
-        last_progress: 0,
-        log: Vec::new(),
-        prepared_go: Some(PreparedGoLoadingState {
-            status: clonk_network::NetworkStatus {
-                state: clonk_network::NETWORK_STATE_GO,
-                control_mode: 2,
-                target_tick: 0,
-            },
-            local_reached: true,
-            save_game: false,
-            network_runtime_join: false,
-            restore_player_infos: vec![restore],
-            runtime_join_players: Vec::new(),
-            pending_client_runtime_join: None,
-            initial_game_data: None,
-            random_seed: 0,
-            use_fair_crew: false,
-            fair_crew_strength: 0,
-            fair_crew_forced: false,
-            allow_debug: true,
-            auto_frame_skip: true,
-            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
-                Vec::new(),
-                Vec::new(),
-            ),
-            team_configuration: TeamConfiguration::default(),
-            team_registry: Vec::new(),
-            definition_modules: None,
-        }),
-        offline_startup_players: None,
-        offline_savegame: None,
-        offline_random_seed: None,
-    });
+        false,
+        test_prepared_go(2, true, false, false, vec![restore], Vec::new(), Vec::new()),
+    ));
 
-    app.finalize_network_loaded_scenario(false)
-        .expect("restore Dragon Rock's script player before network joins");
+    app.finalize_network_loaded_scenario(false).test_value();
     let packed_player = fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../clonk-engine/tests/fixtures/embedded_player.c4p"
     ))
-    .expect("read embedded network player fixture");
+    .test_value();
     app.apply_join_player_control(clonk_engine::JoinPlayerControlData {
         filename: native(b"NetworkUser.c4p"),
         at_client: 3,
@@ -13179,17 +12323,14 @@ fn dragon_rock_network_restore_makes_script_npcs_hostile_to_joined_users() {
         source: clonk_engine::JoinPlayerSource::Embedded(packed_player),
         by_client: 0,
     })
-    .expect("execute synchronized user JoinPlayer after restore");
+    .test_value();
 
     let user = app
         .engine
         .players()
         .find(|player| player.player_info_id() == user_info_id)
-        .expect("network user joined on team 1");
-    let script = app
-        .engine
-        .player(10)
-        .expect("Dragon Rock script player 10 was restored");
+        .test_value();
+    let script = app.engine.test_player(10);
     assert_eq!((user.team(), script.team()), (Some(1), Some(2)));
     assert!(user.is_hostile_towards(10));
     assert!(script.is_hostile_towards(user.id()));
@@ -13205,16 +12346,14 @@ fn network_savegame_finalization_does_not_rerun_scenario_initialize() {
                 "#strict 3\nfunc Initialize() { SetGravity(77); }",
                 true,
             )
-            .expect("load Initialize probe without invoking it");
+            .test_value();
     };
 
     let mut savegame = new_state_only_running_sandbox_app();
     let restored_gravity = savegame.engine.physics().gravity;
     assert_ne!(restored_gravity, 77);
     install_probe(&mut savegame);
-    savegame
-        .finalize_network_loaded_scenario(true)
-        .expect("finalize hosted savegame");
+    savegame.finalize_network_loaded_scenario(true).test_value();
     assert_eq!(
         savegame.engine.physics().gravity,
         restored_gravity,
@@ -13223,9 +12362,7 @@ fn network_savegame_finalization_does_not_rerun_scenario_initialize() {
 
     let mut fresh = new_state_only_running_sandbox_app();
     install_probe(&mut fresh);
-    fresh
-        .finalize_network_loaded_scenario(false)
-        .expect("finalize fresh network scenario");
+    fresh.finalize_network_loaded_scenario(false).test_value();
     assert_eq!(fresh.engine.physics().gravity, 77);
 }
 
@@ -13237,14 +12374,12 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
         .capture_state()
         .objects
         .first()
-        .expect("sandbox object")
+        .test_value()
         .snapshot
         .id;
     app.engine.retain_restored_players([]);
-    let native = |bytes: &[u8]| {
-        clonk_engine::LegacyCString::from_bytes(bytes.to_vec())
-            .expect("test native string has no NUL")
-    };
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let player_info =
         |id: i32, filename: &[u8], name: &[u8]| clonk_engine::ControlPlayerInfoEntry {
             id,
@@ -13265,7 +12400,7 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
             b"[Player]\nName=First profile\nScore=111\n[Preferences]\nControl=0\nMouse=0\n"
                 .to_vec(),
         )
-        .expect("first player core");
+        .test_value();
     let mut second_group = MutableGroup::new("Second.c4p");
     second_group
         .add_file(
@@ -13273,39 +12408,31 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
             b"[Player]\nName=Second profile\nScore=222\n[Preferences]\nControl=0\nMouse=0\n"
                 .to_vec(),
         )
-        .expect("second player core");
+        .test_value();
     let mut crew_group = MutableGroup::new("Veteran.c4i");
     crew_group
         .add_file(
             "ObjectInfo.txt",
             b"[ObjectInfo]\nid=CLNK\nName=Veteran\nRank=2\n".to_vec(),
         )
-        .expect("crew info");
+        .test_value();
     second_group
         .add_child("Veteran.c4i", crew_group)
-        .expect("embedded crew group");
+        .test_value();
 
     let game_txt = format!(
                 "[Player11]\r\nStatus=1\r\nAtClient=71\r\nAtClientName=stale first\r\nIndex=7\r\nID=11\r\nWealth=1111\r\n\r\n[Player22]\r\nStatus=1\r\nAtClient=72\r\nAtClientName=stale second\r\nIndex=5\r\nID=22\r\nWealth=2222\r\nMsgBoardQueries=({},\"object survives\",1)\r\n",
                 object.as_u64()
             );
-    let combined_dir = tempdir().expect("combined runtime scenario directory");
+    let combined_dir = tempdir();
     let combined_path = combined_dir.path().join("Combined.c4s");
     let mut combined = MutableGroup::new("Combined.c4s");
     combined
         .add_file("Game.txt", game_txt.into_bytes())
-        .expect("runtime Game.txt");
-    combined
-        .add_child("First.c4p", first_group)
-        .expect("first root player group");
-    combined
-        .add_child("Second.c4p", second_group)
-        .expect("second root player group");
-    fs::write(
-        &combined_path,
-        combined.pack().expect("pack combined scenario"),
-    )
-    .expect("write combined scenario");
+        .test_value();
+    combined.add_child("First.c4p", first_group).test_value();
+    combined.add_child("Second.c4p", second_group).test_value();
+    fs::write(&combined_path, combined.pack().test_value()).test_value();
 
     let (network, _events) = NetworkManager::test_stub();
     app.network = Some(network);
@@ -13324,11 +12451,10 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
     current_first.savegame_player = second.id;
     app.control_player_infos.replace_snapshot(
         22,
-        [clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![current_first, second.clone()],
-            ..Default::default()
-        }],
+        [netplay_player_info_data(
+            0,
+            vec![current_first, second.clone()],
+        )],
     );
     let sources = vec![
         clonk_engine::RuntimeJoinPlayerSource {
@@ -13353,52 +12479,22 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(combined_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState {
+    app.loading_state = Some(test_loading_state(
         scenario,
-        refreshed_resources: None,
-        refreshed_tooltip_font: None,
-        refreshed_native_font_source: None,
-        refreshed_global_gui_failures: None,
-        refreshed_gui_sheet_overrides: None,
-        refresh_requested: false,
         receiver,
-        finished: false,
-        last_progress: 0,
-        log: Vec::new(),
-        prepared_go: Some(PreparedGoLoadingState {
-            status: clonk_network::NetworkStatus {
-                state: clonk_network::NETWORK_STATE_GO,
-                control_mode: 0,
-                target_tick: 0,
-            },
-            local_reached: true,
-            save_game: true,
-            network_runtime_join: true,
-            restore_player_infos: vec![first, second, departed],
-            runtime_join_players: sources,
-            pending_client_runtime_join: None,
-            initial_game_data: None,
-            random_seed: 0,
-            use_fair_crew: false,
-            fair_crew_strength: 0,
-            fair_crew_forced: false,
-            allow_debug: true,
-            auto_frame_skip: true,
-            synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
-                Vec::new(),
-                Vec::new(),
-            ),
-            team_configuration: TeamConfiguration::default(),
-            team_registry: Vec::new(),
-            definition_modules: None,
-        }),
-        offline_startup_players: None,
-        offline_savegame: None,
-        offline_random_seed: None,
-    });
+        false,
+        test_prepared_go(
+            0,
+            true,
+            true,
+            true,
+            vec![first, second, departed],
+            sources,
+            Vec::new(),
+        ),
+    ));
 
-    app.finalize_network_loaded_scenario(true)
-        .expect("finalize runtime-join savegame");
+    app.finalize_network_loaded_scenario(true).test_value();
 
     assert_eq!(
         app.control_player_infos
@@ -13408,8 +12504,8 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
         22,
         "NetworkRuntimeJoin must not execute ordinary RestoreSavegameInfos first"
     );
-    let first_player = app.engine.player(7).expect("first ordered player");
-    let second_player = app.engine.player(5).expect("second ordered player");
+    let first_player = app.engine.test_player(7);
+    let second_player = app.engine.test_player(5);
     assert_eq!((first_player.wealth(), first_player.score()), (1111, 111));
     assert_eq!((second_player.wealth(), second_player.score()), (2222, 222));
     assert_eq!(first_player.at_client(), clonk_engine::PlayerAtClient::HOST);
@@ -13469,18 +12565,16 @@ fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
         .active_scenario
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
-    app.local_controls
-        .toggle_mouse(owner)
-        .expect("disable current mouse owner");
+    app.local_controls.toggle_mouse(owner).test_value();
     app.engine
         .set_player_mouse_control(owner, false)
-        .expect("disable live player mouse control");
+        .test_value();
     let mut engine_state = app.engine.capture_state();
     let saved_player = engine_state
         .players
         .iter_mut()
         .find(|player| player.id == owner)
-        .expect("saved sandbox player");
+        .test_value();
     saved_player.mouse_control = 2;
     saved_player.pref_mouse = Some(false);
     let save = SavedGameFile {
@@ -13501,7 +12595,7 @@ fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
         engine_state,
     };
 
-    app.apply_loaded_game(save).expect("restore sandbox save");
+    app.apply_loaded_game(save).test_value();
 
     assert_eq!(
         app.engine
@@ -13522,9 +12616,8 @@ fn run_on_multi_app_test_stack(body: fn()) {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(body)
-        .expect("spawn multi-app test worker")
-        .join()
-        .expect("multi-app test worker completes");
+        .test_value()
+        .test_join();
 }
 
 #[test]
@@ -13537,10 +12630,8 @@ fn debug_key_gates_remaps_and_native_priority_are_nonfatal() {
 fn debug_key_gates_remaps_and_native_priority_body() {
     for key in [VirtualKeyCode::F6, VirtualKeyCode::F7, VirtualKeyCode::F8] {
         let mut app = new_running_sandbox_app();
-        app.handle_modifiers_changed(ModifiersState::CONTROL)
-            .expect("set exact debug modifiers");
-        app.handle_key(key, ElementState::Pressed)
-            .expect("a denied overlay callback is not fatal");
+        app.test_modifiers(ModifiersState::CONTROL);
+        app.test_key(key, ElementState::Pressed);
         assert_eq!(runtime_flash_text(&app), Some("No debug mode!"));
         assert_eq!(
             app.graphics.debug_draw_flags(),
@@ -13551,12 +12642,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
 
     let mut denied = new_running_sandbox_app();
     denied.engine.set_allow_debug(false);
-    denied
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set exact debug modifiers");
-    denied
-        .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("AllowDebug denial is not fatal");
+    denied.test_modifiers(ModifiersState::CONTROL);
+    denied.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     assert!(!denied.engine.debug_mode());
     assert_eq!(runtime_flash_text(&denied), Some("Debug mode: not allowed"));
 
@@ -13565,18 +12652,14 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     missing_resources
         .runtime_key_config_cache
         .set(Err("missing custom key list".to_string()))
-        .expect("install missing debug key configuration");
+        .test_value();
     missing_resources.runtime_flash_resources_cache = OnceLock::new();
     missing_resources
         .runtime_flash_resources_cache
         .set(Err("missing language table".to_string()))
-        .expect("install missing debug resources");
-    missing_resources
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set exact debug modifiers");
-    missing_resources
-        .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("missing flash resources cannot make the debug key fatal");
+        .test_value();
+    missing_resources.test_modifiers(ModifiersState::CONTROL);
+    missing_resources.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     assert!(missing_resources.engine.debug_mode());
     assert_eq!(
         runtime_flash_text(&missing_resources),
@@ -13591,13 +12674,9 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=None\n",
         )
         .expect("parse disabled debug binding")))
-        .expect("install disabled debug binding");
-    disabled_binding
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set disabled default debug chord");
-    disabled_binding
-        .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("a replaced Ctrl+F5 binding is inert rather than fatal");
+        .test_value();
+    disabled_binding.test_modifiers(ModifiersState::CONTROL);
+    disabled_binding.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     assert!(!disabled_binding.engine.debug_mode());
     assert!(disabled_binding.runtime_flash_message.is_none());
 
@@ -13610,22 +12689,16 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=G\nDbgShowVtxToggle=G\n",
         )
         .expect("parse same-priority debug collision")))
-        .expect("install same-priority debug collision");
-    debug_collision
-        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("denied debug callbacks fall through in registration order");
+        .test_value();
+    debug_collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert_eq!(runtime_flash_text(&debug_collision), Some("No debug mode!"));
 
     let mut modified_player = new_running_sandbox_app();
     modified_player
         .bindings
         .rebind(ControlBindingId::Left, VirtualKeyCode::F5);
-    modified_player
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set Ctrl for exact-modifier player priority");
-    modified_player
-        .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("bare player F5 does not steal Ctrl+F5");
+    modified_player.test_modifiers(ModifiersState::CONTROL);
+    modified_player.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     assert!(modified_player.engine.debug_mode());
 
     let mut context_priority = new_running_sandbox_app();
@@ -13634,16 +12707,14 @@ fn debug_key_gates_remaps_and_native_priority_body() {
         .runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(b"[Keys]\nDbgModeToggle=R\n")
             .expect("parse context/debug collision")))
-        .expect("install context/debug collision");
+        .test_value();
     context_priority
         .open_context_menu_at(
             vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain off").with_hotkey('R')],
             GuiPoint::new(20.0, 20.0),
         )
-        .expect("open higher-priority context menu");
-    context_priority
-        .handle_key(VirtualKeyCode::KeyR, ElementState::Pressed)
-        .expect("context hotkey precedes remapped debug callback");
+        .test_value();
+    context_priority.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
     assert!(!context_priority.engine.debug_mode());
     assert!(context_priority.runtime_flash_message.is_none());
 
@@ -13655,11 +12726,9 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=Return\n",
         )
         .expect("parse chat/debug collision")))
-        .expect("install chat/debug collision");
+        .test_value();
     chat_priority.start_running_chat(RunningChatMode::All);
-    chat_priority
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("focused chat Return precedes remapped debug callback");
+    chat_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(!chat_priority.engine.debug_mode());
     assert!(!chat_priority.running_chat_active());
 
@@ -13671,14 +12740,10 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=Ctrl+Alt+G\n",
         )
         .expect("parse modified chat/debug collision")))
-        .expect("install modified chat/debug collision");
+        .test_value();
     modified_chat_fallthrough.start_running_chat(RunningChatMode::All);
-    modified_chat_fallthrough
-        .handle_modifiers_changed(ModifiersState::CONTROL | ModifiersState::ALT)
-        .expect("set Ctrl+Alt chat/debug modifiers");
-    modified_chat_fallthrough
-        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("an unowned Ctrl+Alt chat chord reaches the debug callback");
+    modified_chat_fallthrough.test_modifiers(ModifiersState::CONTROL | ModifiersState::ALT);
+    modified_chat_fallthrough.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert!(modified_chat_fallthrough.engine.debug_mode());
     assert!(modified_chat_fallthrough.running_chat_active());
 
@@ -13690,7 +12755,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=Return\n",
         )
         .expect("parse vote/debug collision")))
-        .expect("install vote/debug collision");
+        .test_value();
     vote_priority
         .push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
@@ -13703,16 +12768,12 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             ),
             MessageDialogContinuation::LeagueSurrender,
         )
-        .expect("show exclusive vote for debug priority");
-    vote_priority
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("exclusive vote Return precedes remapped debug callback");
+        .test_value();
+    vote_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(!vote_priority.engine.debug_mode());
     assert!(vote_priority.runtime_flash_message.is_none());
     assert_eq!(vote_priority.message_dialogs.len(), 1);
-    vote_priority
-        .handle_key(VirtualKeyCode::Enter, ElementState::Released)
-        .expect("exclusive vote owns the matching Return release");
+    vote_priority.test_key(VirtualKeyCode::Enter, ElementState::Released);
     assert!(vote_priority.message_dialogs.is_empty());
     assert_eq!(vote_priority.mode, AppMode::Running);
 
@@ -13724,10 +12785,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=Return\n",
         )
         .expect("parse game-over/debug collision")))
-        .expect("install game-over/debug collision");
-    game_over_priority
-        .handle_key(VirtualKeyCode::Enter, ElementState::Pressed)
-        .expect("game-over Return precedes remapped debug callback");
+        .test_value();
+    game_over_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     assert!(!game_over_priority.engine.debug_mode());
     assert!(game_over_priority.running_chat_active());
 
@@ -13745,12 +12804,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             show_solid_mask: true,
             show_net_status: true,
         });
-    disable
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set exact debug modifiers");
-    disable
-        .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-        .expect("an already-enabled mode may always be disabled");
+    disable.test_modifiers(ModifiersState::CONTROL);
+    disable.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     assert!(!disable.engine.debug_mode());
     assert_eq!(
         disable.graphics.debug_draw_flags(),
@@ -13765,10 +12820,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgShowVtxToggle=G\nGameSpeedUp=G\n",
         )
         .expect("parse denied-debug/later-global collision")))
-        .expect("install denied-debug/later-global collision");
-    later_collision
-        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("denied debug callback falls through to later speed callback");
+        .test_value();
+    later_collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert!(!later_collision.engine.debug_mode());
     assert_eq!(later_collision.frame_skip, 2);
     assert!(later_collision.full_speed);
@@ -13782,14 +12835,10 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nDbgModeToggle=G\nDbgShowVtxToggle=H\n",
         )
         .expect("parse rebound debug keys")))
-        .expect("install rebound debug keys");
-    rebound
-        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("rebound debug mode key");
+        .test_value();
+    rebound.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert!(rebound.engine.debug_mode());
-    rebound
-        .handle_key(VirtualKeyCode::KeyH, ElementState::Pressed)
-        .expect("rebound vertex key");
+    rebound.test_key(VirtualKeyCode::KeyH, ElementState::Pressed);
     assert!(rebound.graphics.debug_draw_flags().show_vertices);
 
     let mut player_collision = new_running_sandbox_app();
@@ -13800,10 +12849,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nKbd1Key1=G\nDbgModeToggle=G\n",
         )
         .expect("parse player/debug collision")))
-        .expect("install player/debug collision");
-    player_collision
-        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("PRIO_PlrControl owns the debug collision");
+        .test_value();
+    player_collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert!(!player_collision.engine.debug_mode());
     assert!(player_collision.runtime_flash_message.is_none());
 
@@ -13815,16 +12862,9 @@ fn debug_key_gates_remaps_and_native_priority_body() {
             b"[Keys]\nSoundToggle=G\nDbgModeToggle=G\n",
         )
         .expect("parse earlier-global/debug collision")))
-        .expect("install earlier-global/debug collision");
-    let sound_enabled = global_collision
-        .audio
-        .as_ref()
-        .expect("sandbox audio")
-        .options
-        .sound_enabled;
-    global_collision
-        .handle_key(VirtualKeyCode::KeyG, ElementState::Pressed)
-        .expect("earlier SoundToggle owns the collision");
+        .test_value();
+    let sound_enabled = global_collision.audio.test_ref().options.sound_enabled;
+    global_collision.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     assert_eq!(
         global_collision
             .audio
@@ -13839,12 +12879,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
 
     let mut game_over = new_game_over_keyboard_app();
     game_over.engine.set_debug_mode(true);
-    game_over
-        .handle_modifiers_changed(ModifiersState::CONTROL)
-        .expect("set Ctrl+F8 under game over");
-    game_over
-        .handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-        .expect("Generic debug callback precedes exclusive GUI input");
+    game_over.test_modifiers(ModifiersState::CONTROL);
+    game_over.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(game_over.graphics.debug_draw_flags().show_solid_mask);
     assert!(game_over.game_over_dialog.is_some());
     assert_eq!(runtime_flash_text(&game_over), Some("SolidMasks: on"));
@@ -13854,16 +12890,15 @@ fn debug_key_gates_remaps_and_native_priority_body() {
 #[test]
 fn renderer_config_loads_native_defaults_and_graphics_values() {
     let _lock = env_lock().lock();
-    let install = tempdir().expect("renderer-config install fixture");
-    let user_data = tempdir().expect("renderer-config user fixture");
-    fs::create_dir_all(install.path().join("planet/System.c4g"))
-        .expect("fixture System.c4g directory");
+    let install = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install.path().join("planet/System.c4g")).test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    let paths = AppPaths::discover().expect("discover renderer-config fixture");
-    paths.ensure_user_dirs().expect("create fixture user dirs");
+    let paths = test_app_paths();
+    paths.ensure_user_dirs().test_value();
 
     let defaults = load_display_flags(Some(&paths));
     assert!(defaults.show_player_hud_always);
@@ -13874,7 +12909,7 @@ fn renderer_config_loads_native_defaults_and_graphics_values() {
         paths.config_file(),
         "[Graphics]\nShowPlayerHUDAlways=0\nSplitscreenDividers=0\nFireParticles=0\n",
     )
-    .expect("write disabled renderer config");
+    .test_value();
     let disabled = load_display_flags(Some(&paths));
     assert!(!disabled.show_player_hud_always);
     assert!(!disabled.splitscreen_dividers);
@@ -13884,7 +12919,7 @@ fn renderer_config_loads_native_defaults_and_graphics_values() {
         paths.config_file(),
         "[Graphics]\nShowPlayerHUDAlways=1\nSplitscreenDividers=-1\nFireParticles=1\n",
     )
-    .expect("write enabled renderer config");
+    .test_value();
     let enabled = load_display_flags(Some(&paths));
     assert!(enabled.show_player_hud_always);
     assert!(
@@ -13897,7 +12932,7 @@ fn renderer_config_loads_native_defaults_and_graphics_values() {
         paths.config_file(),
         "[Graphics]\nSplitscreenDividers=invalid\n",
     )
-    .expect("write invalid divider config");
+    .test_value();
     assert!(load_display_flags(Some(&paths)).splitscreen_dividers);
 }
 
@@ -13944,24 +12979,23 @@ fn client_info_ack_marker_needs_a_host_and_an_unready_net_client() {
 // unknown-command error (src/C4MessageInput.cpp:527-545).
 #[test]
 fn running_chat_netgetscen_saves_client_scenario_resource_like_cpp() {
-    let transfer = tempdir().expect("resource transfer folder");
+    let transfer = tempdir();
     let source = transfer.path().join("Transferred.c4s");
-    fs::write(&source, b"packed scenario bytes").expect("write transferred scenario");
+    fs::write(&source, b"packed scenario bytes").test_value();
 
     // The sandbox app boots against the repository install root; only the
     // netgetscen destination is redirected afterwards.
     let mut app = new_classic_running_sandbox_app();
     // AppPaths::discover validates planet/System.c4g, so the redirected root
     // gets a minimal one; only the install root matters to netgetscen.
-    let install_root = tempdir().expect("install root");
-    let user_data = tempdir().expect("user data");
-    fs::create_dir_all(install_root.path().join("planet/System.c4g"))
-        .expect("minimal system group");
+    let install_root = tempdir();
+    let user_data = tempdir();
+    fs::create_dir_all(install_root.path().join("planet/System.c4g")).test_value();
     let _guard = EnvGuard::set(&[
         ("LC_INSTALL_ROOT", Some(install_root.path())),
         ("LC_USER_DATA_DIR", Some(user_data.path())),
     ]);
-    app.app_paths = Some(AppPaths::discover().expect("discover isolated app paths"));
+    app.app_paths = Some(test_app_paths());
     let (network, _events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(network);
     app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -13970,14 +13004,12 @@ fn running_chat_netgetscen_saves_client_scenario_resource_like_cpp() {
     )));
 
     let host_config = clonk_network::HostConfig::default();
-    let mut snapshot = host_config
-        .initial_join_snapshot
-        .expect("default host publishes JoinData");
+    let mut snapshot = host_config.initial_join_snapshot.test_value();
     snapshot.parameters.scenario = clonk_engine::NetworkResourceCore {
         resource_type: clonk_network::HostResourceType::Scenario as u8,
         id: 9,
         loadable: true,
-        filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).unwrap(),
+        filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).test_value(),
         ..Default::default()
     };
     app.pending_network_join_data = Some(clonk_network::JoinDataEnvelope {
@@ -14034,7 +13066,7 @@ fn running_chat_netgetscen_saves_client_scenario_resource_like_cpp() {
 
     // CreateItem erases an existing target first, so a repeat overwrites and
     // succeeds (src/C4Group.cpp:147; src/StdFile.cpp:660-670).
-    fs::write(&source, b"newer scenario bytes").expect("rewrite transferred scenario");
+    fs::write(&source, b"newer scenario bytes").test_value();
     assert_eq!(
         app.save_joined_scenario_resource().as_deref(),
         Some(destination.as_path())
@@ -14063,29 +13095,23 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
 
     // Both NetIO objects are bound, which is what makes the protocol line
     // appear at all (src/C4Network2.cpp:1149-1150).
-    app.network
-        .as_ref()
-        .expect("network stub")
-        .set_test_local_addresses([
-            clonk_network::NetworkAddress::new(
-                clonk_network::NetworkProtocol::Tcp,
-                SocketAddr::from(([127, 0, 0, 1], 11_112)),
-            ),
-            clonk_network::NetworkAddress::new(
-                clonk_network::NetworkProtocol::Udp,
-                SocketAddr::from(([127, 0, 0, 1], 11_113)),
-            ),
-        ]);
+    app.network.test_ref().set_test_local_addresses([
+        clonk_network::NetworkAddress::new(
+            clonk_network::NetworkProtocol::Tcp,
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        ),
+        clonk_network::NetworkAddress::new(
+            clonk_network::NetworkProtocol::Udp,
+            SocketAddr::from(([127, 0, 0, 1], 11_113)),
+        ),
+    ]);
 
     // An unsampled accumulator reads zero, exactly like native startup.
     app.update_network_status_overlay();
-    let text = app
-        .graphics
-        .network_status_text()
-        .expect("enabled network status text");
+    let text = app.graphics.network_status_text().test_value();
     assert!(text.contains("i0 o0 bc0"), "{text}");
 
-    let network = app.network.as_ref().expect("network stub");
+    let network = app.network.test_ref();
     network.record_test_protocol_traffic(1, clonk_network::NetworkProtocol::Udp, 900, 300, 120);
     network.record_test_protocol_traffic(2, clonk_network::NetworkProtocol::Tcp, 400, 100, 40);
     // GenerateStatistics only consumes an edge strictly outside C++'s
@@ -14093,14 +13119,11 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
     network.generate_test_statistics(2_000);
 
     app.update_network_status_overlay();
-    let text = app
-        .graphics
-        .network_status_text()
-        .expect("sampled network status text");
+    let text = app.graphics.network_status_text().test_value();
     let protocols = text
         .split('|')
         .find(|line| line.starts_with("Protocols:"))
-        .expect("protocol line");
+        .test_value();
     assert!(
         protocols.contains(" i") && protocols.contains(" o") && protocols.contains(" bc"),
         "{protocols}"
@@ -14120,7 +13143,7 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
         .expect("second network status text")
         .split('|')
         .find(|line| line.starts_with("Protocols:"))
-        .expect("protocol line")
+        .test_value()
         .to_string();
     assert_eq!(first, second);
 }
@@ -14138,19 +13161,14 @@ fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
     app.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
 
-    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-        .expect("an unconfigured NetStatsToggle stays unbound");
+    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(!app.graphics.debug_draw_flags().show_net_status);
 
-    let parsed = parse_runtime_key_config(b"[Keys]\nNetStatsToggle=F8\n")
-        .expect("parse the represented default-unbound net status action");
+    let parsed = parse_runtime_key_config(b"[Keys]\nNetStatsToggle=F8\n").test_value();
     app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
-        .set(Ok(parsed))
-        .expect("install net status key registry");
+    app.runtime_key_config_cache.set(Ok(parsed)).test_value();
 
-    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-        .expect("configured NetStatsToggle enables the overlay");
+    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(app.graphics.debug_draw_flags().show_net_status);
     assert!(
         !app.engine.debug_mode(),
@@ -14162,18 +13180,13 @@ fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
     );
 
     app.update_network_status_overlay();
-    let text = app
-        .graphics
-        .network_status_text()
-        .expect("enabled network status text");
+    let text = app.graphics.network_status_text().test_value();
     assert!(text.contains("Local: Active host Host (ID 0)"), "{text}");
 
-    app.handle_key(VirtualKeyCode::F8, ElementState::Released)
-        .expect("the callback has no Up handler");
+    app.test_key(VirtualKeyCode::F8, ElementState::Released);
     assert!(app.graphics.debug_draw_flags().show_net_status);
 
-    app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-        .expect("configured NetStatsToggle disables the overlay");
+    app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     assert!(!app.graphics.debug_draw_flags().show_net_status);
     app.update_network_status_overlay();
     assert!(app.graphics.network_status_text().is_none());
@@ -14242,23 +13255,20 @@ fn network_status_collector_uses_native_client_next_control_baselines() {
     ]);
     app.refresh_network_client_next_control_ticks();
     app.network_control_clock = Some(NetworkControlClock::new(44, 4));
-    app.network
-        .as_ref()
-        .expect("network stub")
-        .set_test_runtime_client_states([
-            network::RuntimeNetworkClientState {
-                client_id: 7,
-                status: clonk_network::RemoteBarrierState::Ready,
-                control_ready: false,
-                wait_ms: -12,
-            },
-            network::RuntimeNetworkClientState {
-                client_id: 9,
-                status: clonk_network::RemoteBarrierState::NotReady,
-                control_ready: true,
-                wait_ms: 5,
-            },
-        ]);
+    app.network.test_ref().set_test_runtime_client_states([
+        network::RuntimeNetworkClientState {
+            client_id: 7,
+            status: clonk_network::RemoteBarrierState::Ready,
+            control_ready: false,
+            wait_ms: -12,
+        },
+        network::RuntimeNetworkClientState {
+            client_id: 9,
+            status: clonk_network::RemoteBarrierState::NotReady,
+            control_ready: true,
+            wait_ms: 5,
+        },
+    ]);
     app.graphics
         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
             show_net_status: true,
@@ -14267,10 +13277,7 @@ fn network_status_collector_uses_native_client_next_control_baselines() {
 
     app.update_network_status_overlay();
 
-    let text = app
-        .graphics
-        .network_status_text()
-        .expect("enabled network status text");
+    let text = app.graphics.network_status_text().test_value();
     assert!(
         text.contains(
             "|- Active client Remote (ID 7) (wait -12 ms, behind 4) (ready to start) (!ctrl)"
@@ -14303,19 +13310,16 @@ fn runtime_f4_toggles_only_live_network_dialog_and_consumes_edges() {
     ] {
         let mut app = new_running_sandbox_app();
         configure_runtime_network_role(&mut app, role);
-        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-            .expect("runtime F4 press is handled locally");
+        app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
         assert_eq!(app.runtime_client_list.is_some(), opens, "role {role:?}");
         assert_eq!(app.mode, AppMode::Running);
         assert!(!app.exit_requested);
 
         let before_release = runtime_global_ui_snapshot(&app);
-        app.handle_key(VirtualKeyCode::F4, ElementState::Released)
-            .expect("runtime F4 release is consumed");
+        app.test_key(VirtualKeyCode::F4, ElementState::Released);
         assert_eq!(runtime_global_ui_snapshot(&app), before_release);
 
-        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-            .expect("second runtime F4 press toggles off");
+        app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
         assert!(app.runtime_client_list.is_none());
     }
 }
@@ -14331,7 +13335,7 @@ fn runtime_client_list_host_actions_submit_native_controls() {
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     activate
         .handle_runtime_client_list_action(RuntimeClientListAction::ToggleActivate(7))
-        .expect("queue client activation toggle");
+        .test_value();
     assert_eq!(
         activate_commands.take_submitted_client_updates(),
         vec![clonk_engine::ClientUpdateControlData {
@@ -14347,7 +13351,7 @@ fn runtime_client_list_host_actions_submit_native_controls() {
     kick.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     kick.handle_runtime_client_list_action(RuntimeClientListAction::Kick(7))
-        .expect("queue client-list kick");
+        .test_value();
     assert_eq!(
         kick_commands.take_submitted_client_removes(),
         vec![clonk_engine::ClientRemoveControlData {
@@ -14362,23 +13366,20 @@ fn runtime_client_list_host_actions_submit_native_controls() {
 #[test]
 fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     let mut app = new_classic_running_sandbox_app();
-    app.resize(640, 480).expect("resize F4 option fixture");
+    app.resize(640, 480).test_value();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("runtime client-list geometry");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let rate = {
-        let dialog = app.runtime_client_list.as_ref().expect("F4 dialog");
+        let dialog = app.runtime_client_list.test_ref();
         let layout = dialog.layout(preferred, line_height);
         let index = dialog
             .option_rows()
             .iter()
             .position(|row| row.kind == LobbyOptionKind::ControlRate)
-            .expect("control-rate row");
+            .test_value();
         layout.option_rows[index].value
     };
     let point = GuiPoint::new((rate.x + 2) as f32, (rate.y + 2) as f32);
@@ -14407,7 +13408,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
             }),
         ],
     })
-    .expect("select runtime control rate");
+    .test_value();
     assert_eq!(app.engine.control_rate(), 4);
     assert_eq!(
         app.network_control_clock
@@ -14426,8 +13427,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     );
     let decided = commands.take_submitted_decided_controls();
     assert_eq!(decided.len(), 1);
-    let set = clonk_network::LegacyControlSet::from_control_packet(&decided[0].1)
-        .expect("control-rate set packet");
+    let set = clonk_network::LegacyControlSet::from_control_packet(&decided[0].1).test_value();
     assert_eq!(
         set,
         clonk_network::LegacyControlSet {
@@ -14438,7 +13438,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     );
 
     app.apply_ready_controls(decided[0].0, vec![NetworkControl::Set(set)])
-        .expect("execute authoritative control-rate echo");
+        .test_value();
     assert_eq!(app.engine.control_rate(), 7);
     assert_eq!(
         app.network_control_clock
@@ -14465,21 +13465,16 @@ fn f4_runtime_join_waits_for_network_ack_and_flashes_state() {
     app.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
     let labels = app.classic_lobby_option_labels();
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
 
     let acknowledgement = thread::spawn(move || {
         let (allowed, completion) = commands.receive_join_allowed();
         assert!(allowed);
-        completion
-            .send(Ok(()))
-            .expect("acknowledge runtime-join change");
+        completion.send(Ok(())).test_value();
     });
     app.apply_runtime_client_list_option(LobbyOptionKind::RuntimeJoin, 1)
-        .expect("apply acknowledged runtime-join option");
-    acknowledgement
-        .join()
-        .expect("runtime-join acknowledgement thread");
+        .test_value();
+    acknowledgement.test_join();
 
     assert_eq!(app.runtime_network_join_allowed, Some(true));
     assert_eq!(
@@ -14506,19 +13501,16 @@ fn running_f4_nonexclusive_scope_does_not_receive_tab() {
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
 
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-        .expect("nonexclusive running F4 leaves Tab outside GUI scope");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     assert_eq!(
         app.runtime_client_list
             .as_ref()
             .and_then(|dialog| dialog.focused()),
         None
     );
-    app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-        .expect("release remains outside the nonexclusive GUI scope");
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     assert!(app.runtime_client_list.is_some());
 }
 
@@ -14528,33 +13520,27 @@ fn runtime_client_list_wheel_precedes_running_player_control() {
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     assert!(app.mouse_control);
     assert!(app.local_controls.mouse_owner().is_some());
 
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("dialog input geometry");
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let layout = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog open")
+        .test_ref()
         .layout(preferred, line_height);
     app.running_pointer_position = Some(GuiPoint::new(
         (layout.list.x + 4) as f32,
         (layout.list.y + 4) as f32,
     ));
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("client list consumes wheel");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     assert!(commands.take_submitted_local().is_empty());
 
     app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
-    app.handle_mouse_wheel(
+    app.test_mouse_wheel(
         MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
         2.0,
-    )
-    .expect("wheel outside dialog reaches player control");
+    );
     let submitted = commands.take_submitted_local();
     assert_eq!(submitted.len(), 1);
     assert!(matches!(
@@ -14573,9 +13559,9 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
     };
 
     let mut app = new_classic_running_sandbox_app();
-    app.resize(640, 480).expect("resize client-info fixture");
+    app.resize(640, 480).test_value();
     app.mode = AppMode::Menu;
-    let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+    let fonts = app.assets.clonk_fonts.clone().test_value();
     let row = RuntimeClientRow {
         client_id: 7,
         name: "Remote".to_string(),
@@ -14601,14 +13587,12 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         row.client_id,
         Some(row),
     ));
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("standalone info geometry");
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let info = app
         .runtime_client_list
         .as_ref()
         .and_then(|dialog| dialog.info_layout(preferred, line_height))
-        .expect("standalone info layout");
+        .test_value();
     app.running_pointer_position = Some(GuiPoint::new(
         (info.text.x + 2) as f32,
         (info.text.y + info.text.h / 2) as f32,
@@ -14617,30 +13601,26 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         .runtime_client_list
         .as_ref()
         .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
-        .expect("initial scroll metrics");
+        .test_value();
     assert!(initial.max_scroll > 0);
 
-    app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
-        .expect("standalone info consumes wheel");
+    app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     let wheeled = app
         .runtime_client_list
         .as_ref()
         .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
-        .expect("wheel scroll metrics");
+        .test_value();
     assert!(wheeled.scroll_y > initial.scroll_y);
 
-    app.handle_key(VirtualKeyCode::End, ElementState::Pressed)
-        .expect("standalone info consumes End");
+    app.test_key(VirtualKeyCode::End, ElementState::Pressed);
     let ended = app
         .runtime_client_list
         .as_ref()
         .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
-        .expect("End scroll metrics");
+        .test_value();
     assert_eq!(ended.scroll_y, ended.max_scroll);
-    app.handle_key(VirtualKeyCode::End, ElementState::Released)
-        .expect("standalone info consumes End release");
-    app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
-        .expect("standalone info consumes Home");
+    app.test_key(VirtualKeyCode::End, ElementState::Released);
+    app.test_key(VirtualKeyCode::Home, ElementState::Pressed);
     assert_eq!(
         app.runtime_client_list
             .as_ref()
@@ -14655,29 +13635,24 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
 fn runtime_client_list_consumption_cancels_world_mouse_gestures() {
     let mut app = new_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("dialog input geometry");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let bounds = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog open")
+        .test_ref()
         .layout(preferred, line_height)
         .bounds;
     let dialog_point = GuiPoint::new(
         (bounds.x + bounds.w / 2) as f32,
         (bounds.y + bounds.h / 2) as f32,
     );
-    app.handle_cursor_moved(PhysicalPosition::new(
+    app.test_cursor(PhysicalPosition::new(
         f64::from(dialog_point.x),
         f64::from(dialog_point.y),
-    ))
-    .expect("move onto runtime client list");
+    ));
 
     let owner = app.local_owner;
-    let retained = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let retained = app.engine.test_crew_cursor(owner);
     let pointer = ViewportPointer {
         owner,
         world: FloatVector2::new(20.0, 20.0),
@@ -14703,18 +13678,15 @@ fn runtime_client_list_consumption_cancels_world_mouse_gestures() {
     };
 
     seed_world_gestures(&mut app);
-    app.handle_mouse_button(ElementState::Released)
-        .expect("client list consumes physical left-up");
+    app.test_left_button(ElementState::Released);
     assert_cancelled(&app);
 
     seed_world_gestures(&mut app);
-    app.handle_right_mouse_button(ElementState::Released)
-        .expect("client list consumes physical right-up");
+    app.test_right_button(ElementState::Released);
     assert_cancelled(&app);
 
     seed_world_gestures(&mut app);
-    app.handle_touch(TouchPhase::Moved, dialog_point)
-        .expect("client list consumes touch motion");
+    app.test_touch(TouchPhase::Moved, dialog_point);
     assert_cancelled(&app);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
@@ -14728,43 +13700,37 @@ fn runtime_client_list_prevents_tick5_from_reviving_edge_scroll() {
     let mut app = new_running_sandbox_app();
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
     let owner = app.local_owner;
-    let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+    let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
             owner,
             vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
         )
-        .expect("place camera away from every scroll bound");
+        .test_value();
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.render(&mut frame).expect("establish mouse viewport");
-    let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+    app.test_render(&mut frame);
+    let rect = app.graphics.viewport_rect(owner).test_value();
     let edge = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
-    app.handle_cursor_moved(PhysicalPosition::new(f64::from(edge.x), f64::from(edge.y)))
-        .expect("arm continuous edge scrolling");
+    app.test_cursor(PhysicalPosition::new(f64::from(edge.x), f64::from(edge.y)));
     assert!(app.ingame_edge_scroll.is_some());
 
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list over retained viewport state");
-    let (preferred, line_height) = app
-        .runtime_client_list_input_geometry()
-        .expect("dialog input geometry");
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
+    let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
     let bounds = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog open")
+        .test_ref()
         .layout(preferred, line_height)
         .bounds;
     let dialog_point = GuiPoint::new(
         (bounds.x + bounds.w / 2) as f32,
         (bounds.y + bounds.h / 2) as f32,
     );
-    let stopped = app.engine.player(owner).unwrap().viewports()[0].center;
-    app.handle_cursor_moved(PhysicalPosition::new(
+    let stopped = app.engine.player(owner).test_value().viewports()[0].center;
+    app.test_cursor(PhysicalPosition::new(
         f64::from(dialog_point.x),
         f64::from(dialog_point.y),
-    ))
-    .expect("client list consumes pointer move");
+    ));
     assert!(app.ingame_pointer.is_none());
     assert!(app.ingame_edge_scroll.is_none());
     assert!(
@@ -14792,8 +13758,7 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     app.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.network
-        .as_ref()
-        .expect("network stub")
+        .test_ref()
         .set_test_runtime_client_states([network::RuntimeNetworkClientState {
             client_id: 7,
             status: clonk_network::RemoteBarrierState::Joining,
@@ -14806,13 +13771,8 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     clock.complete_control_frame();
     app.network_control_clock = Some(clock);
 
-    app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
-        .expect("open runtime client list");
-    let initial = app
-        .runtime_client_list
-        .as_ref()
-        .expect("dialog open")
-        .status();
+    app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
+    let initial = app.runtime_client_list.test_ref().status();
     assert_eq!(
         (
             initial.tick,
@@ -14833,12 +13793,11 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     );
     let initial_remote = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog open")
+        .test_ref()
         .rows()
         .iter()
         .find(|row| row.client_id == 7)
-        .expect("remote row");
+        .test_value();
     assert_eq!(
         (initial_remote.status, initial_remote.wait_ms),
         (
@@ -14849,8 +13808,7 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
 
     app.network_control_clock = Some(NetworkControlClock::new(50, 2));
     app.network
-        .as_ref()
-        .expect("network stub")
+        .test_ref()
         .set_test_runtime_client_states([network::RuntimeNetworkClientState {
             client_id: 7,
             status: clonk_network::RemoteBarrierState::Ready,
@@ -14867,12 +13825,11 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     );
     let stale_remote = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog remains open")
+        .test_ref()
         .rows()
         .iter()
         .find(|row| row.client_id == 7)
-        .expect("remote row");
+        .test_value();
     assert_eq!(
         (stale_remote.status, stale_remote.wait_ms),
         (
@@ -14884,11 +13841,7 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     assert!(app
         .sec1_timer()
         .expect("pulse one-second network dialog timer"));
-    let refreshed = app
-        .runtime_client_list
-        .as_ref()
-        .expect("dialog remains open")
-        .status();
+    let refreshed = app.runtime_client_list.test_ref().status();
     assert_eq!(
         (
             refreshed.tick,
@@ -14901,12 +13854,11 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     assert!(refreshed.to_string().contains("Behind "));
     let waiting_remote = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog remains open")
+        .test_ref()
         .rows()
         .iter()
         .find(|row| row.client_id == 7)
-        .expect("remote row");
+        .test_value();
     assert_eq!(
         (waiting_remote.status, waiting_remote.wait_ms),
         (
@@ -14916,8 +13868,7 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     );
 
     app.network
-        .as_ref()
-        .expect("network stub")
+        .test_ref()
         .set_test_runtime_client_states([network::RuntimeNetworkClientState {
             client_id: 7,
             status: clonk_network::RemoteBarrierState::Removing,
@@ -14927,12 +13878,11 @@ fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
     assert!(app.sec1_timer().expect("refresh removing client row"));
     let removing_remote = app
         .runtime_client_list
-        .as_ref()
-        .expect("dialog remains open")
+        .test_ref()
         .rows()
         .iter()
         .find(|row| row.client_id == 7)
-        .expect("remote row");
+        .test_value();
     assert_eq!(
         (removing_remote.status, removing_remote.wait_ms),
         (
@@ -14956,7 +13906,7 @@ fn runtime_pause_control_script_uses_the_executing_network_tick() {
             by_client: 0,
         })],
     )
-    .expect("execute synchronized PauseGame control");
+    .test_value();
 
     let changes = commands
         .take_runtime_status_commands()
@@ -14977,7 +13927,7 @@ fn runtime_pause_control_script_uses_the_executing_network_tick() {
 
 #[test]
 fn save_to_slot_writes_native_c4group_savegame() {
-    let fixture = tempdir().expect("native slot fixture");
+    let fixture = tempdir();
     let user_data = fixture.path().join("user-data");
     let save_root = fixture.path().join("Savegames.c4f");
     let (_guard, paths) = exact_loader_test_paths(&user_data, None);
@@ -14987,29 +13937,19 @@ fn save_to_slot_writes_native_c4group_savegame() {
         "SaveGameFolder",
         save_root.to_string_lossy().into_owned(),
     )
-    .expect("configure native savegame folder");
-    persist_config_value(&paths, "General", "Language", "US")
-        .expect("configure native savegame language");
+    .test_value();
+    persist_config_value(&paths, "General", "Language", "US").test_value();
 
     let scenario_path = fixture.path().join("Missions.c4f").join("01.c4s");
     install_record_test_definitions(&fixture.path().join("Missions.c4f"));
-    fs::create_dir_all(&scenario_path).expect("create source scenario group");
-    fs::write(
-                scenario_path.join("Scenario.txt"),
-                b"[Head]\nTitle=Source scenario\nIcon=4\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Objects.c4d\n",
-            )
-            .expect("write source Scenario.txt");
-    fs::write(scenario_path.join("Source.bin"), b"copied source sentinel")
-        .expect("write source sentinel");
-    fs::write(scenario_path.join("Title.bmp"), b"stale bitmap title")
-        .expect("write stale bitmap title");
-    fs::write(scenario_path.join("Title.png"), b"stale png title").expect("write stale png title");
-    fs::write(scenario_path.join("Icon.bmp"), b"stale bitmap icon")
-        .expect("write stale bitmap icon");
-    fs::write(scenario_path.join("DescDE.rtf"), b"stale description")
-        .expect("write stale description");
-    fs::write(scenario_path.join("TitleUS.txt"), b"US:Stale title")
-        .expect("write stale title text");
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::write(scenario_path.join("Scenario.txt"), b"[Head]\nTitle=Source scenario\nIcon=4\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Objects.c4d\n").test_value();
+    fs::write(scenario_path.join("Source.bin"), b"copied source sentinel").test_value();
+    fs::write(scenario_path.join("Title.bmp"), b"stale bitmap title").test_value();
+    fs::write(scenario_path.join("Title.png"), b"stale png title").test_value();
+    fs::write(scenario_path.join("Icon.bmp"), b"stale bitmap icon").test_value();
+    fs::write(scenario_path.join("DescDE.rtf"), b"stale description").test_value();
+    fs::write(scenario_path.join("TitleUS.txt"), b"US:Stale title").test_value();
 
     let title = "Höhlenübung";
     let frontend = FrontendScenario {
@@ -15021,29 +13961,23 @@ fn save_to_slot_writes_native_c4group_savegame() {
     };
     let scenario_data =
         Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
-            .expect("load source scenario");
+            .test_value();
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.active_scenario = Some(frontend.clone());
-    let player_info_id = app
-        .engine
-        .player(app.local_owner)
-        .expect("sandbox player")
-        .player_info_id();
-    app.control_player_infos
-        .apply(clonk_engine::PlayerInfoControlData {
-            client_id: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                id: player_info_id,
-                flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
-                game_number: app.local_owner,
-                name: LegacyCString::from_bytes(b"Slot player".to_vec()).expect("slot player name"),
-                ..Default::default()
-            }],
+    let player_info_id = app.engine.test_player(app.local_owner).player_info_id();
+    app.control_player_infos.apply(netplay_player_info_data(
+        0,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: player_info_id,
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            game_number: app.local_owner,
+            name: LegacyCString::from_bytes(b"Slot player".to_vec()).expect("slot player name"),
             ..Default::default()
-        });
+        }],
+    ));
     app.prepare_recording_for(&frontend, &scenario_data, None, None, None)
-        .expect("prepare live save seed");
+        .test_value();
     app.save_description_language = b"US".to_vec();
     let mut landscape = clonk_engine::Landscape::flat(2, 1);
     assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
@@ -15059,18 +13993,16 @@ fn save_to_slot_writes_native_c4group_savegame() {
     let mut state = app.engine.capture_state();
     state.frame = 37;
     state.game_time = 12;
-    app.engine
-        .restore_state(&state)
-        .expect("install noninitial save state");
+    app.engine.restore_state(&state).test_value();
     app.snapshot = app.engine.snapshot();
 
     let slot = save_root.join("Missions.c4f").join("Missions10.c4s");
-    fs::create_dir_all(slot.parent().expect("slot parent")).expect("create stale slot parent");
+    fs::create_dir_all(slot.parent().test_value()).test_value();
     let mut stale = MutableGroup::new("Missions10.c4s");
     stale
         .add_file("Stale.txt", b"must be erased".to_vec())
-        .expect("compose stale slot");
-    fs::write(&slot, stale.pack().expect("pack stale slot")).expect("write stale slot");
+        .test_value();
+    fs::write(&slot, stale.pack().test_value()).test_value();
 
     let player_infos = app.recording_player_info_snapshot();
     assert_eq!(player_infos.clients.len(), 1);
@@ -15094,7 +14026,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
         app.status_text
     );
     assert!(slot.is_file(), "numbered save must be a packed file");
-    let saved = Group::open(&slot).expect("open numbered native C4Group");
+    let saved = Group::open(&slot).test_value();
     assert_eq!(
         saved.read_file("Source.bin").expect("copied source entry"),
         b"copied source sentinel"
@@ -15113,24 +14045,18 @@ fn save_to_slot_writes_native_c4group_savegame() {
     for stale in ["Title.bmp", "Icon.bmp", "DescDE.rtf", "TitleUS.txt"] {
         assert!(!saved.exists(stale), "stale component survived: {stale}");
     }
-    let scenario = String::from_utf8(
-        saved
-            .read_file("Scenario.txt")
-            .expect("read saved Scenario.txt"),
-    )
-    .expect("saved Scenario.txt is textual");
+    let scenario = String::from_utf8(saved.read_file("Scenario.txt").test_value()).test_value();
     assert!(scenario.contains("SaveGame=1\r\n"));
     assert!(scenario.contains("NoInitialize=1\r\n"));
     assert!(scenario.contains("Icon=11\r\n"));
-    let game = clonk_engine::parse_initial_network_game_data(
-        &saved.read_file("Game.txt").expect("read saved Game.txt"),
-    );
+    let game =
+        clonk_engine::parse_initial_network_game_data(&saved.read_file("Game.txt").test_value());
     assert_eq!(game.frame, 37);
     assert_eq!(game.time, 12);
 
-    let title_png = saved.read_file("Title.png").expect("read saved Title.png");
+    let title_png = saved.read_file("Title.png").test_value();
     let decoder = png::Decoder::new(io::Cursor::new(title_png));
-    let reader = decoder.read_info().expect("decode saved Title.png");
+    let reader = decoder.read_info().test_value();
     assert_eq!(
         (reader.info().width, reader.info().height),
         (SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT)
@@ -15167,14 +14093,12 @@ fn save_to_slot_writes_native_c4group_savegame() {
     assert!(!app.savegame_slots()[8].free);
     let mut later_state = app.engine.capture_state();
     later_state.frame = 91;
-    app.engine
-        .restore_state(&later_state)
-        .expect("advance after synchronous GPU save");
-    let gpu_title = encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255])
-        .expect("encode retained GPU fixture");
+    app.engine.restore_state(&later_state).test_value();
+    let gpu_title =
+        encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]).test_value();
     app.finish_pending_native_save_thumbnails(Some(&gpu_title));
     assert!(app.pending_native_save_thumbnails.is_empty());
-    let gpu_saved = Group::open(&gpu_slot).expect("open retained GPU slot");
+    let gpu_saved = Group::open(&gpu_slot).test_value();
     assert_eq!(
         gpu_saved
             .read_file("Title.png")
@@ -15195,14 +14119,10 @@ fn save_to_slot_writes_native_c4group_savegame() {
     let mut replacement = MutableGroup::new("Missions8.c4s");
     replacement
         .add_file("External.txt", b"new generation".to_vec())
-        .expect("compose external replacement");
-    fs::write(
-        &guarded_slot,
-        replacement.pack().expect("pack external replacement"),
-    )
-    .expect("replace queued GPU save generation");
+        .test_value();
+    fs::write(&guarded_slot, replacement.pack().test_value()).test_value();
     app.finish_pending_native_save_thumbnails(Some(&gpu_title));
-    let guarded = Group::open(&guarded_slot).expect("open guarded replacement");
+    let guarded = Group::open(&guarded_slot).test_value();
     assert!(guarded.exists("External.txt"));
     assert!(!guarded.exists("Title.png"));
 
@@ -15264,22 +14184,21 @@ fn a_lockstep_stall_announces_itself_once_after_a_grace_period() {
     let mut app = new_running_sandbox_app();
     let start = Instant::now();
 
-    app.announce_network_stall(start)
-        .expect("first observation");
+    app.announce_network_stall(start).test_value();
     assert!(
         app.runtime_flash_message.is_none(),
         "a stall must not be announced the instant it begins"
     );
 
     app.announce_network_stall(start + Duration::from_millis(1_400))
-        .expect("still inside the grace period");
+        .test_value();
     assert!(
         app.runtime_flash_message.is_none(),
         "1.4s is still inside the grace period"
     );
 
     app.announce_network_stall(start + Duration::from_millis(1_600))
-        .expect("past the grace period");
+        .test_value();
     assert!(
         app.runtime_flash_message.is_some(),
         "a stall lasting past the grace period must be announced"
@@ -15287,7 +14206,7 @@ fn a_lockstep_stall_announces_itself_once_after_a_grace_period() {
 
     app.runtime_flash_message = None;
     app.announce_network_stall(start + Duration::from_millis(5_000))
-        .expect("same stall, later");
+        .test_value();
     assert!(
         app.runtime_flash_message.is_none(),
         "one notice per stall, not one per frame"
@@ -15296,9 +14215,9 @@ fn a_lockstep_stall_announces_itself_once_after_a_grace_period() {
     // Clearing the stall arms the next one.
     app.network_stall_since = None;
     let resumed = start + Duration::from_millis(6_000);
-    app.announce_network_stall(resumed).expect("new stall");
+    app.announce_network_stall(resumed).test_value();
     app.announce_network_stall(resumed + Duration::from_millis(1_600))
-        .expect("new stall past the grace period");
+        .test_value();
     assert!(
         app.runtime_flash_message.is_some(),
         "a fresh stall must be announced again"
@@ -15367,7 +14286,7 @@ fn focus_loss_does_not_submit_cpp_player_control() {
     // Drain whatever joining the sandbox already queued.
     let _ = commands.take_submitted_local();
 
-    app.handle_focus_lost().expect("handle focus loss");
+    app.handle_focus_lost().test_value();
 
     assert!(
         commands.take_submitted_local().is_empty(),
@@ -15385,17 +14304,17 @@ fn focus_loss_does_not_submit_cpp_player_control() {
 #[test]
 fn configured_max_resource_search_recursion_reaches_client_candidates() {
     let load = |body: Option<&str>| {
-        let root = tempdir().expect("recursion config root");
-        let user_data = tempdir().expect("recursion user data");
-        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let root = tempdir();
+        let user_data = tempdir();
+        fs::create_dir_all(root.path().join("planet/System.c4g")).test_value();
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(root.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
-        let paths = AppPaths::discover().expect("fixture app paths");
-        paths.ensure_user_dirs().expect("fixture user directories");
+        let paths = test_app_paths();
+        paths.ensure_user_dirs().test_value();
         if let Some(body) = body {
-            fs::write(paths.config_file(), body).expect("write fixture config");
+            fs::write(paths.config_file(), body).test_value();
         }
         (
             load_max_resource_search_recursion(Some(&paths)),
@@ -15444,21 +14363,21 @@ fn configured_max_resource_search_recursion_reaches_client_candidates() {
 #[test]
 fn configured_network_work_path_controls_resource_staging_directory() {
     let staging = |body: Option<&str>| {
-        let root = tempdir().expect("work-path config root");
-        let user_data = tempdir().expect("work-path user data");
-        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("fixture System group");
+        let root = tempdir();
+        let user_data = tempdir();
+        fs::create_dir_all(root.path().join("planet/System.c4g")).test_value();
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(root.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
-        let paths = AppPaths::discover().expect("fixture app paths");
-        paths.ensure_user_dirs().expect("fixture user directories");
+        let paths = test_app_paths();
+        paths.ensure_user_dirs().test_value();
         if let Some(body) = body {
-            fs::write(paths.config_file(), body).expect("write fixture config");
+            fs::write(paths.config_file(), body).test_value();
         }
         let cache = paths.cache_dir().to_path_buf();
         let name = network_work_directory_name(Some(&paths));
-        let directory = network_work_directory(Some(&paths)).expect("staging directory");
+        let directory = network_work_directory(Some(&paths)).test_value();
         let client = client_settings_for_paths(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Work-path tester".to_string(),
@@ -15502,17 +14421,17 @@ fn configured_network_work_path_controls_resource_staging_directory() {
 #[test]
 fn configured_thread_pool_count_builds_runtime_with_requested_workers() {
     let workers = |body: Option<&str>| {
-        let root = tempdir().expect("thread-pool config root");
-        let user_data = tempdir().expect("thread-pool user data");
-        fs::create_dir_all(root.path().join("planet/System.c4g")).expect("System group");
+        let root = tempdir();
+        let user_data = tempdir();
+        fs::create_dir_all(root.path().join("planet/System.c4g")).test_value();
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(root.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
-        let paths = AppPaths::discover().expect("fixture app paths");
-        paths.ensure_user_dirs().expect("fixture user directories");
+        let paths = test_app_paths();
+        paths.ensure_user_dirs().test_value();
         if let Some(body) = body {
-            fs::write(paths.config_file(), body).expect("write fixture config");
+            fs::write(paths.config_file(), body).test_value();
         }
         load_thread_pool_thread_count(Some(&paths))
     };
@@ -15615,7 +14534,7 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
     // C4PlayerList::GetFreeNumber hands it player 0 while `local_owner` still
     // holds the process default. Mouse commands, HUD lookup and menu ownership
     // all read `local_owner`, so it has to follow the join.
-    let directory = tempdir().expect("host player directory");
+    let directory = tempdir();
     let player_path = directory.path().join("Host.c4p");
     let mut player_group = MutableGroup::new("Host.c4p");
     player_group
@@ -15623,17 +14542,14 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
             "Player.txt",
             b"[Player]\nName=Host\n[Preferences]\nColorDw=255\nControl=0\n".to_vec(),
         )
-        .expect("add host player core");
-    fs::write(&player_path, player_group.pack().expect("pack host player"))
-        .expect("write host player group");
+        .test_value();
+    fs::write(&player_path, player_group.pack().test_value()).test_value();
 
     let mut app = new_state_only_running_sandbox_app();
     // A real network host owns no runtime player until its own synchronized
     // JoinPlayer executes; the sandbox fixture pre-registers one.
     app.remove_local_control_assignment(app.local_owner);
-    app.engine
-        .remove_player(app.local_owner)
-        .expect("drop the sandbox local player");
+    app.engine.remove_player(app.local_owner).test_value();
     app.engine.set_local_players([]);
     let (manager, _event_tx) = NetworkManager::test_stub();
     app.network = Some(manager);
@@ -15650,7 +14566,7 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
         resource_type: clonk_network::HostResourceType::Player as u8,
         id: resource_id,
         loadable: true,
-        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).expect("valid wire name"),
+        filename: LegacyCString::from_bytes(b"Host.c4p".to_vec()).test_value(),
         ..clonk_engine::NetworkResourceCore::default()
     };
     app.admission_resources
@@ -15677,14 +14593,14 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
         source: clonk_engine::JoinPlayerSource::Resource(core),
         by_client: 0,
     })
-    .expect("host executes its own synchronized join");
+    .test_value();
 
     let joined = app
         .engine
         .players()
         .find(|player| player.player_info_id() == info_id)
         .map(|player| player.id())
-        .expect("host player joined the round");
+        .test_value();
     assert_eq!(
         app.engine.snapshot().hud.local_players,
         vec![joined],
@@ -15706,9 +14622,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
     let mut app = new_state_only_running_sandbox_app();
     let provisional_owner = app.local_owner;
     app.remove_local_control_assignment(provisional_owner);
-    app.engine
-        .remove_player(provisional_owner)
-        .expect("drop the sandbox local player");
+    app.engine.remove_player(provisional_owner).test_value();
     app.engine.set_local_players([provisional_owner]);
 
     let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
@@ -15728,8 +14642,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
                 "global func ProbeRemote(int plr) { Sound(\"Warning_lowoxygen\", true, nil, 100, plr + 1, 1); }\n",
             ),
             true,
-        )
-        .expect("player-targeted sound fixture links");
+        ).test_value();
     app.engine.pending_audio.clear();
     for client in [0, 3, 7] {
         app.control_clients.register(client, true, false);
@@ -15739,7 +14652,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
         env!("CARGO_MANIFEST_DIR"),
         "/../clonk-engine/tests/fixtures/embedded_player.c4p"
     ))
-    .expect("read embedded player fixture");
+    .test_value();
     for (info_id, at_client, name) in [
         (10, 0, "Remote host"),
         (11, 3, "Remote client"),
@@ -15765,7 +14678,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
             source: clonk_engine::JoinPlayerSource::Embedded(packed_player.clone()),
             by_client: 0,
         })
-        .expect("network player joins");
+        .test_value();
     }
 
     let player_by_info = |app: &GameApp, info_id| {
@@ -15773,7 +14686,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
             .players()
             .find(|player| player.player_info_id() == info_id)
             .map(|player| player.id())
-            .expect("network player joined")
+            .test_value()
     };
     let remote_player = player_by_info(&app, 11);
     let local_player = player_by_info(&app, 12);
@@ -15800,9 +14713,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
         "remote players must not pass player-targeted sound's local-client gate"
     );
 
-    app.engine
-        .tick_without_snapshot()
-        .expect("player views advance once");
+    app.engine.tick_without_snapshot().test_value();
     assert!(
         !app.engine
             .player(remote_player)
@@ -15814,7 +14725,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
     app.engine.pending_audio.clear();
     app.engine
         .call_scenario_script_function("ProbeRemote", vec![Value::Int(remote_player)])
-        .expect("remote player alarm probe executes");
+        .test_value();
     assert!(
         !app.engine.pending_audio.iter().any(|command| matches!(
             command,
@@ -15838,7 +14749,7 @@ fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
     let owner = app.local_owner;
     let expected = format_resource_string(
         app.runtime_flash_resources()
-            .expect("process-start flash resources")
+            .test_value()
             .observer_menu
             .clone(),
         &["<c ffff00><Space></c>"],
@@ -15858,4 +14769,77 @@ fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
             .map(|message| message.text.clone()),
         Some(expected)
     );
+}
+fn netplay_player_info_data(
+    client_id: i32,
+    players: Vec<clonk_engine::ControlPlayerInfoEntry>,
+) -> clonk_engine::PlayerInfoControlData {
+    clonk_engine::PlayerInfoControlData {
+        client_id,
+        players,
+        ..Default::default()
+    }
+}
+
+fn test_prepared_go(
+    control_mode: i32,
+    local_reached: bool,
+    save_game: bool,
+    network_runtime_join: bool,
+    restore_player_infos: Vec<clonk_engine::ControlPlayerInfoEntry>,
+    runtime_join_players: Vec<clonk_engine::RuntimeJoinPlayerSource>,
+    team_registry: Vec<clonk_engine::TeamInfo>,
+) -> PreparedGoLoadingState {
+    PreparedGoLoadingState {
+        status: clonk_network::NetworkStatus {
+            state: clonk_network::NETWORK_STATE_GO,
+            control_mode,
+            target_tick: 0,
+        },
+        local_reached,
+        save_game,
+        network_runtime_join,
+        restore_player_infos,
+        runtime_join_players,
+        pending_client_runtime_join: None,
+        initial_game_data: None,
+        random_seed: 0,
+        use_fair_crew: false,
+        fair_crew_strength: 0,
+        fair_crew_forced: false,
+        allow_debug: true,
+        auto_frame_skip: true,
+        synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
+            Vec::new(),
+            Vec::new(),
+        ),
+        team_configuration: TeamConfiguration::default(),
+        team_registry,
+        definition_modules: None,
+    }
+}
+
+fn test_loading_state(
+    scenario: FrontendScenario,
+    receiver: mpsc::Receiver<ScenarioLoadingEvent>,
+    finished: bool,
+    prepared_go: PreparedGoLoadingState,
+) -> ScenarioLoadingState {
+    ScenarioLoadingState {
+        scenario,
+        refreshed_resources: None,
+        refreshed_tooltip_font: None,
+        refreshed_native_font_source: None,
+        refreshed_global_gui_failures: None,
+        refreshed_gui_sheet_overrides: None,
+        refresh_requested: false,
+        receiver,
+        finished,
+        last_progress: 0,
+        log: Vec::new(),
+        prepared_go: Some(prepared_go),
+        offline_startup_players: None,
+        offline_savegame: None,
+        offline_random_seed: None,
+    }
 }

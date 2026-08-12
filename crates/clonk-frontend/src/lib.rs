@@ -205,6 +205,24 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    trait TestValueExt<T> {
+        fn test_value(self) -> T;
+    }
+
+    impl<T> TestValueExt<T> for Option<T> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            Option::expect(self, "frontend-test value exists")
+        }
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        #[track_caller]
+        fn test_value(self) -> T {
+            Result::expect(self, "frontend-test operation succeeds")
+        }
+    }
+
     fn test_font() -> Arc<dyn TextFont> {
         Arc::new(BitmapFont::new())
     }
@@ -258,7 +276,7 @@ mod tests {
         );
 
         let lit: Vec<bool> = (0..48)
-            .map(|y| surface.get_pixel(5, y).expect("in bounds").r > 0)
+            .map(|y| surface.get_pixel(5, y).test_value().r > 0)
             .collect();
         let mut runs = Vec::new();
         let mut run = 0;
@@ -285,7 +303,7 @@ mod tests {
 
     #[test]
     fn clr_mod_map_reset_aligns_cells_and_keeps_the_extra_edge() {
-        let map = ClrModMap::reset(64, 64, 100, 70, 10, 70, 5, 9, 0).unwrap();
+        let map = ClrModMap::reset(64, 64, 100, 70, 10, 70, 5, 9, 0).test_value();
 
         assert_eq!((map.origin_x, map.origin_y), (-5, 3));
         assert_eq!((map.width, map.height), (3, 3));
@@ -333,7 +351,7 @@ mod tests {
             false,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
 
         assert_eq!(map.get_mod_at(32, 32), 0x0087_8787);
         assert_eq!(sampler.modulation_at(0.5, 0.5), 0x0060_6060);
@@ -360,7 +378,7 @@ mod tests {
             true,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
         assert_eq!(flipped_partial.x_ranges, vec![(0.0, 26.0), (26.0, 40.0)]);
         assert!(flipped_partial
             .x_ranges
@@ -375,7 +393,7 @@ mod tests {
             false,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
         let world_aligned_box = FogSpriteSampler::new_with_chunks(
             &fog,
             (0.0, 0.0, 40.0, 1.0),
@@ -384,7 +402,7 @@ mod tests {
             false,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
         assert_eq!(local_box.x_ranges[0], (0.0, 16.0));
         assert_eq!(world_aligned_box.x_ranges[0], (0.0, 11.0));
 
@@ -489,7 +507,7 @@ mod tests {
                 flipped,
                 |x, y| (x * 1.125 + 3.0, y * 0.75 - 4.0),
             )
-            .unwrap();
+            .test_value();
             assert!(sampler.x_ranges.len() > 2);
             assert!(sampler.y_ranges.len() > 2);
 
@@ -708,7 +726,7 @@ mod tests {
             cells: row.into_iter().chain(row).collect(),
         }));
         let image = ImageData::new(64, 64, vec![255; 64 * 64 * 4]);
-        let fog = graphics.fog_draw_context().unwrap();
+        let fog = graphics.fog_draw_context().test_value();
         let cropped = FogSpriteSampler::new(
             &fog,
             (0.0, 0.0, 49.0, 1.0),
@@ -717,7 +735,7 @@ mod tests {
             false,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
         let uncropped = FogSpriteSampler::new(
             &fog,
             (-15.0, 0.0, 64.0, 1.0),
@@ -726,7 +744,7 @@ mod tests {
             false,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
         let output = |sampler: &FogSpriteSampler, normalized_x: f32| {
             let blit = sampler.blit_at(SpriteBlitState::normal(), normalized_x, 0.5);
             composite_sprite_fragment(
@@ -966,21 +984,22 @@ mod tests {
 
     #[test]
     fn clr_mod_map_squared_reveal_and_generator_values_match_cpp() {
-        let mut reveal = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).unwrap();
+        let mut reveal = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).test_value();
         reveal.reduce_modulation(64, 64, 64, 96);
         assert_eq!(reveal.get_mod_at(128, 128), 0x0033_3333);
 
-        let mut alpha_reveal = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).unwrap();
+        let mut alpha_reveal =
+            ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).test_value();
         alpha_reveal.reduce_modulation(64, 64, 64, 96);
         assert_eq!(alpha_reveal.get_mod_at(128, 128), 0xccff_ffff);
 
-        let mut generator = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).unwrap();
+        let mut generator = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).test_value();
         generator.reduce_modulation(0, 0, 10_000, 11_000);
         generator.add_modulation(0, 0, 64, 264, 0);
         assert_eq!(generator.get_mod_at(128, 0), 0x0030_3030);
 
         let mut alpha_generator =
-            ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).unwrap();
+            ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).test_value();
         alpha_generator.reduce_modulation(0, 0, 10_000, 11_000);
         alpha_generator.add_modulation(0, 0, 64, 264, 64);
         assert_eq!(alpha_generator.get_mod_at(128, 0), 0x8fff_ffff);
@@ -1085,7 +1104,7 @@ mod tests {
             ..PlayerState::default()
         }];
 
-        let map = build_fog_modulation_map(&snapshot, 0, 0, 0, 480, 128).unwrap();
+        let map = build_fog_modulation_map(&snapshot, 0, 0, 0, 480, 128).test_value();
         assert_eq!(map.get_mod_at(96, 64), 0, "generator wins after reveal");
         assert_eq!(
             map.get_mod_at(192, 64),
@@ -1107,17 +1126,17 @@ mod tests {
             .objects
             .iter_mut()
             .find(|object| object.id == ObjectId::new(5))
-            .unwrap()
+            .test_value()
             .position = Vector2::new(500, 64);
         snapshot
             .objects
             .iter_mut()
             .find(|object| object.id == ObjectId::new(6))
-            .unwrap()
+            .test_value()
             .plr_view_range = 0;
-        let fow_player = snapshot.fow_players.get_mut(&0).unwrap();
+        let fow_player = snapshot.fow_players.get_mut(&0).test_value();
         fow_player.view_objects.clear();
-        let default_target = build_fog_modulation_map(&snapshot, 0, 0, 0, 800, 128).unwrap();
+        let default_target = build_fog_modulation_map(&snapshot, 0, 0, 0, 800, 128).test_value();
         assert_ne!(
             default_target.get_mod_at(100, 64) & 0x00ff_ffff,
             0,
@@ -1133,17 +1152,8 @@ mod tests {
     #[test]
     fn ignore_fow_suppresses_only_an_object_base_draw() {
         let sprite = DefinitionSprite {
-            image: ImageData::new(1, 1, vec![255, 255, 255, 255]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![255, 255, 255, 255]))
         };
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "IgnoreFog".into();
@@ -1153,12 +1163,11 @@ mod tests {
         object.blit_mode = 0;
         object.action = Default::default();
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             3,
             3,
             3,
             "Ignore FoW",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("IgnoreFog", None), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -1329,8 +1338,6 @@ mod tests {
             ..DefinitionActionGraphics::default()
         };
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(16, 8, pixels),
             actions: HashMap::from([
                 ("Dup".to_string(), named_first),
                 (physical_action_graphics_key(1), physical_second),
@@ -1339,16 +1346,11 @@ mod tests {
                     DefinitionActionGraphics::default(),
                 ),
             ]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             // Expected source: Facet(2,1) + TopFace(1,1)
             // + FacetSize(2,1) * (reversed phase 2, DrawDir 2) = (7,4).
             top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(16, 8, pixels))
         };
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(10, 10);
@@ -1361,12 +1363,11 @@ mod tests {
             sprite_map_key("TestObject", None),
             sprite,
         )]));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             24,
             24,
             "FacetTopFace physical slot",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -1404,32 +1405,21 @@ mod tests {
         }
 
         let definition_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(12, 8, [blue.r, blue.g, blue.b, blue.a].repeat(12 * 8)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-2, -1, 4, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(2, 1, 2, 2, 1, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(
+                12,
+                8,
+                [blue.r, blue.g, blue.b, blue.a].repeat(12 * 8),
+            ))
         };
         let override_sprite = DefinitionSprite {
             graphics_scale: 2.0,
-            image: ImageData::new(12, 8, override_pixels),
-            actions: HashMap::new(),
-            color_mask: None,
             // Deliberately conflicting metadata: the old path used these
             // coordinates and drew a red pixel at (14,12).
             shape: Some(DefinitionRect::new(2, 2, 2, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(12, 8, override_pixels))
         };
         let sprites = Arc::new(HashMap::from([
             (sprite_map_key("TestObject", None), definition_sprite),
@@ -1443,12 +1433,11 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             20,
             20,
             "cross-definition plain TopFace",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -1492,30 +1481,13 @@ mod tests {
         pixels[12..16].copy_from_slice(&[green.r, green.g, green.b, green.a]);
 
         let definition_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(2, 2, [0, 0, 180, 255].repeat(4)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(2, 2, 1, 1, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(2, 2, [0, 0, 180, 255].repeat(4)))
         };
         let override_sprite = DefinitionSprite {
             graphics_scale: 0.5,
-            image: ImageData::new(2, 2, pixels),
-            actions: HashMap::new(),
-            color_mask: None,
-            shape: None,
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(2, 2, pixels))
         };
         let sprites = Arc::new(HashMap::from([
             (sprite_map_key("TestObject", None), definition_sprite),
@@ -1529,12 +1501,11 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             12,
             12,
             12,
             "fractional TopFace scale",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -1565,16 +1536,8 @@ mod tests {
         ];
         let sprite = DefinitionSprite {
             graphics_scale: 1.25,
-            image: ImageData::new(4, 2, row.repeat(2)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 4, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(4, 2, row.repeat(2)))
         };
         let background = Color::opaque(0, 0, 0);
         let render = |source, transform| {
@@ -1649,30 +1612,20 @@ mod tests {
             ..DefinitionActionGraphics::default()
         };
         let definition_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(8, 4, [blue.r, blue.g, blue.b, blue.a].repeat(8 * 4)),
             actions: HashMap::from([("Active".to_string(), live_action)]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(
+                8,
+                4,
+                [blue.r, blue.g, blue.b, blue.a].repeat(8 * 4),
+            ))
         };
         let override_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(8, 4, override_pixels),
             actions: HashMap::from([("Active".to_string(), DefinitionActionGraphics::default())]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 2, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(8, 4, override_pixels))
         };
         let sprites = Arc::new(HashMap::from([
             (sprite_map_key("TestObject", None), definition_sprite),
@@ -1694,12 +1647,11 @@ mod tests {
             blit_mode: 0,
         });
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             16,
             16,
             "cross-definition FacetTopFace",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -1732,17 +1684,14 @@ mod tests {
             ..DefinitionActionGraphics::default()
         };
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![green.r, green.g, green.b, green.a]),
             actions: HashMap::from([("Active".to_string(), action)]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(
+                1,
+                1,
+                vec![green.r, green.g, green.b, green.a],
+            ))
         };
         let sprites = Arc::new(HashMap::from([(
             sprite_map_key("TestObject", None),
@@ -1757,12 +1706,11 @@ mod tests {
             // hand-built (src/C4Object.cpp:415-428).
             object.draw_transform =
                 DrawTransform::updated_flip_dir(object.draw_transform, direction, 1);
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 24,
                 16,
                 16,
                 "plain TopFace FlipDir",
-                test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -1790,17 +1738,14 @@ mod tests {
         // (src/C4Object.cpp:370-376,2653-2662).
         let green = Color::opaque(0, 200, 0);
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(2, 2, [green.r, green.g, green.b, green.a].repeat(4)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
             stretch_growth: true,
             top_face: Some(DefinitionTargetRect::new(0, 0, 2, 2, 1, 1)),
-            picture: None,
+            ..test_sprite(ImageData::new(
+                2,
+                2,
+                [green.r, green.g, green.b, green.a].repeat(4),
+            ))
         };
         let sprites = Arc::new(HashMap::from([(
             sprite_map_key("TestObject", None),
@@ -1809,12 +1754,11 @@ mod tests {
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(10, 10);
         object.construction = FULL_CON / 2;
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             20,
             20,
             20,
             "partial GrowthType TopFace",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -1834,17 +1778,8 @@ mod tests {
     #[test]
     fn set_obj_draw_transform_rotation_reaches_presenter() {
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(9, 3, [220, 40, 20, 255].repeat(27)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(9, 3, [220, 40, 20, 255].repeat(27)))
         };
         let render = |transform| {
             let mut graphics = test_graphics(24, 24, 24, "Draw transform");
@@ -1899,17 +1834,8 @@ mod tests {
     #[test]
     fn overlay_draw_transform_uses_its_full_local_matrix() {
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(9, 3, [30, 180, 70, 255].repeat(27)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(9, 3, [30, 180, 70, 255].repeat(27)))
         };
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 12);
@@ -1918,12 +1844,11 @@ mod tests {
             .with_transform(Some(DrawTransform::from_matrix([
                 0.866, -0.5, 0.0, 0.5, 0.866, 0.0, 0.0, 0.0, 1.0,
             ])))];
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             28,
             28,
             28,
             "Overlay transform",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("RotatedOverlay", None),
                 sprite,
@@ -2013,10 +1938,11 @@ mod tests {
 
         draw_image_strip(&mut surface, 2, 1, &image, 1, 0, 2, 2, Some(&gamma));
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene([8, 4], Color::transparent(), &gamma);
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [8, 4],
+            Color::transparent(),
+            &gamma,
+        );
         assert_eq!(scene.textures.len(), 1);
         assert_eq!(scene.commands.len(), 1);
         let GpuCommand::Quad {
@@ -2048,7 +1974,7 @@ mod tests {
         let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
         surface
             .set_pixel(0, 0, Color::opaque(200, 200, 200))
-            .unwrap();
+            .test_value();
 
         draw_image_bilinear(
             &mut surface,
@@ -2111,7 +2037,7 @@ mod tests {
         };
 
         let positive = GuiRect::new(1.25, 1.25, 4.5, 3.5);
-        let positive_crop = draw_x_float_crop(&positive, 8, 4).unwrap();
+        let positive_crop = draw_x_float_crop(&positive, 8, 4).test_value();
         assert_eq!(
             (
                 positive_crop.target_x,
@@ -2130,7 +2056,7 @@ mod tests {
         let inward = render(positive, true);
         for y in 0..inward.height() {
             for x in 0..inward.width() {
-                let pixel = inward.get_pixel(x, y).unwrap();
+                let pixel = inward.get_pixel(x, y).test_value();
                 if (2..5).contains(&(x as i32)) && (2..4).contains(&(y as i32)) {
                     assert_eq!(pixel, ordinary.get_pixel(x, y).unwrap());
                 } else {
@@ -2144,7 +2070,7 @@ mod tests {
         assert_ne!(ordinary.get_pixel(2, 4), Some(sentinel));
 
         let negative = GuiRect::new(-1.25, 1.25, 4.0, 3.5);
-        let negative_crop = draw_x_float_crop(&negative, 8, 4).unwrap();
+        let negative_crop = draw_x_float_crop(&negative, 8, 4).test_value();
         assert_eq!(
             (
                 negative_crop.target_x,
@@ -2167,7 +2093,7 @@ mod tests {
         assert_ne!(ordinary.get_pixel(2, 2), Some(sentinel));
 
         let negative_y = GuiRect::new(1.25, -1.25, 4.5, 4.0);
-        let negative_y_crop = draw_x_float_crop(&negative_y, 8, 4).unwrap();
+        let negative_y_crop = draw_x_float_crop(&negative_y, 8, 4).test_value();
         assert_eq!(
             (
                 negative_y_crop.target_x,
@@ -2200,7 +2126,7 @@ mod tests {
                 .collect(),
         );
         let tile_edge_rect = GuiRect::new(0.2, 1.0, 5.0, 4.0);
-        let tile_edge_crop = draw_x_float_crop(&tile_edge_rect, 5, 4).unwrap();
+        let tile_edge_crop = draw_x_float_crop(&tile_edge_rect, 5, 4).test_value();
         assert_eq!(
             (tile_edge_crop.target_x, tile_edge_crop.target_width),
             (1, 4)
@@ -2287,7 +2213,7 @@ mod tests {
             let pixels = (0..destination_extent)
                 .flat_map(|y| {
                     (0..destination_extent)
-                        .map(|x| graphics.surface().get_pixel(x, y).unwrap())
+                        .map(|x| graphics.surface().get_pixel(x, y).test_value())
                         .collect::<Vec<_>>()
                 })
                 .collect();
@@ -2459,7 +2385,7 @@ mod tests {
                     None,
                 );
                 (0..3)
-                    .map(|y| graphics.surface().get_pixel(0, y).unwrap().r)
+                    .map(|y| graphics.surface().get_pixel(0, y).test_value().r)
                     .collect::<Vec<_>>()
             };
             assert_eq!(gradient(false), vec![64, 160, 255]);
@@ -2473,7 +2399,7 @@ mod tests {
                     ..AdvancedRendererConfig::DEFAULT
                 });
                 graphics.fill_world_color(Color::opaque(64, 0, 0), false, None);
-                graphics.surface().get_pixel(0, 0).unwrap().r
+                graphics.surface().get_pixel(0, 0).test_value().r
             };
             assert_eq!(solid(false), 64);
             assert_eq!(solid(true), 8);
@@ -2631,7 +2557,7 @@ mod tests {
                 None,
             ),
         )
-        .expect("physical padding remains part of the selected texture");
+        .test_value();
         assert!(
             (padded.alpha() - 170.0).abs() < 0.01,
             "negative indent mixes the last logical texel with transparent-white padding",
@@ -2685,7 +2611,7 @@ mod tests {
             false,
             |x, y| (x, y),
         )
-        .unwrap();
+        .test_value();
         let (x_samples, y_samples) = sampler.raster_axes_with_destination_offset(64, 64, 1.0, 1.0);
         assert_eq!(
             sampler
@@ -2776,7 +2702,7 @@ mod tests {
                 None,
                 SpriteBlitState::normal(),
             )
-            .expect("source coordinate belongs to a native texture tile");
+            .test_value();
             composite_sprite_fragment(
                 fragment,
                 Color::opaque(0, 0, 0),
@@ -2828,7 +2754,7 @@ mod tests {
             None,
             blit,
         )
-        .unwrap();
+        .test_value();
         assert_eq!(
             composite_sprite_fragment(fragment, Color::opaque(0, 0, 0), blit, None),
             Color::opaque(0, 0, 0),
@@ -2850,7 +2776,7 @@ mod tests {
             Some(0x00ff_ffff),
             SpriteBlitState::normal(),
         )
-        .unwrap();
+        .test_value();
         assert_eq!(
             composite_sprite_fragment(
                 fragment,
@@ -2869,7 +2795,7 @@ mod tests {
         let pixels: Vec<u8> = vec![100, 100, 100, 128];
         let image = ImageData::new(1, 1, pixels);
         let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
-        surface.set_pixel(0, 0, gray(200)).unwrap();
+        surface.set_pixel(0, 0, gray(200)).test_value();
         draw_image_bilinear_additive(
             &mut surface,
             &GuiRect::new(0.0, 0.0, 1.0, 1.0),
@@ -2910,10 +2836,11 @@ mod tests {
             Some(&gamma),
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene([12, 4], Color::transparent(), &gamma);
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [12, 4],
+            Color::transparent(),
+            &gamma,
+        );
         assert_eq!(scene.textures.len(), 1);
         assert_eq!(scene.commands.len(), 3);
         for (index, command) in scene.commands.iter().enumerate() {
@@ -2953,7 +2880,7 @@ mod tests {
         let image = ImageData::new(1, 1, vec![40, 80, 120, 128]);
         let mut surface = Surface::new(2, 1, PixelFormat::Rgba8888);
         surface.begin_gpu_scene_capture();
-        surface.set_pixel(0, 0, Color::opaque(1, 2, 3)).unwrap();
+        surface.set_pixel(0, 0, Color::opaque(1, 2, 3)).test_value();
         draw_image_region(
             &mut surface,
             &GuiRect::new(0.0, 0.0, 2.0, 1.0),
@@ -2968,14 +2895,11 @@ mod tests {
         );
 
         assert!(surface.pixels().iter().all(|component| *component == 0));
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [2, 1],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [2, 1],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 2);
         let GpuCommand::Solid {
             vertices,
@@ -3007,14 +2931,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [12, 2],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [12, 2],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 1);
         let GpuCommand::Quad {
             vertices, sampler, ..
@@ -3069,14 +2990,11 @@ mod tests {
             false,
         ));
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [24, 16],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [24, 16],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.textures.len(), 2);
         assert!(scene
             .textures
@@ -3119,7 +3037,7 @@ mod tests {
             .textures
             .iter()
             .find(|resource| resource.pixels[0] == (4_096 % 251) as u8)
-            .expect("the right physical texture tile is present");
+            .test_value();
         assert_eq!(&right_tile.pixels[0..4], &[(4_096 % 251) as u8, 2, 3, 255]);
         assert_eq!(&right_tile.pixels[4 * 4..5 * 4], &[255, 255, 255, 0]);
     }
@@ -3155,14 +3073,11 @@ mod tests {
             false,
         ));
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [2, 2],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [2, 2],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 2);
         assert!(scene.commands.iter().all(|command| match command {
             GpuCommand::Quad { vertices, .. } => vertices.iter().all(|vertex| {
@@ -3306,14 +3221,11 @@ mod tests {
             ));
         }
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [300, 15],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [300, 15],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("representable object faces did not form one compact resource run");
         };
@@ -3371,14 +3283,11 @@ mod tests {
             false,
         ));
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [15, 15],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [15, 15],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("fogged ST5B phase entered the generic quad fallback");
         };
@@ -3417,7 +3326,7 @@ mod tests {
         ));
         let generic = generic_surface
             .take_gpu_scene_capture()
-            .expect("generic GPU capture remains active")
+            .test_value()
             .into_scene(
                 [15, 15],
                 Color::transparent(),
@@ -3511,14 +3420,11 @@ mod tests {
             GpuSampler::Linear,
             false,
         ));
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [100, 1],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [100, 1],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(
             scene.commands.len(),
             4,
@@ -3571,14 +3477,11 @@ mod tests {
         );
 
         assert!(surface.pixels().iter().all(|component| *component == 0));
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene(
-                [8, 8],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [8, 8],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert!(!scene.commands.is_empty());
         assert!(scene.commands.iter().all(|command| matches!(
             command,
@@ -3653,14 +3556,11 @@ mod tests {
             GpuSampler::Nearest,
             false,
         ));
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("owner/FoW capture remains active")
-            .into_scene(
-                [8, 8],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [8, 8],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(
             scene.textures.len(),
             2,
@@ -3830,6 +3730,44 @@ mod tests {
         Arc::new(HudGraphics::default())
     }
 
+    fn test_sprite(image: ImageData) -> DefinitionSprite {
+        DefinitionSprite {
+            image,
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: None,
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        }
+    }
+
+    fn test_graphics_with(
+        surface_width: u32,
+        surface_height: u32,
+        fallback_ground_height: i32,
+        scenario_label: &str,
+        sprites: Arc<HashMap<String, DefinitionSprite>>,
+        cursor_atlas: Arc<CursorAtlas>,
+        hud_graphics: Arc<HudGraphics>,
+    ) -> GraphicsSystem {
+        let font = test_font();
+        GraphicsSystem::new(
+            surface_width,
+            surface_height,
+            fallback_ground_height,
+            scenario_label,
+            font,
+            sprites,
+            cursor_atlas,
+            hud_graphics,
+        )
+    }
+
     /// A graphics system with the empty test assets: no object sprites, no
     /// cursor atlas and no HUD sheets. The render tests construct dozens of
     /// these and only ever vary the surface size, ground height and label.
@@ -3839,12 +3777,11 @@ mod tests {
         fallback_ground_height: i32,
         scenario_label: &str,
     ) -> GraphicsSystem {
-        GraphicsSystem::new(
+        test_graphics_with(
             surface_width,
             surface_height,
             fallback_ground_height,
             scenario_label,
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -3883,13 +3820,10 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("scenario `{}` loads: {error}", scenario_path.display()));
 
-        let material_group =
-            Group::open(content.join("Material.c4g")).expect("installed Material.c4g opens");
-        let materials =
-            MaterialLibrary::from_group(&material_group).expect("installed materials load");
-        let system_group =
-            Group::open(repository.join("planet/System.c4g")).expect("System.c4g opens");
-        let system_scripts = load_system_scripts(&system_group).expect("system scripts load");
+        let material_group = Group::open(content.join("Material.c4g")).test_value();
+        let materials = MaterialLibrary::from_group(&material_group).test_value();
+        let system_group = Group::open(repository.join("planet/System.c4g")).test_value();
+        let system_scripts = load_system_scripts(&system_group).test_value();
 
         let mut engine = Engine::with_seed(0);
         engine.configure_materials_from_library(&materials);
@@ -3925,7 +3859,7 @@ mod tests {
                 auto_context_menu: false,
                 startup_player_count: 1,
             })
-            .expect("repository tutorial player joins")
+            .test_value()
             .number()
     }
 
@@ -4098,24 +4032,14 @@ mod tests {
         ];
         object.vertex_contacts = vec![0, clonk_engine::CNAT_BOTTOM];
         let sprite = DefinitionSprite {
-            image: ImageData::new(2, 2, vec![0; 16]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(-1, -1, 2, 2)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(2, 2, vec![0; 16]))
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             32,
             32,
             32,
             "vertex overlay",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("TestObject", None),
                 sprite,
@@ -4301,9 +4225,9 @@ mod tests {
         let (alone, no_status) = render(false);
         let (below, status_top) = render(true);
         assert_eq!(no_status, None, "the flag still gates the network status");
-        let alone = alone.expect("the overlay draws on its own");
-        let below = below.expect("the overlay still draws beside the status");
-        let status_top = status_top.expect("the network status drew its own text");
+        let alone = alone.test_value();
+        let below = below.test_value();
+        let status_top = status_top.test_value();
         assert_eq!(
             alone, status_top,
             "with nothing above it the overlay takes the same anchor"
@@ -4322,24 +4246,14 @@ mod tests {
         object.position = Vector2::new(12, 12);
         object.solid_mask_override = Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0));
         let sprite = DefinitionSprite {
-            image: ImageData::new(3, 3, [220, 30, 20, 255].repeat(9)),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(3, 3, [220, 30, 20, 255].repeat(9)))
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             24,
             24,
             "solid masks",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("TestObject", None),
                 sprite,
@@ -4393,8 +4307,7 @@ mod tests {
         )])));
         let mut material_names = vec![None; 128];
         material_names[14] = Some("Earth".to_string());
-        let mut landscape =
-            Landscape::with_default_material(24, vec![24; 24], None).expect("test landscape");
+        let mut landscape = Landscape::with_default_material(24, vec![24; 24], None).test_value();
         landscape.set_world_height(24);
         landscape.set_pixel_grid(PixelGrid::new(
             24,
@@ -4438,8 +4351,7 @@ mod tests {
         // Vehicle carries no render info, so a composed mask byte shows up as
         // an untouched pixel rather than as earth.
         material_names[2] = Some("Vehicle".to_string());
-        let mut landscape =
-            Landscape::with_default_material(24, vec![24; 24], None).expect("test landscape");
+        let mut landscape = Landscape::with_default_material(24, vec![24; 24], None).test_value();
         landscape.set_world_height(24);
         let mut texture_names = vec![None; 128];
         texture_names[14] = Some("Earth".to_string());
@@ -4483,9 +4395,7 @@ mod tests {
         let screen_before = graphics.surface().pixels().to_vec();
         let viewport_before = graphics.active_viewport_projections();
 
-        let capture = graphics
-            .render_full_landscape(&snapshot)
-            .expect("active viewport and landscape produce a full capture");
+        let capture = graphics.render_full_landscape(&snapshot).test_value();
 
         assert_eq!((capture.width(), capture.height()), (256, 120));
         assert_ne!(
@@ -4511,13 +4421,9 @@ mod tests {
             &[ViewportInput::from_focus(&snapshot.objects[0])],
         );
 
-        let before_latch = graphics
-            .render_full_landscape(&changed)
-            .expect("full capture before pending gamma is latched");
+        let before_latch = graphics.render_full_landscape(&changed).test_value();
         graphics.render_frame(&changed, &[ViewportInput::from_focus(&changed.objects[0])]);
-        let after_latch = graphics
-            .render_full_landscape(&changed)
-            .expect("full capture after pending gamma is latched");
+        let after_latch = graphics.render_full_landscape(&changed).test_value();
 
         assert_ne!(
             before_latch.pixels(),
@@ -4592,13 +4498,13 @@ mod tests {
             fog_render.surface().get_pixel(far.0, far.1),
             Some(Color::opaque(0, 0, 0))
         );
-        let baseline_near = baseline.surface().get_pixel(near.0, near.1).unwrap();
+        let baseline_near = baseline.surface().get_pixel(near.0, near.1).test_value();
         assert_eq!(
             fog_render.surface().get_pixel(near.0, near.1),
             Some(modulate_surface_color(baseline_near, 0x00ff_ffff))
         );
-        let fade_color = fog_render.surface().get_pixel(fade.0, fade.1).unwrap();
-        let near_color = fog_render.surface().get_pixel(near.0, near.1).unwrap();
+        let fade_color = fog_render.surface().get_pixel(fade.0, fade.1).test_value();
+        let near_color = fog_render.surface().get_pixel(near.0, near.1).test_value();
         let brightness =
             |color: Color| u16::from(color.r) + u16::from(color.g) + u16::from(color.b);
         assert!(brightness(fade_color) < brightness(near_color));
@@ -4676,12 +4582,11 @@ mod tests {
                 .collect(),
         );
         let render = |snapshot: &SimulationSnapshot| {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 128,
                 120,
                 120,
                 "FoW lifetime",
-                test_font(),
                 Arc::new(sprites.clone()),
                 empty_cursor_atlas(),
                 Arc::new(HudGraphics {
@@ -4703,9 +4608,7 @@ mod tests {
         };
 
         let baseline = render(&snapshot);
-        let normal = baseline
-            .world_to_screen(0, fogged.position)
-            .expect("far world object in viewport");
+        let normal = baseline.world_to_screen(0, fogged.position).test_value();
         let normal = (normal.0.round() as u32 + 1, normal.1.round() as u32 + 1);
         // world_to_screen models an ordinary world object. This one is
         // C4D_Parallax with Local(0)/Local(1) unset and non-negative
@@ -4717,7 +4620,7 @@ mod tests {
             .active_viewports
             .iter()
             .find(|viewport| viewport.owner == 0)
-            .expect("owner viewport");
+            .test_value();
         let parallax_screen = (
             120.0 * parallax_viewport.zoom + parallax_viewport.content_rect.x as f32,
             50.0 * parallax_viewport.zoom + parallax_viewport.content_rect.y as f32,
@@ -4934,14 +4837,11 @@ mod tests {
             &mut rng,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("bolt capture remains active")
-            .into_scene(
-                [24, 20],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [24, 20],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 1);
         let GpuCommand::Solid {
             vertices, topology, ..
@@ -4971,14 +4871,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("line capture remains active")
-            .into_scene(
-                [32, 16],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [32, 16],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 2);
         let GpuCommand::Solid {
             vertices,
@@ -5024,14 +4921,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("line capture remains active")
-            .into_scene(
-                [8, 8],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [8, 8],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 2);
         let GpuCommand::Solid {
             vertices, topology, ..
@@ -5098,17 +4992,8 @@ mod tests {
         // TargetPos/parallax adjustment, or any face drawing
         // (src/C4Object.cpp:2249-2254). Shape vertices are already absolute.
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![255, 0, 255, 255]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![255, 0, 255, 255]))
         };
         let template = make_snapshot().objects.remove(0);
         let mut power = template.clone();
@@ -5143,12 +5028,11 @@ mod tests {
                 },
             ),
         ]);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             32,
             12,
             12,
             "Typed lines",
-            test_font(),
             Arc::new(HashMap::from([
                 (sprite_map_key("PowerLine", None), sprite.clone()),
                 (sprite_map_key("LightningLine", None), sprite),
@@ -5200,7 +5084,7 @@ mod tests {
         palette_bytes[6 * 3..6 * 3 + 3].copy_from_slice(&[1, 2, 3]);
         palette_bytes[26 * 3..26 * 3 + 3].copy_from_slice(&[7, 8, 9]);
         palette_bytes[68 * 3..68 * 3 + 3].copy_from_slice(&[4, 5, 6]);
-        let palette = GamePalette::from_c4_pal(&palette_bytes).expect("complete custom C4.pal");
+        let palette = GamePalette::from_c4_pal(&palette_bytes).test_value();
         assert_eq!(palette.color(0), Color::transparent());
         assert_eq!(palette.color(191), Color::new(0, 0, 255, 128));
         graphics.set_game_palette(Arc::new(palette));
@@ -5617,12 +5501,11 @@ mod tests {
                 .collect(),
         );
         let make_graphics = || {
-            GraphicsSystem::new(
+            test_graphics_with(
                 128,
                 120,
                 120,
                 "Split frame",
-                test_font(),
                 empty_sprites(),
                 empty_cursor_atlas(),
                 Arc::new(HudGraphics {
@@ -5667,12 +5550,11 @@ mod tests {
         // the content surface is the full viewport the shipping game renders.
         snapshot.landscape = Some(Landscape::flat(WIDTH * 2, HEIGHT as i32 * 2));
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             WIDTH,
             HEIGHT,
             120,
             "Deferred pixel plane probe",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -5742,12 +5624,11 @@ mod tests {
             Some(DefinitionRect::new(0, 0, 4, 4)),
             false,
         );
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             128,
             120,
             120,
             "Retained viewport foreground",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -5766,7 +5647,7 @@ mod tests {
         graphics.render_frame_foreground(&pending);
         let scene = graphics
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
-            .expect("ordered foreground capture was started");
+            .test_value();
 
         assert_eq!(
             scene
@@ -5835,12 +5716,11 @@ mod tests {
                 .flat_map(|_| [board_color.r, board_color.g, board_color.b, board_color.a])
                 .collect(),
         );
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             128,
             120,
             120,
             "Transparent HUD",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             Arc::new(HudGraphics {
@@ -6028,7 +5908,7 @@ mod tests {
                 18, 255,
             ],
         )
-        .expect("valid content bytes");
+        .test_value();
         let destination_bytes = (0..7 * 5)
             .flat_map(|index| {
                 let value = index as u8;
@@ -6037,9 +5917,9 @@ mod tests {
             .collect::<Vec<_>>();
         let mut scratch_path =
             Surface::from_bytes(7, 5, PixelFormat::Rgba8888, destination_bytes.clone())
-                .expect("valid destination bytes");
-        let mut direct_path = Surface::from_bytes(7, 5, PixelFormat::Rgba8888, destination_bytes)
-            .expect("valid destination bytes");
+                .test_value();
+        let mut direct_path =
+            Surface::from_bytes(7, 5, PixelFormat::Rgba8888, destination_bytes).test_value();
         let mut viewport_underlay = Surface::new(rect.width, rect.height, PixelFormat::Rgba8888);
         viewport_underlay.fill(Color::opaque(91, 73, 55));
 
@@ -6133,9 +6013,7 @@ mod tests {
             graphics.set_sky_dither(enabled);
             graphics.begin_gpu_scene_capture();
             graphics.fill_vertical_gradient(top, bottom, 1.0, Some(&gamma));
-            let scene = graphics
-                .finish_gpu_scene_capture(&gamma)
-                .expect("GPU capture remains active");
+            let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
             let GpuCommand::Solid { style, .. } = &scene.commands[0] else {
                 panic!("sky gradient did not lower to solid triangles");
             };
@@ -6169,9 +6047,7 @@ mod tests {
             1.0,
             Some(&gamma),
         );
-        let scene = graphics
-            .finish_gpu_scene_capture(&gamma)
-            .expect("GPU capture remains active");
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
 
         assert_eq!(scene.commands.len(), 1);
         let GpuCommand::Solid {
@@ -6222,16 +6098,14 @@ mod tests {
     fn gpu_capture_sections_fogged_solid_sky_into_gamma_quads() {
         let mut graphics = test_graphics(130, 70, 70, "GPU fogged solid sky");
         graphics.active_fog_map = Some(Arc::new(
-            ClrModMap::reset(64, 64, 130, 70, 0, 0, 0, 0, 0).expect("valid fog map"),
+            ClrModMap::reset(64, 64, 130, 70, 0, 0, 0, 0, 0).test_value(),
         ));
         let gamma = clonk_graphics::GammaRamp::standard();
         graphics.begin_gpu_scene_capture();
 
         graphics.fill_world_color(Color::opaque(153, 141, 255), false, Some(&gamma));
 
-        let scene = graphics
-            .finish_gpu_scene_capture(&gamma)
-            .expect("GPU capture remains active");
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         assert_eq!(scene.commands.len(), 1);
         for command in &scene.commands {
             let GpuCommand::Solid {
@@ -6264,7 +6138,7 @@ mod tests {
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(200, 200, 200))
-            .expect("background pixel");
+            .test_value();
         let image = ImageData::new(1, 1, vec![64, 128, 192, 128]);
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
@@ -6308,7 +6182,7 @@ mod tests {
         assert!(gpu.draw_ground(0, Some(&landscape), 1.0, None));
         let scene = gpu
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::standard())
-            .expect("column landscape capture remains active");
+            .test_value();
         assert_eq!(scene.commands.len(), 2, "ground precedes the liquid pass");
         assert_eq!(scene.textures.len(), 2);
 
@@ -6332,7 +6206,7 @@ mod tests {
                 .textures
                 .iter()
                 .find(|resource| resource.id == *texture)
-                .expect("quad resource is retained");
+                .test_value();
             draw_image(
                 &mut replay,
                 &GuiRect::new(0.0, 0.0, 4.0, 4.0),
@@ -6355,7 +6229,7 @@ mod tests {
         assert!(gpu.draw_ground(0, Some(&landscape), 1.0, None));
         let second = gpu
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::standard())
-            .expect("second column landscape capture remains active");
+            .test_value();
         assert_eq!(
             second
                 .textures
@@ -6435,31 +6309,28 @@ mod tests {
             "the initialized official content submodule must provide {}",
             directory.display()
         );
-        let group = Group::open(&directory).expect("open Knight definition");
-        let resource =
-            clonk_resources::ResourceDefinition::load(&group).expect("load Knight resources");
+        let group = Group::open(&directory).test_value();
+        let resource = clonk_resources::ResourceDefinition::load(&group).test_value();
         let mut engine = Engine::new();
         engine
             .register_definition(
                 clonk_engine::Definition::from_resource(&resource)
                     .expect("compile Knight definition"),
             )
-            .expect("register Knight definition");
-        let image = engine
-            .definition_sprite_image("KNIG", None)
-            .expect("Knight sprite image");
+            .test_value();
+        let image = engine.definition_sprite_image("KNIG", None).test_value();
         let width = image.width();
         let height = image.height();
-        let overlay = image.color_mask().expect("Knight Overlay.png");
+        let overlay = image.color_mask().test_value();
         assert_eq!(overlay.len(), width as usize * height as usize * 4);
 
         let mut raw_base =
             image::load_from_memory(&group.read_file("Graphics.png").expect("read Graphics.png"))
-                .expect("decode Graphics.png")
+                .test_value()
                 .into_rgba8();
         let mut raw_overlay =
             image::load_from_memory(&group.read_file("Overlay.png").expect("read Overlay.png"))
-                .expect("decode Overlay.png")
+                .test_value()
                 .into_rgba8();
         for image in [&mut raw_base, &mut raw_overlay] {
             for pixel in image.pixels_mut() {
@@ -6486,7 +6357,7 @@ mod tests {
                     (0..16).any(|x| (1..=254).contains(&raw_overlay.get_pixel(ox + x, oy + y).0[3]))
                 })
             })
-            .expect("the shipped sheet must contain antialiased owner-color edges somewhere");
+            .test_value();
 
         let mut rendered = Surface::new(16, 20, PixelFormat::Rgba8888);
         rendered.fill(Color::opaque(0, 0, 0));
@@ -6524,7 +6395,7 @@ mod tests {
                     (f32::from(base_rgb[2]) * (1.0 - overlay_alpha)).round() as u8,
                     255,
                 );
-                let actual = rendered.get_pixel(x, y).expect("rendered crop pixel");
+                let actual = rendered.get_pixel(x, y).test_value();
                 for (actual, expected) in [actual.r, actual.g, actual.b, actual.a]
                     .into_iter()
                     .zip([expected.r, expected.g, expected.b, expected.a])
@@ -6549,18 +6420,10 @@ mod tests {
         // color after SetColorDw, and unowned FISH explicitly sets white in
         // Birth (Objects.c4d/Animals.c4d/Fish.c4d/Script.c:233-240).
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
             // CreateColorByOwner clears owner-only base pixels to black.
-            image: ImageData::new(1, 1, vec![0, 0, 0, 255]),
-            actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([128]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 255]))
         };
         let mut recolored = make_snapshot().objects.remove(0);
         recolored.definition_id = "ObjectColor".to_string();
@@ -6575,12 +6438,11 @@ mod tests {
         fish.owner = OWNER_NONE;
         fish.color = 0x00ff_ffff;
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             4,
             3,
             3,
             "Object ColorByOwner",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("ObjectColor", None),
                 sprite,
@@ -6626,11 +6488,9 @@ mod tests {
                     .with_position(Vector2::new(200, 100))
                     .with_direction(Direction::Left),
             )
-            .expect("real unowned FISH spawns");
+            .test_value();
         let first_snapshot = engine.snapshot();
-        let fish = first_snapshot
-            .object(fish_id)
-            .expect("spawned FISH is present");
+        let fish = first_snapshot.object(fish_id).test_value();
         assert_eq!(fish.owner, OWNER_NONE);
         assert_eq!(
             fish.color, 0x00ff_ffff,
@@ -6639,15 +6499,11 @@ mod tests {
         assert_eq!(fish.action.name, "Swim");
         assert_eq!(fish.action.phase, 0);
 
-        let image = engine
-            .definition_sprite_image("FISH", None)
-            .expect("FISH loads its real Graphics.png and Overlay.png");
+        let image = engine.definition_sprite_image("FISH", None).test_value();
         let width = image.width();
         let height = image.height();
         assert_eq!((width, height), (448, 64));
-        let mask = image
-            .color_mask()
-            .expect("FISH has its real owner-color mask");
+        let mask = image.color_mask().test_value();
         // Swim phase zero starts at (0,12). Its opaque body pixel at local
         // (7,7) is grey 147 in Overlay.png and transparent in Graphics.png.
         let body_mask_index = 19 * width as usize + 7;
@@ -6659,9 +6515,7 @@ mod tests {
         let sprite = DefinitionSprite {
             graphics_scale: 1.0,
             image: ImageData::from_arc(width, height, image.into_pixels()),
-            actions: engine
-                .definition_action_graphics("FISH")
-                .expect("FISH loads its real ActMap facets"),
+            actions: engine.definition_action_graphics("FISH").test_value(),
             color_mask: Some(ColorByOwnerMask::new(width, height, mask)),
             shape: engine.definition_shape_rect("FISH"),
             fire_top: engine.definition_fire_top("FISH"),
@@ -6671,19 +6525,18 @@ mod tests {
             top_face: engine.definition_top_face("FISH"),
             picture: None,
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             16,
             12,
             12,
             "real unowned FISH",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("FISH", None), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
         );
         let render_body_pixel =
             |graphics: &mut GraphicsSystem, snapshot: &SimulationSnapshot| -> Color {
-                let fish = snapshot.object(fish_id).expect("FISH remains present");
+                let fish = snapshot.object(fish_id).test_value();
                 graphics.surface_mut().fill(Color::opaque(0, 0, 0));
                 graphics.viewport_x = (fish.position.x - 8) as f32;
                 graphics.viewport_y = (fish.position.y - 6) as f32;
@@ -6697,10 +6550,7 @@ mod tests {
                     0,
                     None,
                 );
-                graphics
-                    .surface()
-                    .get_pixel(7, 7)
-                    .expect("body pixel lies on the output surface")
+                graphics.surface().get_pixel(7, 7).test_value()
             };
 
         assert_eq!(
@@ -6711,9 +6561,7 @@ mod tests {
 
         let mut recolor = ObjectUpdate::new();
         recolor.color = Some(0x00ff_0000);
-        engine
-            .apply_object_update(fish_id, recolor)
-            .expect("live FISH color changes");
+        engine.apply_object_update(fish_id, recolor).test_value();
         let recolored_snapshot = engine.snapshot();
         assert_eq!(
             recolored_snapshot
@@ -6736,17 +6584,9 @@ mod tests {
         // object color instead of folding in global ColorMod
         // (StdDDraw2.cpp:773-777). ReleaseClonk uses this exact combination.
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![0, 0, 0, 255]),
-            actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 255]))
         };
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "OwnerTransparency".to_string();
@@ -6756,12 +6596,11 @@ mod tests {
         object.blit_mode = C4GFXBLIT_CLRSFC_OWNCLR;
         object.crew_member = false;
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             3,
             3,
             3,
             "Packed owner transparency",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("OwnerTransparency", None),
                 sprite,
@@ -6800,24 +6639,17 @@ mod tests {
         sprites.insert(
             sprite_map_key("BaseAdd", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
-                actions: HashMap::new(),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(
+                    1,
+                    1,
+                    vec![source.r, source.g, source.b, source.a],
+                ))
             },
         );
         sprites.insert(
             sprite_map_key("ActionAdd", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
                 actions: HashMap::from([(
                     "Active".to_string(),
                     DefinitionActionGraphics {
@@ -6833,34 +6665,24 @@ mod tests {
                         ..DefinitionActionGraphics::default()
                     },
                 )]),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(
+                    1,
+                    1,
+                    vec![source.r, source.g, source.b, source.a],
+                ))
             },
         );
         sprites.insert(
             sprite_map_key("TopAdd", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+                ..test_sprite(ImageData::new(
                     2,
                     1,
                     vec![0, 0, 0, 0, source.r, source.g, source.b, source.a],
-                ),
-                actions: HashMap::new(),
-                color_mask: None,
-                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
-                picture: None,
+                ))
             },
         );
 
@@ -6882,12 +6704,11 @@ mod tests {
             make_object(4, "BaseAdd", 7, "Idle", 0),
         ];
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             9,
             3,
             3,
             "Object additive",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -6929,17 +6750,13 @@ mod tests {
         let source = Color::new(10, 20, 30, 128);
         let owner = 0x0064_788c;
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
-            actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(
+                1,
+                1,
+                vec![source.r, source.g, source.b, source.a],
+            ))
         };
         let render = |object_mode, overlay_mode| {
             let mut object = object.clone();
@@ -6948,12 +6765,11 @@ mod tests {
                 vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
                     .with_definition(Some("OverlayAdd".to_string()))
                     .with_blit_mode(overlay_mode)];
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 3,
                 3,
                 3,
                 "Overlay additive",
-                test_font(),
                 Arc::new(HashMap::from([(
                     sprite_map_key("OverlayAdd", None),
                     sprite.clone(),
@@ -7026,45 +6842,27 @@ mod tests {
             (
                 sprite_map_key("OverlayHost", None),
                 DefinitionSprite {
-                    graphics_scale: 1.0,
-                    image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
-                    actions: HashMap::new(),
-                    color_mask: None,
                     shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                    fire_top: 0,
-                    rotateable: 0,
-                    line: 0,
-                    stretch_growth: false,
-                    top_face: None,
-                    picture: None,
+                    ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
                 },
             ),
             (
                 sprite_map_key("OverlayTarget", None),
                 DefinitionSprite {
-                    graphics_scale: 1.0,
-                    image: ImageData::new(2, 1, vec![40, 0, 0, 255, 0, 40, 0, 255]),
-                    actions: HashMap::new(),
-                    color_mask: None,
                     shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                    fire_top: 0,
-                    rotateable: 0,
-                    line: 0,
-                    stretch_growth: false,
                     top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 1, 0)),
-                    picture: None,
+                    ..test_sprite(ImageData::new(2, 1, vec![40, 0, 0, 255, 0, 40, 0, 255]))
                 },
             ),
         ]));
         let render = |for_player, target_blit_mode| {
             let mut target = target.clone();
             target.blit_mode = target_blit_mode;
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 12,
                 8,
                 8,
                 "Object overlay",
-                test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
                 Arc::new(HudGraphics {
@@ -7113,12 +6911,11 @@ mod tests {
                                viewport: Vector2,
                                width: u32,
                                height: u32| {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 width,
                 height,
                 height as i32,
                 "Parallax object overlay",
-                test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -7140,10 +6937,8 @@ mod tests {
             graphics.surface().clone()
         };
 
-        let int_value = |value| {
-            serde_json::from_value(serde_json::json!({ "Int": value }))
-                .expect("deserialize C4Script integer")
-        };
+        let int_value =
+            |value| serde_json::from_value(serde_json::json!({ "Int": value })).test_value();
         let mut percentage_host = host.clone();
         percentage_host.position = Vector2::new(50, 30);
         percentage_host.category |= CATEGORY_PARALLAX_FLAG;
@@ -7223,28 +7018,19 @@ mod tests {
         }
         let source_sprite = DefinitionSprite {
             graphics_scale: 2.0,
-            image: ImageData::new(16, 8, pixels),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-3, 1, 4, 3)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(16, 8, pixels))
         };
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 10);
         object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
             .with_definition(Some("Pickup".to_string()))
             .with_transform(Some(DrawTransform::identity()))];
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             24,
             24,
             "Base overlay shape",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("Pickup", None),
                 source_sprite,
@@ -7290,12 +7076,11 @@ mod tests {
         object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
             .with_definition(Some("Shapeless".to_string()))
             .with_transform(Some(DrawTransform::identity()))];
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             7,
             7,
             7,
             "Shapeless base overlay",
-            test_font(),
             solid_sprite("Shapeless", 2, 2, overlay_color, None, false),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -7328,17 +7113,8 @@ mod tests {
         // fZoom = min(Shape.Wdt/fct.Wdt, Shape.Hgt/fct.Hgt) about that origin,
         // and blits the facet centred there (src/C4DefGraphics.cpp:818-826).
         let host_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-8, -6, 16, 12)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
         };
         // 16x16 sheet, transparent except a 4x4 marker block at (8,0) that the
         // source definition declares as its DefCore Picture rect.
@@ -7351,17 +7127,9 @@ mod tests {
             }
         }
         let source_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(16, 16, pixels),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
             picture: Some(DefinitionRect::new(8, 0, 4, 4)),
+            ..test_sprite(ImageData::new(16, 16, pixels))
         };
 
         let render = |transform: Option<DrawTransform>| {
@@ -7374,12 +7142,11 @@ mod tests {
                         .with_definition(Some("PicSrc".to_string()))
                         .with_transform(transform),
                 ];
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 40,
                 40,
                 40,
                 "Ingame picture overlay",
-                test_font(),
                 Arc::new(HashMap::from([
                     (sprite_map_key("PicHost", None), host_sprite.clone()),
                     (sprite_map_key("PicSrc", None), source_sprite.clone()),
@@ -7434,17 +7201,8 @@ mod tests {
         // GetID() so host and source share a definition and differ only in the
         // named graphics sheet.
         let sheet = |rgba: [u8; 4]| DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(8, 8, rgba.repeat(64)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(8, 8, rgba.repeat(64)))
         };
         let base_colour = Color::opaque(200, 40, 40);
         let shield_colour = Color::opaque(40, 80, 200);
@@ -7462,12 +7220,11 @@ mod tests {
             } else {
                 Vec::new()
             };
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 32,
                 32,
                 32,
                 "Extra graphics overlay",
-                test_font(),
                 Arc::new(HashMap::from([
                     (sprite_map_key("KNIG", None), sheet([200, 40, 40, 255])),
                     (
@@ -7544,12 +7301,11 @@ mod tests {
                     .with_transform(Some(DrawTransform::from_components(2.0, 2.0, 0.0, 0.0))),
             ];
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             48,
             48,
             48,
             "Extra graphics transform order",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("KNIG", None), sheet)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -7598,8 +7354,7 @@ mod tests {
             "the bundled ClonkMars pack must provide {}",
             hud.display()
         );
-        let def_core =
-            std::fs::read_to_string(hud.join("DefCore.txt")).expect("read shipped MHUD DefCore");
+        let def_core = std::fs::read_to_string(hud.join("DefCore.txt")).test_value();
         let value = |key: &str| {
             def_core
                 .lines()
@@ -7615,34 +7370,17 @@ mod tests {
         let picture_extent = 64;
         let marker = Color::opaque(15, 120, 240);
         let source_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(
+            shape: Some(DefinitionRect::new(-32, -32, 64, 64)),
+            picture: Some(DefinitionRect::new(0, 0, picture_extent, picture_extent)),
+            ..test_sprite(ImageData::new(
                 picture_extent as u32,
                 picture_extent as u32,
                 [15, 120, 240, 255].repeat((picture_extent * picture_extent) as usize),
-            ),
-            actions: HashMap::new(),
-            color_mask: None,
-            shape: Some(DefinitionRect::new(-32, -32, 64, 64)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: Some(DefinitionRect::new(0, 0, picture_extent, picture_extent)),
+            ))
         };
         let hud_sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-80, -60, 160, 120)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
         };
 
         // DrawLogItem's transform, in the engine's 1/1000 units.
@@ -7662,12 +7400,11 @@ mod tests {
                     ))),
             ];
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             200,
             140,
             140,
             "ClonkMars item log",
-            test_font(),
             Arc::new(HashMap::from([
                 (sprite_map_key("MHUD", None), hud_sprite),
                 (sprite_map_key("ITEM", None), source_sprite),
@@ -7693,7 +7430,7 @@ mod tests {
 
         // Final map is x' = 0.43875x + 27.9375, y' = 0.43875y + 19.55625 over a
         // 64x64 quad at (118, 73): x 79.71..107.79, y 51.59..79.67.
-        let bbox = colour_bbox(graphics.surface(), marker).expect("item-log icon is drawn");
+        let bbox = colour_bbox(graphics.surface(), marker).test_value();
         assert_eq!(bbox, (80, 52, 107, 79));
         assert_eq!(bbox.2 - bbox.0 + 1, 28, "64px picture renders 28px wide");
         assert_eq!(bbox.3 - bbox.1 + 1, 28, "64px picture renders 28px tall");
@@ -7723,12 +7460,11 @@ mod tests {
             object.graphics_overlays = vec![
                 ObjectGraphicsOverlay::new(1, mode).with_definition(Some("PicSrc".to_string()))
             ];
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 16,
                 16,
                 16,
                 "Non-drawing overlay modes",
-                test_font(),
                 Arc::clone(&sprite),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -7779,7 +7515,6 @@ mod tests {
         }
         let sprite = DefinitionSprite {
             graphics_scale: 2.0,
-            image: ImageData::new(16, 16, pixels),
             actions: HashMap::from([(
                 "Wave".to_string(),
                 DefinitionActionGraphics {
@@ -7795,14 +7530,8 @@ mod tests {
                     ..DefinitionActionGraphics::default()
                 },
             )]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(16, 16, pixels))
         };
 
         let mut object = make_snapshot().objects.remove(0);
@@ -7813,12 +7542,11 @@ mod tests {
             .with_action(Some("Wave".to_string()))];
 
         let background = Color::opaque(10, 10, 10);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             16,
             8,
             8,
             "HD action overlay",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("HdOverlay", None), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -7869,16 +7597,8 @@ mod tests {
         let facet = SourceRect::new(0, 0, 16, 22);
         let sprite = DefinitionSprite {
             graphics_scale: 3.0,
-            image: ImageData::new(96, 132, vec![255_u8; 96 * 132 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 16, 22)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(96, 132, vec![255_u8; 96 * 132 * 4]))
         };
 
         let capture = |presentation_scale: f32, hd_exact_blits: bool| {
@@ -7902,7 +7622,7 @@ mod tests {
             let scene = graphics
                 .surface_mut()
                 .take_gpu_scene_capture()
-                .expect("sprite capture stays active across the blit")
+                .test_value()
                 .into_scene([64, 64], Color::transparent(), &gamma);
             let extent = scene.textures[0].extent;
             let quad = scene
@@ -7925,7 +7645,7 @@ mod tests {
                     }
                     _ => None,
                 })
-                .expect("the face blit retains a compact object sprite");
+                .test_value();
             (extent, quad)
         };
 
@@ -8000,7 +7720,6 @@ mod tests {
         }
         let sprite = DefinitionSprite {
             graphics_scale: 2.0,
-            image: ImageData::new(16, 16, pixels),
             actions: HashMap::from([(
                 "Wave".to_string(),
                 DefinitionActionGraphics {
@@ -8016,14 +7735,8 @@ mod tests {
                     ..DefinitionActionGraphics::default()
                 },
             )]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(16, 16, pixels))
         };
 
         let mut object = make_snapshot().objects.remove(0);
@@ -8034,12 +7747,11 @@ mod tests {
             .with_action(Some("Wave".to_string()))];
 
         let background = Color::opaque(10, 10, 10);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             16,
             8,
             8,
             "HD facet clamp",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("HdClamp", None), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -8133,12 +7845,11 @@ mod tests {
                 .with_action(Some("O20".to_string()))];
 
         let render = |viewport: Vector2| {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 24,
                 16,
                 16,
                 "Parallax action overlay",
-                test_font(),
                 Arc::new(HashMap::from([(
                     sprite_map_key("ParallaxHud", None),
                     sprite.clone(),
@@ -8246,12 +7957,11 @@ mod tests {
             top_face: None,
             picture: None,
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             100,
             100,
             "Nested overlay audibility",
-            test_font(),
             Arc::new(HashMap::from([
                 (sprite_map_key("AudibleOverlayHost", None), sprite(0)),
                 (sprite_map_key("AudibleOverlayMiddle", None), sprite(0)),
@@ -8308,31 +8018,30 @@ mod tests {
         // C4Object::CompileFunc restores `Locals=` through C4ValueList before
         // ApplyParallaxity reads Local[0]/Local[1] (C4Object.cpp:2788,
         // 5800-5814; C4ValueList.cpp:102-136).
-        let dir = tempfile::tempdir().expect("temporary scenario root");
+        let dir = tempfile::tempdir().test_value();
         let definition = dir.path().join("Defs.c4d/Host.c4d");
-        std::fs::create_dir_all(&definition).expect("definition directory");
+        std::fs::create_dir_all(&definition).test_value();
         std::fs::write(
             definition.join("DefCore.txt"),
             "[DefCore]\nid=HOST\nName=Host\nCategory=1\nCrewMember=0\n",
         )
-        .expect("definition core");
-        std::fs::write(definition.join("Script.c"), "// host\n").expect("definition script");
+        .test_value();
+        std::fs::write(definition.join("Script.c"), "// host\n").test_value();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
             .save(definition.join("Graphics.png"))
-            .expect("definition graphics");
+            .test_value();
 
         let scenario_path = dir.path().join("ParallaxSave.c4s");
-        std::fs::create_dir_all(&scenario_path).expect("scenario directory");
+        std::fs::create_dir_all(&scenario_path).test_value();
         std::fs::write(
             scenario_path.join("Scenario.txt"),
             "[Head]\nTitle=Parallax save\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         )
-        .expect("scenario core");
+        .test_value();
         std::fs::write(
             scenario_path.join("Objects.txt"),
             "[Object]\nid=HOST\nNumber=1\nStatus=1\nCategory=2097153\nX=50\nY=30\nLocals=2;i50,i25\n",
-        )
-        .expect("saved object");
+        ).test_value();
 
         let scenario = Scenario::load_from_path_with(
             &scenario_path,
@@ -8340,12 +8049,10 @@ mod tests {
                 root: dir.path().to_path_buf(),
             },
         )
-        .expect("saved scenario loads");
+        .test_value();
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("saved scenario applies");
-        let restored = engine
-            .object_snapshot(ObjectId::new(1))
-            .expect("saved parallax host restored");
+        scenario.apply(&mut engine).test_value();
+        let restored = engine.object_snapshot(ObjectId::new(1)).test_value();
 
         assert_eq!(
             restored
@@ -8374,16 +8081,13 @@ mod tests {
         // uses ten 3x3 frames. Phase four's opaque centre is grey 184.
         let definition = crate::test_support::repo_root()
             .join("content/Objects.c4d/Environment.c4d/Stars.c4d/Star.c4d");
-        let def_core = std::fs::read_to_string(definition.join("DefCore.txt"))
-            .expect("read shipped STAR DefCore");
+        let def_core = std::fs::read_to_string(definition.join("DefCore.txt")).test_value();
         assert!(def_core.lines().any(|line| line.trim() == "BlitMode=1"));
         let rgba = image::open(definition.join("Graphics.png"))
-            .expect("decode shipped STAR graphics")
+            .test_value()
             .into_rgba8();
         let (width, height) = rgba.dimensions();
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(width, height, rgba.into_raw()),
             actions: HashMap::from([(
                 "Appear".to_string(),
                 DefinitionActionGraphics {
@@ -8399,14 +8103,8 @@ mod tests {
                     ..DefinitionActionGraphics::default()
                 },
             )]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(width, height, rgba.into_raw()))
         };
         let mut star = make_snapshot().objects.remove(0);
         star.definition_id = "STAR".to_string();
@@ -8415,12 +8113,11 @@ mod tests {
         star.action.phase = 4;
         star.blit_mode = 1;
         star.crew_member = false;
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             10,
             10,
             10,
             "Shipped STAR additive",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("STAR", None), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -8494,21 +8191,13 @@ mod tests {
         sprites.insert(
             sprite_map_key("TopMod2", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+                ..test_sprite(ImageData::new(
                     2,
                     1,
                     vec![0, 0, 0, 0, source.r, source.g, source.b, source.a],
-                ),
-                actions: HashMap::new(),
-                color_mask: None,
-                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
-                picture: None,
+                ))
             },
         );
         sprites.insert(
@@ -8535,12 +8224,11 @@ mod tests {
             make_object(3, "TopMod2", Vector2::new(5, 2), "Idle", 0),
             make_object(4, "RotatedMod2", Vector2::new(8, 2), "Idle", 45),
         ];
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             11,
             5,
             5,
             "Object MOD2 routes",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -8576,33 +8264,15 @@ mod tests {
         sprites.insert(
             sprite_map_key("BlackMod2", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![200, 200, 200, 255]),
-                actions: HashMap::new(),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(1, 1, vec![200, 200, 200, 255]))
             },
         );
         sprites.insert(
             sprite_map_key("AddMod2", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![64, 128, 192, 128]),
-                actions: HashMap::new(),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(1, 1, vec![64, 128, 192, 128]))
             },
         );
         let template = make_snapshot().objects.remove(0);
@@ -8620,12 +8290,11 @@ mod tests {
         combined.color_modulation = 0x0020_4080;
         combined.crew_member = false;
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             5,
             3,
             3,
             "MOD2 precedence",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -8685,17 +8354,9 @@ mod tests {
         // owner's raw color independent of global ColorMod; bit 8 selects
         // MOD2 only for the grey owner surface (StdDDraw2.cpp:768-778).
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![255, 255, 255, 255]),
-            actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([64]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![255, 255, 255, 255]))
         };
         let owner = Color::opaque(64, 128, 192);
         let render = |mode| {
@@ -8706,12 +8367,11 @@ mod tests {
             object.color = 0x0040_80c0;
             object.color_modulation = 0x0080_4020;
             object.crew_member = false;
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 3,
                 3,
                 3,
                 "Owner modulation modes",
-                test_font(),
                 Arc::new(HashMap::from([(
                     sprite_map_key("OwnerModes", None),
                     sprite.clone(),
@@ -8750,17 +8410,8 @@ mod tests {
         // white is MOD2-to-white, while explicit black triggers the PerformBlt
         // black reset. Exact parent mode inherits both mode and ColorMod.
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(3, 3, [64, 128, 192, 255].repeat(9)),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(3, 3, [64, 128, 192, 255].repeat(9)))
         };
         let render = |overlay_mode, overlay_modulation, rotation| {
             let mut object = make_snapshot().objects.remove(0);
@@ -8772,12 +8423,11 @@ mod tests {
                 .with_blit_mode(overlay_mode);
             overlay.color_modulation = overlay_modulation;
             object.graphics_overlays = vec![overlay];
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 5,
                 5,
                 5,
                 "Overlay MOD2",
-                test_font(),
                 Arc::new(HashMap::from([(
                     sprite_map_key("OverlayMod2", None),
                     sprite.clone(),
@@ -8821,20 +8471,17 @@ mod tests {
         // base face to pin shipped MOD2 behavior.
         let definition = crate::test_support::repo_root()
             .join("content/Fantasy.c4d/Magic.c4d/Firelump.c4d/Fball.c4d");
-        let def_core = std::fs::read_to_string(definition.join("DefCore.txt"))
-            .expect("read shipped FRBL DefCore");
+        let def_core = std::fs::read_to_string(definition.join("DefCore.txt")).test_value();
         assert!(def_core.lines().any(|line| line.trim() == "BlitMode=2"));
-        let script = std::fs::read(definition.join("Script.c")).expect("read shipped FRBL Script");
+        let script = std::fs::read(definition.join("Script.c")).test_value();
         assert!(script
             .windows(b"SetClrModulation(RGB(iR,iG,64))".len())
             .any(|window| window == b"SetClrModulation(RGB(iR,iG,64))"));
         let rgba = image::open(definition.join("Graphics.png"))
-            .expect("decode shipped FRBL graphics")
+            .test_value()
             .into_rgba8();
         let (width, height) = rgba.dimensions();
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(width, height, rgba.into_raw()),
             actions: HashMap::from([(
                 "Exist".to_string(),
                 DefinitionActionGraphics {
@@ -8842,14 +8489,8 @@ mod tests {
                     ..DefinitionActionGraphics::default()
                 },
             )]),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-5, -5, 10, 10)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(width, height, rgba.into_raw()))
         };
         let mut firelump = make_snapshot().objects.remove(0);
         firelump.definition_id = "FRBL".to_string();
@@ -8858,12 +8499,11 @@ mod tests {
         firelump.blit_mode = 2;
         firelump.color_modulation = 0x0018_2040;
         firelump.crew_member = false;
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             20,
             20,
             20,
             "Shipped FRBL MOD2",
-            test_font(),
             Arc::new(HashMap::from([(sprite_map_key("FRBL", None), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -8894,12 +8534,11 @@ mod tests {
     fn object_and_old_style_pxs_gamma_sample_independent_r16_channels() {
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
         let snapshot = make_snapshot();
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             128,
             128,
             128,
             "Gamma Object/PXS",
-            test_font(),
             solid_sprite(
                 "TestObject",
                 1,
@@ -8945,12 +8584,11 @@ mod tests {
         let mut overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base);
         overlay.definition = Some("Overlay".to_string());
         object.graphics_overlays.push(overlay);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             9,
             9,
             9,
             "Gamma Rotated Overlay",
-            test_font(),
             solid_sprite(
                 "Overlay",
                 3,
@@ -9029,10 +8667,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene([4, 4], Color::transparent(), &gamma);
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 4],
+            Color::transparent(),
+            &gamma,
+        );
         let GpuCommand::Quad {
             sampler,
             blend,
@@ -9067,7 +8706,7 @@ mod tests {
                 None,
                 None,
             );
-            surface.get_pixel(0, 0).unwrap()
+            surface.get_pixel(0, 0).test_value()
         };
         assert_eq!(alpha_result(false, false), Color::opaque(100, 50, 25));
         assert_eq!(alpha_result(false, true), Color::opaque(151, 75, 38));
@@ -9121,7 +8760,7 @@ mod tests {
                 None,
             );
             (0..4)
-                .map(|x| surface.get_pixel(x, 0).unwrap().r)
+                .map(|x| surface.get_pixel(x, 0).test_value().r)
                 .collect::<Vec<_>>()
         };
         assert_eq!(sample_crop(0), vec![64, 96, 128, 160]);
@@ -9157,7 +8796,7 @@ mod tests {
                 None,
                 Some(&fog),
             );
-            surface.get_pixel(0, 0).unwrap().r
+            surface.get_pixel(0, 0).test_value().r
         };
         assert_eq!(fog_result(false), 65);
         assert_eq!(fog_result(true), 191);
@@ -9204,15 +8843,14 @@ mod tests {
         // (AcidRain.c4m:3). C4PXS::Draw emits that fragment through the active
         // shader gamma textures (C4PXS.cpp:242-277; StdGL.cpp:1082-1087).
         let tutorial = crate::test_support::repo_root().join("content/Tutorial.c4f/Tutorial07.c4s");
-        let script = std::fs::read_to_string(tutorial.join("Script.c"))
-            .expect("read shipped Tutorial07 Script.c");
+        let script = std::fs::read_to_string(tutorial.join("Script.c")).test_value();
         let gamma_values = script
             .lines()
             .find(|line| line.contains("SetGamma("))
-            .expect("shipped Tutorial07 sets gamma")
+            .test_value()
             .split(|character: char| !character.is_ascii_digit())
             .filter(|value| !value.is_empty())
-            .map(|value| value.parse::<u32>().expect("Tutorial07 gamma channel"))
+            .map(|value| value.parse::<u32>().test_value())
             .collect::<Vec<_>>();
         assert_eq!(gamma_values.len(), 9);
         let rgb = |offset: usize| {
@@ -9221,8 +8859,8 @@ mod tests {
                 | gamma_values[offset + 2]
         };
 
-        let material = std::fs::read_to_string(tutorial.join("Material.c4g/AcidRain.c4m"))
-            .expect("read shipped Tutorial07 AcidRain material");
+        let material =
+            std::fs::read_to_string(tutorial.join("Material.c4g/AcidRain.c4m")).test_value();
         let material_color = material
             .lines()
             .find_map(|line| line.strip_prefix("Color="))
@@ -9231,7 +8869,7 @@ mod tests {
             .map(|value| value.parse::<u8>().expect("AcidRain color channel"))
             .collect::<Vec<_>>()
             .try_into()
-            .expect("AcidRain has three RGB triplets");
+            .test_value();
 
         let mut snapshot = make_snapshot();
         snapshot
@@ -9259,7 +8897,7 @@ mod tests {
         );
         let (x, y) = graphics
             .world_to_screen(0, Vector2::new(100, 60))
-            .expect("acid-rain point is in the Tutorial07 viewport");
+            .test_value();
 
         assert_eq!(
             graphics
@@ -9289,10 +8927,9 @@ mod tests {
             crate::test_support::repo_root()
                 .join("content/Tutorial.c4f/Tutorial07.c4s/Material.c4g"),
         )
-        .expect("Tutorial07 Material.c4g opens");
-        let materials =
-            MaterialLibrary::from_group(&material_group).expect("Tutorial07 materials load");
-        let acid = materials.get("AcidRain").expect("AcidRain material");
+        .test_value();
+        let materials = MaterialLibrary::from_group(&material_group).test_value();
+        let acid = materials.get("AcidRain").test_value();
         let color: [u8; 9] = acid
             .int_list("Color")
             .expect("AcidRain color")
@@ -9300,7 +8937,7 @@ mod tests {
             .map(|value| value as u8)
             .collect::<Vec<_>>()
             .try_into()
-            .expect("AcidRain has three RGB triplets");
+            .test_value();
         assert!(acid.value("PXSGfx").is_none());
         assert_eq!(color, [200, 250, 200, 200, 250, 200, 200, 250, 200]);
         assert_eq!(acid.int("Density"), Some(25));
@@ -9344,7 +8981,7 @@ mod tests {
         for (frame_index, &(expected_count, checksum, changed_count, expected_bounds)) in
             expected_frames.iter().enumerate()
         {
-            let snapshot = engine.tick().expect("Tutorial07 weather frame");
+            let snapshot = engine.tick().test_value();
             let pxs = snapshot
                 .particles
                 .iter()
@@ -9423,23 +9060,21 @@ mod tests {
         // The optional liquid-animation tint is off by C++ default
         // (C4Config.cpp:451).
         let mut engine = load_repository_tutorial(7);
-        let snapshot = engine.tick().expect("Tutorial07 first frame");
+        let snapshot = engine.tick().test_value();
         let grid = snapshot
             .landscape
             .as_ref()
             .and_then(Landscape::pixel_grid)
-            .expect("Tutorial07 pixel landscape");
+            .test_value();
 
         let local_material_group = Group::open(
             crate::test_support::repo_root()
                 .join("content/Tutorial.c4f/Tutorial07.c4s/Material.c4g"),
         )
-        .expect("Tutorial07 Material.c4g opens");
-        let texmap_source = local_material_group
-            .read_file("Texmap.txt")
-            .expect("Tutorial07 Texmap.txt reads");
+        .test_value();
+        let texmap_source = local_material_group.read_file("Texmap.txt").test_value();
         let texmap = clonk_resources::texmap::TextureMap::parse_bytes(&texmap_source);
-        let acid_slot = texmap.entry(22).expect("Tutorial07 Acid texmap slot");
+        let acid_slot = texmap.entry(22).test_value();
         assert_eq!(
             (acid_slot.material.as_str(), acid_slot.texture.as_str()),
             ("Acid", "Smooth"),
@@ -9468,16 +9103,11 @@ mod tests {
         }));
 
         let global_material_group =
-            Group::open(crate::test_support::repo_root().join("content/Material.c4g"))
-                .expect("installed Material.c4g opens");
-        let global_materials =
-            MaterialLibrary::from_group(&global_material_group).expect("installed materials load");
-        let acid = global_materials.get("Acid").expect("Acid material");
+            Group::open(crate::test_support::repo_root().join("content/Material.c4g")).test_value();
+        let global_materials = MaterialLibrary::from_group(&global_material_group).test_value();
+        let acid = global_materials.get("Acid").test_value();
         let mut color = [0u8; 9];
-        for (target, source) in color
-            .iter_mut()
-            .zip(acid.int_list("Color").expect("Acid Color"))
-        {
+        for (target, source) in color.iter_mut().zip(acid.int_list("Color").test_value()) {
             *target = source as u8;
         }
         assert_eq!(color, [0, 190, 0, 0, 200, 0, 0, 210, 0]);
@@ -9488,8 +9118,8 @@ mod tests {
         );
         let resource =
             clonk_resources::graphics::GraphicsResource::from_group(global_material_group)
-                .expect("installed material graphics index");
-        let liquid = resource.load_image("LIQUID.png").expect("Liquid texture");
+                .test_value();
+        let liquid = resource.load_image("LIQUID.png").test_value();
         assert_eq!((liquid.width(), liquid.height()), (128, 128));
         let liquid = ImageData::new(liquid.width(), liquid.height(), liquid.pixels().to_vec());
         let material = MaterialRenderInfo::new(
@@ -9539,10 +9169,10 @@ mod tests {
 
         let (screen_x, screen_y) = graphics
             .world_to_screen(focus.owner, focus.position)
-            .expect("screen coordinates available");
+            .test_value();
         let pointer = graphics
             .viewport_point_at(GuiPoint::new(screen_x, screen_y))
-            .expect("viewport pointer available");
+            .test_value();
         assert_eq!(pointer.owner, focus.owner);
         assert!(
             (pointer.world.x - focus.position.x as f32).abs() < 0.5,
@@ -9595,7 +9225,7 @@ mod tests {
 
         let pointer = graphics
             .viewport_output_point_for_owner(0, physical_point)
-            .expect("mouse owner's viewport pointer");
+            .test_value();
         let expected_screen = GuiPoint::new(
             (owner_viewport.rect.x + owner_viewport.rect.width as i32 - 1) as f32,
             physical_point.y,
@@ -9621,9 +9251,7 @@ mod tests {
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
-        let (screen_x, screen_y) = graphics
-            .world_to_screen(1, focus.position)
-            .expect("screen coordinates available");
+        let (screen_x, screen_y) = graphics.world_to_screen(1, focus.position).test_value();
         let point = GuiPoint::new(screen_x, screen_y);
 
         let picked = graphics.crew_at_point(&snapshot, 1, point);
@@ -9654,9 +9282,7 @@ mod tests {
         let focus = snapshot.objects[0].clone();
         let mut graphics = test_graphics(320, 180, 150, "Object Pick");
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&focus)]);
-        let (screen_x, screen_y) = graphics
-            .world_to_screen(1, focus.position)
-            .expect("screen coordinates available");
+        let (screen_x, screen_y) = graphics.world_to_screen(1, focus.position).test_value();
         let point = GuiPoint::new(screen_x, screen_y);
 
         assert_eq!(
@@ -9775,8 +9401,7 @@ mod tests {
         snapshot.objects[0].visibility = VIS_LOCAL;
         snapshot.objects[0].local_vars.insert(
             "__local_0".into(),
-            serde_json::from_value(serde_json::json!({"Int": 1 << 3}))
-                .expect("numbered Local value"),
+            serde_json::from_value(serde_json::json!({"Int": 1 << 3})).test_value(),
         );
         assert!(GraphicsSystem::object_is_visible(
             &snapshot.objects,
@@ -9851,7 +9476,7 @@ mod tests {
         let atlas = graphics.render_frame(&snapshot, &viewports);
         assert!(!atlas.is_empty());
 
-        let ground = graphics.surface().get_pixel(0, 179).unwrap();
+        let ground = graphics.surface().get_pixel(0, 179).test_value();
         assert_ne!(ground, Color::opaque(8, 12, 24));
     }
 
@@ -9914,14 +9539,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("PXS capture remains active")
-            .into_scene(
-                [16, 12],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [16, 12],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 1);
         let GpuCommand::Solid {
             vertices, topology, ..
@@ -9951,14 +9573,11 @@ mod tests {
             );
         }
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("PXS capture remains active")
-            .into_scene(
-                [16, 12],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [16, 12],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         let [GpuCommand::Solid {
             vertices, topology, ..
         }] = scene.commands.as_slice()
@@ -9988,14 +9607,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("PXS capture remains active")
-            .into_scene(
-                [8, 8],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [8, 8],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         let [GpuCommand::Solid {
             vertices, topology, ..
         }] = scene.commands.as_slice()
@@ -10021,14 +9637,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("point capture remains active")
-            .into_scene(
-                [4, 3],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 3],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         let [GpuCommand::Solid {
             vertices,
             topology,
@@ -10056,14 +9669,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("point capture remains active")
-            .into_scene(
-                [4, 3],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [4, 3],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         let [GpuCommand::Solid { vertices, .. }] = scene.commands.as_slice() else {
             panic!("edge DrawPixInt was culled before physical scale was known");
         };
@@ -10182,14 +9792,11 @@ mod tests {
             None,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("selection capture remains active")
-            .into_scene(
-                [12, 10],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [12, 10],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert_eq!(scene.commands.len(), 1);
         let GpuCommand::Solid {
             vertices,
@@ -10449,12 +10056,11 @@ mod tests {
             Some(DefinitionRect::new(0, 0, 1, 1)),
             false,
         );
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "PXS order",
-            test_font(),
             Arc::clone(&sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -10469,7 +10075,7 @@ mod tests {
         );
         let (screen_x, screen_y) = graphics
             .world_to_screen(0, snapshot.objects[0].position)
-            .expect("active viewport");
+            .test_value();
 
         assert_eq!(
             graphics
@@ -10480,12 +10086,11 @@ mod tests {
 
         let mut background_snapshot = snapshot.clone();
         background_snapshot.objects[0].category |= CATEGORY_BACKGROUND_FLAG;
-        let mut background_graphics = GraphicsSystem::new(
+        let mut background_graphics = test_graphics_with(
             80,
             60,
             60,
             "PXS background order",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -10500,7 +10105,7 @@ mod tests {
         );
         let (screen_x, screen_y) = background_graphics
             .world_to_screen(0, background_snapshot.objects[0].position)
-            .expect("active viewport");
+            .test_value();
         let lighting =
             GraphicsSystem::lighting_factor(background_snapshot.environment.settings.time_of_day);
 
@@ -10561,12 +10166,11 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Parallax select mark",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             Arc::new(hud),
@@ -10633,12 +10237,11 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 80,
                 60,
                 60,
                 "Foreground order",
-                test_font(),
                 sprites,
                 empty_cursor_atlas(),
                 Arc::new(hud),
@@ -10742,12 +10345,11 @@ mod tests {
             control: Some(ImageData::new(width, height, pixels)),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             180,
             150,
             "Control Hint",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud_graphics,
@@ -10812,12 +10414,11 @@ mod tests {
             upper_board: Some(board),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             240,
             150,
             "Chrome",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud_graphics,
@@ -10856,12 +10457,11 @@ mod tests {
             upper_board: Some(board),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             240,
             150,
             "Dynamic message board",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud_graphics,
@@ -10922,12 +10522,11 @@ mod tests {
                 upper_board: Some(ImageData::new(4, 55, vec![120; 4 * 55 * 4])),
                 ..HudGraphics::default()
             });
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 800,
                 240,
                 1_000,
                 "Chrome modes",
-                test_font(),
                 empty_sprites(),
                 empty_cursor_atlas(),
                 hud_graphics,
@@ -10984,22 +10583,22 @@ mod tests {
                 });
             match mode {
                 hud::UpperBoardMode::Hide => {
-                    let upper = upper.expect("Hide retains native raw Output facet");
+                    let upper = upper.test_value();
                     assert_eq!((upper.width, upper.height), (800, 55));
                     assert_eq!(message.width, 800);
                 }
                 hud::UpperBoardMode::Full => {
-                    let upper = upper.expect("Full upper-board output facet");
+                    let upper = upper.test_value();
                     assert_eq!((upper.width, upper.height), (800, 55));
                     assert_eq!(message.width, 800);
                 }
                 hud::UpperBoardMode::Small => {
-                    let upper = upper.expect("Small upper-board output facet");
+                    let upper = upper.test_value();
                     assert_eq!((upper.width, upper.height), (800, 27));
                     assert_eq!(message.width, 800);
                 }
                 hud::UpperBoardMode::Mini => {
-                    let upper = upper.expect("Mini upper-board output facet");
+                    let upper = upper.test_value();
                     assert_eq!(upper.width + message.width, 800);
                     assert_eq!(upper.height, message.height);
 
@@ -11038,12 +10637,11 @@ mod tests {
             upper_board: Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4])),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             200,
             1_000,
             "Small world chrome",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud_graphics,
@@ -11072,12 +10670,11 @@ mod tests {
             upper_board: Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4])),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             200,
             1_000,
             "Observer edge chrome",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud_graphics,
@@ -11091,10 +10688,7 @@ mod tests {
         viewport.target_x = viewport.world_width - viewport.logical_width;
         viewport.target_y = viewport.world_height - viewport.logical_height;
         let key = viewport.camera_key;
-        let state = graphics
-            .camera_states
-            .get_mut(&key)
-            .expect("observer camera");
+        let state = graphics.camera_states.get_mut(&key).test_value();
         state.view_x = viewport.target_x;
         state.view_y = viewport.target_y;
 
@@ -11149,54 +10743,60 @@ mod tests {
         graphics.layout_viewports(count)
     }
 
-    #[test]
-    fn splitscreen_layout_matches_cpp_for_two_players() {
-        assert_eq!(
-            viewport_layout(800, 600, 2),
-            vec![
-                SurfaceRect::new(0, 0, 396, 600),
-                SurfaceRect::new(400, 0, 400, 600),
-            ]
-        );
+    macro_rules! viewport_layout_test {
+        ($name:ident, $width:literal, $height:literal, $count:literal, [$($rect:expr),+]) => {
+            #[test]
+            fn $name() {
+                assert_eq!(viewport_layout($width, $height, $count), vec![$($rect),+]);
+            }
+        };
     }
 
-    #[test]
-    fn splitscreen_layout_matches_cpp_for_three_players() {
-        assert_eq!(
-            viewport_layout(800, 600, 3),
-            vec![
-                SurfaceRect::new(0, 0, 262, 600),
-                SurfaceRect::new(266, 0, 262, 600),
-                SurfaceRect::new(532, 0, 266, 600),
-            ]
-        );
-    }
-
-    #[test]
-    fn splitscreen_layout_matches_cpp_for_four_players() {
-        assert_eq!(
-            viewport_layout(800, 600, 4),
-            vec![
-                SurfaceRect::new(0, 0, 396, 296),
-                SurfaceRect::new(400, 0, 400, 296),
-                SurfaceRect::new(0, 300, 396, 300),
-                SurfaceRect::new(400, 300, 400, 300),
-            ]
-        );
-    }
-
-    #[test]
-    fn splitscreen_layout_leaves_cpp_integer_division_remainder_unassigned() {
-        assert_eq!(
-            viewport_layout(801, 601, 4),
-            vec![
-                SurfaceRect::new(0, 0, 396, 296),
-                SurfaceRect::new(400, 0, 400, 296),
-                SurfaceRect::new(0, 300, 396, 300),
-                SurfaceRect::new(400, 300, 400, 300),
-            ]
-        );
-    }
+    viewport_layout_test!(
+        splitscreen_layout_matches_cpp_for_two_players,
+        800,
+        600,
+        2,
+        [
+            SurfaceRect::new(0, 0, 396, 600),
+            SurfaceRect::new(400, 0, 400, 600)
+        ]
+    );
+    viewport_layout_test!(
+        splitscreen_layout_matches_cpp_for_three_players,
+        800,
+        600,
+        3,
+        [
+            SurfaceRect::new(0, 0, 262, 600),
+            SurfaceRect::new(266, 0, 262, 600),
+            SurfaceRect::new(532, 0, 266, 600)
+        ]
+    );
+    viewport_layout_test!(
+        splitscreen_layout_matches_cpp_for_four_players,
+        800,
+        600,
+        4,
+        [
+            SurfaceRect::new(0, 0, 396, 296),
+            SurfaceRect::new(400, 0, 400, 296),
+            SurfaceRect::new(0, 300, 396, 300),
+            SurfaceRect::new(400, 300, 400, 300)
+        ]
+    );
+    viewport_layout_test!(
+        splitscreen_layout_leaves_cpp_integer_division_remainder_unassigned,
+        801,
+        601,
+        4,
+        [
+            SurfaceRect::new(0, 0, 396, 296),
+            SurfaceRect::new(400, 0, 400, 296),
+            SurfaceRect::new(0, 300, 396, 300),
+            SurfaceRect::new(400, 300, 400, 300)
+        ]
+    );
 
     #[test]
     fn disabled_splitscreen_dividers_remove_four_pixel_layout_gaps() {
@@ -11303,7 +10903,7 @@ mod tests {
 
         let degenerate =
             viewport_edge_scroll(SurfaceRect::new(0, 0, 1, 1), GuiPoint::new(0.0, 0.0))
-                .expect("one-pixel viewport is all four edges");
+                .test_value();
         assert_eq!(degenerate.delta, Vector2::ZERO);
         assert_eq!(degenerate.cursor, MouseCursorPhase::DownRight);
         assert_eq!(
@@ -11415,7 +11015,7 @@ mod tests {
             before_projection.content_origin_y + 10.0
         );
 
-        graphics.camera_states.get_mut(&key).unwrap().view_x = 0;
+        graphics.camera_states.get_mut(&key).test_value().view_x = 0;
         assert!(graphics.scroll_observer_viewport(0, Vector2::new(-10, 0)));
         assert_eq!(graphics.camera_states[&key].view_x, 0);
 
@@ -11532,10 +11132,10 @@ mod tests {
 
         let first = graphics
             .render_detached_viewport(&snapshot, &inputs(), 41, 320, 200)
-            .expect("identity 41 is in the supplied list");
+            .test_value();
         let second_frame = graphics
             .render_detached_viewport(&snapshot, &inputs(), 42, 320, 200)
-            .expect("identity 42 is in the supplied list");
+            .test_value();
 
         // The supplied target is filled whole: no split layout, and no
         // upper-board/message-board reservation.
@@ -11600,7 +11200,7 @@ mod tests {
         assert_eq!(fullscreen.len(), 2);
         let _ = graphics
             .render_detached_viewport(&snapshot, &inputs(), 41, 320, 200)
-            .expect("identity 41 is still live");
+            .test_value();
         assert_eq!(
             graphics.active_viewport_projections(),
             fullscreen,
@@ -11633,7 +11233,7 @@ mod tests {
 
         let detached = graphics
             .render_detached_viewport(&snapshot, &inputs(), 7, 320, 200)
-            .expect("identity 7 is in the supplied list");
+            .test_value();
         assert_eq!(
             detached.projection.rect,
             SurfaceRect::new(0, 0, 320, 200),
@@ -11751,9 +11351,7 @@ mod tests {
         assert_eq!(projection[0].owner, OWNER_NONE);
         assert!(projection[0].is_no_owner_viewport);
         assert!(graphics.active_viewports[0].focus.is_none());
-        let capture = graphics
-            .render_full_landscape(&snapshot)
-            .expect("focusless observer still supports full-map capture");
+        let capture = graphics.render_full_landscape(&snapshot).test_value();
         assert_eq!((capture.width(), capture.height()), (256, 120));
     }
 
@@ -11965,7 +11563,7 @@ mod tests {
         let camera = graphics
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
-            .expect("stable viewport camera");
+            .test_value();
         assert_eq!(camera.view_x, 548);
         assert_eq!(graphics.active_viewports[0].viewport_x, 548.0);
     }
@@ -12054,7 +11652,7 @@ mod tests {
                 identity: 42,
                 slot: 0,
             })
-            .expect("film-assigned ownerless camera");
+            .test_value();
         assert_eq!((camera.view_x, camera.view_y), (842, 460));
         let projection = graphics.active_viewport_projections()[0];
         assert_eq!(projection.owner, 0);
@@ -12075,7 +11673,7 @@ mod tests {
         let camera_before = *graphics
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
-            .expect("camera state after baseline render");
+            .test_value();
 
         let shaken = ViewportInput::new(0, Vector2::new(500, 500), 1.0, &snapshot.objects[0])
             .with_offset(Vector2::new(7, -4));
@@ -12084,7 +11682,7 @@ mod tests {
         let camera_after = graphics
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
-            .expect("camera state after shaken render");
+            .test_value();
         assert_eq!(camera_after.view_x, camera_before.view_x);
         assert_eq!(camera_after.view_y, camera_before.view_y);
         assert_eq!(
@@ -12154,12 +11752,11 @@ mod tests {
                 background_color.a,
             ],
         );
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             100,
             80,
             80,
             "Camera border",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             Arc::new(HudGraphics {
@@ -12175,7 +11772,7 @@ mod tests {
         let camera = graphics
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
-            .expect("camera state");
+            .test_value();
         assert_eq!(camera.view_x, -40);
         assert_eq!(graphics.active_viewports[0].content_rect.x, 40);
         assert_eq!(graphics.active_viewports[0].content_rect.width, 60);
@@ -12204,7 +11801,7 @@ mod tests {
                 owner: OWNER_NONE,
                 slot: 0,
             })
-            .expect("no-owner camera");
+            .test_value();
         assert_eq!((camera.view_x, camera.view_y), (200, 210));
     }
 
@@ -12224,7 +11821,7 @@ mod tests {
         let camera = graphics
             .camera_states
             .get(&CameraKey::Player { owner: 0, slot: 0 })
-            .expect("scaled camera");
+            .test_value();
         assert_eq!((camera.view_width, camera.view_height), (67, 54));
         assert_ne!(camera.d_view_x, itofix(CAMERA_UNINITIALIZED));
     }
@@ -12284,7 +11881,7 @@ mod tests {
         let surface = (0..640)
             .map(|x| if x % 2 == 0 { 479 } else { 480 })
             .collect();
-        let mut landscape = Landscape::new(640, surface).expect("valid landscape surface");
+        let mut landscape = Landscape::new(640, surface).test_value();
         landscape.set_world_height(480);
         snapshot.landscape = Some(landscape);
         let background_pattern = [
@@ -12305,12 +11902,11 @@ mod tests {
             background: Some(background),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             1_000,
             800,
             300,
             "Tutorial",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud_graphics,
@@ -12354,22 +11950,16 @@ mod tests {
         let terrain_bottom = graphics
             .surface()
             .get_pixel(terrain_x, last_content_y)
-            .expect("terrain bottom pixel");
+            .test_value();
         let sky_bottom = graphics
             .surface()
             .get_pixel(sky_x, last_content_y)
-            .expect("sky bottom pixel");
+            .test_value();
         assert_ne!(terrain_bottom, sky_bottom, "bottom row must be nonuniform");
 
         for x in [terrain_x, sky_x] {
-            let border = graphics
-                .surface()
-                .get_pixel(x, first_border_y)
-                .expect("first border pixel below content");
-            let last_content = graphics
-                .surface()
-                .get_pixel(x, last_content_y)
-                .expect("last content pixel");
+            let border = graphics.surface().get_pixel(x, first_border_y).test_value();
+            let last_content = graphics.surface().get_pixel(x, last_content_y).test_value();
             assert_eq!(border, pattern_at(x, first_border_y));
             assert_ne!(border, last_content, "terrain edge must not be extended");
         }
@@ -12484,17 +12074,9 @@ mod tests {
         sprites.insert(
             sprite_map_key(definition_id, None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(width, height, pixels),
-                actions: HashMap::new(),
-                color_mask: None,
                 shape,
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
                 stretch_growth,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(width, height, pixels))
             },
         );
         Arc::new(sprites)
@@ -12762,12 +12344,11 @@ mod tests {
             particle("AdditiveRed", 31.0, 18.0, 0, 1.0, ParticleLayer::Global),
         ];
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             64,
             24,
             24,
             "particle draw procedures",
-            test_font(),
             Arc::new(object_sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -12778,7 +12359,7 @@ mod tests {
         graphics
             .surface_mut()
             .set_pixel(31, 18, Color::opaque(50, 20, 30))
-            .expect("seed additive destination");
+            .test_value();
 
         graphics.draw_objects_at_frame(
             0,
@@ -12902,7 +12483,7 @@ mod tests {
         graphics.draw_definition_particles(&particles, &ParticleLayer::Global, None, None);
         let scene = graphics
             .finish_gpu_scene_capture(&clonk_graphics::GammaRamp::identity())
-            .expect("particle scene capture");
+            .test_value();
 
         let [fire2, fire] = scene.commands.as_slice() else {
             panic!("expected one adjacent batch per definition");
@@ -13027,12 +12608,11 @@ mod tests {
         };
         let particles = vec![particle("Fire2", 31.0), particle("Fire", 41.0)];
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             64,
             24,
             24,
             "shipped fire particle blending",
-            test_font(),
             Arc::new(object_sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -13044,7 +12624,7 @@ mod tests {
             graphics
                 .surface_mut()
                 .set_pixel(x, 18, Color::opaque(50, 20, 30))
-                .expect("seed the destination behind each flame");
+                .test_value();
         }
 
         graphics.draw_objects_at_frame(
@@ -13272,12 +12852,11 @@ mod tests {
         .clone();
 
         let render = |fire_particles: bool| {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 32,
                 16,
                 16,
                 "fire particle suppression",
-                test_font(),
                 Arc::new(object_sprites.clone()),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -13346,12 +12925,11 @@ mod tests {
             fire: Some(fire_test_strip()),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             12,
             12,
             12,
             "simple fire fallback",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             hud,
@@ -13411,12 +12989,11 @@ mod tests {
             fire: Some(fire_test_strip()),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             40,
             32,
             32,
             "straight fire facet",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("BurningStraight", None),
                 sprite,
@@ -13471,10 +13048,8 @@ mod tests {
         // TargetPos applies object-local parallax before fire. The existing
         // base-face path intentionally remains transparent at the sampled
         // edge, so this pins the fire coordinates independently.
-        let int_value = |value| {
-            serde_json::from_value(serde_json::json!({ "Int": value }))
-                .expect("deserialize C4Script integer")
-        };
+        let int_value =
+            |value| serde_json::from_value(serde_json::json!({ "Int": value })).test_value();
         object.current_fire_top = None;
         object.category |= CATEGORY_PARALLAX_FLAG;
         object
@@ -13567,28 +13142,20 @@ mod tests {
         ];
 
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(12, 8, vec![0; 12 * 8 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(-6, -4, 12, 8)),
             fire_top: 7,
             rotateable: 1,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(12, 8, vec![0; 12 * 8 * 4]))
         };
         let hud = Arc::new(HudGraphics {
             fire: Some(fire_test_strip()),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             40,
             32,
             32,
             "rotated fire facet",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("BurningRotated", None),
                 sprite,
@@ -13661,24 +13228,15 @@ mod tests {
         object.fire_phase = 0;
 
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
             rotateable: 1,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![0, 0, 0, 0]))
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             10,
             10,
             10,
             "culled fire facet",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("CulledBurning", None),
                 sprite,
@@ -13723,24 +13281,14 @@ mod tests {
         object.on_fire = true;
 
         let sprite = DefinitionSprite {
-            graphics_scale: 1.0,
-            image: ImageData::new(4, 4, vec![0; 4 * 4 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 0, 0)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(4, 4, vec![0; 4 * 4 * 4]))
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             10,
             10,
             10,
             "zero shape fire facet",
-            test_font(),
             Arc::new(HashMap::from([(
                 sprite_map_key("ZeroShapeBurning", None),
                 sprite,
@@ -13827,12 +13375,11 @@ mod tests {
             construction: Some(ImageData::new(2, 2, [0, 200, 0, 255].repeat(4))),
             ..HudGraphics::default()
         });
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Construction sign",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             hud,
@@ -13889,45 +13436,28 @@ mod tests {
         sprites.insert(
             sprite_map_key("TopObject", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(2, 1, vec![0, 0, 0, 0, 0, 200, 0, 255]),
                 actions: HashMap::from([(
                     "Active".to_string(),
                     DefinitionActionGraphics::default(),
                 )]),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
-                picture: None,
+                ..test_sprite(ImageData::new(2, 1, vec![0, 0, 0, 0, 0, 200, 0, 255]))
             },
         );
         sprites.insert(
             sprite_map_key("BaseObject", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![0, 0, 200, 255]),
-                actions: HashMap::new(),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
-                top_face: None,
-                picture: None,
+                ..test_sprite(ImageData::new(1, 1, vec![0, 0, 200, 255]))
             },
         );
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "TopFace pass",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -13985,48 +13515,37 @@ mod tests {
         sprites.insert(
             sprite_map_key("ELEV", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![red.r, red.g, red.b, red.a]),
                 actions: HashMap::from([(
                     "Active".to_string(),
                     DefinitionActionGraphics::default(),
                 )]),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
-                picture: None,
+                ..test_sprite(ImageData::new(1, 1, vec![red.r, red.g, red.b, red.a]))
             },
         );
         sprites.insert(
             sprite_map_key("ELEC", None),
             DefinitionSprite {
-                graphics_scale: 1.0,
-                image: ImageData::new(1, 1, vec![green.r, green.g, green.b, green.a]),
                 actions: HashMap::from([(
                     "Active".to_string(),
                     DefinitionActionGraphics::default(),
                 )]),
-                color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-                fire_top: 0,
-                rotateable: 0,
-                line: 0,
-                stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 10)),
-                picture: None,
+                ..test_sprite(ImageData::new(
+                    1,
+                    1,
+                    vec![green.r, green.g, green.b, green.a],
+                ))
             },
         );
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Elevator object order",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -14061,12 +13580,11 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let green = Color::opaque(0, 200, 0);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Sprite Precedence",
-            test_font(),
             solid_sprite(
                 "TestObject",
                 8,
@@ -14112,12 +13630,11 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let green = Color::opaque(0, 200, 0);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Idle Anchor",
-            test_font(),
             solid_sprite(
                 "TestObject",
                 8,
@@ -14181,12 +13698,11 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let green = Color::opaque(0, 200, 0);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Growth Anchor",
-            test_font(),
             solid_sprite(
                 "TestObject",
                 8,
@@ -14268,15 +13784,14 @@ mod tests {
                 .as_ref()
                 .clone()
                 .remove(&sprite_map_key("TestObject", None))
-                .expect("variant sprite"),
+                .test_value(),
         );
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Variant",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -14365,12 +13880,11 @@ mod tests {
             },
         );
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Facet Anchor",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -14487,12 +14001,11 @@ mod tests {
             },
         );
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Facet target stretch",
-            test_font(),
             Arc::new(sprites),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -14585,7 +14098,7 @@ mod tests {
                     };
                     surface
                         .set_pixel(target_x as u32, target_y as u32, output)
-                        .unwrap();
+                        .test_value();
                 }
             }
         }
@@ -14602,7 +14115,7 @@ mod tests {
             .objects
             .iter()
             .find(|object| object.definition_id == "ELEV")
-            .expect("Tutorial05 creates its partial ELEV");
+            .test_value();
         assert_eq!(partial.construction, 80_000);
         assert_ne!(
             partial.ocf & clonk_engine::ocf::CONSTRUCT,
@@ -14620,7 +14133,7 @@ mod tests {
         let partial_sprites = real_elevator_sprites(&tutorial05);
         let real_elev = partial_sprites
             .get(&sprite_map_key("ELEV", None))
-            .expect("real ELEV sprite");
+            .test_value();
         assert_eq!(real_elev.image.width(), 84);
         assert_eq!(real_elev.image.height(), 56);
         assert_eq!(real_elev.shape, Some(DefinitionRect::new(-14, -28, 28, 56)));
@@ -14638,12 +14151,11 @@ mod tests {
             (16, 16),
             "C++ fctConstruction uses the whole shipped image"
         );
-        let mut partial_graphics = GraphicsSystem::new(
+        let mut partial_graphics = test_graphics_with(
             96,
             112,
             112,
             "real Tutorial05 partial ELEV",
-            test_font(),
             Arc::clone(&partial_sprites),
             empty_cursor_atlas(),
             Arc::new(HudGraphics {
@@ -14721,15 +14233,13 @@ mod tests {
         let mut tutorial06 = load_repository_tutorial(6);
         let elevator_id = tutorial06
             .spawn_object(SpawnConfig::new("ELEV").with_position(Vector2::new(332, 148)))
-            .expect("real Tutorial06 ELEV spawns");
+            .test_value();
         let first_snapshot = tutorial06.snapshot();
-        let elevator = first_snapshot
-            .object(elevator_id)
-            .expect("spawned ELEV is present");
+        let elevator = first_snapshot.object(elevator_id).test_value();
         assert_eq!(elevator.construction, FULL_CON);
         assert_eq!(elevator.action.name, "LiftCase");
-        let case_id = elevator.action.target.expect("LiftCase targets real ELEC");
-        let first_case = first_snapshot.object(case_id).expect("ELEV creates ELEC");
+        let case_id = elevator.action.target.test_value();
+        let first_case = first_snapshot.object(case_id).test_value();
         assert_eq!(first_case.definition_id, "ELEC");
         assert_eq!(
             first_case.action.name, "Wait",
@@ -14745,14 +14255,9 @@ mod tests {
         );
 
         let sprites = real_elevator_sprites(&tutorial06);
-        let elev_sprite = sprites
-            .get(&sprite_map_key("ELEV", None))
-            .expect("real Tutorial06 ELEV sprite");
-        let lift_case = elev_sprite
-            .actions
-            .get("LiftCase")
-            .expect("real ELEV LiftCase ActMap entry");
-        let cable_facet = lift_case.facet.as_ref().expect("LiftCase cable facet");
+        let elev_sprite = sprites.get(&sprite_map_key("ELEV", None)).test_value();
+        let lift_case = elev_sprite.actions.get("LiftCase").test_value();
+        let cable_facet = lift_case.facet.as_ref().test_value();
         assert_eq!(
             (
                 cable_facet.x,
@@ -14768,9 +14273,7 @@ mod tests {
         assert!(lift_case.facet_base);
         assert!(lift_case.facet_target_stretch);
 
-        let case_sprite = sprites
-            .get(&sprite_map_key("ELEC", None))
-            .expect("real Tutorial06 ELEC sprite");
+        let case_sprite = sprites.get(&sprite_map_key("ELEC", None)).test_value();
         assert_eq!(case_sprite.image.width(), 24);
         assert_eq!(case_sprite.image.height(), 28);
         assert_eq!(
@@ -14785,13 +14288,12 @@ mod tests {
 
         let origin = Vector2::new(elevator.position.x - 48, elevator.position.y - 48);
         let render_elevator_base_and_cable = |snapshot: &SimulationSnapshot| {
-            let elevator = snapshot.object(elevator_id).expect("ELEV remains live");
-            let mut graphics = GraphicsSystem::new(
+            let elevator = snapshot.object(elevator_id).test_value();
+            let mut graphics = test_graphics_with(
                 96,
                 128,
                 128,
                 "real Tutorial06 ELEV cable",
-                test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -14813,8 +14315,8 @@ mod tests {
             graphics.surface().clone()
         };
         let expected_elevator_base_and_cable = |snapshot: &SimulationSnapshot| {
-            let elevator = snapshot.object(elevator_id).expect("ELEV remains live");
-            let case = snapshot.object(case_id).expect("ELEC remains live");
+            let elevator = snapshot.object(elevator_id).test_value();
+            let case = snapshot.object(case_id).test_value();
             let mut expected = Surface::new(96, 128, PixelFormat::Rgba8888);
             expected.fill(Color::opaque(0, 0, 0));
             draw_point_region(
@@ -14853,13 +14355,12 @@ mod tests {
             expected
         };
         let render_case = |snapshot: &SimulationSnapshot| {
-            let case = snapshot.object(case_id).expect("ELEC remains live");
-            let mut graphics = GraphicsSystem::new(
+            let case = snapshot.object(case_id).test_value();
+            let mut graphics = test_graphics_with(
                 96,
                 128,
                 128,
                 "real Tutorial06 ELEC carriage",
-                test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -14882,7 +14383,7 @@ mod tests {
             graphics.surface().clone()
         };
         let expected_case = |snapshot: &SimulationSnapshot| {
-            let case = snapshot.object(case_id).expect("ELEC remains live");
+            let case = snapshot.object(case_id).test_value();
             let mut expected = Surface::new(96, 128, PixelFormat::Rgba8888);
             expected.fill(Color::opaque(0, 0, 0));
             // Wait is active but has neither FacetBase nor Facet, so the
@@ -14927,12 +14428,10 @@ mod tests {
         let moved_position = Vector2::new(first_case.position.x, first_case.position.y + 1);
         tutorial06
             .apply_object_update(case_id, ObjectUpdate::new().with_position(moved_position))
-            .expect("move real ELEC by one live simulation pixel");
-        let second_snapshot = tutorial06.tick().expect("next Tutorial06 frame");
+            .test_value();
+        let second_snapshot = tutorial06.tick().test_value();
         assert_eq!(second_snapshot.frame, first_snapshot.frame + 1);
-        let second_case = second_snapshot
-            .object(case_id)
-            .expect("moved ELEC survives");
+        let second_case = second_snapshot.object(case_id).test_value();
         assert_eq!(second_case.position, moved_position);
 
         let second_cable = render_elevator_base_and_cable(&second_snapshot);
@@ -15020,12 +14519,11 @@ mod tests {
         };
         let images = vec![None, None, sheet(150), None, None, sheet(50), None, None];
         let atlas = Arc::new(CursorAtlas::new(images));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             3840,
             8,
             8,
             "HD cursor tiers",
-            test_font(),
             Arc::new(HashMap::new()),
             Arc::clone(&atlas),
             empty_hud_graphics(),
@@ -15046,12 +14544,11 @@ mod tests {
 
         // The policy is configured once at startup, but every resolution
         // change and scenario start builds a fresh GraphicsSystem.
-        let mut rebuilt = GraphicsSystem::new(
+        let mut rebuilt = test_graphics_with(
             3840,
             8,
             8,
             "HD cursor tiers rebuilt",
-            test_font(),
             Arc::new(HashMap::new()),
             atlas,
             empty_hud_graphics(),
@@ -15137,12 +14634,11 @@ mod tests {
         }
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             24,
             24,
             "Mouse scroll cursor",
-            test_font(),
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
             empty_hud_graphics(),
@@ -15222,12 +14718,11 @@ mod tests {
         }
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             24,
             24,
             "Mouse cursor clip",
-            test_font(),
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
             empty_hud_graphics(),
@@ -15261,12 +14756,11 @@ mod tests {
         }
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             48,
             48,
             48,
             "Old-style mouse cursor",
-            test_font(),
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
             empty_hud_graphics(),
@@ -15322,12 +14816,11 @@ mod tests {
         }
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             40,
             40,
             40,
             "GUI help cursor",
-            test_font(),
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
             empty_hud_graphics(),
@@ -15359,12 +14852,11 @@ mod tests {
         }
         let mut entries = vec![None; 8];
         entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             24,
             24,
             24,
             "Construction add marker",
-            test_font(),
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
             empty_hud_graphics(),
@@ -15379,9 +14871,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let cursor_offset = graphics
-            .construction_cursor_primary_offset()
-            .expect("selected Construct cell");
+        let cursor_offset = graphics.construction_cursor_primary_offset().test_value();
         assert_eq!(cursor_offset, GuiPoint::new(2.0, 2.0));
         assert!(graphics.draw_construction_add_marker(
             SurfaceRect::new(0, 0, 24, 24),
@@ -15549,12 +15039,11 @@ mod tests {
         cursor_entries[4] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             800,
             180,
             150,
             "Cursor Scenario",
-            test_font(),
             empty_sprites(),
             cursor_atlas,
             empty_hud_graphics(),
@@ -15615,12 +15104,11 @@ mod tests {
         let image = ImageData::new(40 * cell, cell, pixels);
         let mut entries = vec![None; 8];
         entries[4] = Some(image);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             800,
             180,
             150,
             "Scaled Cursor Scenario",
-            test_font(),
             empty_sprites(),
             Arc::new(CursorAtlas::new(entries)),
             empty_hud_graphics(),
@@ -15636,33 +15124,17 @@ mod tests {
                 frame.copy_from_slice(graphics.surface().pixels());
                 Ok::<bool, ()>(true)
             })
-            .expect("present scaled cursor frame");
+            .test_value();
 
         let points = physical
             .chunks_exact(4)
             .enumerate()
             .filter_map(|(index, pixel)| (pixel == mark).then_some((index % 1600, index / 1600)))
             .collect::<Vec<_>>();
-        let min_x = points
-            .iter()
-            .map(|point| point.0)
-            .min()
-            .expect("cursor pixels");
-        let max_x = points
-            .iter()
-            .map(|point| point.0)
-            .max()
-            .expect("cursor pixels");
-        let min_y = points
-            .iter()
-            .map(|point| point.1)
-            .min()
-            .expect("cursor pixels");
-        let max_y = points
-            .iter()
-            .map(|point| point.1)
-            .max()
-            .expect("cursor pixels");
+        let min_x = points.iter().map(|point| point.0).min().test_value();
+        let max_x = points.iter().map(|point| point.0).max().test_value();
+        let min_y = points.iter().map(|point| point.1).min().test_value();
+        let max_y = points.iter().map(|point| point.1).max().test_value();
         let physical_width = max_x - min_x + 1;
         let physical_height = max_y - min_y + 1;
         assert!(
@@ -15700,12 +15172,11 @@ mod tests {
         cursor_entries[7] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             180,
             150,
             "Cursor Label Scenario",
-            test_font(),
             empty_sprites(),
             cursor_atlas,
             empty_hud_graphics(),
@@ -15854,12 +15325,11 @@ mod tests {
                          width: u32,
                          height: u32,
                          zoom: f32| {
-            let mut graphics = GraphicsSystem::new(
+            let mut graphics = test_graphics_with(
                 width,
                 height,
                 height as i32,
                 "Crew label",
-                test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
@@ -16126,10 +15596,11 @@ mod tests {
             &fog,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("GPU capture remains active")
-            .into_scene([3, 2], Color::transparent(), &gamma);
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [3, 2],
+            Color::transparent(),
+            &gamma,
+        );
         assert_eq!(scene.commands.len(), 1);
         assert_eq!(scene.textures.len(), 1);
         let GpuCommand::Quad {
@@ -16153,7 +15624,7 @@ mod tests {
         let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
         PremultipliedTextLayer::new(&mut surface)
             .blend_fragment(0, 0, [120.0, 80.0, 40.0, 128.0], None)
-            .unwrap();
+            .test_value();
 
         assert_eq!(surface.get_pixel(0, 0), Some(Color::new(60, 40, 20, 128)));
         let image = retained_straight_alpha_text_image(&surface);
@@ -16199,14 +15670,11 @@ mod tests {
             &fog,
         );
 
-        let scene = surface
-            .take_gpu_scene_capture()
-            .expect("markup capture remains active")
-            .into_scene(
-                [8, 4],
-                Color::transparent(),
-                &clonk_graphics::GammaRamp::standard(),
-            );
+        let scene = surface.take_gpu_scene_capture().test_value().into_scene(
+            [8, 4],
+            Color::transparent(),
+            &clonk_graphics::GammaRamp::standard(),
+        );
         assert!(!scene.commands.is_empty());
         assert!(
             scene
@@ -16257,7 +15725,7 @@ mod tests {
         let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
-        let name_only_top = min_red_y(&graphics).expect("name label drawn");
+        let name_only_top = min_red_y(&graphics).test_value();
 
         let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
         let mut players = graphics.hud_players.clone();
@@ -16281,7 +15749,7 @@ mod tests {
         });
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
-        let ranked_top = min_red_y(&graphics).expect("rank|name label drawn");
+        let ranked_top = min_red_y(&graphics).test_value();
 
         assert!(
             ranked_top < name_only_top,
@@ -16617,12 +16085,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Energy Scenario",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             Arc::new(hud),
@@ -16681,12 +16148,11 @@ mod tests {
 
         let bolt = Color::opaque(231, 47, 113);
         let bolt_image = ImageData::new(5, 3, [bolt.r, bolt.g, bolt.b, bolt.a].repeat(5 * 3));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             120,
             80,
             "NeedEnergy",
-            test_font(),
             sprites,
             empty_cursor_atlas(),
             Arc::new(HudGraphics {
@@ -16742,8 +16208,7 @@ mod tests {
                 continue;
             }
             let projection = graphics.active_viewport_projections()[0];
-            let (logical_x, logical_y) =
-                expected_origin.expect("visible bolt has an oracle origin");
+            let (logical_x, logical_y) = expected_origin.test_value();
             let logical_origin = Vector2::new(logical_x, logical_y);
             let (output_x, output_y) = projection.logical_to_output(logical_origin);
             let output_x = output_x.round() as u32;
@@ -16847,12 +16312,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "SelectMark Scenario",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             Arc::new(hud),
@@ -16908,12 +16372,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "SelectMark Scenario",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             Arc::new(hud),
@@ -16965,12 +16428,11 @@ mod tests {
             select_mark: Some(ImageData::new(20, 5, pixels)),
             ..Default::default()
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             80,
             60,
             60,
             "Mouse selection candidates",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             Arc::new(hud),
@@ -17022,12 +16484,11 @@ mod tests {
         cursor_entries[7] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             320,
             180,
             150,
             "Cursor Scenario",
-            test_font(),
             empty_sprites(),
             cursor_atlas,
             empty_hud_graphics(),
@@ -17098,7 +16559,7 @@ mod tests {
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
-        let top = graphics.surface().get_pixel(0, 0).unwrap();
+        let top = graphics.surface().get_pixel(0, 0).test_value();
         assert!(
             top.r > top.b,
             "expected the red fade_top at the top of the view, got {top:?}"
@@ -17175,9 +16636,7 @@ mod tests {
 
         graphics.begin_gpu_scene_capture();
         graphics.draw_sky(None, &environment, &[], &[], &[], 1.0, Some(&gamma));
-        let scene = graphics
-            .finish_gpu_scene_capture(&gamma)
-            .expect("GPU capture remains active");
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         let (body_index, texture) = scene
             .commands
             .iter()
@@ -17192,7 +16651,7 @@ mod tests {
                 } => Some((index, *texture)),
                 _ => None,
             })
-            .expect("the celestial body must be a retained textured quad");
+            .test_value();
 
         assert!(matches!(
             scene.commands.first(),
@@ -17387,7 +16846,7 @@ mod tests {
         let mut day_view = test_graphics(120, 80, 60, "Day");
         let day_viewports = vec![ViewportInput::from_focus(focus)];
         day_view.render_frame(&daytime, &day_viewports);
-        let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
+        let day_pixel = day_view.surface().get_pixel(0, 0).test_value();
 
         let mut nighttime = daytime.clone();
         // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
@@ -17396,7 +16855,7 @@ mod tests {
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
-        let night_pixel = night_view.surface().get_pixel(0, 0).unwrap();
+        let night_pixel = night_view.surface().get_pixel(0, 0).test_value();
 
         let base_color = Color::opaque(160, 160, 160);
         let day_factor = GraphicsSystem::lighting_factor(daytime.environment.settings.time_of_day);
@@ -17429,7 +16888,7 @@ mod tests {
         let day_pixel = day_view
             .surface()
             .get_pixel(day_screen_x, day_screen_y)
-            .unwrap();
+            .test_value();
 
         let mut nighttime = daytime.clone();
         // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
@@ -17444,7 +16903,7 @@ mod tests {
         let night_pixel = night_view
             .surface()
             .get_pixel(night_screen_x, night_screen_y)
-            .unwrap();
+            .test_value();
 
         let day_factor = GraphicsSystem::lighting_factor(daytime.environment.settings.time_of_day);
         let night_factor =
@@ -17472,10 +16931,7 @@ mod tests {
         let viewports = vec![ViewportInput::new(0, Vector2::new(20, 20), 1.0, focus)];
         graphics.render_frame(&snapshot, &viewports);
 
-        let viewport = graphics
-            .active_viewports
-            .first()
-            .expect("expected active viewport");
+        let viewport = graphics.active_viewports.first().test_value();
         assert!(viewport.content_rect.width < viewport.rect.width);
         assert_eq!(viewport.content_rect.width, 40);
 
@@ -17506,7 +16962,7 @@ mod tests {
         let pixel = graphics
             .surface()
             .get_pixel(screen_x, screen_y)
-            .expect("pixel in bounds");
+            .test_value();
 
         let lighting = GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day);
         let liquid = GraphicsSystem::apply_lighting(
@@ -17620,7 +17076,7 @@ mod tests {
                 "material_names": [null, "Water", "Earth"]
             }
         }))
-        .expect("liquid and solid pixel landscape");
+        .test_value();
         let textures = Arc::new(HashMap::from([
             (
                 "liquid".to_string(),
@@ -17722,7 +17178,7 @@ mod tests {
                 "material_names": []
             }
         }))
-        .expect("PNG-backed exact landscape");
+        .test_value();
         let mut graphics = test_graphics(2, 1, 1, "Exact Landscape.png");
 
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
@@ -17816,7 +17272,7 @@ mod tests {
                 })
                 .collect(),
         });
-        let grid = landscape.pixel_grid().expect("pixel grid").clone();
+        let grid = landscape.pixel_grid().test_value().clone();
         let border_state = (
             landscape.left_open(),
             landscape.right_open(),
@@ -17992,8 +17448,8 @@ mod tests {
         let mut parallel = make_graphics();
         assert!(parallel.draw_ground_textured_with_parallel_rows(Some(&landscape), None, true,));
 
-        let scalar = scalar.landscape_cache.as_ref().expect("scalar cache");
-        let parallel = parallel.landscape_cache.as_ref().expect("parallel cache");
+        let scalar = scalar.landscape_cache.as_ref().test_value();
+        let parallel = parallel.landscape_cache.as_ref().test_value();
         assert_eq!(parallel.pixels, scalar.pixels);
         assert_eq!(parallel.liquid_mask, scalar.liquid_mask);
         assert_eq!(parallel.gpu_dirty, scalar.gpu_dirty);
@@ -18019,7 +17475,7 @@ mod tests {
                 "material_names": [null, "Acid"]
             }
         }))
-        .expect("pixel landscape");
+        .test_value();
         landscape.set_liquid_column(
             0,
             vec![LiquidSegment::with_material(0, 0, MaterialId::new(1))],
@@ -18218,7 +17674,7 @@ mod tests {
                 "material_names": [null, "Earth"]
             }
         }))
-        .expect("pixel landscape");
+        .test_value();
         let textures = HashMap::from([
             (
                 "rough".to_string(),
@@ -18243,7 +17699,7 @@ mod tests {
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(10, 20, 30))
-            .expect("sky pixel");
+            .test_value();
         graphics.set_material_textures(Arc::new(textures));
         graphics.set_material_render_info(Arc::new(materials));
 
@@ -18273,8 +17729,8 @@ mod tests {
                 "material_names": [null, "Earth"]
             }
         }))
-        .expect("pixel landscape");
-        let cached_grid = landscape.pixel_grid().expect("pixel grid").clone();
+        .test_value();
+        let cached_grid = landscape.pixel_grid().test_value().clone();
         let mut graphics = test_graphics(1, 1, 1, "Gamma Material");
         graphics.set_material_textures(Arc::new(HashMap::from([(
             "rough".to_string(),
@@ -18294,7 +17750,7 @@ mod tests {
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(200, 200, 200))
-            .expect("sky pixel");
+            .test_value();
         let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
         assert!(graphics.draw_ground_textured(Some(&landscape), Some(&gamma)));
@@ -18317,9 +17773,9 @@ mod tests {
             renderer_config: AdvancedRendererConfig::DEFAULT,
         };
         let with_modulation = |landscape: Landscape, modulation: u32| {
-            let mut value = serde_json::to_value(landscape).expect("landscape serializes");
+            let mut value = serde_json::to_value(landscape).test_value();
             value["modulation"] = serde_json::json!(modulation);
-            serde_json::from_value::<Landscape>(value).expect("modulated landscape decodes")
+            serde_json::from_value::<Landscape>(value).test_value()
         };
 
         let render_textured = |modulation| {
@@ -18338,7 +17794,7 @@ mod tests {
                     "material_names": [null, "Earth"]
                 }
             }))
-            .expect("pixel landscape");
+            .test_value();
             let mut graphics = test_graphics(1, 1, 1, "modulated landscape");
             graphics.set_material_textures(Arc::new(HashMap::from([(
                 "rough".to_string(),
@@ -18349,7 +17805,7 @@ mod tests {
                 MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
             )])));
             let mut cache = LandscapeRenderCache::new(
-                landscape.pixel_grid().expect("pixel grid").clone(),
+                landscape.pixel_grid().test_value().clone(),
                 1,
                 1,
                 false,
@@ -18360,9 +17816,9 @@ mod tests {
             graphics
                 .surface_mut()
                 .set_pixel(0, 0, background)
-                .expect("background pixel");
+                .test_value();
             assert!(graphics.draw_ground_textured(Some(&landscape), Some(&gamma)));
-            graphics.surface().get_pixel(0, 0).expect("drawn pixel")
+            graphics.surface().get_pixel(0, 0).test_value()
         };
 
         for modulation in [0, MODULATION] {
@@ -18386,8 +17842,8 @@ mod tests {
             assert!(!graphics.draw_ground(0, Some(&landscape), 1.0, Some(&gamma)));
             graphics.draw_liquids(0, Some(&landscape), 1.0, Some(&gamma));
             (
-                graphics.surface().get_pixel(0, 0).expect("liquid pixel"),
-                graphics.surface().get_pixel(0, 1).expect("ground pixel"),
+                graphics.surface().get_pixel(0, 0).test_value(),
+                graphics.surface().get_pixel(0, 1).test_value(),
             )
         };
 
@@ -18471,7 +17927,7 @@ mod tests {
                 ),
             ])));
             assert!(graphics.draw_ground_textured(Some(&landscape), None));
-            let cache = graphics.landscape_cache.as_ref().expect("cache built");
+            let cache = graphics.landscape_cache.as_ref().test_value();
             (0..height as usize)
                 .map(|y| {
                     let offset = (y * WIDTH as usize + 1) * 4;
@@ -18558,12 +18014,11 @@ mod tests {
                 pxs_slot: None,
             })
             .collect::<Vec<_>>();
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             120,
             120,
             "particle layer index",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -18725,24 +18180,16 @@ mod tests {
             ..DefinitionActionGraphics::default()
         };
         let sprite = DefinitionSprite {
-            image: ImageData::new(300, 110, vec![255; 300 * 110 * 4]),
             actions: HashMap::from([("Walk".to_string(), walk)]),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
             stretch_growth: true,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(300, 110, vec![255; 300 * 110 * 4]))
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             640,
             420,
             420,
             "ST5B compact capture",
-            test_font(),
             Arc::new(HashMap::from([("ST5B".to_string(), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -18762,9 +18209,7 @@ mod tests {
             Some(&gamma),
         );
 
-        let scene = graphics
-            .finish_gpu_scene_capture(&gamma)
-            .expect("GPU capture was started");
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("representable ST5B faces entered the generic capture path");
         };
@@ -18802,24 +18247,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let sprite = DefinitionSprite {
-            image: ImageData::new(30, 15, vec![255; 30 * 15 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(15, 0, 15, 15, 0, 0)),
-            picture: None,
+            ..test_sprite(ImageData::new(30, 15, vec![255; 30 * 15 * 4]))
         };
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             48,
             32,
             32,
             "compact base and top ordering",
-            test_font(),
             Arc::new(HashMap::from([("Layered".to_owned(), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -18839,9 +18275,7 @@ mod tests {
             Some(&gamma),
         );
 
-        let scene = graphics
-            .finish_gpu_scene_capture(&gamma)
-            .expect("GPU capture was started");
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         let [GpuCommand::ObjectBatch { sprites, .. }] = scene.commands.as_slice() else {
             panic!("base and TopFace sprites split out of their ordered resource run");
         };
@@ -18872,25 +18306,15 @@ mod tests {
         object.construction = FULL_CON / 2;
         object.ocf = clonk_engine::ocf::CONSTRUCT;
         let sprite = DefinitionSprite {
-            image: ImageData::new(15, 15, vec![255; 15 * 15 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(15, 15, vec![255; 15 * 15 * 4]))
         };
         let construction = ImageData::new(16, 16, vec![255; 16 * 16 * 4]);
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             32,
             32,
             32,
             "construction fallback",
-            test_font(),
             Arc::new(HashMap::from([("Building".to_owned(), sprite)])),
             empty_cursor_atlas(),
             Arc::new(HudGraphics {
@@ -18913,9 +18337,7 @@ mod tests {
             Some(&gamma),
         );
 
-        let scene = graphics
-            .finish_gpu_scene_capture(&gamma)
-            .expect("GPU capture was started");
+        let scene = graphics.finish_gpu_scene_capture(&gamma).test_value();
         assert!(matches!(
             scene.commands.first(),
             Some(GpuCommand::ObjectBatch { .. })
@@ -18930,25 +18352,15 @@ mod tests {
     #[test]
     fn normal_object_draw_borrows_default_sprite_keys() {
         let sprite = DefinitionSprite {
-            image: ImageData::new(1, 1, vec![255; 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![255; 4]))
         };
         let snapshot = make_snapshot();
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             120,
             120,
             "borrowed sprite keys",
-            test_font(),
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -18973,25 +18385,15 @@ mod tests {
     #[test]
     fn object_without_top_face_or_construction_skips_top_face_draw_setup() {
         let sprite = DefinitionSprite {
-            image: ImageData::new(1, 1, vec![255; 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![255; 4]))
         };
         let snapshot = make_snapshot();
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             120,
             120,
             "absent top face",
-            test_font(),
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -19016,25 +18418,15 @@ mod tests {
     #[test]
     fn objects_without_overlays_skip_recursive_ancestry_setup() {
         let sprite = DefinitionSprite {
-            image: ImageData::new(1, 1, vec![255; 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
-            stretch_growth: false,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(1, 1, vec![255; 4]))
         };
         let snapshot = make_snapshot();
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             120,
             120,
             "absent overlays",
-            test_font(),
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -19061,26 +18453,17 @@ mod tests {
         // C4Object::Draw has one output-boundary return before overlays and
         // selection graphics (src/C4Object.cpp:2266-2283).
         let sprite = DefinitionSprite {
-            image: ImageData::new(15, 15, vec![255; 15 * 15 * 4]),
-            actions: HashMap::new(),
-            color_mask: None,
-            graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(-7, -7, 15, 15)),
-            fire_top: 0,
-            rotateable: 0,
-            line: 0,
             stretch_growth: true,
-            top_face: None,
-            picture: None,
+            ..test_sprite(ImageData::new(15, 15, vec![255; 15 * 15 * 4]))
         };
         let mut snapshot = make_snapshot();
         snapshot.objects[0].need_energy = true;
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             160,
             120,
             120,
             "single output reach",
-            test_font(),
             Arc::new(HashMap::from([("TestObject".to_owned(), sprite)])),
             empty_cursor_atlas(),
             Arc::new(HudGraphics {
@@ -19132,12 +18515,11 @@ mod tests {
             material_names,
             texture_names,
         ));
-        let mut graphics = GraphicsSystem::new(
+        let mut graphics = test_graphics_with(
             WIDTH,
             HEIGHT,
             HEIGHT as i32,
             "landscape cache anchor",
-            test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             empty_hud_graphics(),
@@ -19151,14 +18533,8 @@ mod tests {
             MaterialRenderInfo::new([100, 100, 100, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 50),
         )])));
 
-        let anchor = |graphics: &GraphicsSystem| {
-            graphics
-                .landscape_cache
-                .as_ref()
-                .expect("cache built")
-                .grid
-                .clone()
-        };
+        let anchor =
+            |graphics: &GraphicsSystem| graphics.landscape_cache.as_ref().test_value().grid.clone();
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
         let first = anchor(&graphics);
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
@@ -19192,7 +18568,7 @@ mod tests {
             "changed landscape did not re-anchor its cache lineage"
         );
 
-        let grid = landscape.pixel_grid().expect("grid");
+        let grid = landscape.pixel_grid().test_value();
         let start = std::time::Instant::now();
         const CLONES: u32 = 1000;
         for _ in 0..CLONES {
@@ -19239,17 +18615,17 @@ mod tests {
         )])));
 
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        let before = landscape.pixel_grid().expect("grid").bytes().as_ptr();
+        let before = landscape.pixel_grid().test_value().bytes().as_ptr();
 
         landscape.grid_write_byte(17, 23, 2);
 
-        let after = landscape.pixel_grid().expect("grid").bytes().as_ptr();
+        let after = landscape.pixel_grid().test_value().bytes().as_ptr();
         assert_eq!(
             after, before,
             "renderer lineage metadata retained the full simulation byte plane"
         );
         assert!(graphics.draw_ground_textured(Some(&landscape), None));
-        let cache = graphics.landscape_cache.as_ref().expect("cache patched");
+        let cache = graphics.landscape_cache.as_ref().test_value();
         let slot = (23 * WIDTH as usize + 17) * 4;
         assert_eq!(
             &cache.pixels[slot..slot + 4],
@@ -19304,7 +18680,7 @@ mod tests {
             3 * 17,
             "Relight expands one Surface8 change by x=1 and y=8"
         );
-        let cache = graphics.landscape_cache.as_ref().expect("cache patched");
+        let cache = graphics.landscape_cache.as_ref().test_value();
         let color_at = |x: i32, y: i32| {
             let offset = (y as usize * WIDTH as usize + x as usize) * 4;
             Color::new(
@@ -19407,7 +18783,7 @@ mod tests {
         let unchanged_material = graphics
             .surface()
             .get_pixel(CHANGE_X as u32 - 1, 0)
-            .expect("neighboring material pixel");
+            .test_value();
         assert_eq!(
             graphics.surface().get_pixel(CHANGE_X as u32, 0),
             Some(BACKGROUND),
@@ -19535,7 +18911,7 @@ mod tests {
             (WIDTH * HEIGHT) as usize,
             "the cold cache composes the complete raster once"
         );
-        let before = graphics.surface().get_pixel(0, 0).expect("visible pixel");
+        let before = graphics.surface().get_pixel(0, 0).test_value();
         let mut sibling = landscape.clone();
 
         landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);

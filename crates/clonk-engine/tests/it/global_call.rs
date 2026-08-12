@@ -28,15 +28,15 @@ global func ProbeGlobalFrame() {
 func ProbeGlobalWrapper() { return global->ProbeGlobalFrame(); }
 "#;
     let mut engine = Engine::new();
-    engine
-        .register_script_definition("GLOB", "Global-call probe", script)
-        .expect("global-call probe registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("GLOB").with_position(Vector2::new(42, 100)))
-        .expect("probe object spawns");
-    let index = engine
-        .find_object_index(object)
-        .expect("probe object exists");
+    crate::support::TestValueExt::test_value(engine.register_script_definition(
+        "GLOB",
+        "Global-call probe",
+        script,
+    ));
+    let object = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("GLOB").with_position(Vector2::new(42, 100))),
+    );
+    let index = crate::support::TestValueExt::test_value(engine.find_object_index(object));
 
     assert_eq!(
         engine

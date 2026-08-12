@@ -9,10 +9,10 @@ fn evaluate(strict_level: u8, body: &str) -> Value {
     } else {
         format!("#strict {strict_level}")
     };
-    engine
-        .load_script(&format!("{strict}\nfunc Probe() {{ {body} }}"))
-        .expect("strictness probe compiles");
-    engine.call("Probe", &[]).expect("probe executes")
+    crate::support::TestValueExt::test_value(
+        engine.load_script(&format!("{strict}\nfunc Probe() {{ {body} }}")),
+    );
+    crate::support::TestValueExt::test_value(engine.call("Probe", &[]))
 }
 
 #[test]

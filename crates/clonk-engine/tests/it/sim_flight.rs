@@ -1,3 +1,4 @@
+use crate::support::EngineTestExt;
 use clonk_engine::landscape::PixelGrid;
 use clonk_engine::{
     command::CommandId, math::itofix_prec, ActionSpec, ActionState, CommandDirection, Definition,
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use crate::support::real_scenario::load_tutorial;
 
 fn call_probe(script: &str, landscape: Landscape, physics: PhysicsSettings) -> Value {
-    call_probe_result(script, landscape, physics).expect("Probe runs")
+    crate::support::TestValueExt::test_value(call_probe_result(script, landscape, physics))
 }
 
 fn call_probe_result(
@@ -23,13 +24,10 @@ fn call_probe_result(
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(landscape);
     engine.set_physics(physics);
-    engine
-        .register_script_definition("TFLT", "SimFlight probe", script)
-        .expect("probe definition registers");
-    let object = engine
-        .spawn_object(SpawnConfig::new("TFLT").with_position(Vector2::new(1, 1)))
-        .expect("probe object spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    engine.register_test_script_definition("TFLT", "SimFlight probe", script);
+    let object =
+        engine.spawn_test_object(SpawnConfig::new("TFLT").with_position(Vector2::new(1, 1)));
+    let index = engine.test_object_index(object);
     engine.call_object_function(index, "Probe", Vec::new())
 }
 
@@ -84,35 +82,34 @@ protected func Probe(pTarget)
 }
 "#;
 
-    let mut definition =
-        Definition::from_script("ROTN", "Foreign rotation probe", script).expect("script compiles");
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "ROTN",
+        "Foreign rotation probe",
+        script,
+    ));
     definition.set_rotateable(360);
 
     let mut engine = Engine::with_seed(17);
-    engine
-        .register_definition(definition)
-        .expect("probe definition registers");
-    let caller = engine
-        .spawn_object(
-            SpawnConfig::new("ROTN")
-                .with_category(CATEGORY_OBJECT)
-                .with_rotation(-29)
-                .with_rotation_velocity(itofix_prec(91, 10)),
-        )
-        .expect("caller spawns");
-    let target = engine
-        .spawn_object(
-            SpawnConfig::new("ROTN")
-                .with_category(CATEGORY_OBJECT)
-                .with_rotation(137)
-                .with_rotation_velocity(itofix_prec(23, 10)),
-        )
-        .expect("target spawns");
+    engine.register_test_definition(definition);
+    let caller = engine.spawn_test_object(
+        SpawnConfig::new("ROTN")
+            .with_category(CATEGORY_OBJECT)
+            .with_rotation(-29)
+            .with_rotation_velocity(itofix_prec(91, 10)),
+    );
+    let target = engine.spawn_test_object(
+        SpawnConfig::new("ROTN")
+            .with_category(CATEGORY_OBJECT)
+            .with_rotation(137)
+            .with_rotation_velocity(itofix_prec(23, 10)),
+    );
 
-    let caller_index = engine.find_object_index(caller).expect("caller exists");
-    let result = engine
-        .call_object_function(caller_index, "Probe", vec![Value::Object(target.as_u64())])
-        .expect("foreign rotation probe runs");
+    let caller_index = engine.test_object_index(caller);
+    let result = engine.call_test_object_function(
+        caller_index,
+        "Probe",
+        vec![Value::Object(target.as_u64())],
+    );
     assert_eq!(
         result,
         Value::Array(vec![
@@ -129,10 +126,10 @@ protected func Probe(pTarget)
     );
 
     let snapshot = engine.snapshot();
-    let target_state = snapshot.object(target).expect("target remains live");
+    let target_state = crate::support::TestValueExt::test_value(snapshot.object(target));
     assert_eq!(target_state.rotation, 271);
     assert_eq!(target_state.rotation_velocity, Some(itofix_prec(-47, 10)));
-    let caller_state = snapshot.object(caller).expect("caller remains live");
+    let caller_state = crate::support::TestValueExt::test_value(snapshot.object(caller));
     assert_eq!(caller_state.rotation, -29);
     assert_eq!(caller_state.rotation_velocity, Some(itofix_prec(91, 10)));
 }
@@ -157,8 +154,11 @@ protected func Probe(pTarget)
             .with_procedure("walk")
             .with_attach(CNAT_BOTTOM),
     );
-    let mut definition = Definition::from_script("WROT", "Foreign walk rotation probe", script)
-        .expect("probe compiles");
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "WROT",
+        "Foreign walk rotation probe",
+        script,
+    ));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_rotateable(45);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -166,10 +166,10 @@ protected func Probe(pTarget)
     let mut engine = Engine::with_seed(17);
     let mut surface = vec![25; 32];
     surface.extend(vec![5; 32]);
-    engine.set_landscape(Landscape::new(64, surface).expect("slope landscape builds"));
-    engine
-        .register_definition(definition)
-        .expect("probe definition registers");
+    engine.set_landscape(crate::support::TestValueExt::test_value(Landscape::new(
+        64, surface,
+    )));
+    engine.register_test_definition(definition);
 
     let attached = ShapeAttachRecord {
         mat_valid: true,
@@ -183,7 +183,7 @@ protected func Probe(pTarget)
         .with_action(ActionState::new("Walk"))
         .with_rotation_velocity(itofix_prec(41, 100));
     caller_config.shape_attach = Some(attached);
-    let caller = engine.spawn_object(caller_config).expect("caller spawns");
+    let caller = engine.spawn_test_object(caller_config);
 
     let mut target_config = SpawnConfig::new("WROT")
         .with_category(CATEGORY_OBJECT)
@@ -191,24 +191,24 @@ protected func Probe(pTarget)
         .with_rotation(6)
         .with_rotation_velocity(itofix_prec(23, 100));
     target_config.shape_attach = Some(attached);
-    let target = engine.spawn_object(target_config).expect("target spawns");
+    let target = engine.spawn_test_object(target_config);
     for object in [caller, target] {
-        engine
-            .apply_object_update(
-                object,
-                ObjectUpdate {
-                    t_attach: Some(CNAT_BOTTOM),
-                    ..ObjectUpdate::new()
-                },
-            )
-            .expect("walk attachment latches for the probe frame");
+        crate::support::TestValueExt::test_value(engine.apply_object_update(
+            object,
+            ObjectUpdate {
+                t_attach: Some(CNAT_BOTTOM),
+                ..ObjectUpdate::new()
+            },
+        ));
     }
 
-    let caller_index = engine.find_object_index(caller).expect("caller exists");
+    let caller_index = engine.test_object_index(caller);
     assert_eq!(
-        engine
-            .call_object_function(caller_index, "Probe", vec![Value::Object(target.as_u64())],)
-            .expect("foreign walk rotation call runs"),
+        engine.call_test_object_function(
+            caller_index,
+            "Probe",
+            vec![Value::Object(target.as_u64())],
+        ),
         Value::Bool(true)
     );
 
@@ -231,9 +231,7 @@ protected func Probe(pTarget)
     );
 
     assert_eq!(
-        engine
-            .call_object_function(caller_index, "Probe", vec![Value::Object(u64::MAX)],)
-            .expect("missing target is a normal false result"),
+        engine.call_test_object_function(caller_index, "Probe", vec![Value::Object(u64::MAX)],),
         Value::Bool(false)
     );
 }
@@ -255,26 +253,18 @@ protected func Probe()
 "#;
 
     let mut engine = Engine::with_seed(18);
-    let mut child = Definition::from_script("CHLD", "Pending rotation child", "#strict\n")
-        .expect("child compiles");
+    let mut child = crate::support::TestValueExt::test_value(Definition::from_script(
+        "CHLD",
+        "Pending rotation child",
+        "#strict\n",
+    ));
     child.set_rotateable(360);
-    engine
-        .register_definition(child)
-        .expect("child definition registers");
-    engine
-        .register_script_definition("CALL", "Pending rotation caller", script)
-        .expect("caller definition registers");
-    let caller = engine
-        .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
-        .expect("caller spawns");
+    engine.register_test_definition(child);
+    engine.register_test_script_definition("CALL", "Pending rotation caller", script);
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT));
 
-    let result = engine
-        .call_object_function(
-            engine.find_object_index(caller).expect("caller exists"),
-            "Probe",
-            Vec::new(),
-        )
-        .expect("CreateObject rotation probe runs");
+    let result =
+        engine.call_test_object_function(engine.test_object_index(caller), "Probe", Vec::new());
     let Value::Array(values) = result else {
         panic!("Probe returns its rotation observations");
     };
@@ -295,7 +285,7 @@ protected func Probe()
     );
 
     let snapshot = engine.snapshot();
-    let spawned_state = snapshot.object(spawned).expect("spawn materializes");
+    let spawned_state = crate::support::TestValueExt::test_value(snapshot.object(spawned));
     assert_eq!(spawned_state.definition_id, "CHLD");
     assert_eq!(spawned_state.rotation, 271);
     assert_eq!(spawned_state.rotation_velocity, Some(itofix_prec(-47, 10)));
@@ -315,24 +305,23 @@ protected func Construction()
     construction_rdir = GetRDir(0, 100);
 }
 "#;
-    let mut definition =
-        Definition::from_script("CRDV", "Construction rdir probe", script).expect("probe compiles");
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "CRDV",
+        "Construction rdir probe",
+        script,
+    ));
     definition.set_rotateable(360);
 
     let mut engine = Engine::with_seed(19);
-    engine
-        .register_definition(definition)
-        .expect("probe definition registers");
+    engine.register_test_definition(definition);
     let initial_rdir = itofix_prec(-37, 100);
-    let object = engine
-        .spawn_object(
-            SpawnConfig::new("CRDV")
-                .with_category(CATEGORY_OBJECT)
-                .with_rotation_velocity(initial_rdir),
-        )
-        .expect("probe object spawns");
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("CRDV")
+            .with_category(CATEGORY_OBJECT)
+            .with_rotation_velocity(initial_rdir),
+    );
 
-    let snapshot = engine.object_snapshot(object).expect("probe remains live");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.rotation_velocity, Some(initial_rdir));
     assert_eq!(
         snapshot.local_vars.get("construction_rdir"),
@@ -648,29 +637,19 @@ fn sim_flight_uses_vehicle_solid_mask_density() {
     let mut engine = Engine::with_seed(0);
     engine.set_landscape(Landscape::flat(30, 30));
     engine.set_physics(PhysicsSettings::new(0, 20, -20));
-    engine
-        .register_script_definition("TFLT", "SimFlight probe", script)
-        .expect("probe registers");
-    let mut platform =
-        Definition::from_script("PLAT", "Vehicle mask", "#strict\n").expect("mask compiles");
+    engine.register_test_script_definition("TFLT", "SimFlight probe", script);
+    let mut platform = crate::support::TestValueExt::test_value(Definition::from_script(
+        "PLAT",
+        "Vehicle mask",
+        "#strict\n",
+    ));
     platform.set_category(CATEGORY_STATIC_BACK);
     platform.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
-    engine
-        .register_definition(platform)
-        .expect("mask definition registers");
-    engine
-        .spawn_object(SpawnConfig::new("PLAT").with_position(Vector2::new(8, 10)))
-        .expect("mask object spawns");
-    let probe = engine
-        .spawn_object(SpawnConfig::new("TFLT"))
-        .expect("probe spawns");
-    let value = engine
-        .call_object_function(
-            engine.find_object_index(probe).expect("probe exists"),
-            "Probe",
-            Vec::new(),
-        )
-        .expect("Probe runs");
+    engine.register_test_definition(platform);
+    engine.spawn_test_object(SpawnConfig::new("PLAT").with_position(Vector2::new(8, 10)));
+    let probe = engine.spawn_test_object(SpawnConfig::new("TFLT"));
+    let value =
+        engine.call_test_object_function(engine.test_object_index(probe), "Probe", Vec::new());
     assert_eq!(
         value,
         Value::Array(vec![
@@ -689,26 +668,24 @@ fn real_clnk_dolphin_jump_uses_sim_flight_to_select_dive() {
     // SimFlight, then selects Dive (Objects.c4d/Crew.c4d/Clonk.c4d/Script.c:
     // 139-155). This executes the installed CLNK plus planet System.c4g.
     let mut engine = load_tutorial(1, 0);
-    let joined = engine
-        .join_player(JoinPlayerConfig {
-            name: "Dolphin tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
-        .expect("Tutorial01 player joins");
-    let clonk = engine.crew_cursor(joined.number()).expect("CLNK joins");
+    let joined = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Dolphin tester".to_string(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }));
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number()));
     engine.set_landscape(raster_landscape_with_densities(
         80,
         80,
@@ -716,29 +693,20 @@ fn real_clnk_dolphin_jump_uses_sim_flight_to_select_dive() {
         |_, y| u8::from(y >= 30),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(40, 30))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Swim"),
-        )
-        .expect("place CLNK at liquid surface");
+        ),
+    );
     engine.debug_set_in_liquid(clonk, true);
 
-    let index = engine.find_object_index(clonk).expect("CLNK exists");
-    engine
-        .call_object_function(index, "ControlUpDouble", Vec::new())
-        .expect("real ControlUpDouble runs DolphinJump");
-    assert_eq!(
-        engine
-            .object_snapshot(clonk)
-            .expect("CLNK survives")
-            .action
-            .name,
-        "Dive"
-    );
+    let index = engine.test_object_index(clonk);
+    engine.call_test_object_function(index, "ControlUpDouble", Vec::new());
+    assert_eq!(engine.test_object_snapshot(clonk).action.name, "Dive");
 }
 
 #[test]
@@ -748,26 +716,24 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
     // least nine pixels deep (C4ObjectCom.cpp:280-307;
     // C4Movement.cpp:623-670). Tutorial09 is the shipped swimming tutorial.
     let mut engine = load_tutorial(9, 0);
-    let joined = engine
-        .join_player(JoinPlayerConfig {
-            name: "Dive tester".to_string(),
-            player_info_id: 0,
-            score: 0,
-            rounds: 0,
-            rounds_won: 0,
-            rounds_lost: 0,
-            total_playing_time: 0,
-            team: None,
-            color_dw: 0xff_00_00,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
-            control_style: true,
-            auto_context_menu: false,
-            startup_player_count: 1,
-        })
-        .expect("Tutorial09 player joins");
-    let clonk = engine.crew_cursor(joined.number()).expect("CLNK joins");
+    let joined = crate::support::TestValueExt::test_value(engine.join_player(JoinPlayerConfig {
+        name: "Dive tester".to_string(),
+        player_info_id: 0,
+        score: 0,
+        rounds: 0,
+        rounds_won: 0,
+        rounds_lost: 0,
+        total_playing_time: 0,
+        team: None,
+        color_dw: 0xff_00_00,
+        pref_color: 0,
+        pref_position: 0,
+        crew: Vec::new(),
+        control_style: true,
+        auto_context_menu: false,
+        startup_player_count: 1,
+    }));
+    let clonk = crate::support::TestValueExt::test_value(engine.crew_cursor(joined.number()));
     engine.set_landscape(raster_landscape_with_densities(
         240,
         100,
@@ -775,8 +741,8 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
         |_, y| u8::from(y >= 50),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        engine.apply_object_update(
             clonk,
             ObjectUpdate::new()
                 .with_position(Vector2::new(120, 40))
@@ -784,17 +750,19 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
                 .with_action("Walk")
                 .with_direction(Direction::Right)
                 .with_command_direction(CommandDirection::Right),
-        )
-        .expect("place CLNK one pixel above the water by its bottom vertex");
+        ),
+    );
 
-    engine
-        .player_object_command(joined.number(), CommandId::Jump, None, 0, 0)
-        .expect("queue C4CMD_Jump");
-    engine
-        .tick_without_snapshot()
-        .expect("execute ObjectComJump");
+    crate::support::TestValueExt::test_value(engine.player_object_command(
+        joined.number(),
+        CommandId::Jump,
+        None,
+        0,
+        0,
+    ));
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
-    let snapshot = engine.object_snapshot(clonk).expect("CLNK survives");
+    let snapshot = engine.test_object_snapshot(clonk);
     assert_eq!(snapshot.action.name, "Dive");
     assert_eq!(snapshot.velocity, Vector2::new(2, -4));
 }
@@ -808,12 +776,11 @@ fn script_jump_native_uses_object_com_jump_deep_water_dive() {
     actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
     actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
     actions.insert("Dive".to_string(), ActionSpec::for_procedure("swim"));
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "DVER",
         "Script dive probe",
         "#strict\nfunc Probe() { return Jump(); }\n",
-    )
-    .expect("probe compiles");
+    ));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
     definition.set_physical(PhysicalInfo {
@@ -830,30 +797,24 @@ fn script_jump_native_uses_object_com_jump_deep_water_dive() {
         |_, y| u8::from(y >= 50),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .register_definition(definition)
-        .expect("probe registers");
-    let object = engine
-        .spawn_object(
-            SpawnConfig::new("DVER")
-                // The bottom vertex starts at y=50 inside liquid. C++ first
-                // simulates at most ten frames to escape into air, then
-                // continues the landing probe (C4Movement.cpp:657-664).
-                .with_position(Vector2::new(120, 41))
-                .with_action(ActionState::new("Walk"))
-                .with_direction(Direction::Right)
-                .with_command_direction(CommandDirection::Right),
-        )
-        .expect("probe spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("DVER")
+            // The bottom vertex starts at y=50 inside liquid. C++ first
+            // simulates at most ten frames to escape into air, then
+            // continues the landing probe (C4Movement.cpp:657-664).
+            .with_position(Vector2::new(120, 41))
+            .with_action(ActionState::new("Walk"))
+            .with_direction(Direction::Right)
+            .with_command_direction(CommandDirection::Right),
+    );
+    let index = engine.test_object_index(object);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", Vec::new())
-            .expect("Probe calls native Jump"),
+        engine.call_test_object_function(index, "Probe", Vec::new()),
         Value::Bool(true)
     );
-    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.action.name, "Dive");
     assert_eq!(snapshot.velocity, Vector2::new(2, -4));
 }
@@ -869,12 +830,11 @@ fn script_jump_native_missing_dive_action_falls_back_to_jump() {
     let mut actions = HashMap::new();
     actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
     actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "NDVE",
         "No Dive jump probe",
         "#strict\nfunc Probe() { return Jump(); }\n",
-    )
-    .expect("probe compiles");
+    ));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
     definition.set_physical(PhysicalInfo {
@@ -891,27 +851,21 @@ fn script_jump_native_missing_dive_action_falls_back_to_jump() {
         |_, y| u8::from(y >= 50),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .register_definition(definition)
-        .expect("probe registers");
-    let object = engine
-        .spawn_object(
-            SpawnConfig::new("NDVE")
-                .with_position(Vector2::new(120, 41))
-                .with_action(ActionState::new("Walk"))
-                .with_direction(Direction::Right)
-                .with_command_direction(CommandDirection::Right),
-        )
-        .expect("probe spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("NDVE")
+            .with_position(Vector2::new(120, 41))
+            .with_action(ActionState::new("Walk"))
+            .with_direction(Direction::Right)
+            .with_command_direction(CommandDirection::Right),
+    );
+    let index = engine.test_object_index(object);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", Vec::new())
-            .expect("Probe calls native Jump"),
+        engine.call_test_object_function(index, "Probe", Vec::new()),
         Value::Bool(true)
     );
-    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.action.name, "Jump");
     assert_eq!(snapshot.velocity, Vector2::new(2, -4));
 }
@@ -925,12 +879,11 @@ fn script_jump_native_respects_contact_density_dive_gate() {
     actions.insert("Walk".to_string(), ActionSpec::for_procedure("walk"));
     actions.insert("Jump".to_string(), ActionSpec::for_procedure("flight"));
     actions.insert("Dive".to_string(), ActionSpec::for_procedure("swim"));
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "LDVR",
         "Liquid contact probe",
         "#strict\nfunc Probe() { return Jump(); }\n",
-    )
-    .expect("probe compiles");
+    ));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
     definition.set_contact_density(25);
@@ -948,41 +901,22 @@ fn script_jump_native_respects_contact_density_dive_gate() {
         |_, y| u8::from(y >= 50),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .register_definition(definition)
-        .expect("probe registers");
-    let object = engine
-        .spawn_object(
-            SpawnConfig::new("LDVR")
-                .with_position(Vector2::new(120, 40))
-                .with_action(ActionState::new("Walk"))
-                .with_direction(Direction::Right)
-                .with_command_direction(CommandDirection::Right),
-        )
-        .expect("probe spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("LDVR")
+            .with_position(Vector2::new(120, 40))
+            .with_action(ActionState::new("Walk"))
+            .with_direction(Direction::Right)
+            .with_command_direction(CommandDirection::Right),
+    );
+    let index = engine.test_object_index(object);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", Vec::new())
-            .expect("Probe calls native Jump"),
+        engine.call_test_object_function(index, "Probe", Vec::new()),
         Value::Bool(true)
     );
-    assert_eq!(
-        engine
-            .object_snapshot(object)
-            .expect("probe survives")
-            .action
-            .name,
-        "Jump"
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(object)
-            .expect("probe survives")
-            .contact_density,
-        25
-    );
+    assert_eq!(engine.test_object_snapshot(object).action.name, "Jump");
+    assert_eq!(engine.test_object_snapshot(object).contact_density, 25);
 }
 
 #[test]
@@ -1007,8 +941,11 @@ func ProbeSolid()
     return Jump();
 }
 "#;
-    let mut definition =
-        Definition::from_script("SCDN", "Contact density probe", script).expect("probe compiles");
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "SCDN",
+        "Contact density probe",
+        script,
+    ));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
     definition.set_physical(PhysicalInfo {
@@ -1026,61 +963,34 @@ func ProbeSolid()
         |_, y| u8::from(y >= 50),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .register_definition(definition)
-        .expect("probe registers");
-    let object = engine
-        .spawn_object(
-            SpawnConfig::new("SCDN")
-                .with_position(Vector2::new(120, 40))
-                .with_action(ActionState::new("Walk"))
-                .with_direction(Direction::Right)
-                .with_command_direction(CommandDirection::Right),
-        )
-        .expect("probe spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("SCDN")
+            .with_position(Vector2::new(120, 40))
+            .with_action(ActionState::new("Walk"))
+            .with_direction(Direction::Right)
+            .with_command_direction(CommandDirection::Right),
+    );
+    let index = engine.test_object_index(object);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "ProbeLow", Vec::new())
-            .expect("ProbeLow changes the live shape then jumps"),
+        engine.call_test_object_function(index, "ProbeLow", Vec::new()),
         Value::Bool(true)
     );
-    assert_eq!(
-        engine
-            .object_snapshot(object)
-            .expect("probe survives")
-            .action
-            .name,
-        "Jump"
-    );
-    assert_eq!(
-        engine
-            .object_snapshot(object)
-            .expect("probe survives")
-            .contact_density,
-        25
-    );
+    assert_eq!(engine.test_object_snapshot(object).action.name, "Jump");
+    assert_eq!(engine.test_object_snapshot(object).contact_density, 25);
 
     // C4Shape::CompileFunc stores ContactDensity in the object's embedded
     // Shape (C4Shape.cpp:495-510), so the per-object value survives a state
     // round trip independently of the definition's default.
     let state = engine.capture_state();
     let mut restored = Engine::new();
-    restored
-        .register_definition(restored_definition)
-        .expect("probe registers after restore");
-    restored.restore_state(&state).expect("state restores");
-    assert_eq!(
-        restored
-            .object_snapshot(object)
-            .expect("restored probe survives")
-            .contact_density,
-        25
-    );
+    restored.register_test_definition(restored_definition);
+    crate::support::TestValueExt::test_value(restored.restore_state(&state));
+    assert_eq!(restored.test_object_snapshot(object).contact_density, 25);
 
-    restored
-        .apply_object_update(
+    crate::support::TestValueExt::test_value(
+        restored.apply_object_update(
             object,
             ObjectUpdate::new()
                 .with_position(Vector2::new(120, 40))
@@ -1088,18 +998,14 @@ func ProbeSolid()
                 .with_action("Walk")
                 .with_direction(Direction::Right)
                 .with_command_direction(CommandDirection::Right),
-        )
-        .expect("reset restored probe");
-    let index = restored
-        .find_object_index(object)
-        .expect("restored probe exists");
+        ),
+    );
+    let index = restored.test_object_index(object);
     assert_eq!(
-        restored
-            .call_object_function(index, "ProbeSolid", Vec::new())
-            .expect("ProbeSolid restores the live shape then jumps"),
+        restored.call_test_object_function(index, "ProbeSolid", Vec::new()),
         Value::Bool(true)
     );
-    let snapshot = restored.object_snapshot(object).expect("probe survives");
+    let snapshot = restored.test_object_snapshot(object);
     assert_eq!(snapshot.action.name, "Dive");
     assert_eq!(snapshot.contact_density, 50);
 }
@@ -1113,12 +1019,11 @@ fn live_contact_density_controls_movement_contact_with_liquid() {
     // (WalkOnLiquid.c4d/Script.c:105,131).
     let mut actions = HashMap::new();
     actions.insert("Flight".to_string(), ActionSpec::for_procedure("flight"));
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "WALK",
         "Liquid attachment probe",
         "#strict\nfunc Enable() { return SetContactDensity(C4M_Liquid); }\n",
-    )
-    .expect("probe compiles");
+    ));
     definition.configure_actions(Some("Flight".to_string()), actions);
     definition.set_category(CATEGORY_OBJECT);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -1131,43 +1036,31 @@ fn live_contact_density_controls_movement_contact_with_liquid() {
         |_, y| u8::from(y >= 20),
     ));
     engine.set_physics(PhysicsSettings::new(100, 20, -20));
-    engine
-        .register_definition(definition)
-        .expect("probe registers");
-    let walker = engine
-        .spawn_object(
-            SpawnConfig::new("WALK")
-                .with_position(Vector2::new(20, 18))
-                .with_velocity(Vector2::new(0, 3))
-                .with_mobile(true)
-                .with_action(ActionState::new("Flight")),
-        )
-        .expect("liquid walker spawns");
-    let falling_control = engine
-        .spawn_object(
-            SpawnConfig::new("WALK")
-                .with_position(Vector2::new(40, 18))
-                .with_velocity(Vector2::new(0, 3))
-                .with_mobile(true)
-                .with_action(ActionState::new("Flight")),
-        )
-        .expect("solid-density control spawns");
-    let walker_index = engine.find_object_index(walker).expect("walker exists");
+    engine.register_test_definition(definition);
+    let walker = engine.spawn_test_object(
+        SpawnConfig::new("WALK")
+            .with_position(Vector2::new(20, 18))
+            .with_velocity(Vector2::new(0, 3))
+            .with_mobile(true)
+            .with_action(ActionState::new("Flight")),
+    );
+    let falling_control = engine.spawn_test_object(
+        SpawnConfig::new("WALK")
+            .with_position(Vector2::new(40, 18))
+            .with_velocity(Vector2::new(0, 3))
+            .with_mobile(true)
+            .with_action(ActionState::new("Flight")),
+    );
+    let walker_index = engine.test_object_index(walker);
     assert_eq!(
-        engine
-            .call_object_function(walker_index, "Enable", Vec::new())
-            .expect("WalkOnLiquid-style mutation succeeds"),
+        engine.call_test_object_function(walker_index, "Enable", Vec::new()),
         Value::Bool(true)
     );
 
-    engine
-        .tick_without_snapshot()
-        .expect("movement contact probe ticks");
+    crate::support::TestValueExt::test_value(engine.tick_without_snapshot());
 
-    let walker = engine.object_snapshot(walker).expect("walker survives");
-    let falling = engine
-        .object_snapshot(falling_control)
-        .expect("control survives");
+    let walker = engine.test_object_snapshot(walker);
+    let falling = engine.test_object_snapshot(falling_control);
     assert_eq!(walker.contact_density, 25);
     assert_eq!(
         walker.position.y, 19,
@@ -1201,8 +1094,11 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
 func Probe() { return Jump(); }
 func ProbeFallback() { allow_hardcoded = true; return Jump(); }
 "#;
-    let mut definition =
-        Definition::from_script("JHOK", "Jump hook probe", script).expect("probe compiles");
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
+        "JHOK",
+        "Jump hook probe",
+        script,
+    ));
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_physical(PhysicalInfo {
         walk: 70_000,
@@ -1211,26 +1107,20 @@ func ProbeFallback() { allow_hardcoded = true; return Jump(); }
     });
 
     let mut engine = Engine::new();
-    engine
-        .register_definition(definition)
-        .expect("probe registers");
-    let object = engine
-        .spawn_object(
-            SpawnConfig::new("JHOK")
-                .with_action(ActionState::new("Walk"))
-                .with_direction(Direction::Right)
-                .with_command_direction(CommandDirection::Right),
-        )
-        .expect("probe spawns");
-    let index = engine.find_object_index(object).expect("probe exists");
+    engine.register_test_definition(definition);
+    let object = engine.spawn_test_object(
+        SpawnConfig::new("JHOK")
+            .with_action(ActionState::new("Walk"))
+            .with_direction(Direction::Right)
+            .with_command_direction(CommandDirection::Right),
+    );
+    let index = engine.test_object_index(object);
 
     assert_eq!(
-        engine
-            .call_object_function(index, "Probe", Vec::new())
-            .expect("Probe calls native Jump"),
+        engine.call_test_object_function(index, "Probe", Vec::new()),
         Value::Bool(true)
     );
-    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.action.name, "Walk");
     assert_eq!(snapshot.velocity, Vector2::ZERO);
     assert_eq!(snapshot.local_vars.get("jump_calls"), Some(&Value::Int(1)));
@@ -1244,14 +1134,12 @@ func ProbeFallback() { allow_hardcoded = true; return Jump(); }
         Some(&Value::Bool(true))
     );
 
-    let index = engine.find_object_index(object).expect("probe remains");
+    let index = engine.test_object_index(object);
     assert_eq!(
-        engine
-            .call_object_function(index, "ProbeFallback", Vec::new())
-            .expect("false hook allows the hardcoded jump"),
+        engine.call_test_object_function(index, "ProbeFallback", Vec::new()),
         Value::Bool(true)
     );
-    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    let snapshot = engine.test_object_snapshot(object);
     assert_eq!(snapshot.action.name, "Jump");
     assert_eq!(snapshot.velocity, Vector2::new(2, -4));
     assert!(snapshot.mobile);

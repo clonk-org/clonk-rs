@@ -11,7 +11,7 @@ fn construction_called_before_action_start() {
     // Create a definition with:
     // - local variable initialized in Construction()
     // - action StartCall that uses the variable
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "TEST",
         "Test",
         r#"
@@ -35,8 +35,7 @@ fn construction_called_before_action_start() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
     // Configure an action with StartCall
     let mut actions = HashMap::new();
@@ -51,13 +50,13 @@ fn construction_called_before_action_start() {
     );
     definition.configure_actions(Some("Idle".to_string()), actions);
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
     // Spawn object with the Test action that has StartCall=OnStart
     let action_state = ActionState::new("Test");
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TEST".to_string()).with_action(action_state))
-        .expect("spawn should succeed - Construction() should initialize MyValue before OnStart() is called");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TEST".to_string()).with_action(action_state)),
+    );
 }
 
 #[test]
@@ -65,7 +64,7 @@ fn construction_initializes_local_vars_for_tree() {
     // This directly reproduces the TREE/PLM1 MotionThreshold issue
     let mut engine = Engine::new();
 
-    let mut definition = Definition::from_script(
+    let mut definition = crate::support::TestValueExt::test_value(Definition::from_script(
         "TREE",
         "Tree",
         r#"
@@ -89,8 +88,7 @@ fn construction_initializes_local_vars_for_tree() {
             return 0;
         }
         "#,
-    )
-    .expect("script compiles");
+    ));
 
     // Configure Still action with StartCall like PLM1
     let mut actions = HashMap::new();
@@ -105,11 +103,11 @@ fn construction_initializes_local_vars_for_tree() {
     );
     definition.configure_actions(Some("Idle".to_string()), actions);
 
-    engine.register_definition(definition).unwrap();
+    crate::support::TestValueExt::test_value(engine.register_definition(definition));
 
     // Spawn with Still action
     let action_state = ActionState::new("Still");
-    let _obj = engine
-        .spawn_object(SpawnConfig::new("TREE".to_string()).with_action(action_state))
-        .expect("spawn should succeed - Construction() should initialize MotionThreshold before Still() StartCall");
+    let _obj = crate::support::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("TREE".to_string()).with_action(action_state)),
+    );
 }

@@ -2,18 +2,17 @@
 // Action callbacks may pass extra arguments that scripts ignore
 // Runtime behavior tested via integration test
 
-#[test]
-fn cowb_throwing_pattern() {
-    // Throwing function from COWB that expects 1 arg
-    // Action system will call it with 2 args at runtime
-    let source = r#"
+// Throwing function from COWB that expects 1 arg
+// Action system will call it with 2 args at runtime
+crate::support::compile_case!(
+    cowb_throwing_pattern,
+    r#"
 private func Throwing(pObj) {
     if(!pObj) return(0);
     return(1);
 }
-    "#;
-    crate::support::assert_compiles(source);
-}
+    "#,
+);
 
 #[test]
 fn function_with_one_param() {
