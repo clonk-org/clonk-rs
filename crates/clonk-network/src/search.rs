@@ -24,6 +24,15 @@ pub const DEFAULT_DISCOVERY_PORT: u16 = 11_114;
 pub const MAX_LAN_DISCOVERS: usize = 64;
 pub const REFERENCE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 pub const GAME_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the startup browser re-probes the LAN for games.
+///
+/// Deliberately shorter than the oracle's `C4NetGameDiscoveryInterval`, which
+/// leaves a game opened while the browser is on screen invisible for half a
+/// minute. Every probe makes each host on the group multicast an announce, and
+/// a C++ client re-fetches a reference for each announce it sees
+/// (src/C4StartupNetDlg.cpp:1133-1154,590-600), so this is not free to shorten
+/// further; the host's own opening announce covers the first seconds instead.
+pub const LAN_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const MASTERSERVER_FAST_RETRIES: u8 = 2;
 const REFERENCE_LIFETIME: Duration = Duration::from_secs(42);
 const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
@@ -970,12 +979,10 @@ async fn run_game_search(
     let mut masterserver_generation = 0_u64;
     let mut masterserver_failures = 0_u8;
     let mut masterserver_query: Option<tokio::task::JoinHandle<()>> = None;
-    let mut active_discovery_queries = HashSet::new();
-    let mut empty_discovery_query_expirations = HashMap::new();
+    let mut discovery_queries = GameDiscoveryQueryGate::default();
     let mut stopped = false;
     let mut datagram = [0_u8; 512];
-    let mut next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
-    let mut next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+    let mut deadlines = SearchDeadlines::armed_at(Instant::now());
 
     while !stopped {
         while let Ok(command) = commands.try_recv() {
@@ -987,10 +994,8 @@ async fn run_game_search(
                     }
                     generation = generation.wrapping_add(1);
                     masterserver_failures = 0;
-                    active_discovery_queries.clear();
-                    empty_discovery_query_expirations.clear();
-                    next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
-                    next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                    discovery_queries.clear();
+                    deadlines = SearchDeadlines::armed_at(Instant::now());
                     let _ = events.send(StartupGameSearchEvent::Cleared);
                     if matches!(command, StartupGameSearchCommand::Refresh)
                         && discovery_needs_rebuild(&discovery)
@@ -1019,8 +1024,7 @@ async fn run_game_search(
                     let changed = search.config.internet_enabled != enabled;
                     if changed {
                         masterserver_failures = 0;
-                        next_masterserver_search =
-                            tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                        deadlines.defer_masterserver_query_at(Instant::now());
                     }
                     if let Some(command) = search.set_internet_enabled(enabled) {
                         masterserver_generation = masterserver_generation.wrapping_add(1);
@@ -1099,29 +1103,26 @@ async fn run_game_search(
             };
             if query.source == ReferenceQuerySource::Masterserver {
                 masterserver_query.take();
-                next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
-            }
-            if let Some(address) = discovery_address {
-                active_discovery_queries.remove(&address);
+                deadlines.defer_masterserver_query_at(Instant::now());
             }
             match query.result {
                 Ok(response) => {
+                    let now = Instant::now();
                     if let Some(address) = discovery_address {
-                        if response.references.is_empty() {
-                            let now = Instant::now();
-                            empty_discovery_query_expirations.insert(
-                                address,
-                                now.checked_add(EMPTY_REFERENCE_LIFETIME).unwrap_or(now),
-                            );
-                        } else {
-                            empty_discovery_query_expirations.remove(&address);
-                        }
+                        discovery_queries.finish_at(
+                            now,
+                            address,
+                            if response.references.is_empty() {
+                                GameDiscoveryQueryOutcome::NoReferences
+                            } else {
+                                GameDiscoveryQueryOutcome::References
+                            },
+                        );
                     }
                     let ReferenceQueryResponse {
                         references,
                         masterserver,
                     } = response;
-                    let now = Instant::now();
                     let selected_reference = (query.direct_request_id.is_some()
                         || discovery_address.is_some())
                     .then(|| references.first().cloned())
@@ -1168,7 +1169,11 @@ async fn run_game_search(
                         && query.source == ReferenceQuerySource::Masterserver
                         && masterserver_failure_allows_fast_retry(&mut masterserver_failures);
                     if let Some(address) = discovery_address {
-                        empty_discovery_query_expirations.remove(&address);
+                        discovery_queries.finish_at(
+                            Instant::now(),
+                            address,
+                            GameDiscoveryQueryOutcome::Failed,
+                        );
                     }
                     let message = error.to_string();
                     if let Some(request_id) = query.direct_request_id {
@@ -1211,9 +1216,8 @@ async fn run_game_search(
         if stopped {
             break;
         }
-        let now = tokio::time::Instant::now();
-        if now >= next_periodic_lan_search {
-            next_periodic_lan_search += GAME_SEARCH_INTERVAL;
+        let now = Instant::now();
+        if deadlines.take_due_lan_probe_at(now) {
             execute_search_command(
                 search.periodic_lan_command(),
                 (generation, masterserver_generation),
@@ -1228,9 +1232,8 @@ async fn run_game_search(
         }
         if search.config.internet_enabled
             && masterserver_query.is_none()
-            && now >= next_masterserver_search
+            && deadlines.take_due_masterserver_query_at(now)
         {
-            next_masterserver_search = now + GAME_SEARCH_INTERVAL;
             execute_search_command(
                 search.masterserver_query(),
                 (generation, masterserver_generation),
@@ -1251,12 +1254,7 @@ async fn run_game_search(
             .await
             {
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
-                    if register_game_discovery_query(
-                        &mut active_discovery_queries,
-                        &mut empty_discovery_query_expirations,
-                        Instant::now(),
-                        &command,
-                    ) {
+                    if discovery_queries.begin_at(Instant::now(), &command) {
                         execute_search_command(
                             command,
                             (generation, masterserver_generation),
@@ -1277,28 +1275,105 @@ async fn run_game_search(
     }
 }
 
-fn register_game_discovery_query(
-    active: &mut HashSet<SocketAddr>,
-    empty_expirations: &mut HashMap<SocketAddr, Instant>,
-    now: Instant,
-    command: &SearchCommand,
-) -> bool {
-    match command {
-        SearchCommand::QueryReferences {
+/// The two periodic deadlines the search worker re-arms by hand.
+///
+/// `C4StartupNetDlg` drives both from `OnSec1Timer`: a per-second countdown
+/// re-sends the discovery probe, while each masterserver row re-queries itself
+/// once its own `iTimeout` passes (pinned oracle src/C4StartupNetDlg.cpp:
+/// 1116-1131,186-210).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchDeadlines {
+    lan_probe_at: Instant,
+    masterserver_query_at: Instant,
+}
+
+impl SearchDeadlines {
+    fn armed_at(now: Instant) -> Self {
+        Self {
+            lan_probe_at: now + LAN_DISCOVERY_INTERVAL,
+            masterserver_query_at: now + GAME_SEARCH_INTERVAL,
+        }
+    }
+
+    fn take_due_lan_probe_at(&mut self, now: Instant) -> bool {
+        if now < self.lan_probe_at {
+            return false;
+        }
+        self.lan_probe_at = now + LAN_DISCOVERY_INTERVAL;
+        true
+    }
+
+    fn take_due_masterserver_query_at(&mut self, now: Instant) -> bool {
+        if now < self.masterserver_query_at {
+            return false;
+        }
+        self.defer_masterserver_query_at(now);
+        true
+    }
+
+    fn defer_masterserver_query_at(&mut self, now: Instant) {
+        self.masterserver_query_at = now + GAME_SEARCH_INTERVAL;
+    }
+}
+
+/// How a LAN reference query ended, which is what decides when its address may
+/// be queried again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GameDiscoveryQueryOutcome {
+    References,
+    NoReferences,
+    Failed,
+}
+
+/// Per-host gate for LAN reference queries.
+///
+/// `C4StartupNetDlg` keeps one list entry per discovered address and
+/// `AddReferenceQuery` refuses a second query while that entry is still waiting
+/// for its answer (pinned oracle src/C4StartupNetDlg.cpp:1133-1154,590-600), so
+/// how often a host is re-queried follows the lifetime of the row its last
+/// answer produced rather than anything the probe decides.
+#[derive(Debug, Default)]
+struct GameDiscoveryQueryGate {
+    active: HashSet<SocketAddr>,
+    next_allowed: HashMap<SocketAddr, Instant>,
+}
+
+impl GameDiscoveryQueryGate {
+    fn clear(&mut self) {
+        self.active.clear();
+        self.next_allowed.clear();
+    }
+
+    fn begin_at(&mut self, now: Instant, command: &SearchCommand) -> bool {
+        let SearchCommand::QueryReferences {
             endpoint: ReferenceEndpoint::Address(address),
             source: ReferenceQuerySource::GameDiscovery,
             ..
-        } => {
-            if empty_expirations
-                .get(address)
-                .is_some_and(|expires_at| now < *expires_at)
-            {
-                return false;
-            }
-            empty_expirations.remove(address);
-            active.insert(*address)
+        } = command
+        else {
+            return true;
+        };
+        if self
+            .next_allowed
+            .get(address)
+            .is_some_and(|allowed_at| now < *allowed_at)
+        {
+            return false;
         }
-        _ => true,
+        self.next_allowed.remove(address);
+        self.active.insert(*address)
+    }
+
+    fn finish_at(&mut self, now: Instant, address: SocketAddr, outcome: GameDiscoveryQueryOutcome) {
+        self.active.remove(&address);
+        let backoff = match outcome {
+            GameDiscoveryQueryOutcome::References => GAME_SEARCH_INTERVAL,
+            GameDiscoveryQueryOutcome::NoReferences | GameDiscoveryQueryOutcome::Failed => {
+                EMPTY_REFERENCE_LIFETIME
+            }
+        };
+        let allowed_at = now.checked_add(backoff).unwrap_or(now);
+        self.next_allowed.insert(address, allowed_at);
     }
 }
 
@@ -2895,37 +2970,145 @@ Title=Empty\n",
             source: ReferenceQuerySource::GameDiscovery,
             timeout: REFERENCE_QUERY_TIMEOUT,
         };
-        let mut active = HashSet::new();
-        let mut empty_expirations = HashMap::new();
+        let mut gate = GameDiscoveryQueryGate::default();
         let now = Instant::now();
 
-        assert!(register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            now,
-            &command,
-        ));
-        assert!(!register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            now,
-            &command,
-        ));
-        assert!(active.remove(&address));
+        assert!(gate.begin_at(now, &command));
+        assert!(!gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::NoReferences);
         let empty_until = now + EMPTY_REFERENCE_LIFETIME;
-        empty_expirations.insert(address, empty_until);
-        assert!(!register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            empty_until - Duration::from_millis(1),
-            &command,
-        ));
-        assert!(register_game_discovery_query(
-            &mut active,
-            &mut empty_expirations,
-            empty_until,
-            &command,
-        ));
+        assert!(!gate.begin_at(empty_until - Duration::from_millis(1), &command));
+        assert!(gate.begin_at(empty_until, &command));
+    }
+
+    #[test]
+    fn lan_probes_run_more_often_than_the_masterserver_query() {
+        // Deliberate divergence. C4StartupNetDlg counts one countdown down per
+        // second and re-probes the LAN when it passes zero, so its game list
+        // and its masterserver row both refresh every thirty seconds (pinned
+        // oracle src/C4StartupNetDlg.cpp:1116-1131; src/C4StartupNetDlg.h:27,31).
+        // The port keeps the masterserver on the oracle's interval - that is a
+        // shared public server - and probes the LAN on its own.
+        assert!(LAN_DISCOVERY_INTERVAL < GAME_SEARCH_INTERVAL);
+        let now = Instant::now();
+        let mut deadlines = SearchDeadlines::armed_at(now);
+
+        assert!(!deadlines
+            .take_due_lan_probe_at(now + LAN_DISCOVERY_INTERVAL - Duration::from_millis(1)));
+        assert!(deadlines.take_due_lan_probe_at(now + LAN_DISCOVERY_INTERVAL));
+        assert!(
+            !deadlines.take_due_masterserver_query_at(now + LAN_DISCOVERY_INTERVAL),
+            "a LAN probe must not drag the masterserver query forward with it"
+        );
+        assert!(deadlines.take_due_masterserver_query_at(now + GAME_SEARCH_INTERVAL));
+    }
+
+    #[test]
+    fn a_stalled_search_worker_sends_one_catch_up_lan_probe() {
+        // A worker that missed its deadline owes one probe, not one per
+        // interval it slept through: C4StartupNetDlg reloads its countdown from
+        // the tick that fired it (pinned oracle src/C4StartupNetDlg.cpp:
+        // 1123-1127), so a stalled second never queues a burst.
+        let now = Instant::now();
+        let mut deadlines = SearchDeadlines::armed_at(now);
+        let stalled_until = now + GAME_SEARCH_INTERVAL * 2;
+
+        assert!(deadlines.take_due_lan_probe_at(stalled_until));
+
+        assert!(
+            !deadlines.take_due_lan_probe_at(
+                stalled_until + LAN_DISCOVERY_INTERVAL - Duration::from_millis(1)
+            ),
+            "the missed ticks are dropped rather than fired back to back"
+        );
+        assert!(deadlines.take_due_lan_probe_at(stalled_until + LAN_DISCOVERY_INTERVAL));
+    }
+
+    #[test]
+    fn a_resolved_lan_host_is_requeried_on_the_cpp_discovery_interval() {
+        // C4StartupNetDlg deletes a LAN query row the moment its answer is
+        // converted into references (pinned oracle src/C4StartupNetDlg.cpp:
+        // 329-334), and IsSameRefQueryAddress matches unretrieved rows only
+        // (:590-600), so the host is queried again on the dialog's next probe -
+        // once per C4NetGameDiscoveryInterval (:1116-1131; C4StartupNetDlg.h:31).
+        // This port probes far more often than that, so it holds the per-host
+        // interval here instead of inheriting it from the probe cadence.
+        let address: SocketAddr = "127.0.0.1:31113".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut gate = GameDiscoveryQueryGate::default();
+        let now = Instant::now();
+
+        assert!(gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::References);
+
+        assert!(
+            !gate.begin_at(
+                now + GAME_SEARCH_INTERVAL - Duration::from_millis(1),
+                &command
+            ),
+            "a host already on the list keeps the oracle's re-query interval"
+        );
+        assert!(gate.begin_at(now + GAME_SEARCH_INTERVAL, &command));
+    }
+
+    #[test]
+    fn a_failed_lan_reference_query_backs_off_for_the_cpp_error_row_lifetime() {
+        // Deliberate divergence. IsSameRefQueryAddress refuses to match a failed
+        // non-masterserver row - "if request failed, create a duplicate anyway
+        // in case the game is opened now" (pinned oracle
+        // src/C4StartupNetDlg.cpp:590-600) - so C++ retries a refusing host on
+        // every probe. At this port's probe rate that would stack an error row
+        // and a connection attempt several times over the ten seconds one such
+        // row is displayed, so the retry waits out C4NetErrorRefTimeout
+        // (src/C4StartupNetDlg.h:30), the lifetime C++ gives the row itself
+        // (:506-531).
+        let address: SocketAddr = "127.0.0.1:31114".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut gate = GameDiscoveryQueryGate::default();
+        let now = Instant::now();
+
+        assert!(gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::Failed);
+
+        assert!(
+            !gate.begin_at(
+                now + EMPTY_REFERENCE_LIFETIME - Duration::from_millis(1),
+                &command
+            ),
+            "a refusing host is not retried on every probe"
+        );
+        assert!(gate.begin_at(now + EMPTY_REFERENCE_LIFETIME, &command));
+    }
+
+    #[test]
+    fn an_explicit_refresh_readmits_every_host_the_gate_is_holding() {
+        // DoRefresh deletes every row and restarts discovery from nothing
+        // (pinned oracle src/C4StartupNetDlg.cpp:1078-1109), so no backoff this
+        // gate is holding may outlive it - the button has to mean now.
+        let address: SocketAddr = "127.0.0.1:31115".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut gate = GameDiscoveryQueryGate::default();
+        let now = Instant::now();
+
+        assert!(gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::References);
+        assert!(!gate.begin_at(now, &command));
+
+        gate.clear();
+
+        assert!(gate.begin_at(now, &command));
     }
 
     #[test]

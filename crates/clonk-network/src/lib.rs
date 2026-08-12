@@ -242,8 +242,8 @@ pub use search::{
     ReferenceEndpoint, ReferenceFetchError, ReferenceParseError, ReferenceQueryConfig,
     ReferenceQueryResponse, ReferenceQuerySource, SearchCommand, StartupGameSearch,
     StartupGameSearchEvent, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, DEFAULT_DISCOVERY_PORT,
-    DEFAULT_MASTER_SERVER_URL, DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS,
-    REFERENCE_QUERY_TIMEOUT,
+    DEFAULT_MASTER_SERVER_URL, DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL,
+    LAN_DISCOVERY_INTERVAL, MAX_LAN_DISCOVERS, REFERENCE_QUERY_TIMEOUT,
 };
 pub use session::{
     connect_client, connect_client_addresses, connect_dual_client, connect_udp_client, start_host,

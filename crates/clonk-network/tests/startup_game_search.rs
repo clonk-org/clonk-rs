@@ -266,7 +266,7 @@ fn disabling_internet_cancels_the_inflight_masterserver_query() {
 }
 
 #[test]
-fn cpp_thirty_second_search_keeps_rows_while_reissuing_lan_and_master_queries() {
+fn a_periodic_search_keeps_rows_while_reissuing_lan_and_master_queries() {
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
     search.merge_references([NetworkGameReference {
         title: "Existing".into(),
