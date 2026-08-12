@@ -814,6 +814,69 @@ impl GameApp {
         Ok(owners)
     }
 
+    pub(crate) fn execute_presentation_benchmark_team_selection_controls(
+        &mut self,
+        controls: &[clonk_engine::InitScenarioPlayerControlData],
+    ) -> Result<(), String> {
+        for control in controls {
+            if control.by_client != 0 {
+                return Err(format!(
+                    "benchmark player {} team {} is not an offline host control",
+                    control.player, control.team
+                ));
+            }
+            if !self
+                .engine
+                .player(control.player)
+                .is_some_and(|player| player.status() == clonk_engine::PlayerStatus::TeamSelection)
+            {
+                return Err(format!(
+                    "benchmark player {} is not awaiting team {}",
+                    control.player, control.team
+                ));
+            }
+            if !self
+                .engine
+                .teams()
+                .iter()
+                .any(|team| team.id == control.team)
+            {
+                return Err(format!(
+                    "benchmark player {} requested unavailable team {}",
+                    control.player, control.team
+                ));
+            }
+        }
+        for control in controls {
+            self.engine
+                .mark_team_selection_pending(control.player)
+                .map_err(|error| error.to_string())?;
+        }
+        let packets = controls
+            .iter()
+            .copied()
+            .map(clonk_engine::ControlPacket::InitScenarioPlayer)
+            .collect::<Vec<_>>();
+        self.record_control_batch(&packets);
+        for control in controls {
+            self.execute_init_scenario_player_control(control.player, control.team)
+                .map_err(|error| error.to_string())?;
+            if self.engine.player(control.player).is_some_and(|player| {
+                matches!(
+                    player.status(),
+                    clonk_engine::PlayerStatus::TeamSelection
+                        | clonk_engine::PlayerStatus::TeamSelectionPending
+                )
+            }) {
+                return Err(format!(
+                    "benchmark player {} did not initialize on team {}",
+                    control.player, control.team
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_init_scenario_player_control(
         &mut self,
         player: i32,

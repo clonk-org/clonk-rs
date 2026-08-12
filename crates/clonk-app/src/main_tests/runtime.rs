@@ -793,6 +793,150 @@
     }
 
     #[test]
+    fn presentation_benchmark_player_team_parser_is_ordered_and_fail_closed() {
+        assert_eq!(
+            parse_presentation_benchmark_player_teams("1,2"),
+            Ok(vec![1, 2])
+        );
+        for rejected in ["", "0", "-1", "1,", ",1", "1, 2", "one,2"] {
+            assert!(
+                parse_presentation_benchmark_player_teams(rejected).is_err(),
+                "`{rejected}` must not silently change the benchmark workload"
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_benchmark_team_controls_preserve_player_order_and_scope() {
+        assert_eq!(
+            presentation_benchmark_team_selection_controls(
+                true,
+                false,
+                &[7, 3],
+                Some("1,2")
+            ),
+            Ok(vec![
+                clonk_engine::InitScenarioPlayerControlData {
+                    team: 1,
+                    player: 7,
+                    by_client: 0,
+                },
+                clonk_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: 3,
+                    by_client: 0,
+                },
+            ])
+        );
+        assert_eq!(
+            presentation_benchmark_team_selection_controls(
+                false,
+                false,
+                &[7, 3],
+                Some("invalid")
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            presentation_benchmark_team_selection_controls(true, true, &[7, 3], Some("invalid")),
+            Ok(Vec::new())
+        );
+        assert!(presentation_benchmark_team_selection_controls(true, false, &[7], Some("1,2"))
+            .is_err());
+    }
+
+    fn join_presentation_benchmark_teamless_player(
+        app: &mut GameApp,
+        name: &str,
+        startup_player_count: i32,
+    ) -> i32 {
+        app.engine
+            .join_player(clonk_engine::JoinPlayerConfig {
+                name: name.to_string(),
+                player_info_id: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count,
+            })
+            .expect("benchmark player waits for a team")
+            .number()
+    }
+
+    #[test]
+    fn presentation_benchmark_team_controls_resume_existing_pending_players() {
+        let mut app = new_running_sandbox_app();
+        app.engine.set_teams(vec![
+            clonk_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
+            clonk_engine::TeamInfo::new(2, "Blue", 0x0000_c800),
+        ]);
+        app.engine.set_runtime_join_team_choice(true);
+        let players = [
+            join_presentation_benchmark_teamless_player(&mut app, "Profiler A", 2),
+            join_presentation_benchmark_teamless_player(&mut app, "Profiler B", 2),
+        ];
+        let controls = presentation_benchmark_team_selection_controls(
+            true,
+            false,
+            &players,
+            Some("1,2"),
+        )
+        .expect("ordered benchmark controls");
+
+        app.execute_presentation_benchmark_team_selection_controls(&controls)
+            .expect("benchmark selections execute");
+
+        assert_eq!(
+            app.engine.player(players[0]).and_then(|player| player.team()),
+            Some(1)
+        );
+        assert_eq!(
+            app.engine.player(players[1]).and_then(|player| player.team()),
+            Some(2)
+        );
+        for player in players {
+            assert!(!matches!(
+                app.engine.player(player).map(|player| player.status()),
+                Some(PlayerStatus::TeamSelection | PlayerStatus::TeamSelectionPending)
+            ));
+        }
+        assert_eq!(app.engine.players().count(), 3);
+    }
+
+    #[test]
+    fn presentation_benchmark_team_controls_reject_an_unavailable_team() {
+        let mut app = new_running_sandbox_app();
+        app.engine
+            .set_teams(vec![clonk_engine::TeamInfo::new(1, "Only", 0x00f4_0000)]);
+        app.engine.set_runtime_join_team_choice(true);
+        let player = join_presentation_benchmark_teamless_player(&mut app, "Profiler", 1);
+        let controls = [clonk_engine::InitScenarioPlayerControlData {
+            team: 9,
+            player,
+            by_client: 0,
+        }];
+
+        let error = app
+            .execute_presentation_benchmark_team_selection_controls(&controls)
+            .expect_err("an unavailable benchmark team must abort activation");
+
+        assert!(error.contains("team 9"), "unexpected error: {error}");
+        assert_eq!(
+            app.engine.player(player).map(|player| player.status()),
+            Some(PlayerStatus::TeamSelection)
+        );
+    }
+
+    #[test]
     fn graphics_pass_percentiles_use_nearest_rank() {
         let samples = (1..=20)
             .rev()

@@ -3621,6 +3621,55 @@ pub(crate) fn parse_presentation_benchmark_window(raw: &str) -> Option<Duration>
         .map(Duration::from_secs)
 }
 
+pub(crate) fn parse_presentation_benchmark_player_teams(raw: &str) -> Result<Vec<i32>, String> {
+    if raw.is_empty() {
+        return Err("benchmark player teams must not be empty".to_string());
+    }
+    raw.split(',')
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .ok()
+                .filter(|team| *team > 0)
+                .ok_or_else(|| format!("benchmark player team `{value}` is not a positive ID"))
+        })
+        .collect()
+}
+
+pub(crate) fn presentation_benchmark_team_selection_controls(
+    benchmark_active: bool,
+    network_game: bool,
+    players: &[i32],
+    raw_teams: Option<&str>,
+) -> Result<Vec<clonk_engine::InitScenarioPlayerControlData>, String> {
+    if !benchmark_active || network_game {
+        return Ok(Vec::new());
+    }
+    let Some(raw_teams) = raw_teams else {
+        return Ok(Vec::new());
+    };
+    let teams = parse_presentation_benchmark_player_teams(raw_teams)?;
+    if teams.len() != players.len() {
+        return Err(format!(
+            "benchmark configured {} player teams for {} pending players",
+            teams.len(),
+            players.len()
+        ));
+    }
+    Ok(players
+        .iter()
+        .copied()
+        .zip(teams)
+        .map(
+            |(player, team)| clonk_engine::InitScenarioPlayerControlData {
+                team,
+                player,
+                by_client: 0,
+            },
+        )
+        .collect())
+}
+
 pub(crate) fn parse_input_latency_benchmark_interval(raw: &str) -> Option<Duration> {
     raw.parse::<u64>()
         .ok()

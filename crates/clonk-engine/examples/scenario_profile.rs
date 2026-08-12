@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
-use clonk_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError, SpawnConfig, Vector2};
+use clonk_engine::{
+    Engine, JoinPlayerConfig, JoinPlayerOutcome, Scenario, ScenarioError, SpawnConfig, Vector2,
+};
 use clonk_resources::{Group, MaterialLibrary};
 use clonk_script::Value;
 
@@ -229,8 +231,8 @@ fn populate_stippels(engine: &mut Engine, target: usize) {
     );
 }
 
-fn join(engine: &mut Engine, name: &str, team: Option<i32>) -> Option<i32> {
-    engine
+fn join_with_fallback_team(engine: &mut Engine, name: &str, team: i32) -> Option<i32> {
+    let outcome = engine
         .join_player(JoinPlayerConfig {
             name: name.to_owned(),
             player_info_id: 0,
@@ -239,7 +241,7 @@ fn join(engine: &mut Engine, name: &str, team: Option<i32>) -> Option<i32> {
             rounds_won: 0,
             rounds_lost: 0,
             total_playing_time: 0,
-            team,
+            team: None,
             color_dw: 0xff_00_00,
             pref_color: 0,
             pref_position: 0,
@@ -248,9 +250,14 @@ fn join(engine: &mut Engine, name: &str, team: Option<i32>) -> Option<i32> {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .ok()?
-        .initialized()
-        .map(|player| player.number)
+        .ok()?;
+    match outcome {
+        JoinPlayerOutcome::Initialized(player) => Some(player.number),
+        JoinPlayerOutcome::AwaitingTeamSelection { number } => engine
+            .initialize_scenario_player(number, team)
+            .ok()?
+            .map(|player| player.number),
+    }
 }
 
 fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
@@ -314,10 +321,7 @@ fn main() {
     let joined: Vec<i32> = ["Profiler A", "Profiler B"]
         .iter()
         .enumerate()
-        .filter_map(|(index, name)| {
-            join(&mut engine, name, None)
-                .or_else(|| join(&mut engine, name, Some(index as i32 + 1)))
-        })
+        .filter_map(|(index, name)| join_with_fallback_team(&mut engine, name, index as i32 + 1))
         .collect();
 
     if let Some(target) = stippel_target {
@@ -446,6 +450,32 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use clonk_engine::{PlayerStatus, TeamInfo};
+
+    #[test]
+    fn profile_join_resumes_teamless_player_instead_of_registering_a_duplicate() {
+        // Runtime team selection registers the player before ScenarioInit and
+        // resumes that same C4Player after selection (C4Player.cpp:299-320,
+        // 344-349). A profiling helper must not treat the pending outcome as a
+        // failed, side-effect-free join.
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Red", 0x00f4_0000),
+            TeamInfo::new(2, "Blue", 0x0000_c800),
+        ]);
+        engine.set_runtime_join_team_choice(true);
+
+        let joined = join_with_fallback_team(&mut engine, "Profiler", 1);
+
+        assert_eq!(joined, Some(0));
+        let players = engine.players().collect::<Vec<_>>();
+        assert_eq!(players.len(), 1);
+        assert!(!matches!(
+            players[0].status(),
+            PlayerStatus::TeamSelection | PlayerStatus::TeamSelectionPending
+        ));
+        assert_eq!(players[0].team(), Some(1));
+    }
 
     #[test]
     fn added_stippels_use_unique_small_offsets_on_each_anchor_band() {

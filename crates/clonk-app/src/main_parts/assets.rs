@@ -27,6 +27,8 @@ pub(crate) const RENDER_RESERVE_PERCENT: u32 = 15;
 /// unbounded stretch; this is the only guarantee the window still updates.
 pub(crate) const MAX_TIME_BETWEEN_RENDERS: Duration = Duration::from_millis(500);
 pub(crate) const PRESENTATION_BENCHMARK_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_SECONDS";
+pub(crate) const PRESENTATION_BENCHMARK_PLAYER_TEAMS_ENV: &str =
+    "LC_APP_PRESENTATION_BENCHMARK_PLAYER_TEAMS";
 pub(crate) const INPUT_LATENCY_BENCHMARK_INTERVAL_ENV: &str =
     "LC_APP_PRESENTATION_BENCHMARK_INPUT_INTERVAL_MS";
 pub(crate) const PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV: &str =
