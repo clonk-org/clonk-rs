@@ -1357,15 +1357,14 @@ impl GameDiscoveryQueryGate {
 
     fn finish_at(&mut self, now: Instant, address: SocketAddr, outcome: GameDiscoveryQueryOutcome) {
         self.active.remove(&address);
-        match outcome {
-            GameDiscoveryQueryOutcome::NoReferences => {
-                let allowed_at = now.checked_add(EMPTY_REFERENCE_LIFETIME).unwrap_or(now);
-                self.next_allowed.insert(address, allowed_at);
+        let backoff = match outcome {
+            GameDiscoveryQueryOutcome::References => GAME_SEARCH_INTERVAL,
+            GameDiscoveryQueryOutcome::NoReferences | GameDiscoveryQueryOutcome::Failed => {
+                EMPTY_REFERENCE_LIFETIME
             }
-            GameDiscoveryQueryOutcome::References | GameDiscoveryQueryOutcome::Failed => {
-                self.next_allowed.remove(&address);
-            }
-        }
+        };
+        let allowed_at = now.checked_add(backoff).unwrap_or(now);
+        self.next_allowed.insert(address, allowed_at);
     }
 }
 
@@ -2971,6 +2970,93 @@ Title=Empty\n",
         let empty_until = now + EMPTY_REFERENCE_LIFETIME;
         assert!(!gate.begin_at(empty_until - Duration::from_millis(1), &command));
         assert!(gate.begin_at(empty_until, &command));
+    }
+
+    #[test]
+    fn a_resolved_lan_host_is_requeried_on_the_cpp_discovery_interval() {
+        // C4StartupNetDlg deletes a LAN query row the moment its answer is
+        // converted into references (pinned oracle src/C4StartupNetDlg.cpp:
+        // 329-334), and IsSameRefQueryAddress matches unretrieved rows only
+        // (:590-600), so the host is queried again on the dialog's next probe -
+        // once per C4NetGameDiscoveryInterval (:1116-1131; C4StartupNetDlg.h:31).
+        // This port probes far more often than that, so it holds the per-host
+        // interval here instead of inheriting it from the probe cadence.
+        let address: SocketAddr = "127.0.0.1:31113".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut gate = GameDiscoveryQueryGate::default();
+        let now = Instant::now();
+
+        assert!(gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::References);
+
+        assert!(
+            !gate.begin_at(
+                now + GAME_SEARCH_INTERVAL - Duration::from_millis(1),
+                &command
+            ),
+            "a host already on the list keeps the oracle's re-query interval"
+        );
+        assert!(gate.begin_at(now + GAME_SEARCH_INTERVAL, &command));
+    }
+
+    #[test]
+    fn a_failed_lan_reference_query_backs_off_for_the_cpp_error_row_lifetime() {
+        // Deliberate divergence. IsSameRefQueryAddress refuses to match a failed
+        // non-masterserver row - "if request failed, create a duplicate anyway
+        // in case the game is opened now" (pinned oracle
+        // src/C4StartupNetDlg.cpp:590-600) - so C++ retries a refusing host on
+        // every probe. At this port's probe rate that would stack an error row
+        // and a connection attempt several times over the ten seconds one such
+        // row is displayed, so the retry waits out C4NetErrorRefTimeout
+        // (src/C4StartupNetDlg.h:30), the lifetime C++ gives the row itself
+        // (:506-531).
+        let address: SocketAddr = "127.0.0.1:31114".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut gate = GameDiscoveryQueryGate::default();
+        let now = Instant::now();
+
+        assert!(gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::Failed);
+
+        assert!(
+            !gate.begin_at(
+                now + EMPTY_REFERENCE_LIFETIME - Duration::from_millis(1),
+                &command
+            ),
+            "a refusing host is not retried on every probe"
+        );
+        assert!(gate.begin_at(now + EMPTY_REFERENCE_LIFETIME, &command));
+    }
+
+    #[test]
+    fn an_explicit_refresh_readmits_every_host_the_gate_is_holding() {
+        // DoRefresh deletes every row and restarts discovery from nothing
+        // (pinned oracle src/C4StartupNetDlg.cpp:1078-1109), so no backoff this
+        // gate is holding may outlive it - the button has to mean now.
+        let address: SocketAddr = "127.0.0.1:31115".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut gate = GameDiscoveryQueryGate::default();
+        let now = Instant::now();
+
+        assert!(gate.begin_at(now, &command));
+        gate.finish_at(now, address, GameDiscoveryQueryOutcome::References);
+        assert!(!gate.begin_at(now, &command));
+
+        gate.clear();
+
+        assert!(gate.begin_at(now, &command));
     }
 
     #[test]
