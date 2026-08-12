@@ -3148,6 +3148,28 @@ an ordered-map model gap.
   it became observable with the clonk-org/clonk-rs#235 fix. Closing it means
   threading resolved icons into the input-side helpers.
 
+- Open: **A DFA_FLOAT action on a definition that declares no `Float` physical
+  still steers on the port's `MovementProfile` convenience path, where C++
+  freezes it.** `C4Object::ExecAction`'s DFA_FLOAT arm takes
+  `lLimit = FIXED100(pPhysical->Float)` and clamps both dirs to it with no zero
+  special case (`C4Object.cpp:5291-5309`), so an object with no Float physical
+  anywhere has `xdir = ydir = 0` forced every frame for as long as it holds
+  that action. `Engine::uses_native_float_bounds`
+  (`crates/clonk-engine/src/engine/economy.rs`) now routes every object with a
+  Float physical — DefCore-declared or script-installed — onto that exact path,
+  which is what closed the Eke airbike's dismount. Objects with neither keep the
+  additive `MovementProfile` fixture path: `float_speed = 6`,
+  `float_acceleration = 1` (ten times `FloatAccel`), and no hard zero.
+  109 shipped definitions are in that class — torches, lens flares, gates,
+  force-field segments, wires, bait — against 86 that declare one. None was
+  observed to move, because they are script-positioned props whose `ComDir`
+  stays `COMD_Stop`, and with `COMD_Stop` the fixture path only clamps to ±6
+  rather than accelerating; DFA_FLOAT takes no gravity on either path
+  (`ActionProcedure::gravity_component_fixed`). Closing it means giving the
+  synthetic snapshot fixtures an explicit opt-in — a real `MovementManifest`
+  rather than "no physicals declared" — so the native path can become
+  unconditional for FLOAT.
+
 ## Deliberate divergences from the oracle
 
 - **LAN discovery re-probes every five seconds and a new host repeats its
@@ -3969,6 +3991,83 @@ an ordered-map model gap.
   `eke_missile_down_and_up_still_straighten_the_guided_missile`,
   `classic_release_is_emitted_only_when_no_autostop_set_claims_the_key` and
   `selected_player_classic_control_synchronizes_horizontal_key_release`.
+
+- **The Eke Reloaded airbike is hold-to-steer, flies diagonals and keeps
+  shooting through a turn** (`planet/System.c4g/EkeAirbikeSteering.c`, plus the
+  four steering releases and `ControlUpdate` forwarded by
+  `planet/System.c4g/EkeSftRelease.c`; C++ `C4Object::ExecAction`'s DFA_FLOAT
+  arm, LegacyClonk 7d43b47 src/C4Object.cpp:5291-5309, and
+  `EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:21-90`). Requested from play
+  on 2026-08-12, after the airbike control chain was audited end to end against
+  the oracle and the engine halves were found to match it (see the parity fixes
+  landed the same day). This is a content-level departure, not a port fix: the
+  three things it changes are all shipped LegacyClonk behaviour.
+  1. **It coasts forever.** DFA_FLOAT adds `FloatAccel` = FIXED100(10) for the
+     named ComDir and clamps each axis to `FIXED100(Float)`; `COMD_Stop` has no
+     deceleration case at all, and the shipped script never writes `COMD_Stop`
+     either. A tap of `[Left]` commits the bike to that heading until the pilot
+     spends an exactly equal number of frames holding `[Right]`.
+  2. **It cannot fly a diagonal.** Each of `ControlLeft`/`Right`/`Up`/`Down`
+     slams ComDir to one pure axis, so the four diagonal ComDirs the engine
+     offers are unreachable.
+  3. **Steering cancels the gun.** `ControlLeft`/`Right` reset any non-Fly
+     action with `SetAction("Fly", clonk)` to leave Hyperfly; the same line
+     drops `Shoot` and ends the burst `ControlThrow` started.
+  The append maintains the set of steering keys the pilot holds instead of
+  latching one axis, and resolves it exactly the way the engine resolves
+  pressed coms (`Coms2ComDir`, C4ObjectCom.cpp:903-920): releasing stops that
+  axis' acceleration, holding two flies the diagonal between them, and rolling
+  one direction onto its opposite and letting go of the newer one leaves the
+  older one steering. A per-frame `AirbikeGlide` effect
+  decays each unheld axis toward zero by one `FloatAccel` step, snapping inside
+  the last step. That magnitude is deliberate: braking then costs exactly what
+  acceleration cost, the symmetry DFA_WALK already has in C++
+  (`if ((xdir > -WalkAccel) && (xdir < +WalkAccel)) xdir = 0;`,
+  src/C4Object.cpp:4796). Terminal speed and the Float physical stay the
+  engine's, including the Hyperfly ladder, which keeps its shipped shape and
+  simply becomes hold-to-dash — letting go of the last held direction ends the
+  dash, so the 800 physical decays back down the `Flying()` ladder instead of
+  staying latched on a bike the brake has already stopped. Only the Fly-family
+  actions are reset by a turn, so a burst survives steering.
+  Hold-to-steer needs releases, and only a human pilot produces them. The GPED
+  remote control steers by calling these very handlers
+  (`target -> ControlLeft(this())`, GPED.c4d/Script.c:15-73) — it is itself the
+  object in the `AirbikeFly` action — but no definition in `content/` declares a
+  `Control*Released` at all, so a held-direction model would latch write-only
+  there and the operator could never null an axis again. Every control and the
+  glide therefore test `GetID(clonk) == SF5B` and fall through to the shipped
+  pure-axis body otherwise, which keeps the whole remote-control path on the
+  shipped latched physics.
+  The append is a cooperative ComDir authority, not an exclusive one: a ComDir
+  it did not ask for means another script commanded the bike — AirbikeFight's
+  opening `SetComDir(COMD_Up(), airbike)`
+  (InterplanetaryCivilwar.c4f/AirbikeFight.c4s/Script.c:59), or `PilotLost`'s
+  `SetComDir(COMD_Down())` still standing when a fresh pilot mounts — and the
+  glide adopts it instead of braking it. Overruling it would have cancelled
+  those commands at exactly the `FloatAccel` the engine adds, leaving the bike
+  creeping on an axis nobody steers while `GetXDir` sampled as zero.
+  Jump'n'Run additionally re-syncs the held direction from `ControlUpdate`,
+  which `C4Object::CallControl` hands the crew member after every com it
+  dispatches (src/C4Object.cpp:3321-3339); classic control has only the
+  press/release pair, which the port synchronizes in both styles (see the
+  guided-missile entry above). Unchanged: `FloatAccel`, the Float physical and
+  its Hyperfly ladder, the ActMap, the weapon modes, the dismount rule,
+  `Hit`/`Damage`, and the GPED remote-control path.
+  This cannot desync two clonk-rs peers: no `Random()` draw is added or
+  reordered and every write is to synchronized object state from synchronized
+  control input. It does diverge from a LegacyClonk peer and from replays
+  recorded against one.
+  Pinned by `releasing_the_steering_key_brings_the_airbike_to_a_stop` (both
+  control styles), `holding_two_steering_keys_flies_the_diagonal`,
+  `steering_does_not_cancel_the_airbike_gun`,
+  `the_hyperfly_boost_is_held_rather_than_latched`,
+  `the_gped_remote_control_still_flies_the_airbike`,
+  `releasing_the_newer_of_two_opposite_keys_keeps_the_older_one_steering` (both
+  control styles) and
+  `the_shipped_dismount_and_abandoned_physics_are_unchanged`. The oracle-exact
+  chain keeps its own coverage in
+  `crates/clonk-engine/tests/it/airbike_pilot_control.rs`, which runs the same
+  scenario with this append removed.
 
 - **The Eke GPED's remote-control pilot stays parked under Jump'n'Run control**
   (`planet/System.c4g/EkeGpedRemoteControl.c`; C++ `C4Object::AutoStopDirectCom`

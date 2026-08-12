@@ -13363,7 +13363,19 @@ fn runtime_f4_toggles_only_live_network_dialog_and_consumes_edges() {
 
         let before_release = runtime_global_ui_snapshot(&app);
         app.test_key(VirtualKeyCode::F4, ElementState::Released);
-        assert_eq!(runtime_global_ui_snapshot(&app), before_release);
+        let mut after_release = runtime_global_ui_snapshot(&app);
+        // `C4Game::DoKeyboardInput` clears its `PressedKeys` entry for every
+        // key-up before any scope or dialog decision (C4Game.cpp:2143-2155),
+        // so the held-key latch is the one thing a consumed release does
+        // change. Nothing else may.
+        assert!(
+            after_release.pressed_engine_keys.is_empty(),
+            "role {role:?}: the release clears the physical held-key latch"
+        );
+        after_release
+            .pressed_engine_keys
+            .clone_from(&before_release.pressed_engine_keys);
+        assert_eq!(after_release, before_release);
 
         app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
         assert!(app.runtime_client_list.is_none());
