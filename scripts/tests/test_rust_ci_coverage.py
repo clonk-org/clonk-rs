@@ -108,11 +108,11 @@ class RustCoverageGateTests(unittest.TestCase):
             coverage,
         )
         self.assertIn("cancel-in-progress: true", coverage)
-        self.assertEqual(coverage.count("actions/cache/restore@"), 12)
-        self.assertEqual(coverage.count("fail-on-cache-miss: true"), 12)
-        self.assertEqual(coverage.count("if: ${{ !inputs.upload-diagnostics }}"), 12)
+        self.assertNotIn("actions/cache/restore@", coverage)
+        self.assertNotIn("fail-on-cache-miss: true", coverage)
         self.assertIn("actions/download-artifact@", coverage)
-        self.assertIn("if: inputs.upload-diagnostics", coverage)
+        self.assertNotIn("if: inputs.upload-diagnostics", coverage)
+        self.assertNotIn("if: ${{ !inputs.upload-diagnostics }}", coverage)
         self.assertIn(
             "pattern: rust-coverage-fragment-${{ github.run_id }}-*",
             coverage,
@@ -135,31 +135,32 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertNotIn("actions/upload-artifact@", coverage)
         self.assertNotIn("continue-on-error:", coverage)
 
-    def test_fragment_handoffs_use_run_scoped_caches_not_release_artifacts(self):
+    def test_fragment_handoffs_use_run_scoped_artifacts_for_every_qualification(self):
         collectors = job_block("coverage-fragments")
         coverage = job_block("coverage")
 
-        self.assertIn("actions/upload-artifact@", collectors)
-        self.assertIn("if: inputs.upload-diagnostics", collectors)
-        self.assertIn("retention-days: 1", collectors)
+        self.assertRegex(
+            collectors,
+            r"- name: Upload coverage fragment\n"
+            r"        uses: actions/upload-artifact@",
+        )
+        self.assertIn(
+            "retention-days: ${{ inputs.upload-diagnostics && 1 || 7 }}",
+            collectors,
+        )
         self.assertIn("overwrite: true", collectors)
         self.assertIn(
             "name: rust-coverage-fragment-${{ github.run_id }}-"
             "${{ matrix.artifact }}",
             collectors,
         )
-        self.assertIn("actions/cache/save@", collectors)
-        self.assertEqual(
-            collectors.count("if: ${{ !inputs.upload-diagnostics }}"), 2
-        )
-        self.assertIn("lookup-only: true", collectors)
+        self.assertNotIn("actions/cache/save@", collectors)
+        self.assertNotIn("actions/cache/restore@", collectors)
+        self.assertNotIn("if: inputs.upload-diagnostics", collectors)
+        self.assertNotIn("if: ${{ !inputs.upload-diagnostics }}", collectors)
+        self.assertNotIn("lookup-only: true", collectors)
         self.assertNotIn("actions: write", coverage)
-        cache_lines = "\n".join(
-            line
-            for line in collectors.splitlines() + coverage.splitlines()
-            if line.lstrip().startswith("key: rust-coverage-fragment-")
-        )
-        self.assertNotIn("github.run_attempt", cache_lines)
+        self.assertNotIn("key: rust-coverage-fragment-", collectors + coverage)
 
         artifacts = re.findall(r"(?m)^            artifact: (.+)$", collectors)
         self.assertEqual(len(artifacts), 12)
@@ -172,15 +173,10 @@ class RustCoverageGateTests(unittest.TestCase):
             "target/coverage-fragments/${{ matrix.artifact }}.lcov.gz",
             collectors,
         )
-        for artifact in artifacts:
-            with self.subTest(artifact=artifact):
-                path = f"target/coverage-fragments/{artifact}.lcov.gz"
-                key = (
-                    "rust-coverage-fragment-${{ github.run_id }}-"
-                    f"{artifact}"
-                )
-                self.assertIn(path, coverage)
-                self.assertIn(key, coverage)
+        self.assertIn(
+            "pattern: rust-coverage-fragment-${{ github.run_id }}-*",
+            coverage,
+        )
 
     def test_coverage_collectors_use_the_pinned_instrumented_toolchain(self):
         collectors = job_block("coverage-fragments")

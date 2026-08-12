@@ -152,7 +152,8 @@ jobs:
       # Only trusted main publishes reusable caches. A merge-group cache is
       # scoped to its ephemeral ref and no later candidate can restore it.
       publish-recording-host-cache: false
-      # Publication resolves an exact seven-artifact inventory from this run.
+      # Publication resolves exactly seven payload artifacts plus this run's
+      # twelve non-publishable coverage handoffs.
       upload-diagnostics: false
 
   linux:

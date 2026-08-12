@@ -151,33 +151,14 @@ jobs:
             --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
           gzip --best "target/coverage-fragments/${{ matrix.artifact }}.lcov"
 
-      - name: Hand off coverage fragment
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/${{ matrix.artifact }}.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-${{ matrix.artifact }}
-
-      # cache/save reports service failures as warnings. Verify the immutable
-      # run-scoped handoff now so the collector fails closed on a cache miss.
-      - name: Verify coverage fragment handoff
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/${{ matrix.artifact }}.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-${{ matrix.artifact }}
-          fail-on-cache-miss: true
-          lookup-only: true
-
       - name: Upload coverage fragment
-        if: inputs.upload-diagnostics
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rust-coverage-fragment-${{ github.run_id }}-${{ matrix.artifact }}
           path: target/coverage-fragments/${{ matrix.artifact }}.lcov.gz
           if-no-files-found: error
           overwrite: true
-          retention-days: 1
+          retention-days: ${{ inputs.upload-diagnostics && 1 || 7 }}
 
   coverage:
     name: Rust code coverage
@@ -201,108 +182,11 @@ jobs:
           persist-credentials: false
 
       - name: Download coverage fragments
-        if: inputs.upload-diagnostics
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: rust-coverage-fragment-${{ github.run_id }}-*
           path: target/coverage-fragments
           merge-multiple: true
-
-      - name: Restore coverage fragment / app-1-10
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-1-10.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-1-10
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / app-2-7
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-2-7.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-2-7
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / app-3
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-3.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-3
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / app-4-9
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-4-9.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-4-9
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / app-5
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-5.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-5
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / app-11-12
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-11-12.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-11-12
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / app-6-8
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/app-6-8.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-6-8
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / engine-1
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/engine-1.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-engine-1
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / engine-2
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/engine-2.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-engine-2
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / engine-and-frontend-units
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/engine-and-frontend-units.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-engine-and-frontend-units
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / remaining-1
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/remaining-1.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-remaining-1
-          fail-on-cache-miss: true
-
-      - name: Restore coverage fragment / remaining-2
-        if: ${{ !inputs.upload-diagnostics }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/coverage-fragments/remaining-2.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-remaining-2
-          fail-on-cache-miss: true
 
       - name: Enforce merged line coverage floor
         env:

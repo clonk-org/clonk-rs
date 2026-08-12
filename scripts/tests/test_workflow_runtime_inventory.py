@@ -91,19 +91,21 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                     line,
                 )
 
-    def test_exact_sha_coverage_uses_current_pinned_cache_handoffs(self):
+    def test_exact_sha_coverage_uses_current_pinned_artifact_handoffs(self):
         workflow = EXACT_SHA_QUALIFICATION_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn(
-            "actions/cache/restore@"
-            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
+            "actions/upload-artifact@"
+            "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
             workflow,
         )
         self.assertIn(
-            "actions/cache/save@"
-            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
+            "actions/download-artifact@"
+            "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
             workflow,
         )
+        self.assertNotIn("actions/cache/restore@", workflow)
+        self.assertNotIn("actions/cache/save@", workflow)
 
     def test_landing_smoke_covers_c4group_everywhere_it_is_inventoried(self):
         expected = {
@@ -289,15 +291,22 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             )
         ]
         upload = collectors.index("- name: Upload coverage fragment")
-        self.assertIn(
-            "if: inputs.upload-diagnostics",
+        self.assertRegex(
             collectors[upload : upload + 180],
+            r"- name: Upload coverage fragment\n"
+            r"        uses: actions/upload-artifact@",
         )
-        self.assertIn("actions/cache/save@", collectors)
-        handoff = collectors.index("- name: Hand off coverage fragment")
-        self.assertIn(
-            "if: ${{ !inputs.upload-diagnostics }}",
-            collectors[handoff : handoff + 180],
+        self.assertNotIn("actions/cache/save@", collectors)
+        self.assertNotIn("actions/cache/restore@", qualification)
+        coverage = qualification[
+            qualification.index("  coverage:") : qualification.index(
+                "  coverage-html:"
+            )
+        ]
+        self.assertRegex(
+            coverage,
+            r"- name: Download coverage fragments\n"
+            r"        uses: actions/download-artifact@",
         )
 
     def test_installer_smoke_compiles_the_release_icon_branch(self):
