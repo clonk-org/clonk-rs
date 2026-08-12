@@ -107,8 +107,12 @@ pub struct ViewportContextEntryLayout {
 pub enum ViewportContextOutcome {
     /// Run this command and close the menu.
     Activate(ViewportContextItem),
-    /// Close the menu without running anything — a click outside, or on a
-    /// disabled row.
+    /// The menu swallowed the click and stays up. A greyed row does this in
+    /// both toolkits: `MF_GRAYED` absorbs the click without dismissing the
+    /// popup, and a GTK insensitive item never emits `activate` — only a
+    /// click *outside* cancels.
+    Ignored,
+    /// Close the menu without running anything — a click outside it.
     Dismiss,
 }
 
@@ -226,9 +230,11 @@ impl ViewportContextMenu {
 
     /// Releasing a button over the popup.
     ///
-    /// A disabled row swallows the click and closes, which is what both
-    /// toolkits do — `TrackPopupMenu` returns 0 for a grayed item, and GTK's
-    /// insensitive item never emits `activate`.
+    /// A row that is not a live command — greyed, or the separator — swallows
+    /// the click and leaves the menu up; only a click outside cancels it.
+    /// Both toolkits behave that way, and it matters here because the popup
+    /// is not modal: a greyed row that dismissed would make the menu feel
+    /// like it had acted.
     pub fn handle_pointer_up(
         &mut self,
         position: GuiPoint,
@@ -236,14 +242,18 @@ impl ViewportContextMenu {
         height: u32,
     ) -> ViewportContextOutcome {
         self.pointer = Some(position);
-        self.layout(width, height)
+        let Some(row) = self
+            .layout(width, height)
             .into_iter()
             .find(|row| contains(row.rect, position))
-            .and_then(|row| {
-                let entry = self.entries.get(row.index)?;
-                entry.enabled().then(|| entry.item()).flatten()
-            })
-            .map_or(ViewportContextOutcome::Dismiss, |item| {
+        else {
+            return ViewportContextOutcome::Dismiss;
+        };
+        self.entries
+            .get(row.index)
+            .filter(|entry| entry.enabled())
+            .and_then(ViewportContextEntry::item)
+            .map_or(ViewportContextOutcome::Ignored, |item| {
                 ViewportContextOutcome::Activate(item)
             })
     }
@@ -495,18 +505,19 @@ mod tests {
             menu.handle_pointer_up(center(&rows[0]), 400, 250),
             ViewportContextOutcome::Activate(ViewportContextItem::Delete)
         );
-        // Grab contents is grey with an empty container: the click closes the
-        // menu and runs nothing.
+        // Grab contents is grey with an empty container: the click is
+        // swallowed and the menu stays up, as a `MF_GRAYED` item and a GTK
+        // insensitive one both do.
         assert_eq!(
             menu.handle_pointer_up(center(&rows[2]), 400, 250),
-            ViewportContextOutcome::Dismiss
+            ViewportContextOutcome::Ignored
         );
-        // The separator is not a command either.
+        // The separator is not a command either, and does not dismiss.
         assert_eq!(
             menu.handle_pointer_up(center(&rows[3]), 400, 250),
-            ViewportContextOutcome::Dismiss
+            ViewportContextOutcome::Ignored
         );
-        // Outside the popup entirely.
+        // Only a click outside the popup cancels it.
         assert_eq!(
             menu.handle_pointer_up(GuiPoint::new(390.0, 240.0), 400, 250),
             ViewportContextOutcome::Dismiss

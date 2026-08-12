@@ -155,10 +155,15 @@ impl DeveloperWindowPresenter<GameApp> for ToolboxWindowHost {
             Ok(crate::main_audio::RetainedGpuPresentOutcome::Skipped) => Ok(()),
             Err(pixels::Error::SurfaceLost) => {
                 // The pages survive a lost surface, so the window hides and
-                // waits rather than being destroyed with them.
+                // waits rather than being destroyed with them. The *model*
+                // has to learn that too: it would otherwise still believe the
+                // toolbox visible, answer the next `switch_page` with a bare
+                // retitle, and leave a window nobody can bring back.
                 let _ = self.surface_rebuild.note_loss();
                 self.window.set_visible(false);
                 self.visible = false;
+                let effect = app.developer_toolbox.close(None);
+                app.developer_toolbox_effects.extend(effect);
                 Err("the developer toolbox surface was lost".to_owned())
             }
             Err(error) => Err(error.to_string()),

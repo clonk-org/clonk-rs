@@ -2903,9 +2903,31 @@ impl GameApp {
         true
     }
 
-    /// A click while the popup is up. Returns whether the menu consumed it,
-    /// which is what keeps the click off the edit cursor underneath —
-    /// `TrackPopupMenu` is modal and GTK grabs the pointer.
+    /// Whether an open popup owns this viewport's pointer events.
+    ///
+    /// C++'s menu is modal — `TrackPopupMenu` blocks until an item is chosen
+    /// (`C4EditCursor.cpp:597`) and the GTK menu holds a pointer grab — so
+    /// *no* button message reaches the viewport while it is up. The port's
+    /// popup is painted rather than owned by the window system, so the grab
+    /// has to be made explicit, and it covers both buttons: without it a
+    /// right-click over the popup would re-pick the selection underneath it,
+    /// and the release that follows a chosen item would run
+    /// `LeftButtonUp` — clearing the very `Hold` Grab contents had just set.
+    pub(crate) fn console_viewport_context_menu_owns_pointer(&self, identity: u64) -> bool {
+        self.console_viewport_context_menu
+            .as_ref()
+            .is_some_and(|(open, _)| *open == identity)
+    }
+
+    /// Consume the grab a swallowed press left behind, so exactly one release
+    /// is swallowed with it.
+    pub(crate) fn take_console_viewport_pointer_grab(&mut self, identity: u64) -> bool {
+        self.console_viewport_context_menu_grab
+            .take_if(|held| *held == identity)
+            .is_some()
+    }
+
+    /// A click while the popup is up. Returns whether the menu consumed it.
     pub(crate) fn console_viewport_context_menu_click(
         &mut self,
         identity: u64,
@@ -2925,9 +2947,17 @@ impl GameApp {
             extent.0,
             extent.1,
         );
-        self.console_viewport_context_menu = None;
-        if let ViewportContextOutcome::Activate(item) = outcome {
-            self.activate_console_viewport_context_item(item);
+        // The release completing this click belongs to the menu too, whether
+        // or not the menu is still up by the time it arrives.
+        self.console_viewport_context_menu_grab = Some(identity);
+        match outcome {
+            ViewportContextOutcome::Activate(item) => {
+                self.console_viewport_context_menu = None;
+                self.activate_console_viewport_context_item(item);
+            }
+            // A greyed row or the separator: swallowed, and the menu stays.
+            ViewportContextOutcome::Ignored => {}
+            ViewportContextOutcome::Dismiss => self.console_viewport_context_menu = None,
         }
         true
     }
@@ -3000,8 +3030,12 @@ impl GameApp {
             previous,
             self.console_cursor_mode(),
             self.developer_tools.active(),
-            self.developer_toolbox.current_page()
-                == Some(crate::developer_windows::ToolboxPage::Property),
+            // `C4PropertyDlg::Active`, which only a *shown* property page
+            // sets. Asking `current_page` instead would call a closed toolbox
+            // active forever, because hiding it keeps its pages.
+            self.developer_toolbox.visible()
+                && self.developer_toolbox.current_page()
+                    == Some(crate::developer_windows::ToolboxPage::Property),
         );
         // `Clear()` drops `Active` and nothing else, which is why re-opening
         // restores the previous selection rather than the defaults.
@@ -3011,6 +3045,20 @@ impl GameApp {
         if change.reopen_prop_tools {
             self.open_developer_prop_tools();
         }
+    }
+
+    /// The toolbox window closing, from its own close button.
+    ///
+    /// `C4DevmodeDlg`'s `delete-event` hides rather than destroys, and the
+    /// shared window's `"hide"` signal is separately connected to
+    /// `C4ToolsDlg::OnWindowHide`, whose whole body is `Active = false`
+    /// (`C4ToolsDlg.cpp:393,1098-1101`). Dropping that second half is what
+    /// would make the next mode change resurrect a toolbox the user closed —
+    /// `SetMode` reopens on `ToolsDlg.Active || PropertyDlg.Active`.
+    pub(crate) fn close_developer_toolbox(&mut self, position: Option<(i32, i32)>) {
+        let effect = self.developer_toolbox.close(position);
+        self.developer_toolbox_effects.extend(effect);
+        self.developer_tools.clear();
     }
 
     /// Draw one toolbox page at the window's extent.
@@ -3103,7 +3151,7 @@ impl GameApp {
     /// transition and enqueues `EMDT_SetMode`. The dialog state moves only
     /// when that control comes back out of the queue, which is what keeps
     /// every peer's landscape mode identical.
-    fn submit_editor_landscape_mode(
+    pub(crate) fn submit_editor_landscape_mode(
         &mut self,
         target: clonk_engine::developer_tools::LandscapeMode,
     ) {
@@ -3113,16 +3161,21 @@ impl GameApp {
             return;
         };
         if landscape_mode_needs_confirmation(landscape_mode_of(mode), target) {
-            // `Console.Message(IDS_CNS_EXACTTOSTATIC, true)` is a task-modal
-            // yes/no box under `_WIN32`/`WITH_DEVELOPER_MODE` and returns true
-            // unasked past them (`C4Console.cpp:841-853`). The reference build
-            // therefore never asks; the port takes the same answer and says
-            // what it cost, on the surface its other console notices use.
+            // A declined confirmation **aborts**: `SetLandscapeMode` returns
+            // false before enqueueing anything (`C4ToolsDlg.cpp:869-874`). And
+            // on the reference build it is always declined — `C4Console::
+            // Message`'s two bodies are behind `_WIN32`/`WITH_DEVELOPER_MODE`
+            // and past their `#endif` it is a bare `return false`
+            // (`C4Console.cpp:841-853`). So the one destructive transition is
+            // refused there, and is refused here. Saying so is the port's own
+            // choice of surface; discarding an exact landscape on a click no
+            // dialog ever confirmed would be the worse divergence.
             let message = self.runtime_resource_text(
                 "IDS_CNS_EXACTTOSTATIC",
-                "Switching to a static landscape discards the exact landscape.",
+                "The exact landscape would be lost. Switching to static is refused.",
             );
             self.developer_console.out(&message);
+            return;
         }
         if let Err(error) =
             self.submit_or_execute_editor_draw_tool(clonk_engine::EmDrawToolControlData {
@@ -3149,6 +3202,7 @@ impl GameApp {
             mode: state.as_ref().map_or(LandscapeMode::Undefined, |state| {
                 landscape_mode_of(state.mode)
             }),
+            has_map: state.as_ref().is_some_and(|state| state.has_map),
             tool: self.developer_tools.tool(),
             grade: self.developer_tools.grade(),
             ift: self.developer_tools.ift(),

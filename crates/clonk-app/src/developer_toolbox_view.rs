@@ -27,7 +27,9 @@ use clonk_frontend::developer_chrome::{
 use clonk_frontend::GuiPoint;
 use clonk_graphics::{Surface, TextFont};
 
-use crate::developer_tools_page::{tools_control_enabled, ToolsControl, TOOLS_PAGE_CONTROLS};
+use crate::developer_tools_page::{
+    landscape_mode_button_enabled, tools_control_enabled, ToolsControl, TOOLS_PAGE_CONTROLS,
+};
 
 /// The toolbox window's initial extent. Nothing to port — the GTK page is
 /// sized by its box tree and the Win32 one by a dialog template neither of
@@ -54,6 +56,9 @@ const LIST_ROW_HEIGHT: i32 = 14;
 pub(crate) struct ToolsPageModel {
     /// `Game.Landscape.Mode`, which decides the whole page's enablement.
     pub(crate) mode: LandscapeMode,
+    /// `Game.Landscape.Map != nullptr` — the Static button's own gate
+    /// (`C4ToolsDlg.cpp:805-807`).
+    pub(crate) has_map: bool,
     pub(crate) tool: Tool,
     pub(crate) grade: i32,
     pub(crate) ift: bool,
@@ -109,10 +114,17 @@ impl ToolsPageModel {
         let mode_width = MODE_COLUMN_WIDTH.min((content.w - WIDE_GAP - 1).max(1));
         let mut slots = Vec::with_capacity(TOOLS_PAGE_CONTROLS.len());
         let mut push = |control: ToolsControl, rect: IntRect| {
+            // Two rules, not one: `EnableControls` covers the page, and
+            // `UpdateLandscapeModeCtrls` separately gates the three mode
+            // buttons — which `EnableControls` never disables.
+            let enabled = tools_control_enabled(control, self.mode, &self.material)
+                && control.landscape_mode().is_none_or(|button| {
+                    landscape_mode_button_enabled(button, self.mode, self.has_map)
+                });
             slots.push(ToolsPageSlot {
                 control,
                 rect,
-                enabled: tools_control_enabled(control, self.mode, &self.material),
+                enabled,
             });
         };
 
@@ -548,6 +560,7 @@ mod tests {
     fn model() -> ToolsPageModel {
         ToolsPageModel {
             mode: LandscapeMode::Exact,
+            has_map: true,
             tool: Tool::Brush,
             grade: 5,
             ift: true,

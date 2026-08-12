@@ -5991,13 +5991,28 @@
         assert_eq!(remove.action, clonk_engine::EMMO_REMOVE);
         assert_eq!(remove.objects, vec![id.as_u64() as i32]);
 
-        // A disabled row swallows its click: the menu closes and no control
-        // goes out. Grab contents is grey while the selection holds nothing.
+        // A disabled row swallows its click and the menu *stays up*, as a
+        // grayed Win32 item and an insensitive GTK one both do — only a click
+        // outside cancels. Grab contents is grey while the selection holds
+        // nothing.
         app.open_console_viewport_context_menu(identity, local);
         assert!(app.console_viewport_context_menu_click(identity, center(2), (320, 200)));
         assert!(
+            app.console_viewport_context_menu.is_some(),
+            "a greyed row does not dismiss the menu"
+        );
+        assert!(
             commands.take_submitted_decided_controls().is_empty(),
             "a greyed item runs nothing"
+        );
+        assert!(app.console_viewport_context_menu_click(
+            identity,
+            (rows[0].rect.x - 4, rows[0].rect.y - 4),
+            (320, 200)
+        ));
+        assert!(
+            app.console_viewport_context_menu.is_none(),
+            "a click outside cancels it"
         );
 
         // Escape closes the popup without choosing anything, and only the
@@ -6026,6 +6041,217 @@
                 .1),
             vec![ViewportContextItem::Properties]
         );
+    }
+
+    // C4EditCursor.cpp:361-374,503-518 and C4ToolsDlg.cpp:865-879 — the
+    // context menu's Properties/Tools row is the only thing that opens the
+    // toolbox, the page follows the cursor mode, and the landscape mode
+    // buttons are the one page control that travels as a control.
+    #[test]
+    fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
+        use crate::developer_toolbox::ToolboxEffect;
+        use crate::developer_toolbox_view::{TOOLBOX_HEIGHT, TOOLBOX_WIDTH};
+        use crate::developer_tools_page::ToolsControl;
+        use crate::developer_windows::ToolboxPage;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Draw;
+
+        // Nothing opens the toolbox on its own: `SetMode` reopens it only when
+        // one of the two pages was already active (`:508-516`).
+        assert!(app.developer_toolbox_effects.is_empty());
+        assert_eq!(app.developer_toolbox.current_page(), None);
+
+        // Draw mode's Properties row opens the Tools page, and `C4ToolsDlg::
+        // Open`'s tail sets Active even with no dialog of its own.
+        app.open_developer_prop_tools();
+        assert!(app.developer_tools.active());
+        assert_eq!(
+            app.developer_toolbox.current_page(),
+            Some(ToolboxPage::Tools)
+        );
+        assert_eq!(
+            app.developer_toolbox.pages(),
+            &[ToolboxPage::Tools, ToolboxPage::Property],
+            "both pages are appended, whichever is switched to"
+        );
+        let effects = std::mem::take(&mut app.developer_toolbox_effects);
+        assert!(
+            matches!(effects.first(), Some(ToolboxEffect::Create(_))),
+            "the first page creates the window: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                ToolboxEffect::Show {
+                    page: ToolboxPage::Tools,
+                    ..
+                }
+            )),
+            "and it is shown on the Tools page: {effects:?}"
+        );
+
+        // Leaving Draw clears the tools and, because a page was up, reopens
+        // the toolbox on Property (`:503-516`).
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Edit,
+        )])
+        .expect("the console switched to Edit");
+        assert!(!app.developer_tools.active(), "Clear drops Active");
+        assert_eq!(
+            app.developer_toolbox.current_page(),
+            Some(ToolboxPage::Property)
+        );
+
+        // The page's own controls: everything but the landscape mode is local
+        // dialog state, and only the mode leaves as a control.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Draw,
+        )])
+        .expect("the console switched back to Draw");
+        app.developer_toolbox_effects.clear();
+        let extent = (TOOLBOX_WIDTH, TOOLBOX_HEIGHT);
+        let center = |app: &GameApp, control: ToolsControl| {
+            let rect = app
+                .developer_tools_page_model()
+                .layout(extent.0, extent.1)
+                .into_iter()
+                .find(|slot| slot.control == control)
+                .expect("the control is laid out")
+                .rect;
+            (rect.x + rect.w / 2, rect.y + rect.h / 2)
+        };
+
+        // Offline the control applies straight away, so this is also the
+        // fixture that puts the landscape somewhere the rest of the page is
+        // live at all — everything but the mode buttons is dead below Static.
+        let exact = center(&app, ToolsControl::ModeExact);
+        app.developer_toolbox_click(exact, extent);
+        assert_eq!(
+            app.developer_tools_page_model().mode,
+            clonk_engine::developer_tools::LandscapeMode::Exact
+        );
+
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.developer_toolbox_click(center(&app, ToolsControl::Line), extent);
+        assert_eq!(
+            app.developer_tools.tool(),
+            clonk_engine::developer_tools::Tool::Line
+        );
+        app.developer_toolbox_click(center(&app, ToolsControl::NoIft), extent);
+        assert!(!app.developer_tools.ift());
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "the tool and IFT are dialog state, not synchronized state"
+        );
+
+        // The three mode buttons are the exception: `SetLandscapeMode(iMode,
+        // false)` enqueues `EMDT_SetMode` and changes nothing locally, so
+        // every peer switches at the same tick. Exact is the button that is
+        // always live — Dynamic is enabled only when the landscape already is
+        // dynamic, and Static needs a map (`C4ToolsDlg.cpp:796-812`).
+        let before = app
+            .engine
+            .landscape()
+            .expect("the sandbox landscape")
+            .mode();
+        app.developer_toolbox_click(center(&app, ToolsControl::ModeExact), extent);
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDrawTool(set_mode), false)] = decided.as_slice()
+        else {
+            panic!("expected one set-mode control, got {decided:?}");
+        };
+        assert_eq!(set_mode.action, clonk_engine::EMDT_SET_MODE);
+        assert_eq!(set_mode.mode, clonk_engine::landscape::LANDSCAPE_MODE_EXACT);
+        assert_eq!(
+            app.engine
+                .landscape()
+                .expect("the sandbox landscape")
+                .mode(),
+            before,
+            "the local request changes nothing until the control executes"
+        );
+
+        // Exact -> Static is the one destructive transition, and it is
+        // **refused**: `SetLandscapeMode` returns false unless
+        // `Console.Message` confirms, and past its two `#ifdef` bodies that
+        // function is a bare `return false` (`C4Console.cpp:841-853`). So
+        // nothing is enqueued.
+        let model = app.developer_tools_page_model();
+        assert_eq!(
+            model.mode,
+            clonk_engine::developer_tools::LandscapeMode::Exact
+        );
+        // Driven at the seam rather than through the button, because the
+        // button carries a second gate — Static needs `Game.Landscape.Map`,
+        // which this fixture's landscape may not have.
+        app.submit_editor_landscape_mode(clonk_engine::developer_tools::LandscapeMode::Static);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a refused Exact -> Static enqueues nothing"
+        );
+        // Every other transition still goes out, so the refusal is the
+        // confirmation's and not a blanket block.
+        app.submit_editor_landscape_mode(clonk_engine::developer_tools::LandscapeMode::Dynamic);
+        assert_eq!(
+            commands.take_submitted_decided_controls().len(),
+            1,
+            "only the destructive transition is refused"
+        );
+
+        // Closing the toolbox clears `ToolsDlg.Active` — C++ connects the
+        // shared devmode window's "hide" to `OnWindowHide`, whose body is
+        // exactly that (`C4ToolsDlg.cpp:393,1098-1101`). Without it the next
+        // mode change would resurrect a toolbox the user closed.
+        assert!(app.developer_tools.active());
+        app.close_developer_toolbox(Some((120, 80)));
+        assert!(!app.developer_tools.active());
+        assert!(!app.developer_toolbox.visible());
+        assert_eq!(app.developer_toolbox.remembered_position(), Some((120, 80)));
+        app.developer_toolbox_effects.clear();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Play,
+        )])
+        .expect("the console switched to Play");
+        assert!(
+            app.developer_toolbox_effects.is_empty(),
+            "a closed toolbox is not reopened by a mode change"
+        );
+        // Re-opening restores the remembered position rather than re-centring.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Draw,
+        )])
+        .expect("the console switched to Draw");
+        app.open_developer_prop_tools();
+        assert!(app.developer_toolbox_effects.iter().any(|effect| matches!(
+            effect,
+            ToolboxEffect::Show {
+                position: Some((120, 80)),
+                ..
+            }
+        )));
+        app.developer_toolbox_effects.clear();
+
+        // The property page is a read-only text box: clicking it emits
+        // nothing at all.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
+            ConsoleEditMode::Edit,
+        )])
+        .expect("the console switched to Edit");
+        assert_eq!(
+            app.developer_toolbox.current_page(),
+            Some(ToolboxPage::Property)
+        );
+        app.developer_toolbox_click(center(&app, ToolsControl::ModeExact), extent);
+        assert!(commands.take_submitted_decided_controls().is_empty());
+
+        // Both pages draw at the window's extent without panicking.
+        for page in [ToolboxPage::Tools, ToolboxPage::Property] {
+            let surface = app.render_developer_toolbox_page(page, TOOLBOX_WIDTH, TOOLBOX_HEIGHT);
+            assert_eq!(surface.width(), TOOLBOX_WIDTH);
+            assert!(surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+        }
     }
 
     // C4EditCursor.cpp:640-651 — Grab contents replaces the selection with the
@@ -6103,6 +6329,20 @@
             exit.objects,
             vec![held.as_u64() as i32],
             "EMMO_Exit carries the contents, never the container"
+        );
+
+        // The release completing that click belongs to the menu: C++'s popup
+        // is modal, so `LeftButtonUp` never runs, and letting it through here
+        // would clear the `Hold` the command set one line before its control
+        // went out.
+        assert!(
+            app.take_console_viewport_pointer_grab(identity),
+            "the popup grabbed the pointer for the whole click"
+        );
+        assert!(app.edit_cursor_hold, "and Hold survives it");
+        assert!(
+            !app.take_console_viewport_pointer_grab(identity),
+            "exactly one release is swallowed"
         );
     }
 

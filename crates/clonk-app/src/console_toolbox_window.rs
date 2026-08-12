@@ -55,6 +55,16 @@ pub(crate) fn reconcile_developer_toolbox_window(
                     }
                     if let Some(DeveloperHost::Toolbox(toolbox)) = windows.host_mut(key) {
                         toolbox.window.set_title(&title);
+                        // `SwitchPage` restores the remembered coordinates on
+                        // the way back up (`C4DevmodeDlg.cpp:108-114`). This
+                        // is the arm that has one: the create arm can only
+                        // ever see `None`, because the position is recorded
+                        // while the window is visible.
+                        if let Some((x, y)) = position {
+                            toolbox
+                                .window
+                                .set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                        }
                     }
                 }
                 None => {
@@ -79,6 +89,12 @@ pub(crate) fn reconcile_developer_toolbox_window(
                         }
                         Err(error) => {
                             tracing::error!(%error, "failed to open the developer toolbox");
+                            // The model believes it is up. Left that way it
+                            // would answer every later `switch_page` with a
+                            // bare retitle, and the toolbox could never be
+                            // opened again in this session.
+                            let effect = app.developer_toolbox.close(None);
+                            app.developer_toolbox_effects.extend(effect);
                         }
                     }
                 }
@@ -129,8 +145,7 @@ pub(crate) fn handle_developer_toolbox_event(
                 .host_mut(key)
                 .and_then(DeveloperHost::as_toolbox_mut)
                 .and_then(|toolbox| toolbox.position());
-            let effect = app.developer_toolbox.close(position);
-            app.developer_toolbox_effects.extend(effect);
+            app.close_developer_toolbox(position);
             windows.hide(key);
         }
         Event::WindowEvent {

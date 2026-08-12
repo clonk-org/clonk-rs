@@ -2405,6 +2405,7 @@ impl GameApp {
             edit_cursor_last_world: None,
             edit_cursor_drag_frame: None,
             console_viewport_context_menu: None,
+            console_viewport_context_menu_grab: None,
             developer_toolbox: Default::default(),
             developer_toolbox_effects: Vec::new(),
             developer_console_editing_enabled: true,

@@ -132,6 +132,34 @@ pub(crate) fn tools_page_enablement(
         .collect()
 }
 
+/// `C4ToolsDlg::UpdateLandscapeModeCtrls`' own enablement
+/// (`C4ToolsDlg.cpp:796-840`).
+///
+/// This is the *second* rule for the three mode buttons, and it is not in
+/// `EnableControls` — which is why reading only that function leaves all three
+/// permanently live. Dynamic is enabled **only when the landscape already is
+/// dynamic**, so it is a display of the current mode rather than a way into
+/// it; Static needs a retained map to go back to; Exact is always available.
+///
+/// `has_map` is `Game.Landscape.Map != nullptr`.
+pub(crate) fn landscape_mode_button_enabled(
+    button: LandscapeMode,
+    mode: LandscapeMode,
+    has_map: bool,
+) -> bool {
+    match button {
+        // "Dynamic: enable only if dynamic anyway" (`:800-802`).
+        LandscapeMode::Dynamic => mode == LandscapeMode::Dynamic,
+        // "Static: enable only if map available" (`:805-807`).
+        LandscapeMode::Static => has_map,
+        // "Exact: enable always" (`:810-812`) — it has no `EnableWindow` call
+        // at all, so it keeps whatever the template gave it, which is enabled.
+        LandscapeMode::Exact => true,
+        // Not a button.
+        LandscapeMode::Undefined => false,
+    }
+}
+
 #[cfg(all(
     test,
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
@@ -223,5 +251,65 @@ mod tests {
             !tools_control_enabled(ToolsControl::Textures, LandscapeMode::Dynamic, "Earth"),
             "the mode gate still applies to a real material"
         );
+    }
+
+    // C4ToolsDlg.cpp:796-840 — the mode buttons' *own* enablement, which lives
+    // in `UpdateLandscapeModeCtrls` rather than `EnableControls`. Reading only
+    // the latter leaves all three permanently live, which is what this pins
+    // against.
+    #[test]
+    fn landscape_mode_buttons_gate_dynamic_on_the_mode_and_static_on_a_map() {
+        // "Dynamic: enable only if dynamic anyway" — the button shows the
+        // current mode, and is never a way back into it.
+        assert!(landscape_mode_button_enabled(
+            LandscapeMode::Dynamic,
+            LandscapeMode::Dynamic,
+            true
+        ));
+        for mode in [
+            LandscapeMode::Static,
+            LandscapeMode::Exact,
+            LandscapeMode::Undefined,
+        ] {
+            assert!(
+                !landscape_mode_button_enabled(LandscapeMode::Dynamic, mode, true),
+                "Dynamic is dead in {mode:?}"
+            );
+        }
+
+        // "Static: enable only if map available" — and nothing else; the
+        // current mode does not enter into it.
+        for mode in [
+            LandscapeMode::Dynamic,
+            LandscapeMode::Static,
+            LandscapeMode::Exact,
+        ] {
+            assert!(landscape_mode_button_enabled(
+                LandscapeMode::Static,
+                mode,
+                true
+            ));
+            assert!(!landscape_mode_button_enabled(
+                LandscapeMode::Static,
+                mode,
+                false
+            ));
+        }
+
+        // "Exact: enable always" — it carries no `EnableWindow` call at all.
+        for mode in [
+            LandscapeMode::Dynamic,
+            LandscapeMode::Static,
+            LandscapeMode::Exact,
+            LandscapeMode::Undefined,
+        ] {
+            for has_map in [true, false] {
+                assert!(landscape_mode_button_enabled(
+                    LandscapeMode::Exact,
+                    mode,
+                    has_map
+                ));
+            }
+        }
     }
 }

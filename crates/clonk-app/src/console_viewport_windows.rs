@@ -303,6 +303,21 @@ pub(crate) fn handle_console_viewport_event(
                 },
             ..
         } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            // The popup owns the whole click, press and release: C++'s menu is
+            // modal, so `LeftButtonUp` never runs while it is up. Letting the
+            // release through would clear the `Hold` that Grab contents sets
+            // one line before its control goes out — and the press that chose
+            // the item may already have closed the menu, so the grab is what
+            // is asked, not whether a popup is still open.
+            let identity = viewport.identity;
+            if app.take_console_viewport_pointer_grab(identity)
+                || app.console_viewport_context_menu_owns_pointer(identity)
+            {
+                return;
+            }
             app.console_viewport_release();
         }
         Event::WindowEvent {
@@ -354,6 +369,16 @@ pub(crate) fn handle_console_viewport_event(
                 return;
             };
             let (identity, local) = (viewport.identity, viewport.last_pointer);
+            // A second right-click while the popup is up cancels it and
+            // touches nothing underneath — the modal menu would have eaten
+            // the message. Without this the selection is re-picked *behind*
+            // the menu the user is still reading.
+            if app.console_viewport_context_menu_owns_pointer(identity) {
+                app.dismiss_console_viewport_context_menu();
+                app.console_viewport_context_menu_grab = Some(identity);
+                windows.request_redraw(key);
+                return;
+            }
             let modifiers = app.keyboard_modifiers;
             app.console_viewport_right_press(identity, local, 1.0, modifiers.control_key());
         }
@@ -370,6 +395,11 @@ pub(crate) fn handle_console_viewport_event(
                 return;
             };
             let (identity, local) = (viewport.identity, viewport.surface_pointer());
+            // The release that completes a cancelling right-click opens
+            // nothing: `RightButtonUp` runs `DoContextMenu` once per press.
+            if app.take_console_viewport_pointer_grab(identity) {
+                return;
+            }
             app.open_console_viewport_context_menu(identity, local);
             windows.request_redraw(key);
         }

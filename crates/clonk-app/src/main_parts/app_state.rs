@@ -411,6 +411,16 @@ pub(crate) struct GameApp {
         u64,
         clonk_frontend::developer_context_menu::ViewportContextMenu,
     )>,
+    /// The viewport whose popup swallowed the last button press, so the
+    /// release that completes that click is swallowed with it.
+    ///
+    /// C++ needs no such latch: `TrackPopupMenu` blocks and the GTK menu holds
+    /// a pointer grab, so the whole click — press *and* release — happens
+    /// inside the menu and `C4EditCursor::LeftButtonUp` never sees it. A
+    /// painted popup gets the release afterwards, when it may already have
+    /// closed, and running the edit cursor's release then would clear the
+    /// `Hold` `GrabContents` sets (`C4EditCursor.cpp:649`).
+    pub(crate) console_viewport_context_menu_grab: Option<u64>,
     /// `C4Console::ToolsDlg` and `PropertyDlg`'s shared `C4DevmodeDlg`
     /// notebook. The model owns every decision about the window
     /// ([`crate::developer_toolbox`]); the runner owns the window itself, so
