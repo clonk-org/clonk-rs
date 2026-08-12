@@ -5946,3 +5946,70 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         assert_eq!(snapshot.vertices[0].cnat, CNAT_BOTTOM);
         assert_eq!(snapshot.vertices[0].friction, 80);
     }
+
+    // An effect whose name resolves no Fx* callback at all is still a valid
+    // data carrier: C4Effect::C4Effect only removes the effect when a Start
+    // callback actually answers C4Fx_Start_Deny, and a missing function is
+    // not an answer (C4Effect.cpp:42-99). Hazard leans on this for the team
+    // of an ownerless projectile, storing it in EffectVar(0) of an
+    // "OwnerlessTeam" effect with no interval and no callbacks
+    // (Hazard.c4d/System.c4g/EnemyChecks.c SetTeam/GetTeam).
+    #[test]
+    fn callbackless_effect_carries_its_var_on_an_ownerless_object() {
+        let script = r#"#strict 2
+global func SetTeam(int iTeam, object pObject)
+{
+	if(!pObject)
+		if(!(pObject = this))
+			return;
+	if(iTeam <= 0) return RemoveEffect("OwnerlessTeam", pObject);
+	if(GetOwner(pObject) != NO_OWNER) return;
+	var eff = GetEffect("OwnerlessTeam", pObject);
+	if(!eff)
+	  eff = AddEffect("OwnerlessTeam", pObject, 1);
+	EffectVar(0, pObject, eff) = iTeam;
+	return eff;
+}
+
+global func GetTeam(object pObject)
+{
+	if(!pObject)
+		if(!(pObject = this))
+			return 0;
+	if(GetOwner(pObject) == NO_OWNER) {
+		return EffectVar(0, pObject, GetEffect("OwnerlessTeam", pObject));
+	} else {
+		return GetPlayerTeam(GetOwner(pObject));
+	}
+}
+
+func Probe()
+{
+    var added = SetTeam(2);
+    return [GetOwner(), added, GetEffect("OwnerlessTeam", this()), GetTeam()];
+}
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_script_definition("SHT1", "Shot", script)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("SHT1").with_owner(-1))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        let probe = engine
+            .call_object_function(idx, "Probe", Vec::new())
+            .expect("probe runs");
+        assert_eq!(
+            probe,
+            Value::Array(vec![
+                Value::Int(-1),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(2),
+            ]),
+            "AddEffect returns the new effect number, GetEffect finds it back \
+             by name, and the EffectVar write survives the call that made it"
+        );
+    }

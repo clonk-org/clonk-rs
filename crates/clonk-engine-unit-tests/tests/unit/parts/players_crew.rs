@@ -6676,3 +6676,129 @@ public func MarkCollection()
         );
         Ok(())
     }
+
+    // C4Player::SetTeamHostility makes a joining player mutually allied with
+    // every teammate and mutually hostile to every other team, and it runs on
+    // the ordinary join path too (C4Player.cpp:757,1022-1034). Hazard's hit
+    // arbitration (Hazard.c4d/System.c4g/EnemyChecks.c CheckEnemy) reads that
+    // through Hostile() first and only then consults its own
+    // NoFriendlyFire rule, whose toggle is ObjectCount(NOFF) over a live
+    // C4D_Rule object. Both halves have to hold or teammates take damage in a
+    // round that enabled the rule.
+    #[test]
+    fn allied_teammates_let_the_no_friendly_fire_rule_decline_a_hit(
+    ) -> Result<(), EngineError> {
+        let hazard_check_enemy = r#"#strict 2
+global func NoFriendlyFire() { return(ObjectCount(NOFF)); }
+global func FriendlyFire() { return(!NoFriendlyFire()); }
+
+global func GetTeam(object pObject)
+{
+	if(!pObject)
+		if(!(pObject = this))
+			return 0;
+	if(GetOwner(pObject) == NO_OWNER) {
+		return EffectVar(0, pObject, GetEffect("OwnerlessTeam", pObject));
+	} else {
+		return GetPlayerTeam(GetOwner(pObject));
+	}
+}
+
+global func CheckEnemy(object pObj, object pObj2, bool findEnemy) {
+  if(!pObj) return false;
+  if(!pObj2)
+    pObj2 = this;
+  if(!pObj2) return false;
+  var own1 = GetOwner(pObj);
+  var own2 = GetOwner(pObj2);
+  if(Hostile(own1, own2)) {
+    return true;
+  }
+  var noown1 = (own1 == NO_OWNER);
+  var noown2 = (own2 == NO_OWNER);
+  var team1 = GetTeam(pObj);
+  var team2 = GetTeam(pObj2);
+  if(noown1 || noown2) {
+    if( (team1 == team2) && (team1 || team2)) { }
+	else if( !(team1 || team2) && noown1 && noown2) { }
+	else {
+	  if(!findEnemy)
+        return true;
+      if(pObj->~IsThreat()) {
+        return true;
+      }
+	}
+  }
+  if(FriendlyFire() && !findEnemy) {
+    if(!(pObj->~IgnoreFriendlyFire())
+	&& !(pObj2->~IgnoreFriendlyFire()) ) {
+		return true;
+	}
+  }
+  return false;
+}
+
+func Gates(object shot, object victim)
+{
+    return [ObjectCount(NOFF), FriendlyFire(),
+            Hostile(GetOwner(shot), GetOwner(victim)),
+            Hostile(GetOwner(victim), GetOwner(shot)),
+            GetPlayerTeam(GetOwner(shot)), GetPlayerTeam(GetOwner(victim)),
+            CheckEnemy(shot, victim)];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        // Category mirrors NoFriendlyFire.c4d/DefCore.txt:
+        // C4D_StaticBack|C4D_Rule.
+        let mut rule = Definition::from_script("NOFF", "No Friendly Fire", "#strict\n")
+            .expect("rule compiles");
+        rule.set_category(1 | 524_288);
+        engine.register_definition(rule)?;
+        engine.register_definition(
+            Definition::from_script("HZCK", "Clonk", hazard_check_enemy)
+                .expect("check-enemy library compiles"),
+        )?;
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Alpha", 0x00f4_0000),
+            TeamInfo::new(2, "Beta", 0x0000_c800),
+        ]);
+
+        let mut first_config = lifecycle_join_config("Alice", Vec::new());
+        first_config.team = Some(1);
+        let first = engine.join_player(first_config)?.number();
+        let mut second_config = lifecycle_join_config("Bob", Vec::new());
+        second_config.player_info_id = 2;
+        second_config.team = Some(1);
+        let second = engine.join_player(second_config)?.number();
+
+        engine.spawn_object(SpawnConfig::new("NOFF").with_owner(-1))?;
+        let shot = engine.spawn_object(SpawnConfig::new("HZCK").with_owner(first))?;
+        let victim = engine.spawn_object(SpawnConfig::new("HZCK").with_owner(second))?;
+
+        let index = engine.find_object_index(shot).expect("shot remains");
+        let gates = engine.call_object_function(
+            index,
+            "Gates",
+            vec![
+                Value::Object(shot.as_u64()),
+                Value::Object(victim.as_u64()),
+            ],
+        )?;
+        assert_eq!(
+            gates,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Int(1),
+                Value::Int(1),
+                // `return false` below STRICT3 is the folded nil stack slot
+                // C++ emits for a zero AB_BOOL operand (C4AulParse.cpp:1112).
+                Value::Nil,
+            ]),
+            "the C4D_Rule object counts, teammates are allied both ways, and \
+             the final friendly-fire gate declines the hit"
+        );
+        Ok(())
+    }
