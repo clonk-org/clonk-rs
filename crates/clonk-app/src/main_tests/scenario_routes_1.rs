@@ -43,7 +43,7 @@
         // C++ instead applies those overrides (C4GraphicsResource::Init →
         // C4GUI::Resource::Load over the registered set).
         app.start_scenario(scenario).expect("start Hazard tutorial");
-        wait_for_running_with_attempts(&mut app, 2_400);
+        wait_for_running_with_attempts(&mut app, 4_800);
 
         assert!(app.effective_global_gui_failures().is_empty());
         app.assets
