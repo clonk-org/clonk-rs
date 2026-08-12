@@ -118,20 +118,45 @@ jobs:
           shared-key: release-prepare
           cache-on-failure: true
 
-      # prepare-release.sh `cargo install`s git-cliff into target/release-tools,
-      # which rust-cache does not preserve. Without this every release pays a
-      # multi-minute compile of a tool that never changes.
-      - name: Cache git-cliff
+      # prepare-release.sh `cargo install`s git-cliff when it finds no binary,
+      # which costs 2m36s and blows the SLO below. Caching that build was the
+      # first answer and it failed twice over: this repository sits against the
+      # 10 GiB Actions cache cap, so an entry touched once a day is evicted
+      # ahead of caches touched on every push, and once the missing cache had
+      # failed the job `actions/cache` no longer saved what it had just built.
+      # Every run after 2026-08-11 rebuilt it and failed identically.
+      #
+      # git-cliff publishes prebuilt binaries, so take one: seconds, not
+      # minutes, and no cache to lose. `--version` is still checked by the
+      # script.
+      - name: Install git-cliff
         if: steps.existing.outputs.open != 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/release-tools
-          # Key the binary by its pinned version, not by unrelated edits to the
-          # caller script. The broad fallback recovers the already-populated
-          # trusted-main cache created under the former script-hash key; the
-          # script still verifies the executable reports exactly v2.13.1.
-          key: git-cliff-${{ runner.os }}-v2.13.1
-          restore-keys: git-cliff-${{ runner.os }}-
+        env:
+          GIT_CLIFF_VERSION: '2.13.1'
+          GIT_CLIFF_SHA256: '200d2535da6d9703f3bcc8a4d159c3b55eacdb01cf2148c55b3eee9dd04d5249'
+        run: |
+          archive="${RUNNER_TEMP}/git-cliff.tar.gz"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+
+          # `cargo install --locked` at least resolved a version through
+          # crates.io; a release asset is whatever the URL serves today, so the
+          # pinned digest is the whole integrity story for a binary that then
+          # writes this repository's changelog.
+          actual=$(sha256sum "$archive" | cut -d' ' -f1)
+          if [[ "$actual" != "$GIT_CLIFF_SHA256" ]]; then
+            echo "git-cliff ${GIT_CLIFF_VERSION} hashes to ${actual}" >&2
+            echo "but this workflow pins ${GIT_CLIFF_SHA256}" >&2
+            exit 1
+          fi
+
+          # Exactly where prepare-release.sh probes: land it anywhere else and
+          # the script silently falls back to building it from source.
+          bin="target/release-tools/git-cliff-${GIT_CLIFF_VERSION}/bin"
+          mkdir -p "$bin"
+          tar -xzf "$archive" -C "$bin" --strip-components=1 \
+            "git-cliff-${GIT_CLIFF_VERSION}/git-cliff"
 
       - name: Populate the cargo registry
         if: steps.existing.outputs.open != 'true'
