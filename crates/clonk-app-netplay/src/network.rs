@@ -2711,6 +2711,11 @@ pub enum NetworkEvent {
         client_id: Option<ClientId>,
         error: String,
     },
+    /// A connection that failed before it named a client. Recorded, but kept
+    /// out of the lobby: C++ logs it below its GUI sink's level.
+    UnassociatedConnectionFailed {
+        error: String,
+    },
     /// A peer transport/protocol error that does not stop the network worker.
     TransportDiagnostic {
         client_id: Option<ClientId>,
@@ -7173,6 +7178,9 @@ async fn handle_host_event(
         }
         HostEvent::RecoverableRouteDiagnostic { client_id, error } => {
             let _ = event_tx.send(NetworkEvent::RecoverableRouteDiagnostic { client_id, error });
+        }
+        HostEvent::UnassociatedConnectionFailed { error } => {
+            let _ = event_tx.send(NetworkEvent::UnassociatedConnectionFailed { error });
         }
         HostEvent::TransportError { client_id, error } => {
             let _ = event_tx.send(NetworkEvent::TransportDiagnostic { client_id, error });

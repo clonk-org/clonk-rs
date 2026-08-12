@@ -9,6 +9,7 @@ use std::{
 use clonk_core::std_markup::Markup;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_log::NormalizeEvent;
 use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::format::{DefaultFields, Writer};
 use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt, OptionalWriter};
@@ -204,7 +205,16 @@ struct DropUpstreamNoise;
 
 impl<S: Subscriber> Layer<S> for DropUpstreamNoise {
     fn event_enabled(&self, event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
-        if event.metadata().target() != CALLOOP_LOOP_LOGIC_TARGET {
+        // calloop logs through the `log` crate. `tracing-log` gives every
+        // bridged record one static callsite per level, whose target is `log`;
+        // the emitting module survives only in the `log.target` field, which
+        // `normalized_metadata` reads back. Comparing the raw target would
+        // never match the events this layer exists to drop.
+        let normalized = event.normalized_metadata();
+        let target = normalized
+            .as_ref()
+            .map_or_else(|| event.metadata().target(), |metadata| metadata.target());
+        if target != CALLOOP_LOOP_LOGIC_TARGET {
             return true;
         }
         let mut message = MessageStartsWith::new(CALLOOP_STALE_SOURCE_MESSAGE);

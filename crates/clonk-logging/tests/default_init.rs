@@ -177,13 +177,18 @@ const CALLOOP_PING_MARKER: &str = "[calloop] Failed to write a ping";
 ///
 /// Only that one message goes: `calloop::loop_logic` emits real faults too, and
 /// muting the module would take them with it.
+///
+/// calloop logs through the `log` crate, so these go through `tracing-log` as
+/// the real ones do. That bridge hands every record the same static callsite,
+/// whose target is `log` — emitting with `tracing::warn!` instead would test a
+/// target the emitting crate never presents.
 #[test]
 fn only_the_calloop_stale_source_line_stays_off_stderr() {
     if env::var_os(CHILD_MODE).is_some() {
         clonk_logging::init();
-        tracing::warn!(target: "calloop::loop_logic", "{CALLOOP_STALE_SOURCE_MARKER}");
-        tracing::warn!(target: "calloop::loop_logic", "{CALLOOP_UNREGISTER_MARKER}");
-        tracing::warn!(target: "calloop::sources::ping", "{CALLOOP_PING_MARKER}");
+        log::warn!(target: "calloop::loop_logic", "{CALLOOP_STALE_SOURCE_MARKER}");
+        log::warn!(target: "calloop::loop_logic", "{CALLOOP_UNREGISTER_MARKER}");
+        log::warn!(target: "calloop::sources::ping", "{CALLOOP_PING_MARKER}");
         return;
     }
 
