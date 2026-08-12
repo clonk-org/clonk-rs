@@ -3148,6 +3148,28 @@ an ordered-map model gap.
   it became observable with the clonk-org/clonk-rs#235 fix. Closing it means
   threading resolved icons into the input-side helpers.
 
+- Open: **A DFA_FLOAT action on a definition that declares no `Float` physical
+  still steers on the port's `MovementProfile` convenience path, where C++
+  freezes it.** `C4Object::ExecAction`'s DFA_FLOAT arm takes
+  `lLimit = FIXED100(pPhysical->Float)` and clamps both dirs to it with no zero
+  special case (`C4Object.cpp:5291-5309`), so an object with no Float physical
+  anywhere has `xdir = ydir = 0` forced every frame for as long as it holds
+  that action. `Engine::uses_native_float_bounds`
+  (`crates/clonk-engine/src/engine/economy.rs`) now routes every object with a
+  Float physical — DefCore-declared or script-installed — onto that exact path,
+  which is what closed the Eke airbike's dismount. Objects with neither keep the
+  additive `MovementProfile` fixture path: `float_speed = 6`,
+  `float_acceleration = 1` (ten times `FloatAccel`), and no hard zero.
+  109 shipped definitions are in that class — torches, lens flares, gates,
+  force-field segments, wires, bait — against 86 that declare one. None was
+  observed to move, because they are script-positioned props whose `ComDir`
+  stays `COMD_Stop`, and with `COMD_Stop` the fixture path only clamps to ±6
+  rather than accelerating; DFA_FLOAT takes no gravity on either path
+  (`ActionProcedure::gravity_component_fixed`). Closing it means giving the
+  synthetic snapshot fixtures an explicit opt-in — a real `MovementManifest`
+  rather than "no physicals declared" — so the native path can become
+  unconditional for FLOAT.
+
 ## Deliberate divergences from the oracle
 
 - **LAN discovery re-probes every five seconds and a new host repeats its
