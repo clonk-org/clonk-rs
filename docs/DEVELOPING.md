@@ -19,15 +19,19 @@ sudo apt-get update
 sudo apt-get install --yes --no-install-recommends \
   libasound2-dev \
   libfreetype6-dev \
+  libfluidsynth3 \
   libxmp4 \
   libudev-dev \
   pkg-config
 ```
 
 Tracker music and its executable IT/MOD/S3M/XM tests require the libxmp 4
-runtime (`libxmp4` on Debian/Ubuntu, `libxmp` in Homebrew). Set
-`LC_LIBXMP_LIBRARY` to an explicit shared-library path when it is not installed
-in a standard system, executable, or macOS app-bundle location.
+runtime (`libxmp4` on Debian/Ubuntu, `libxmp` in Homebrew). MIDI music needs
+FluidSynth 2 (`libfluidsynth3` on Debian/Ubuntu, `fluidsynth` on Arch,
+`fluid-synth` in Homebrew) plus a General MIDI SoundFont. Set
+`LC_LIBXMP_LIBRARY` or `LC_FLUIDSYNTH_LIBRARY` to an explicit shared-library
+path when either runtime is not installed in a standard system, executable, or
+macOS app-bundle location.
 
 ## Quick, change-aware feedback
 

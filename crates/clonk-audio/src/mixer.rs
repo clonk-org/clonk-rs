@@ -87,6 +87,12 @@ pub enum AudioError {
     InvalidChannel,
 }
 
+impl AudioError {
+    pub fn is_missing_optional_decoder(&self) -> bool {
+        matches!(self, Self::Decode(error) if error.is_missing_optional_decoder())
+    }
+}
+
 /// Selects the sample-rate converter used when decoded audio does not match
 /// the output device. `Default` leaves the backend's established choice in
 /// place; `Linear` explicitly pins the inexpensive two-point interpolator.

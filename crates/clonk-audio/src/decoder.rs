@@ -39,6 +39,22 @@ pub enum AudioDecodeError {
     IoError(#[from] std::io::Error),
 }
 
+impl AudioDecodeError {
+    /// True when the host is missing an optional runtime (FluidSynth, a
+    /// SoundFont, or libxmp). Those failures stay the same for the process
+    /// lifetime, so callers should not warn on every catalog retry.
+    pub fn is_missing_optional_decoder(&self) -> bool {
+        match self {
+            Self::MidiDecoderError(message) => {
+                message.contains("FluidSynth library not found")
+                    || message.contains("no SoundFont found")
+            }
+            Self::TrackerDecoderError(message) => message.contains("libxmp library not found"),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedAudio {
     pub frames: Vec<[f32; 2]>,

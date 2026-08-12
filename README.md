@@ -50,12 +50,15 @@ Tracker music needs the optional libxmp 4 runtime; install it through your
 platform package manager, or point `LC_LIBXMP_LIBRARY` at a compatible library.
 Everything else works without it.
 
-MIDI music additionally needs a General MIDI SoundFont, which no platform ships
-by default. Put an `.sf2` or `.sf3` bank in `~/Library/Audio/Sounds/Banks` on
-macOS, `/usr/share/soundfonts` on other Unix systems, or a `soundfonts` folder
-beside the executable on Windows — or name one explicitly through
-`SDL_SOUNDFONTS`. FluidSynth 2 provides the synthesis itself and is found the
-same way, with `LC_FLUIDSYNTH_LIBRARY` as the override.
+MIDI music additionally needs FluidSynth 2 and a General MIDI SoundFont, which
+no platform ships by default. Install the runtime through your package manager
+(`fluidsynth` plus `soundfont-fluid` on Arch, `libfluidsynth3` plus
+`fluid-soundfont-gm` on Debian/Ubuntu, `fluid-synth` in Homebrew) or point
+`LC_FLUIDSYNTH_LIBRARY` at a compatible library. Put an `.sf2` or `.sf3` bank
+in `~/Library/Audio/Sounds/Banks` on macOS, `/usr/share/soundfonts` on other
+Unix systems, or a `soundfonts` folder beside the executable on Windows — or
+name one explicitly through `SDL_SOUNDFONTS`. The synthesizer is also loaded
+from beside the executable, matching tracker-music discovery.
 
 ## Building from source
 

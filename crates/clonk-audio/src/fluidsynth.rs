@@ -2,7 +2,7 @@ use std::ffi::{c_char, c_int, c_void, CString, OsStr};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Once, OnceLock};
 
 use libloading::Library;
 
@@ -581,12 +581,20 @@ struct FluidApi {
 
 impl FluidApi {
     fn load() -> Result<Arc<Self>, AudioDecodeError> {
+        static API: OnceLock<Result<Arc<FluidApi>, String>> = OnceLock::new();
+        match API.get_or_init(Self::load_uncached) {
+            Ok(api) => Ok(Arc::clone(api)),
+            Err(message) => Err(midi_error(message.clone())),
+        }
+    }
+
+    fn load_uncached() -> Result<Arc<Self>, String> {
         let mut last_error = None;
         for path in fluid_library_candidates() {
             let library = match unsafe { Library::new(&path) } {
                 Ok(library) => library,
                 Err(error) => {
-                    last_error = Some(format!("{}: {error}", path.display()));
+                    last_error = Some(format_library_probe_error(&path, &error));
                     continue;
                 }
             };
@@ -595,9 +603,9 @@ impl FluidApi {
                 Err(error) => last_error = Some(format!("{}: {error}", path.display())),
             }
         }
-        Err(midi_error(last_error.unwrap_or_else(|| {
-            "FluidSynth library not found; set LC_FLUIDSYNTH_LIBRARY".to_owned()
-        })))
+        let error = missing_fluid_library_message(last_error);
+        tracing::warn!("{error}");
+        Err(error)
     }
 
     unsafe fn from_library(library: Library) -> Result<Self, String> {
@@ -669,11 +677,40 @@ unsafe fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T, Stri
 }
 
 fn fluid_library_candidates() -> Vec<PathBuf> {
-    if let Some(configured) = std::env::var_os("LC_FLUIDSYNTH_LIBRARY") {
+    resolve_fluid_library_candidates(
+        std::env::var_os("LC_FLUIDSYNTH_LIBRARY").as_deref(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .as_deref(),
+    )
+}
+
+fn resolve_fluid_library_candidates(
+    configured: Option<&OsStr>,
+    executable_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    if let Some(configured) = configured.filter(|path| !path.is_empty()) {
         return vec![PathBuf::from(configured)];
     }
 
     let mut candidates = Vec::new();
+    if let Some(executable_dir) = executable_dir {
+        candidates.extend(
+            platform_fluid_library_names()
+                .iter()
+                .map(|name| executable_dir.join(name)),
+        );
+        #[cfg(target_os = "macos")]
+        if let Some(contents_dir) = executable_dir.parent() {
+            candidates.extend(
+                platform_fluid_library_names()
+                    .iter()
+                    .map(|name| contents_dir.join("Frameworks").join(name)),
+            );
+        }
+    }
+
     #[cfg(target_os = "macos")]
     candidates.extend(
         [
@@ -682,40 +719,74 @@ fn fluid_library_candidates() -> Vec<PathBuf> {
             "/usr/local/opt/fluid-synth/lib/libfluidsynth.3.dylib",
             "/usr/local/lib/libfluidsynth.3.dylib",
             "/opt/local/lib/libfluidsynth.3.dylib",
-            "libfluidsynth.3.dylib",
-            "libfluidsynth.2.dylib",
-            "libfluidsynth.dylib",
         ]
         .into_iter()
         .map(PathBuf::from),
     );
     #[cfg(all(unix, not(target_os = "macos")))]
-    candidates.extend(
-        [
-            "libfluidsynth.so.3",
-            "libfluidsynth.so.2",
-            "libfluidsynth.so",
-        ]
-        .into_iter()
-        .map(PathBuf::from),
-    );
-    #[cfg(windows)]
-    if let Some(directory) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-    {
-        candidates.extend(
-            [
-                "libfluidsynth-3.dll",
-                "libfluidsynth-2.dll",
-                "libfluidsynth.dll",
-                "fluidsynth.dll",
-            ]
-            .into_iter()
-            .map(|name| directory.join(name)),
-        );
+    for directory in [
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/local/lib",
+    ] {
+        candidates.push(PathBuf::from(directory).join("libfluidsynth.so.3"));
+        candidates.push(PathBuf::from(directory).join("libfluidsynth.so.2"));
     }
+    // Bare DLL names would re-enable the unsafe legacy Windows search order,
+    // including the process working directory. Windows candidates above are
+    // therefore restricted to the executable directory unless explicitly
+    // overridden with LC_FLUIDSYNTH_LIBRARY.
+    #[cfg(not(windows))]
+    candidates.extend(platform_fluid_library_names().iter().map(PathBuf::from));
     candidates
+}
+
+#[cfg(target_os = "macos")]
+fn platform_fluid_library_names() -> &'static [&'static str] {
+    &[
+        "libfluidsynth.3.dylib",
+        "libfluidsynth.2.dylib",
+        "libfluidsynth.dylib",
+    ]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_fluid_library_names() -> &'static [&'static str] {
+    &[
+        "libfluidsynth.so.3",
+        "libfluidsynth.so.2",
+        "libfluidsynth.so",
+    ]
+}
+
+#[cfg(windows)]
+fn platform_fluid_library_names() -> &'static [&'static str] {
+    &[
+        "libfluidsynth-3.dll",
+        "libfluidsynth-2.dll",
+        "libfluidsynth.dll",
+        "fluidsynth.dll",
+    ]
+}
+
+fn format_library_probe_error(path: &Path, error: &dyn std::error::Error) -> String {
+    let mut message = format!("{}: {error}", path.display());
+    let mut source = error.source();
+    while let Some(inner) = source {
+        message.push_str(": ");
+        message.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    message
+}
+
+fn missing_fluid_library_message(last_error: Option<String>) -> String {
+    let detail = last_error.unwrap_or_else(|| "no library candidates were available".to_owned());
+    format!(
+        "FluidSynth library not found; set LC_FLUIDSYNTH_LIBRARY to its path; last error: {detail}"
+    )
 }
 
 fn midi_soundfont_candidates() -> Vec<PathBuf> {
@@ -1056,6 +1127,93 @@ mod tests {
             vec![fallback]
         );
         assert!(resolve_soundfont_candidates(None, |_| false, &[], |_| Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn configured_fluidsynth_library_overrides_implicit_discovery() {
+        assert_eq!(
+            resolve_fluid_library_candidates(
+                Some(OsStr::new("/opt/custom/libfluidsynth.so.3")),
+                Some(Path::new("/game/bin")),
+            ),
+            vec![PathBuf::from("/opt/custom/libfluidsynth.so.3")]
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn linux_fluidsynth_candidates_search_executable_then_system_paths() {
+        // libxmp searches the executable directory before the dynamic linker
+        // sonames (tracker.rs:345-381). MIDI used only the bare sonames, so a
+        // Linux package that shipped libfluidsynth.so.3 next to clonk-app, or
+        // a host whose ld.so cache did not list /usr/lib, failed open with
+        // libloading 0.9's opaque "dlopen failed".
+        let candidates = resolve_fluid_library_candidates(None, Some(Path::new("/game/bin")));
+        assert_eq!(
+            &candidates[..3],
+            &[
+                PathBuf::from("/game/bin/libfluidsynth.so.3"),
+                PathBuf::from("/game/bin/libfluidsynth.so.2"),
+                PathBuf::from("/game/bin/libfluidsynth.so"),
+            ]
+        );
+        assert!(candidates.contains(&PathBuf::from("/usr/lib/libfluidsynth.so.3")));
+        assert!(candidates.contains(&PathBuf::from("/usr/lib64/libfluidsynth.so.3")));
+        assert!(candidates.contains(&PathBuf::from(
+            "/usr/lib/x86_64-linux-gnu/libfluidsynth.so.3"
+        )));
+        assert_eq!(candidates.last(), Some(&PathBuf::from("libfluidsynth.so")));
+    }
+
+    #[test]
+    fn library_probe_error_includes_the_dlopen_source() {
+        // libloading 0.9 Display is just "dlopen failed"; the useful
+        // `dlerror` text lives on `Error::source`.
+        #[derive(Debug)]
+        struct Source;
+        impl std::fmt::Display for Source {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("libfluidsynth.so: cannot open shared object file")
+            }
+        }
+        impl std::error::Error for Source {}
+
+        #[derive(Debug)]
+        struct Outer {
+            source: Source,
+        }
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("dlopen failed")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        assert_eq!(
+            format_library_probe_error(Path::new("libfluidsynth.so"), &Outer { source: Source }),
+            "libfluidsynth.so: dlopen failed: libfluidsynth.so: cannot open shared object file"
+        );
+    }
+
+    #[test]
+    fn missing_fluidsynth_error_names_the_override_and_last_probe() {
+        let error = midi_error(missing_fluid_library_message(Some(
+            "libfluidsynth.so: dlopen failed".to_owned(),
+        )));
+        assert!(error.is_missing_optional_decoder());
+        assert!(error.to_string().contains("LC_FLUIDSYNTH_LIBRARY"));
+        assert!(error
+            .to_string()
+            .contains("libfluidsynth.so: dlopen failed"));
+        assert!(!midi_error("invalid MIDI file").is_missing_optional_decoder());
+        assert!(
+            midi_error("no SoundFont found; set SDL_SOUNDFONTS to an SF2/SF3 path".to_owned())
+                .is_missing_optional_decoder()
+        );
     }
 
     #[test]
