@@ -4021,14 +4021,15 @@ an ordered-map model gap.
 
 - **The Eke Reloaded airbike is hold-to-steer, flies diagonals and keeps
   shooting through a turn** (`planet/System.c4g/EkeAirbikeSteering.c`, plus the
-  four steering releases and `ControlUpdate` forwarded by
+  four steering releases and `ControlUpdate` forwarded, and seated
+  `ControlDownDouble` normalized to `ControlDown`, by
   `planet/System.c4g/EkeSftRelease.c`; C++ `C4Object::ExecAction`'s DFA_FLOAT
   arm, LegacyClonk 7d43b47 src/C4Object.cpp:5291-5309, and
   `EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:21-90`). Requested from play
   on 2026-08-12, after the airbike control chain was audited end to end against
   the oracle and the engine halves were found to match it (see the parity fixes
   landed the same day). This is a content-level departure, not a port fix: the
-  three things it changes are all shipped LegacyClonk behaviour.
+  behaviors it changes are shipped LegacyClonk behaviour.
   1. **It coasts forever.** DFA_FLOAT adds `FloatAccel` = FIXED100(10) for the
      named ComDir and clamps each axis to `FIXED100(Float)`; `COMD_Stop` has no
      deceleration case at all, and the shipped script never writes `COMD_Stop`
@@ -4077,9 +4078,18 @@ an ordered-map model gap.
   which `C4Object::CallControl` hands the crew member after every com it
   dispatches (src/C4Object.cpp:3321-3339); classic control has only the
   press/release pair, which the port synchronizes in both styles (see the
-  guided-missile entry above). Unchanged: `FloatAccel`, the Float physical and
-  its Hyperfly ladder, the ActMap, the weapon modes, the dismount rule,
-  `Hit`/`Damage`, and the GPED remote-control path.
+  guided-missile entry above). A quick Down release/repress on touchdown still
+  sits inside C++'s ten-frame double-click window, so `C4Player::InCom` promotes
+  the landing press to `ControlDownDouble` (src/C4Player.cpp:1213-1228,
+  1522-1548; src/C4Constants.h:156). The shipped SFT discards that callback
+  instead of forwarding it
+  (`EkeReloaded.c4d/Creatures.c4d/SFT.c4d/Script.c:145-151`), which made the new
+  hold-to-steer landing sequence unable to reach the airbike. The SFT append
+  maps that double press to the airbike's ordinary `ControlDown` only while the
+  pilot is seated; the same shipped `Stuck() || GBackSolid(0, 11)` predicate and
+  dismount body still decide the result, and off-bike double-Down is unchanged.
+  Also unchanged: `FloatAccel`, the Float physical and its Hyperfly ladder, the
+  ActMap, the weapon modes, `Hit`/`Damage`, and the GPED remote-control path.
   This cannot desync two clonk-rs peers: no `Random()` draw is added or
   reordered and every write is to synchronized object state from synchronized
   control input. It does diverge from a LegacyClonk peer and from replays
@@ -4090,7 +4100,8 @@ an ordered-map model gap.
   `the_hyperfly_boost_is_held_rather_than_latched`,
   `the_gped_remote_control_still_flies_the_airbike`,
   `releasing_the_newer_of_two_opposite_keys_keeps_the_older_one_steering` (both
-  control styles) and
+  control styles), `pressing_down_again_after_touchdown_dismounts_the_airbike`
+  and
   `the_shipped_dismount_and_abandoned_physics_are_unchanged`. The oracle-exact
   chain keeps its own coverage in
   `crates/clonk-engine/tests/it/airbike_pilot_control.rs`, which runs the same

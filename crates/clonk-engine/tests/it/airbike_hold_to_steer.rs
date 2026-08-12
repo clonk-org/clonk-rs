@@ -6,8 +6,8 @@
 
 use crate::support::real_scenario::prepare_installed_scenario;
 use clonk_engine::{
-    CommandDirection, Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT,
-    COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN,
+    CommandDirection, Engine, JoinPlayerConfig, ObjectId, Vector2, COM_DIG, COM_DOUBLE, COM_DOWN,
+    COM_LEFT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN,
 };
 
 const SCENARIO: &str = "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/AirbikeFight.c4s";
@@ -550,6 +550,90 @@ fn the_shipped_dismount_and_abandoned_physics_are_unchanged() {
             raw_velocity(&engine, airbike),
             (0, 0),
             "the parked airbike stops dead (with_append={with_append})"
+        );
+    }
+}
+
+/// Descending and then pressing Down again on touchdown must still dismount.
+/// The second press is promoted to `DownDouble` by `C4Player::InCom`
+/// (oracle C4Player.cpp:1522-1536), while the shipped SFT deliberately leaves
+/// `ControlDownDouble` unhandled (SFT.c4d/Script.c:145-151).
+#[test]
+fn pressing_down_again_after_touchdown_dismounts_the_airbike() {
+    let prepared = prepare_installed_scenario(SCENARIO, 0);
+    for auto_stop in [false, true] {
+        let mut engine = prepared.instantiate();
+        let owner = join_pilot(&mut engine, auto_stop);
+        let sft = engine.crew_cursor(owner).expect("the seated SFT");
+        let airbike = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "AB5B" && object.owner == owner)
+            .map(|object| object.id)
+            .expect("InitializeClonk creates one airbike per player");
+
+        // Start descending in open air and keep Down held through touchdown.
+        engine
+            .player_in_com(owner, COM_DOWN, 0)
+            .expect("the descent reaches the airbike");
+        assert_eq!(
+            action_name(&engine, sft),
+            "AirbikeFly",
+            "the first airborne Down descends without dismounting \
+             (auto_stop={auto_stop})"
+        );
+
+        // Put the bike exactly eleven pixels above solid ground, matching the
+        // shipped `GBackSolid(0, 11)` dismount probe (Airbike.c4d/Script.c:78).
+        let airbike_state = engine
+            .object_snapshot(airbike)
+            .expect("the airbike remains live");
+        let landscape = engine.landscape().expect("the scenario landscape");
+        let (ground_x, solid_y) = landscape
+            .surface()
+            .iter()
+            .enumerate()
+            .skip(18)
+            .take(landscape.width() as usize - 36)
+            .find_map(|(x, &surface_y)| {
+                let x = i32::try_from(x).ok()?;
+                let position = Vector2::new(x, surface_y - 11);
+                let probe_is_solid = engine.debug_landscape_is_solid(x, surface_y);
+                let bike_is_stuck = airbike_state.vertices.iter().any(|vertex| {
+                    engine.debug_landscape_is_solid(position.x + vertex.x, position.y + vertex.y)
+                });
+                (probe_is_solid && !bike_is_stuck).then_some((x, surface_y))
+            })
+            .expect("one solid landscape surface");
+        let airbike_index = engine
+            .find_object_index(airbike)
+            .expect("the airbike has an index");
+        engine.force_object_position(airbike_index, Vector2::new(ground_x, solid_y - 11));
+
+        // Brake on touchdown, then press Down to dismount. This press is a
+        // DownDouble because the descent remains in the native double-click
+        // window, but it must retain Down's grounded meaning.
+        engine
+            .player_in_com(owner, COM_DOWN + COM_RELEASE_OFFSET, 0)
+            .expect("releasing the descent succeeds");
+        engine
+            .player_in_com(owner, COM_DOWN, 0)
+            .expect("the landing press reaches the seated pilot");
+        assert_eq!(
+            engine
+                .player(owner)
+                .expect("the pilot's player remains live")
+                .control
+                .last_com,
+            i32::from(COM_DOWN | COM_DOUBLE),
+            "the landing press really took the native DownDouble route \
+             (auto_stop={auto_stop})"
+        );
+        assert!(
+            action_name(&engine, sft).ends_with("Walk"),
+            "the landing press dismounts instead of disappearing as \
+             ControlDownDouble (auto_stop={auto_stop})"
         );
     }
 }
