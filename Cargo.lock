@@ -1049,7 +1049,9 @@ version = "0.10.0"
 dependencies = [
  "clonk-core",
  "libc",
+ "log",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

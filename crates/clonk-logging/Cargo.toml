@@ -15,10 +15,12 @@ test = false
 [dependencies]
 clonk-core = { path = "../clonk-core" }
 tracing = "0.1"
+tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
+log = "0.4"
 tracing = "0.1"
