@@ -163,7 +163,7 @@ jobs:
           CI_POLL_ATTEMPTS: '5'
           CI_POLL_SECONDS: '1'
         run: |
-          expected=(
+          expected_payloads=(
             desktop-linux
             desktop-windows
             desktop-macos
@@ -172,7 +172,20 @@ jobs:
             components-desktop-macos
             release-tool
           )
-          expected_inventory=$(printf '%s\tfalse\n' "${expected[@]}" | LC_ALL=C sort)
+          coverage_fragment_suffixes=(
+            app-1-10
+            app-2-7
+            app-3
+            app-4-9
+            app-5
+            app-11-12
+            app-6-8
+            engine-1
+            engine-2
+            engine-and-frontend-units
+            remaining-1
+            remaining-2
+          )
 
           for ((attempt = 1; attempt <= CI_POLL_ATTEMPTS; attempt++)); do
             if ! runs=$(gh run list \
@@ -200,6 +213,11 @@ jobs:
                 continue
               fi
 
+              expected_artifacts=("${expected_payloads[@]}")
+              for suffix in "${coverage_fragment_suffixes[@]}"; do
+                expected_artifacts+=("rust-coverage-fragment-${run_id}-${suffix}")
+              done
+              expected_inventory=$(printf '%s\tfalse\n' "${expected_artifacts[@]}" | LC_ALL=C sort)
               actual_inventory=$(jq -r \
                 '.artifacts[] | [.name, (.expired | tostring)] | @tsv' \
                 <<<"$artifacts" | LC_ALL=C sort)

@@ -73,6 +73,52 @@ fn mouse_test_object_point(app: &GameApp, owner: i32, object: ObjectId) -> GuiPo
         .expect("mouse test object has a visible pick point")
 }
 
+fn mouse_test_drop_geometry_candidate(landscape: &Landscape, world: Vector2) -> bool {
+    landscape.is_liquid_at(world.x, world.y)
+        || (!landscape.is_solid_at(world.x, world.y)
+            && (1..=5).any(|offset| landscape.is_solid_at(world.x, world.y.saturating_add(offset))))
+}
+
+fn mouse_test_matching_empty_point(
+    app: &mut GameApp,
+    owner: i32,
+    start: GuiPoint,
+    point: GuiPoint,
+    carry_command: Option<CommandId>,
+    require_drop_geometry: bool,
+) -> Option<(GuiPoint, Vector2)> {
+    let routed_point = GuiPoint::new(point.x.ceil(), point.y.ceil());
+    let pointer = app.graphics.viewport_point_at(routed_point)?;
+    let world = ingame_pointer_world_pixel(pointer);
+    if pointer.owner != owner
+        || ((point.x - start.x).abs() < 12.0 && (point.y - start.y).abs() < 12.0)
+    {
+        return None;
+    }
+    if require_drop_geometry
+        && !app
+            .engine
+            .landscape()
+            .is_some_and(|landscape| mouse_test_drop_geometry_candidate(landscape, world))
+    {
+        return None;
+    }
+    if app.ingame_viewport_region(owner, routed_point).is_some()
+        || app
+            .graphics
+            .object_at_point(&app.snapshot, owner, routed_point)
+            .is_some()
+    {
+        return None;
+    }
+    if carry_command.is_some_and(|expected| {
+        app.engine.mouse_drag_carryable_command(owner, world) != Some(expected)
+    }) {
+        return None;
+    }
+    Some((point, world))
+}
+
 fn mouse_test_empty_point(
     app: &mut GameApp,
     owner: i32,
@@ -83,26 +129,33 @@ fn mouse_test_empty_point(
         .graphics
         .viewport_rect(owner)
         .expect("mouse test has a local viewport");
+
+    // Drop has an exact cheap geometry case: liquid, or air at most five
+    // pixels above ground (C4MouseControl.cpp:833-846). Probe sparse columns
+    // from the bottom up so the test reaches that band without asking the
+    // ballistic Throw solver about every sky pixel. Static maps and obstructed
+    // columns may defeat this conservative phase, so retain the original exact
+    // row-major search below as a behavior-preserving fallback.
+    if carry_command == Some(CommandId::Drop) {
+        for x in (viewport.x..viewport.x + viewport.width as i32).step_by(32) {
+            for y in (viewport.y..viewport.y + viewport.height as i32).rev() {
+                let point = GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5);
+                if let Some(found) =
+                    mouse_test_matching_empty_point(app, owner, start, point, carry_command, true)
+                {
+                    return found;
+                }
+            }
+        }
+    }
+
     (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
         .find_map(|point| {
-            let routed_point = GuiPoint::new(point.x.ceil(), point.y.ceil());
-            let pointer = app.graphics.viewport_point_at(routed_point)?;
-            let world = ingame_pointer_world_pixel(pointer);
-            (pointer.owner == owner
-                && ((point.x - start.x).abs() >= 12.0 || (point.y - start.y).abs() >= 12.0)
-                && app.ingame_viewport_region(owner, routed_point).is_none()
-                && app
-                    .graphics
-                    .object_at_point(&app.snapshot, owner, routed_point)
-                    .is_none()
-                && carry_command.is_none_or(|expected| {
-                    app.engine.mouse_drag_carryable_command(owner, world) == Some(expected)
-                }))
-            .then_some((point, world))
+            mouse_test_matching_empty_point(app, owner, start, point, carry_command, false)
         })
         .expect("mouse test has a matching empty release point")
 }

@@ -67,9 +67,13 @@ class MergeQueueGateTests(unittest.TestCase):
         )
         self.assertEqual(
             reusable.count("if: ${{ always() && inputs.upload-diagnostics }}"),
-            2,
+            1,
         )
-        self.assertIn("needs: release-context", qualification)
+        self.assertIn("if: inputs.upload-diagnostics", reusable)
+        self.assertIn("name: Rust coverage HTML report", reusable)
+        self.assertIn(
+            "needs: [release-context, linux, windows-smoke]", qualification
+        )
         self.assertIn(
             "needs.release-context.outputs.release == 'true'", qualification
         )

@@ -18,6 +18,30 @@ fn mouse_drag_starts_only_after_cpp_five_pixel_sensitivity() {
     assert!(state.moved, "six pixels enters C4MC_Drag_Moving");
 }
 
+#[test]
+fn mouse_test_drop_geometry_fast_path_keeps_the_exact_cpp_ground_band() {
+    // Drop admits air no more than five pixels above solid ground, while the
+    // sixth pixel and solid ground itself do not qualify
+    // (C4MouseControl.cpp:833-846).
+    let landscape = Landscape::flat(8, 12);
+    assert!(!mouse_test_drop_geometry_candidate(
+        &landscape,
+        Vector2::new(3, 6)
+    ));
+    assert!(mouse_test_drop_geometry_candidate(
+        &landscape,
+        Vector2::new(3, 7)
+    ));
+    assert!(mouse_test_drop_geometry_candidate(
+        &landscape,
+        Vector2::new(3, 11)
+    ));
+    assert!(!mouse_test_drop_geometry_candidate(
+        &landscape,
+        Vector2::new(3, 12)
+    ));
+}
+
 fn physical_left_drag(app: &mut GameApp, start: GuiPoint, end: GuiPoint) {
     app.ingame_last_left_down = None;
     app.handle_cursor_moved(PhysicalPosition::new(

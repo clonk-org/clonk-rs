@@ -15,6 +15,15 @@ from test_release_content_handoff import WORKFLOW, step_script
 BUILD_WORKFLOW = WORKFLOW.with_name("release-build.yml")
 LANDING_WORKFLOW = WORKFLOW.with_name("landing.yml")
 PREBUILD_WORKFLOW = WORKFLOW.with_name("release-prebuild.yml")
+QUALIFICATION_WORKFLOW = WORKFLOW.with_name("exact-sha-qualification.yml")
+
+
+def coverage_fragment_suffixes():
+    source = QUALIFICATION_WORKFLOW.read_text(encoding="utf-8")
+    collectors = source[
+        source.index("  coverage-fragments:") : source.index("  coverage:")
+    ]
+    return re.findall(r"(?m)^            artifact: ([a-z0-9-]+)$", collectors)
 
 
 def job_block(name):
@@ -159,9 +168,26 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         self.assertNotIn("restore-keys:", prebuild + reusable)
         self.assertNotIn("github.run_attempt", reusable)
 
-        # Only final distributables are Actions artifacts. Compile handoffs use
-        # run-scoped caches so release.yml still verifies exactly seven names.
+        # Only final distributables in the release build are Actions artifacts.
+        # Compile handoffs remain run-scoped caches.
         self.assertEqual(reusable.count("actions/upload-artifact@"), 3)
+
+    def test_release_resolver_coverage_inventory_matches_collectors(self):
+        resolver = step_script("Resolve exact-SHA release artifacts")
+        match = re.search(
+            r"coverage_fragment_suffixes=\(\n(?P<body>.*?)\n\)",
+            resolver,
+            re.S,
+        )
+        self.assertIsNotNone(match)
+        allowlisted = re.findall(r"(?m)^\s+([a-z0-9-]+)$", match.group("body"))
+
+        self.assertEqual(allowlisted, coverage_fragment_suffixes())
+        self.assertIn(
+            'expected_artifacts+=("rust-coverage-fragment-${run_id}-${suffix}")',
+            resolver,
+        )
+        self.assertNotIn("is_coverage_fragment", resolver)
 
     def test_release_packaging_tool_uses_the_non_lto_test_profile(self):
         prebuild = PREBUILD_WORKFLOW.read_text(encoding="utf-8")
@@ -262,6 +288,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def run_artifact_resolver(self, **extra):
         output = self.root / "github-output"
+        output.unlink(missing_ok=True)
         environment = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
@@ -407,7 +434,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     @staticmethod
     def artifact_inventory(*, omit=None, extra=None, expired=None):
-        names = [
+        release_names = [
             "desktop-linux",
             "desktop-windows",
             "desktop-macos",
@@ -416,6 +443,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "components-desktop-macos",
             "release-tool",
         ]
+        coverage_names = [
+            f"rust-coverage-fragment-91-{suffix}"
+            for suffix in coverage_fragment_suffixes()
+        ]
+        names = release_names + coverage_names
         return json.dumps(
             {
                 "artifacts": [
@@ -448,6 +480,34 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--commit 0123456789abcdef", commands)
         self.assertNotIn("--branch", commands)
 
+    def test_resolver_fails_closed_on_missing_or_expired_coverage_artifacts(self):
+        self._stub(
+            'if [[ "$1 $2" == "run list" ]]; then\n'
+            '  printf "91\\t%s\\tcompleted\\tsuccess\\n" "$CI_SHA"\n'
+            'elif [[ "$1" == "api" ]]; then printf "%s\\n" "$ARTIFACTS";\n'
+            "else exit 1; fi\n"
+        )
+        cases = {
+            "missing": self.artifact_inventory(
+                omit="rust-coverage-fragment-91-app-1-10"
+            ),
+            "expired": self.artifact_inventory(
+                expired="rust-coverage-fragment-91-app-1-10"
+            ),
+            "stale run": self.artifact_inventory(
+                omit="rust-coverage-fragment-91-app-1-10",
+                extra="rust-coverage-fragment-90-app-1-10",
+            ),
+        }
+        for name, inventory in cases.items():
+            with self.subTest(name=name):
+                completed, output = self.run_artifact_resolver(
+                    ARTIFACTS=inventory, CI_POLL_ATTEMPTS="1"
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertIn("timed out", completed.stderr)
+
     def test_resolver_fails_closed_on_incomplete_or_unexpected_inventory(self):
         self._stub(
             'if [[ "$1 $2" == "run list" ]]; then\n'
@@ -459,6 +519,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "missing": self.artifact_inventory(omit="release-tool"),
             "expired": self.artifact_inventory(expired="desktop-linux"),
             "unexpected": self.artifact_inventory(extra="unreviewed-payload"),
+            "unknown coverage": self.artifact_inventory(
+                extra="rust-coverage-fragment-91-unreviewed"
+            ),
         }
         for name, inventory in cases.items():
             with self.subTest(name=name):

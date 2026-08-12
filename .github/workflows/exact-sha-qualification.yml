@@ -28,17 +28,297 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  coverage:
-    name: Rust code coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+  coverage-fragments:
+    name: Rust coverage / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     concurrency:
-      group: "main-coverage-${{ inputs.concurrency-suffix }}"
+      group: "main-coverage-${{ matrix.artifact }}-${{ inputs.concurrency-suffix }}"
       cancel-in-progress: true
     env:
-      COVERAGE_MIN_LINE_PERCENT: '79'
+      CARGO_TARGET_DIR: target/coverage-build
       COVERAGE_IGNORE_REGEX: '/(main_tests|lib_tests)/|/(parity_differential|test_game_call_ex|test_support)\.rs$'
       LLVM_PROFILE_FILE_NAME: 'clonk-%8m.profraw'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: app 1+10/12
+            artifact: app-1-10
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-1,app-test-shard-10 --no-fail-fast --locked
+          - name: app 2+7/12
+            artifact: app-2-7
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
+          - name: app 3/12
+            artifact: app-3
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
+          - name: app 4+9/12
+            artifact: app-4-9
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
+          - name: app 5/12
+            artifact: app-5
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
+          - name: app 11+12/12
+            artifact: app-11-12
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-11,app-test-shard-12 --no-fail-fast --locked
+          - name: app 6+8/12
+            artifact: app-6-8
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-6,app-test-shard-8 --no-fail-fast --locked
+          - name: engine integration 1/2
+            artifact: engine-1
+            apt: ''
+            command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
+          - name: engine integration 2/2
+            artifact: engine-2
+            apt: ''
+            command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
+          - name: engine and frontend units
+            artifact: engine-and-frontend-units
+            apt: ''
+            command: cargo llvm-cov --no-report nextest -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked
+          - name: remaining workspace 1/2
+            artifact: remaining-1
+            apt: mesa-vulkan-drivers
+            command: cargo llvm-cov --no-report nextest -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p pixels --no-fail-fast --locked
+          - name: remaining workspace 2/2
+            artifact: remaining-2
+            apt: libasound2-dev libxmp4
+            command: cargo llvm-cov --no-report nextest -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --features xtask/engine-tools --no-fail-fast --locked
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install native Rust dependencies
+        if: matrix.apt != ''
+        env:
+          APT_PACKAGES: ${{ matrix.apt }}
+        run: |
+          read -r -a packages <<< "$APT_PACKAGES"
+          if ! sudo apt-get install --yes --no-install-recommends "${packages[@]}"; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-nextest@0.9.91
+          fallback: none
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+
+      # Instrumented targets are large and incompatible across collector
+      # feature sets. Reuse only Cargo downloads; one trusted-main row refreshes
+      # the shared registry cache after all rows restore the same snapshot.
+      - name: Restore Cargo registry cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-targets: false
+          shared-key: coverage-registry
+          save-if: ${{ inputs.upload-diagnostics && matrix.artifact == 'app-1-10' }}
+
+      - name: Collect instrumented coverage fragment
+        env:
+          SHARD_COMMAND: ${{ matrix.command }}
+        run: |
+          cargo llvm-cov clean --workspace
+          bash -euo pipefail -c "$SHARD_COMMAND"
+          mkdir -p target/coverage-fragments
+          cargo llvm-cov report --lcov \
+            --output-path "target/coverage-fragments/${{ matrix.artifact }}.lcov" \
+            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+          gzip --best "target/coverage-fragments/${{ matrix.artifact }}.lcov"
+
+      - name: Upload coverage fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-fragment-${{ github.run_id }}-${{ matrix.artifact }}
+          path: target/coverage-fragments/${{ matrix.artifact }}.lcov.gz
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ inputs.upload-diagnostics && 1 || 7 }}
+
+  coverage:
+    name: Rust code coverage
+    needs: coverage-fragments
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: "main-coverage-report-${{ inputs.concurrency-suffix }}"
+      cancel-in-progress: true
+    env:
+      # The prior LLVM JSON gate was 79%. LCOV detail omits unmergeable macro
+      # expansion totals and reads 0.45 points higher on the baseline report.
+      COVERAGE_MIN_LINE_PERCENT: '79.45'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - name: Download coverage fragments
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rust-coverage-fragment-${{ github.run_id }}-*
+          path: target/coverage-fragments
+          merge-multiple: true
+
+      - name: Enforce merged line coverage floor
+        env:
+          EXPECTED_FRAGMENT_COUNT: '12'
+        run: |
+          expected=(
+            app-1-10
+            app-2-7
+            app-3
+            app-4-9
+            app-5
+            app-11-12
+            app-6-8
+            engine-1
+            engine-2
+            engine-and-frontend-units
+            remaining-1
+            remaining-2
+          )
+          shopt -s nullglob
+          fragments=(target/coverage-fragments/*.lcov.gz)
+          if [[ "${#fragments[@]}" -ne "$EXPECTED_FRAGMENT_COUNT" ]]; then
+            echo "expected ${EXPECTED_FRAGMENT_COUNT} coverage fragments, found ${#fragments[@]}" >&2
+            exit 1
+          fi
+          expected_names=$(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          actual_names=$(printf '%s\n' "${fragments[@]##*/}" | sed 's/\.lcov\.gz$//' | LC_ALL=C sort)
+          if [[ "$actual_names" != "$expected_names" ]]; then
+            diff -u <(printf '%s\n' "$expected_names") <(printf '%s\n' "$actual_names") || true
+            exit 1
+          fi
+          gzip --decompress --keep target/coverage-fragments/*.lcov.gz
+          python3 scripts/merge-rust-coverage.py \
+            --fail-under-lines "$COVERAGE_MIN_LINE_PERCENT" \
+            target/coverage-fragments/*.lcov
+
+  # HTML is useful post-merge diagnostics, not part of the coverage gate. It
+  # independently merges the fragments so rendering and artifact retention
+  # cannot extend or fail the required release-qualification critical path.
+  coverage-html:
+    name: Rust coverage HTML report
+    needs: coverage-fragments
+    if: inputs.upload-diagnostics
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: "main-coverage-html-${{ inputs.concurrency-suffix }}"
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+
+      - name: Download Rust coverage fragments
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rust-coverage-fragment-${{ github.run_id }}-*
+          path: target/coverage-fragments
+          merge-multiple: true
+
+      - name: Merge Rust coverage fragments
+        env:
+          EXPECTED_FRAGMENT_COUNT: '12'
+        run: |
+          expected=(
+            app-1-10
+            app-2-7
+            app-3
+            app-4-9
+            app-5
+            app-11-12
+            app-6-8
+            engine-1
+            engine-2
+            engine-and-frontend-units
+            remaining-1
+            remaining-2
+          )
+          shopt -s nullglob
+          fragments=(target/coverage-fragments/*.lcov.gz)
+          if [[ "${#fragments[@]}" -ne "$EXPECTED_FRAGMENT_COUNT" ]]; then
+            echo "expected ${EXPECTED_FRAGMENT_COUNT} coverage fragments, found ${#fragments[@]}" >&2
+            exit 1
+          fi
+          expected_names=$(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          actual_names=$(printf '%s\n' "${fragments[@]##*/}" | sed 's/\.lcov\.gz$//' | LC_ALL=C sort)
+          if [[ "$actual_names" != "$expected_names" ]]; then
+            diff -u <(printf '%s\n' "$expected_names") <(printf '%s\n' "$actual_names") || true
+            exit 1
+          fi
+          gzip --decompress --keep target/coverage-fragments/*.lcov.gz
+          python3 scripts/merge-rust-coverage.py \
+            --output target/coverage/lcov.info \
+            target/coverage-fragments/*.lcov
+
+      - name: Install LCOV report generator
+        run: |
+          if ! sudo apt-get install --yes --no-install-recommends lcov; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends lcov
+          fi
+
+      - name: Generate Rust coverage report
+        run: |
+          genhtml target/coverage/lcov.info \
+            --output-directory target/coverage/html \
+            --legend \
+            --title "clonk-rs ${{ inputs.source-sha }}"
+
+      - name: Upload Rust coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/coverage/lcov.info
+            target/coverage/html
+          if-no-files-found: warn
+          retention-days: 14
+
+  developer-feedback:
+    name: Developer feedback replay
+    if: inputs.upload-diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: "main-developer-feedback-${{ inputs.concurrency-suffix }}"
+      cancel-in-progress: true
     defaults:
       run:
         shell: bash
@@ -63,8 +343,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
-        with:
-          components: llvm-tools-preview
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
@@ -72,15 +350,6 @@ jobs:
           tool: cargo-nextest@0.9.91
           fallback: none
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
-        with:
-          tool: cargo-llvm-cov@0.8.7
-          fallback: none
-
-      # Replay/render use the ordinary landing target while coverage keeps its
-      # instrumented artifacts elsewhere. This diagnostic never publishes a
-      # partial cache if a newer main commit supersedes it.
       - name: Restore Linux landing cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -89,7 +358,7 @@ jobs:
           save-if: false
 
       # The ordinary landing suite runs the replay assertion. Repeat it here
-      # only to retain a fresh snapshot for the ignored render diagnostic.
+      # only when retaining a fresh snapshot for the ignored render diagnostic.
       - name: Generate deterministic replay evidence
         env:
           LC_TEST_ARTIFACT_DIR: ${{ github.workspace }}/target/dev-check/replay
@@ -123,49 +392,12 @@ jobs:
             -- \
             dev_feedback_render --ignored --exact
 
-      - name: Collect instrumented workspace coverage
-        env:
-          CARGO_TARGET_DIR: target/coverage-build
-        run: |
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --no-report nextest \
-            --workspace \
-            --no-fail-fast \
-            --features xtask/engine-tools \
-            --locked
-
-      - name: Generate Rust coverage reports
-        env:
-          CARGO_TARGET_DIR: target/coverage-build
-        run: |
-          mkdir -p target/coverage
-          cargo llvm-cov report --lcov --output-path target/coverage/lcov.info \
-            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-          cargo llvm-cov report --html --output-dir target/coverage \
-            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-
-      - name: Enforce line coverage floor
-        env:
-          CARGO_TARGET_DIR: target/coverage-build
-        run: |
-          cargo llvm-cov report --fail-under-lines "$COVERAGE_MIN_LINE_PERCENT" \
-            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-
       - name: Upload developer-feedback artifacts
         if: ${{ always() && inputs.upload-diagnostics }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: developer-feedback-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/dev-check
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload Rust coverage reports
-        if: ${{ always() && inputs.upload-diagnostics }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/coverage
           if-no-files-found: warn
           retention-days: 14
 
