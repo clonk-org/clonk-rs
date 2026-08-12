@@ -812,6 +812,9 @@ pub enum HostCommand {
         rejoin_seconds: u16,
         completion: oneshot::Sender<()>,
     },
+    BroadcastHostRestartLobby {
+        completion: oneshot::Sender<()>,
+    },
     SubmitPacket {
         delivery: ControlDelivery,
         data: Vec<u8>,
@@ -972,6 +975,20 @@ impl HostHandle {
                 rejoin_seconds,
                 completion,
             })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        broadcast.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Tells every connected client that the round has restarted while this
+    /// session stays up, so each returns to the lobby on its existing
+    /// connection. Resolves once the notice is queued on every route, which is
+    /// what orders it ahead of the lobby state the host publishes next. See
+    /// [`crate::host_restart`].
+    pub async fn broadcast_host_restart_lobby(&self) -> Result<(), HostError> {
+        let (completion, broadcast) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BroadcastHostRestartLobby { completion })
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         broadcast.await.map_err(|_| HostError::HostLoopGone)
@@ -1495,6 +1512,10 @@ pub enum ClientEvent {
     HostRestarting {
         rejoin_seconds: u16,
     },
+    /// The host has restarted the round and kept this session up, so no
+    /// disconnect follows and the client re-enters the lobby on the connection
+    /// it already has. See [`crate::host_restart`].
+    HostRestartLobby,
     UnhandledPacket {
         packet_type: u8,
     },

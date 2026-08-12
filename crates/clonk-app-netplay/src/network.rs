@@ -1737,6 +1737,18 @@ impl TestNetworkCommands {
         observed
     }
 
+    /// The lobby restart carries no payload, so the count is the whole
+    /// observation.
+    pub fn take_host_restart_lobby_broadcasts(&mut self) -> usize {
+        let mut observed = 0;
+        while let Ok(command) = self.command_rx.try_recv() {
+            if matches!(command, NetworkCommand::BroadcastHostRestartLobby) {
+                observed += 1;
+            }
+        }
+        observed
+    }
+
     pub fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
         let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -2668,6 +2680,10 @@ pub enum NetworkEvent {
     HostRestarting {
         rejoin_seconds: u16,
     },
+    /// The host has restarted the round and kept this session up. No
+    /// `PeerDisconnected` follows: the client returns to the lobby on the
+    /// connection it already holds. See [`clonk_network::host_restart`].
+    HostRestartLobby,
     NetpuncherStateChanged {
         game_ids: clonk_network::NetpuncherGameIds,
         local_addresses: Vec<NetworkAddress>,
@@ -2930,6 +2946,7 @@ enum NetworkCommand {
     BroadcastHostRestarting {
         rejoin_seconds: u16,
     },
+    BroadcastHostRestartLobby,
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -3876,6 +3893,23 @@ impl NetworkManager {
         }
         self.command_tx
             .blocking_send(NetworkCommand::BroadcastHostRestarting { rejoin_seconds })
+            .map_err(|_| anyhow!("network worker is not accepting a restart notice"))
+    }
+
+    /// Announces that the round has restarted while this session stays up, so
+    /// every client returns to the lobby on its existing connection.
+    ///
+    /// Unlike [`Self::broadcast_host_restarting`] no teardown follows, so the
+    /// ordering this relies on is the ordinary one: the notice precedes the
+    /// lobby state the app publishes next on the same channel.
+    pub fn broadcast_host_restart_lobby(&self) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may announce a round restart"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastHostRestartLobby)
             .map_err(|_| anyhow!("network worker is not accepting a restart notice"))
     }
 
@@ -6778,6 +6812,14 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host restart notice failed: {error}"))?;
                     }
+                    // Awaited for ordering rather than teardown: the lobby state
+                    // the app publishes next must not overtake the notice that
+                    // explains it.
+                    NetworkCommand::BroadcastHostRestartLobby => {
+                        host.broadcast_host_restart_lobby()
+                            .await
+                            .map_err(|error| anyhow!("host lobby restart failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -7789,7 +7831,8 @@ async fn run_client_worker(
                             "client attempted to submit an authoritative vote result".to_string(),
                         ));
                     }
-                    NetworkCommand::BroadcastHostRestarting { .. } => {
+                    NetworkCommand::BroadcastHostRestarting { .. }
+                    | NetworkCommand::BroadcastHostRestartLobby => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to announce a host round restart".to_string(),
                         ));
@@ -8190,6 +8233,9 @@ async fn handle_client_event(
         }
         ClientEvent::HostRestarting { rejoin_seconds } => {
             let _ = event_tx.send(NetworkEvent::HostRestarting { rejoin_seconds });
+        }
+        ClientEvent::HostRestartLobby => {
+            let _ = event_tx.send(NetworkEvent::HostRestartLobby);
         }
         ClientEvent::ReadyCheck { packet } => {
             let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
@@ -13685,6 +13731,47 @@ Message=Server says Andr\xe9\r\n\
 
         assert_eq!(host_commands.take_host_restart_broadcasts(), vec![30]);
         assert!(client_commands.take_host_restart_broadcasts().is_empty());
+    }
+
+    /// Same host-only rule as the reconnect notice: a client that could
+    /// broadcast this would end everybody else's round.
+    #[test]
+    fn only_a_host_broadcasts_a_lobby_restart() {
+        let (host, _host_events, mut host_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (client, _client_events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        host.broadcast_host_restart_lobby()
+            .expect("host queues the lobby restart");
+        assert!(client.broadcast_host_restart_lobby().is_err());
+
+        assert_eq!(host_commands.take_host_restart_lobby_broadcasts(), 1);
+        assert_eq!(client_commands.take_host_restart_lobby_broadcasts(), 0);
+    }
+
+    /// The app owns the round teardown, so the worker surfaces this verbatim
+    /// too. Unlike the reconnect notice there is no disconnect behind it to
+    /// fold into — the session stays up.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lobby_restart_notice_is_forwarded_to_the_app() {
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+
+        handle_client_event(
+            ClientEvent::HostRestartLobby,
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward lobby restart notice");
+
+        assert_eq!(
+            event_rx.recv().expect("lobby restart event"),
+            NetworkEvent::HostRestartLobby
+        );
     }
 
     /// The app is the only layer that can act on a restart notice — it owns the

@@ -2255,6 +2255,67 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    /// The session-preserving notice is the more dangerous one to relay: it
+    /// does not predict a disconnect, so a forged one ends a round that is
+    /// still perfectly healthy and drops every victim back to a lobby. The
+    /// whole `0x7x` range is refused on the relay for exactly this reason.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_cannot_forge_a_lobby_restart_through_the_forward_relay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut attacker, _attacker_id) = raw_client_transport(address, b"Mallory").await;
+        let (mut victim, _victim_id) = raw_client_transport(address, b"Alice").await;
+        drain_raw_client(&mut attacker).await;
+        drain_raw_client(&mut victim).await;
+
+        attacker
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::encode_host_restart_lobby_notice(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            !raw_client_received_message(
+                &mut victim,
+                &ControlMessage::HostRestartLobby,
+                Duration::from_millis(200)
+            )
+            .await,
+            "the host relayed a peer's lobby restart as its own"
+        );
+
+        drop(attacker);
+        drop(victim);
+        host.shutdown().await.unwrap();
+    }
+
+    /// Unlike the reconnect notice, this one is followed by the session staying
+    /// up, so it has to reach every client on the connection it will keep using.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lobby_restart_notice_reaches_every_client_on_the_live_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut alice, _) = raw_client_transport(address, b"Alice").await;
+        let (mut bob, _) = raw_client_transport(address, b"Bob").await;
+        drain_raw_client(&mut alice).await;
+        drain_raw_client(&mut bob).await;
+
+        host.broadcast_host_restart_lobby().await.unwrap();
+
+        let expected = ControlMessage::HostRestartLobby;
+        assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
+        assert!(raw_client_received_message(&mut bob, &expected, EVENT_WAIT).await);
+
+        drop(alice);
+        drop(bob);
+        host.shutdown().await.unwrap();
+    }
+
     /// The restart notice exists only to be read *before* the disconnect it
     /// predicts, and the host sends it while already on its way down. If the
     /// teardown could overtake it, every client would still see a bare socket
@@ -15631,6 +15692,7 @@ mod tests {
                 | ClientEvent::ResourceDeriveUnsupported { .. }
                 | ClientEvent::LeagueRoundResults { .. }
                 | ClientEvent::HostRestarting { .. }
+                | ClientEvent::HostRestartLobby
                 | ClientEvent::UnhandledPacket { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
@@ -18060,6 +18122,7 @@ mod tests {
                 | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
                 Ok(Some(ClientEvent::LeagueRoundResults { .. })) => continue,
                 Ok(Some(ClientEvent::HostRestarting { .. })) => continue,
+                Ok(Some(ClientEvent::HostRestartLobby)) => continue,
                 Ok(Some(ClientEvent::UnhandledPacket { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {

@@ -297,6 +297,10 @@ pub enum ControlMessage {
     HostRestarting {
         rejoin_seconds: u16,
     },
+    /// The host restarting the round *without* closing the session, so this
+    /// connection carries straight on into the new lobby. See
+    /// [`crate::host_restart`].
+    HostRestartLobby,
 }
 
 #[derive(Debug)]
@@ -650,6 +654,9 @@ impl<S> ControlTransport<S> {
             ControlMessage::HostRestarting { rejoin_seconds } => {
                 frame.extend(crate::encode_host_restart_notice(rejoin_seconds));
             }
+            ControlMessage::HostRestartLobby => {
+                frame.extend(crate::encode_host_restart_lobby_notice());
+            }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
                 let control_tick = i32::try_from(control_tick)
@@ -831,6 +838,11 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
             .map(|rejoin_seconds| ControlMessage::HostRestarting { rejoin_seconds })
             .ok_or(TransportError::UnsupportedPacket(
                 crate::PID_PORT_HOST_RESTARTING,
+            )),
+        crate::PID_PORT_HOST_RESTART_LOBBY => crate::decode_host_restart_lobby_notice(body)
+            .then_some(ControlMessage::HostRestartLobby)
+            .ok_or(TransportError::UnsupportedPacket(
+                crate::PID_PORT_HOST_RESTART_LOBBY,
             )),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
@@ -1361,6 +1373,24 @@ mod tests {
             decoded,
             ControlMessage::HostRestarting { rejoin_seconds: 30 }
         );
+    }
+
+    /// The session-preserving notice rides the same codec, and must stay
+    /// distinct from the reconnect notice: the two ask a client for opposite
+    /// things, so decoding one as the other would either drop a live session or
+    /// strand a client waiting to re-dial a host that never went away.
+    #[test]
+    fn a_lobby_restart_notice_round_trips_through_the_frame_codec() {
+        let frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::HostRestartLobby,
+        )
+        .expect("notice encodes");
+
+        assert_eq!(frame[FRAME_HEADER_LEN], crate::PID_PORT_HOST_RESTART_LOBBY);
+
+        let decoded = parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("notice decodes");
+
+        assert_eq!(decoded, ControlMessage::HostRestartLobby);
     }
 
     /// A stock C++ peer never sends this, so the port must never *require* it —

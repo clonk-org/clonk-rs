@@ -662,6 +662,10 @@ pub(crate) async fn run_host(
                         broadcast_host_restarting(rejoin_seconds, &mut state).await;
                         let _ = completion.send(());
                     }
+                    HostCommand::BroadcastHostRestartLobby { completion } => {
+                        broadcast_host_restart_lobby(&mut state).await;
+                        let _ = completion.send(());
+                    }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {

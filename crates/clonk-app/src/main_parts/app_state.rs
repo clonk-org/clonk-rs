@@ -4927,6 +4927,19 @@ pub(crate) struct PendingHostRejoin {
     pub(crate) next_attempt_at: Option<Instant>,
 }
 
+/// What a round teardown does with the live network session.
+///
+/// `C4Game::Clear` knows only [`Self::Clear`]: the session dies with the round
+/// it belongs to (src/C4Game.cpp:544-582). [`Self::Retain`] is the port-only
+/// case behind `clonk_network::host_restart` — the host restarts the round
+/// without closing the session, so the manager, its sockets and every client
+/// connection outlive the round and carry straight on into the next lobby.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NetworkSessionTeardown {
+    Clear,
+    Retain,
+}
+
 /// Spacing between reconnect attempts while the host is re-hosting. The first
 /// attempt necessarily races the host's own teardown, so a refused connection
 /// is the expected case rather than a failure.

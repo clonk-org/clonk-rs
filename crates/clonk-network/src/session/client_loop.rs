@@ -1611,6 +1611,13 @@ pub(crate) async fn run_client_loop_with_routes(
                             .send(ClientEvent::HostRestarting { rejoin_seconds })
                             .await;
                     }
+                    // Same authority rule as the reconnect notice above: only
+                    // the host can end its own round.
+                    Ok(ControlMessage::HostRestartLobby)
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
+                    Ok(ControlMessage::HostRestartLobby) => {
+                        let _ = event_tx.send(ClientEvent::HostRestartLobby).await;
+                    }
                     Ok(ControlMessage::Ping(packet)) => {
                         if let Err(error) = transport.send_message(ControlMessage::Pong(packet)).await {
                             let _ = event_tx

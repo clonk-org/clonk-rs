@@ -671,6 +671,86 @@ fn host_round_restart_announces_itself_before_tearing_the_session_down() {
 }
 
 #[test]
+fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
+    // The session-preserving restart, and the reason issue clonk-org/clonk-rs#241
+    // exists: re-hosting from scratch costs every client a whole new connection
+    // to reach a lobby it was already entitled to. With a scenario this host can
+    // prepare, nothing is torn down but the round.
+    let _lock = env_lock().lock();
+    let user_data = tempdir().expect("isolated restart user data");
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repository root");
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    app.active_scenario = Some(tutorial_frontend(repository));
+    app.active_definition_load = Some(ScenarioDefinitionLoad::Seed {
+        modules: vec!["Objects.c4d".to_string()],
+        definition_root: None,
+    });
+    let (manager, _events, mut commands) =
+        NetworkManager::test_stub_with_commands_for_client_id(0);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Host(HostSettings {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        player_name: "Exact Host".to_string(),
+        prepared: None,
+    }));
+
+    app.restart_current_network_scenario()
+        .expect("host restarts the round on its live session");
+
+    assert!(
+        app.network.is_some(),
+        "the session every client is connected to must outlive the round"
+    );
+    assert!(
+        app.network_mode.is_some(),
+        "a retained session keeps the host mode that describes it"
+    );
+    assert_eq!(
+        commands.take_host_restart_lobby_broadcasts(),
+        1,
+        "clients are told the round restarted while the session stayed up"
+    );
+    assert!(
+        commands.take_host_restart_broadcasts().is_empty(),
+        "the reconnect notice would send every client to re-dial a host that never left"
+    );
+    assert!(
+        app.classic_host_lobby.is_some(),
+        "the host lands back in its own lobby"
+    );
+    assert_eq!(app.mode, AppMode::Menu);
+}
+
+#[test]
+fn a_league_round_restart_still_clears_the_live_session() {
+    // Dropping the manager is what sends the league End, so a league session
+    // that outlived its round would still be registered when the next
+    // LeagueStart asked the same server to register it again
+    // (src/C4Network2.cpp:259-272,748-763,2292-2303). The connection saving is
+    // not worth a rejected Start.
+    let mut app = new_running_sandbox_app();
+    let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
+    app.network_is_league = true;
+
+    assert!(
+        !app.network_round_restart_preserves_session(),
+        "a league round must re-host so its registration is released"
+    );
+
+    app.restart_current_scenario()
+        .expect("host restart selects network lobby staging");
+
+    assert!(
+        app.network.is_none(),
+        "the league session must be torn down before the next one registers"
+    );
+}
+
+#[test]
 fn host_round_restart_clears_the_live_session_before_staging_the_next_host() {
     // C4Network2StartWaitDlg::OnBtnRestart queues the next mission and closes
     // its dialog as aborted; C4Network2::FinalInit answers that abort with

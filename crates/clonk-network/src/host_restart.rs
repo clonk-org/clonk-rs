@@ -26,6 +26,28 @@
 //! from the close it was about to observe, and it falls back to the native
 //! dead-host path either way. Do not copy this reasoning to a packet sent
 //! during a session that is meant to survive.
+//!
+//! # Two notices, two costs
+//!
+//! [`PID_PORT_HOST_RESTARTING`] above is the *reconnect* notice: it tells a
+//! client the address will answer again, and the client pays for a fresh
+//! connection — handshake, admission and resource negotiation — to get back in.
+//!
+//! [`PID_PORT_HOST_RESTART_LOBBY`] is the cheaper one. The host keeps its
+//! session, sockets and client list up across the restart and only rebuilds the
+//! round, so the client keeps the connection it already has and re-enters the
+//! lobby in place. Nothing is re-dialled and nothing is re-transferred.
+//!
+//! The C++ argument survives the change of intent, for a reason worth stating
+//! exactly. This packet *is* sent on a session meant to survive, so a C++ peer
+//! that receives it closes a connection it would otherwise have kept — but the
+//! round it was in has ended regardless, and closing is precisely what that peer
+//! does today, when the host tears the whole session down instead. It reaches
+//! the same `OnClientDisconnect` and the same `ChangeToLocal`
+//! (src/C4Network2.cpp:1826-1832), so a stock peer is no worse off than before
+//! this packet existed; the host simply keeps serving the peers that understood
+//! it. Nothing here licenses a port-only ID on a session where every peer is
+//! meant to keep its connection.
 
 /// Packet ID for the restart notice.
 ///
@@ -33,10 +55,30 @@
 /// chosen to be above every ID C++ dispatches.
 pub const PID_PORT_HOST_RESTARTING: u8 = 0x71;
 
+/// Packet ID for the notice that keeps the session up across the restart.
+///
+/// Sits directly above [`PID_PORT_HOST_RESTARTING`], inside the same `0x7x`
+/// port-only range the host refuses to relay.
+pub const PID_PORT_HOST_RESTART_LOBBY: u8 = 0x72;
+
 /// How long a client should keep trying to reach the restarted host before it
 /// gives up, in seconds. Carried on the wire so the host — the only side that
 /// knows how long its own teardown and re-host take — sets the budget.
 pub const DEFAULT_HOST_RESTART_REJOIN_SECONDS: u16 = 30;
+
+/// Encodes the session-preserving restart notice.
+///
+/// Unlike [`encode_host_restart_notice`] this carries no rejoin window: the
+/// connection it arrives on is the one the client keeps, so there is no
+/// re-dial for the host to budget.
+pub fn encode_host_restart_lobby_notice() -> Vec<u8> {
+    vec![PID_PORT_HOST_RESTART_LOBBY]
+}
+
+/// Answers whether `wire` is a session-preserving restart notice.
+pub fn decode_host_restart_lobby_notice(wire: &[u8]) -> bool {
+    wire.first().copied() == Some(PID_PORT_HOST_RESTART_LOBBY)
+}
 
 /// Encodes the notice. Body is the rejoin window in seconds, little-endian, to
 /// match [`crate::encode_port_capabilities`].
@@ -86,5 +128,26 @@ mod tests {
             decode_host_restart_notice(&[crate::PID_PORT_CAPABILITIES, 30, 0]),
             None
         );
+    }
+
+    #[test]
+    fn a_lobby_notice_is_its_packet_id_alone() {
+        assert_eq!(
+            encode_host_restart_lobby_notice(),
+            vec![PID_PORT_HOST_RESTART_LOBBY]
+        );
+        assert!(decode_host_restart_lobby_notice(&[
+            PID_PORT_HOST_RESTART_LOBBY
+        ]));
+    }
+
+    #[test]
+    fn the_reconnect_notice_is_not_a_lobby_notice() {
+        assert!(!decode_host_restart_lobby_notice(&[
+            PID_PORT_HOST_RESTARTING,
+            30,
+            0
+        ]));
+        assert!(!decode_host_restart_lobby_notice(&[]));
     }
 }
