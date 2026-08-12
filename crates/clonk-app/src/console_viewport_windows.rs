@@ -341,6 +341,11 @@ pub(crate) fn handle_console_viewport_event(
                 windows.request_redraw(key);
                 return;
             }
+            // A press the popup did not take starts an ordinary gesture, so
+            // any grab left behind by a click whose release never arrived —
+            // the window lost focus between the two — ends here rather than
+            // swallowing this gesture's release instead.
+            app.console_viewport_context_menu_grab = None;
             // `LeftButtonDown(fControl)` and `Move`'s Shift arm read the
             // live modifier state (`C4EditCursor.cpp:143,206`).
             let modifiers = app.keyboard_modifiers;
