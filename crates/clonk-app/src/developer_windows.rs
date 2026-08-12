@@ -41,6 +41,9 @@ pub enum HostPurpose {
     Toolbox { page: ToolboxPage },
     /// The object-list utility window.
     ObjectList,
+    /// A `C4ComponentHost::ShowDialog` editor. Modal in C++, so at most one
+    /// exists and its close destroys it.
+    ComponentEditor,
 }
 
 /// One window's surface lifecycle. Implementations own the real window, pixel
@@ -256,7 +259,9 @@ impl<H: DeveloperWindowHost> DeveloperWindows<H> {
                 record.host.set_visible(false);
                 CloseOutcome::Hidden
             }
-            HostPurpose::Viewport { .. } | HostPurpose::ObjectList => {
+            HostPurpose::Viewport { .. }
+            | HostPurpose::ObjectList
+            | HostPurpose::ComponentEditor => {
                 self.records.remove(&id);
                 CloseOutcome::Destroyed
             }

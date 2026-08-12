@@ -13,22 +13,14 @@
 //! in window pixels — so buffer and surface stay the same extent.
 
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter, ToolboxPage};
+use crate::software_window::{build_software_window, SoftwarePresent, SoftwareWindow};
 use crate::GameApp;
-use pixels::Pixels;
-use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::Window;
 
+/// The notebook's window. Everything about its surface is
+/// [`SoftwareWindow`]'s; what is here is what makes it the *toolbox*.
 pub struct ToolboxWindowHost {
-    pub window: Arc<Window>,
-    pub pixels: Option<Pixels<'static>>,
-    /// The last window-local pointer position. winit reports motion and button
-    /// state separately, and the page's hit test needs both.
-    pub(crate) last_pointer: (i32, i32),
-    width: u32,
-    height: u32,
-    surface_rebuild: crate::main_audio::SurfaceRebuildState,
-    visible: bool,
+    pub(crate) surface: SoftwareWindow,
 }
 
 /// Create the toolbox window and its framebuffer.
@@ -49,74 +41,47 @@ pub(crate) fn build_toolbox_window(
     width: u32,
     height: u32,
 ) -> anyhow::Result<ToolboxWindowHost> {
-    use anyhow::Context;
-
-    let mut attributes = Window::default_attributes()
-        .with_title(title)
-        .with_inner_size(winit::dpi::PhysicalSize::new(width, height))
-        .with_resizable(chrome.resizable);
-    if let Some((x, y)) = position {
-        attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
-    }
-    let window = Arc::new(
-        target
-            .create_window(attributes)
-            .context("failed to create the developer toolbox window")?,
-    );
-    let pixels = crate::main_audio::build_framebuffer(&window, window.inner_size())
-        .context("failed to create the developer toolbox framebuffer")?;
-    Ok(ToolboxWindowHost::new(window, pixels, width, height))
+    Ok(ToolboxWindowHost {
+        surface: build_software_window(
+            target,
+            title,
+            chrome.resizable,
+            position,
+            width,
+            height,
+            "developer toolbox",
+        )?,
+    })
 }
 
 impl ToolboxWindowHost {
-    pub fn new(window: Arc<Window>, pixels: Pixels<'static>, width: u32, height: u32) -> Self {
-        Self {
-            window,
-            pixels: Some(pixels),
-            last_pointer: (0, 0),
-            width: width.max(1),
-            height: height.max(1),
-            surface_rebuild: crate::main_audio::SurfaceRebuildState::default(),
-            visible: true,
-        }
-    }
-
     /// The extent the page is laid out and hit-tested in.
     pub(crate) fn surface_extent(&self) -> (u32, u32) {
-        (self.width, self.height)
+        self.surface.surface_extent()
     }
 
     /// The window's live position, which `SwitchPage` reads *before* hiding so
     /// the next show can restore it (`C4DevmodeDlg.cpp:91-115`).
     pub(crate) fn position(&self) -> Option<(i32, i32)> {
-        self.window
-            .outer_position()
-            .ok()
-            .map(|position| (position.x, position.y))
+        self.surface.position()
     }
 }
 
 impl DeveloperWindowHost for ToolboxWindowHost {
     fn resize(&mut self, width: u32, height: u32) {
-        self.width = width.max(1);
-        self.height = height.max(1);
-        if let Some(pixels) = self.pixels.as_mut() {
-            let _ = pixels.resize_surface(self.width, self.height);
-            let _ = pixels.resize_buffer(self.width, self.height);
-        }
+        self.surface.resize(width, height);
     }
 
     fn request_redraw(&mut self) {
-        self.window.request_redraw();
+        self.surface.request_redraw();
     }
 
     fn set_visible(&mut self, visible: bool) {
-        self.window.set_visible(visible);
-        self.visible = visible;
+        self.surface.set_visible(visible);
     }
 
     fn visible(&self) -> bool {
-        self.visible
+        self.surface.visible()
     }
 }
 
@@ -128,45 +93,23 @@ impl DeveloperWindowPresenter<GameApp> for ToolboxWindowHost {
     /// present with no current page blanks rather than tearing the record
     /// down.
     fn present(&mut self, app: &mut GameApp) -> Result<(), String> {
-        let page = app.developer_toolbox.current_page();
-        let Some(pixels) = self.pixels.as_mut() else {
-            return Ok(());
-        };
-        match page {
-            Some(page) => {
-                let surface = app.render_developer_toolbox_page(page, self.width, self.height);
-                let frame = pixels.frame_mut();
-                let drawn = surface.pixels();
-                if frame.len() == drawn.len() {
-                    frame.copy_from_slice(drawn);
-                } else {
-                    // A resize the buffer has not caught up with; showing the
-                    // previous frame beats tearing.
-                    tracing::trace!("toolbox frame size does not match its buffer yet");
-                }
-            }
-            None => pixels.frame_mut().fill(0),
-        }
-        match crate::main_audio::present_pixels_frame(pixels) {
-            Ok(crate::main_audio::RetainedGpuPresentOutcome::Presented) => {
-                self.surface_rebuild.note_presented();
-                Ok(())
-            }
-            Ok(crate::main_audio::RetainedGpuPresentOutcome::Skipped) => Ok(()),
-            Err(pixels::Error::SurfaceLost) => {
-                // The pages survive a lost surface, so the window hides and
-                // waits rather than being destroyed with them. The *model*
-                // has to learn that too: it would otherwise still believe the
-                // toolbox visible, answer the next `switch_page` with a bare
-                // retitle, and leave a window nobody can bring back.
-                let _ = self.surface_rebuild.note_loss();
-                self.window.set_visible(false);
-                self.visible = false;
+        let (width, height) = self.surface.surface_extent();
+        let page = app
+            .developer_toolbox
+            .current_page()
+            .map(|page| app.render_developer_toolbox_page(page, width, height));
+        match self.surface.present_surface(page.as_ref())? {
+            SoftwarePresent::Presented | SoftwarePresent::Skipped => Ok(()),
+            // The pages survive a lost surface, so the window hides and waits
+            // rather than being destroyed with them. The *model* has to learn
+            // that too: it would otherwise still believe the toolbox visible,
+            // answer the next `switch_page` with a bare retitle, and leave a
+            // window nobody can bring back.
+            SoftwarePresent::SurfaceLost => {
                 let effect = app.developer_toolbox.close(None);
                 app.developer_toolbox_effects.extend(effect);
                 Err("the developer toolbox surface was lost".to_owned())
             }
-            Err(error) => Err(error.to_string()),
         }
     }
 }

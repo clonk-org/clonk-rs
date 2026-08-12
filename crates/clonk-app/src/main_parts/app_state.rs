@@ -18,6 +18,19 @@ pub(crate) struct NetworkSavegameRecreationProgress {
     pub(crate) active_client: Option<(i32, String)>,
 }
 
+/// One open component editor: which component, the text being edited, and the
+/// host that will hold the accepted bytes.
+///
+/// C++ needs no such pairing — `C4ComponentHost` *is* the dialog, holding both
+/// the bytes and the window. The port splits them because the editing surface
+/// is invented and the commit rules are ported, and the two should not be one
+/// type.
+pub(crate) struct DeveloperComponentEdit {
+    pub(crate) component: clonk_engine::developer_components::EditableComponent,
+    pub(crate) text: crate::developer_component_editor::ComponentEditorText,
+    pub(crate) host: clonk_engine::developer_components::ComponentHost,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -428,6 +441,22 @@ pub(crate) struct GameApp {
     /// only place winit will build one, can apply them.
     pub(crate) developer_toolbox: crate::developer_toolbox::DeveloperToolbox,
     pub(crate) developer_toolbox_effects: Vec<crate::developer_toolbox::ToolboxEffect>,
+    /// `C4ObjectListDlg`'s `window != nullptr` — the whole of its state.
+    /// Everything the list draws is read from the snapshot at redraw, so
+    /// unlike the toolbox there is no model to keep beside the window.
+    pub(crate) developer_object_list_open: bool,
+    /// The open `C4ComponentHost::ShowDialog`: which component, the host
+    /// holding its committed bytes, and the text being edited. C++ keeps the
+    /// host on `C4Game` (`Game.Script`, `Game.Title`, `Game.Info`) for the
+    /// whole round; the port has no runtime host at all, so it loads one when
+    /// the editor opens and hands its bytes to the save.
+    pub(crate) developer_component_editor: Option<DeveloperComponentEdit>,
+    /// Components the user has committed this round, which the scenario save
+    /// projects onto its group journal
+    /// (`developer_console_save::component_save_mutations`). C++ keeps them on
+    /// `C4Game` and asks each one at save time; the port collects them here as
+    /// they are accepted, which is the same set for the same reason.
+    pub(crate) developer_component_hosts: Vec<clonk_engine::developer_components::ComponentHost>,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.

@@ -2838,6 +2838,98 @@ impl GameApp {
     /// `local` is in the viewport window's *surface* coordinates, which is
     /// where the popup is drawn — C++ pops up at the screen cursor, but this
     /// menu lives on the viewport's own frame.
+    /// `C4Viewport::DropFiles` (`C4Viewport.cpp:225-240`) for one dropped
+    /// path.
+    ///
+    /// The gate is asked once per drop and reports `IDS_CNS_NONETEDIT`, which
+    /// is why it is here rather than inside the ported decision: winit
+    /// delivers `DroppedFile` one path at a time, so a batch arrives as
+    /// several events and each one is its own `DropFiles` call.
+    pub(crate) fn drop_file_on_console_viewport(
+        &mut self,
+        identity: u64,
+        path: &std::path::Path,
+        local: (i32, i32),
+    ) {
+        use clonk_engine::developer_drop::{drop_file, drop_world_position, DropOutcome};
+
+        let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
+            return;
+        };
+        let outcome = drop_file(
+            self.developer_console_editing(),
+            path,
+            |path| self.dropped_definition_id(path),
+            |id| self.engine.definition(id).is_some(),
+            // `Defs.Load(szFilename, C4D_Load_RX, …)` mid-round. The port has
+            // no runtime loader for a definition it has never seen — only
+            // `ReloadDef` for one it already holds — so the second lookup
+            // fails and the drop reports `IDS_CNS_DROPNODEF`, which is the
+            // arm C++ takes when its own load fails.
+            |_| false,
+        );
+        match outcome {
+            DropOutcome::Refused => {
+                let message =
+                    self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
+                self.developer_console.out(&message);
+            }
+            // Not a definition file: C++ says nothing at all.
+            DropOutcome::Ignored => {}
+            DropOutcome::NoDefinition(name) => {
+                let message = self.runtime_resource_text("IDS_CNS_DROPNODEF", "%s: no definition");
+                self.developer_console
+                    .out(&message.replacen("%s", &name, 1));
+            }
+            DropOutcome::Drop(id) => {
+                let (x, y) = drop_world_position(projection.target_x, projection.target_y, local);
+                self.submit_editor_drop_definition(&id, x, y);
+            }
+        }
+    }
+
+    /// `DefFileGetID` (`C4Game.cpp:1631-1639`) — the definition id a `.c4d`
+    /// declares.
+    ///
+    /// A definition the engine already loaded from that path answers without
+    /// touching the disk, which is also the only way a *packed* pack member
+    /// resolves; otherwise the group's own `DefCore.txt` is read, exactly as
+    /// C++ opens the group and loads the core.
+    fn dropped_definition_id(&self, path: &std::path::Path) -> Option<clonk_engine::DefinitionId> {
+        if let Some(id) = self
+            .engine
+            .definition_id_for_source_path(&path.to_string_lossy())
+        {
+            return Some(id);
+        }
+        let group = clonk_resources::Group::open(path).ok()?;
+        clonk_resources::DefCore::load(&group)
+            .ok()
+            .map(|core| core.id)
+    }
+
+    /// `C4Game::DropDef` — `Control.DoInput(CID_EMDropDef, …, CDT_Decide)`
+    /// (`C4Game.cpp:1667`).
+    fn submit_editor_drop_definition(&mut self, id: &str, x: i32, y: i32) {
+        let mut packed = *b"NONE";
+        let bytes = id.as_bytes();
+        if bytes.len() != packed.len() {
+            tracing::warn!(%id, "a dropped definition id is not four bytes");
+            return;
+        }
+        packed.copy_from_slice(bytes);
+        if let Err(error) =
+            self.submit_or_execute_editor_drop_definition(clonk_engine::EmDropDefControlData {
+                id: packed,
+                x,
+                y,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor definition drop");
+        }
+    }
+
     pub(crate) fn open_console_viewport_context_menu(&mut self, identity: u64, local: (i32, i32)) {
         use clonk_engine::developer_cursor::context_menu;
         use clonk_frontend::developer_context_menu::ViewportContextMenu;
@@ -3059,6 +3151,258 @@ impl GameApp {
         let effect = self.developer_toolbox.close(position);
         self.developer_toolbox_effects.extend(effect);
         self.developer_tools.clear();
+    }
+
+    /// `C4Console::EditScript`/`EditTitle`/`EditInfo`
+    /// (`C4Console.cpp:1328-1351`).
+    ///
+    /// All three open with the same refusal — `if (Game.Network.isEnabled())
+    /// return;` — and `EditScript` alone relinks, **unconditionally**: that
+    /// statement sits outside the `#ifdef _WIN32` that guards the dialog, so
+    /// it runs even when the editor never opened. The port keeps that, which
+    /// is why the relink is here rather than in the commit.
+    pub(crate) fn open_developer_component_editor(
+        &mut self,
+        component: clonk_engine::developer_components::EditableComponent,
+    ) {
+        use clonk_engine::developer_components::component_editor_available;
+
+        // `ShowDialog` is modal, so a second editor cannot open over the
+        // first — and letting one would discard whatever was being typed.
+        if self.developer_component_editor.is_some() {
+            return;
+        }
+        if !component_editor_available(self.network.is_some()) {
+            let message = self.runtime_resource_text(
+                "IDS_CNS_NONETEDIT",
+                "No editing while a network game is running.",
+            );
+            self.developer_console.out(&message);
+            return;
+        }
+        match self.load_developer_component(component) {
+            Some(edit) => self.developer_component_editor = Some(edit),
+            None => {
+                let message = self.runtime_resource_text("IDS_CNS_NOSCENARIO", "No scenario open.");
+                self.developer_console.out(&message);
+            }
+        }
+        // `Game.ScriptEngine.ReLink(&Game.Defs)` past the `#endif` (`:1342`).
+        if component.relinks_scripts() {
+            if let Err(error) = self.engine.relink_after_component_edit() {
+                tracing::error!(%error, "the component editor's relink failed");
+            }
+        }
+    }
+
+    /// Read a component's bytes out of the open scenario group.
+    ///
+    /// C++ has these already: `C4Game` holds a live `C4ComponentHost` per
+    /// component for the whole round. The port keeps none — the scenario's
+    /// script reaches the engine as source and is never held as bytes, and
+    /// `Info.txt` is not read at all — so the editor loads from the group it
+    /// will be saved back into.
+    fn load_developer_component(
+        &self,
+        component: clonk_engine::developer_components::EditableComponent,
+    ) -> Option<crate::DeveloperComponentEdit> {
+        use clonk_engine::developer_components::ComponentHost;
+
+        let filename = developer_component_filename(component);
+        // A component edited earlier this round reopens on **its** bytes.
+        // C++ never has to think about this: `Game.Script` and friends are
+        // live hosts held for the whole round, so a second `ShowDialog` sees
+        // the first edit. Re-reading the group here would show the stale
+        // on-disk text and the second commit would overwrite the first.
+        if let Some(host) = self
+            .developer_component_hosts
+            .iter()
+            .rev()
+            .find(|host| host.filename() == filename)
+        {
+            return Some(crate::DeveloperComponentEdit {
+                component,
+                text: crate::developer_component_editor::ComponentEditorText::opened(host.data()),
+                host: host.clone(),
+            });
+        }
+        let scenario = self.developer_component_scenario_path()?;
+        let group = clonk_resources::Group::open(&scenario).ok()?;
+        // A component that does not exist yet opens empty rather than
+        // refusing: that is how a scenario grows one.
+        let data = group.read_file(filename).unwrap_or_default();
+        Some(crate::DeveloperComponentEdit {
+            component,
+            text: crate::developer_component_editor::ComponentEditorText::opened(&data),
+            host: ComponentHost::loaded(filename, data),
+        })
+    }
+
+    /// The open scenario's group path, which is what a component is read
+    /// from and written back to. Both the running round and one still loading
+    /// answer, as the console's own caption does.
+    fn developer_component_scenario_path(&self) -> Option<std::path::PathBuf> {
+        self.active_scenario
+            .as_ref()
+            .and_then(|scenario| scenario.path.clone())
+            .or_else(|| {
+                self.loading_state
+                    .as_ref()
+                    .and_then(|loading| loading.scenario.path.clone())
+            })
+    }
+
+    /// `C4ComponentHost`'s OK arm (`C4ComponentHost.cpp:330-334`), plus the
+    /// Script editor's own reload.
+    pub(crate) fn commit_developer_component_editor(&mut self) {
+        use clonk_engine::developer_components::EditableComponent;
+
+        let Some(mut edit) = self.developer_component_editor.take() else {
+            return;
+        };
+        // `Accept` replaces the bytes and sets `Modified` **without
+        // comparing**, so committing unchanged text still marks the component
+        // for the save.
+        edit.host.accept(edit.text.bytes());
+        if edit.component == EditableComponent::Script {
+            // `C4Console::EditScript` reloads the scenario script into the
+            // engine and relinks; it must *not* re-run Initialize, because the
+            // scenario is already running and its objects exist.
+            let source = clonk_script::c4_string_from_bytes(edit.host.data());
+            let name = self
+                .developer_component_scenario_path()
+                .map(|scenario| scenario.join("Script.c").to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Script.c".to_owned());
+            if let Err(error) = self.engine.apply_scenario_script_edit(name, &source) {
+                tracing::error!(%error, "the edited scenario script did not link");
+            }
+        }
+        // One host per component: a second commit replaces the first rather
+        // than queueing a second write of the same filename at save time.
+        self.developer_component_hosts
+            .retain(|host| host.filename() != edit.host.filename());
+        self.developer_component_hosts.push(edit.host);
+    }
+
+    /// `C4ComponentHost`'s Cancel arm, which mutates nothing — not even the
+    /// modified flag.
+    pub(crate) fn cancel_developer_component_editor(&mut self) {
+        if let Some(mut edit) = self.developer_component_editor.take() {
+            edit.host.cancel();
+        }
+    }
+
+    /// Draw the open editor, if there is one.
+    pub(crate) fn render_developer_component_editor(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Option<clonk_graphics::Surface> {
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let font = self.assets.font_arc();
+        let edit = self.developer_component_editor.as_mut()?;
+        let title = format!("{}  —  Enter commits, Escape cancels", edit.host.filename());
+        edit.text.render(&mut surface, font.as_ref(), &title);
+        Some(surface)
+    }
+
+    /// `C4ObjectListDlg::Open` (`C4ObjectListDlg.cpp:726-787`), reached from
+    /// `C4Console::EditObjects` (`C4Console.cpp:1353-1356`).
+    ///
+    /// Opening is idempotent: C++ creates the window only `if (window ==
+    /// nullptr)`, so a second Objects click on an open list does nothing.
+    pub(crate) fn open_developer_object_list(&mut self) {
+        self.developer_object_list_open = true;
+    }
+
+    /// The `"destroy"` handler, which nulls the window and the model rather
+    /// than hiding them (`:592-597`).
+    pub(crate) fn close_developer_object_list(&mut self) {
+        self.developer_object_list_open = false;
+    }
+
+    /// Draw the object list at the window's extent.
+    pub(crate) fn render_developer_object_list(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> clonk_graphics::Surface {
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let rows = self.developer_object_list_rows();
+        let font = self.assets.font_arc();
+        crate::developer_object_list_view::render_object_list(
+            &mut surface,
+            font.as_ref(),
+            &rows,
+            self.developer_selection.objects(),
+        );
+        surface
+    }
+
+    /// The list's rows, rebuilt from the live snapshot.
+    fn developer_object_list_rows(&self) -> Vec<crate::developer_object_list_view::ObjectListRow> {
+        use clonk_engine::developer_inspection::object_tree;
+
+        let tree = object_tree(&self.snapshot.render_order, &self.snapshot);
+        crate::developer_object_list_view::object_list_rows(&tree, |id| {
+            // `name_cell_data_func` draws `object->GetName()` (`:659-664`),
+            // which is the custom name when there is one and the definition's
+            // otherwise.
+            self.snapshot
+                .object(id)
+                .map(|object| {
+                    object.custom_name.clone().unwrap_or_else(|| {
+                        self.engine
+                            .definition(&object.definition_id)
+                            .map(|definition| definition.name().to_owned())
+                            .unwrap_or_else(|| object.definition_id.clone())
+                    })
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// `C4ObjectListDlg::OnSelectionChanged` (`:599-620`).
+    ///
+    /// The tree writes the edit cursor's selection wholesale — `Clear()` then
+    /// one `Add` per selected row — and the `updating_selection` guard on both
+    /// sides is what stops that write echoing back as a fresh tree update.
+    /// The port has the same guard in a different shape:
+    /// [`clonk_engine::developer_selection::SelectionWriter`] tags the writer,
+    /// so a surface can recognise its own change instead of a flag having to
+    /// be raised and lowered around every write.
+    pub(crate) fn developer_object_list_click(&mut self, point: (i32, i32), extent: (u32, u32)) {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let rows = self.developer_object_list_rows();
+        let selected_row = rows.iter().position(|row| {
+            self.developer_selection
+                .objects()
+                .first()
+                .is_some_and(|id| row.id == *id)
+        });
+        match crate::developer_object_list_view::object_list_hit(
+            &rows,
+            selected_row,
+            extent.0,
+            extent.1,
+            point,
+        ) {
+            Some(object) => self
+                .developer_selection
+                .replace(SelectionWriter::ObjectTree, object),
+            // No path under the pointer: `gtk_tree_selection_get_selected_rows`
+            // returns an empty list and the handler still clears.
+            None => self.developer_selection.clear(SelectionWriter::ObjectTree),
+        };
     }
 
     /// Draw one toolbox page at the window's extent.
@@ -6194,5 +6538,22 @@ pub(crate) fn landscape_mode_value(mode: clonk_engine::developer_tools::Landscap
         LandscapeMode::Static => LANDSCAPE_MODE_STATIC,
         LandscapeMode::Exact => LANDSCAPE_MODE_EXACT,
         LandscapeMode::Undefined => LANDSCAPE_MODE_UNDEFINED,
+    }
+}
+
+/// The group entry each editable component lives in.
+///
+/// `Game.Script`, `Game.Title` and `Game.Info` are loaded from these names;
+/// the Script editor's is the unlocalised `Script.c`, because that is the file
+/// a scenario's own script is written to and the one `EditScript` reloads.
+pub(crate) fn developer_component_filename(
+    component: clonk_engine::developer_components::EditableComponent,
+) -> &'static str {
+    use clonk_engine::developer_components::EditableComponent;
+
+    match component {
+        EditableComponent::Script => "Script.c",
+        EditableComponent::Title => "Title.txt",
+        EditableComponent::Info => "Info.txt",
     }
 }

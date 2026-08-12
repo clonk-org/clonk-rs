@@ -22,14 +22,17 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod component_editor_window_host;
 mod console_toolbox_window;
 mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
 mod deferred_config;
 mod desktop_notification;
+mod developer_component_editor;
 mod developer_console_save;
 mod developer_host;
+mod developer_object_list_view;
 mod developer_toolbox;
 mod developer_toolbox_view;
 mod developer_tools_page;
@@ -50,6 +53,7 @@ mod local_control;
 use clonk_app_netplay::network;
 mod network_team_assignment;
 use clonk_app_menus::object_menu;
+mod object_list_window_host;
 mod offline_savegame;
 mod offline_startup;
 mod output_folders;
@@ -60,6 +64,7 @@ mod runtime_join_save;
 mod save_browser;
 mod settings;
 mod shell_window_host;
+mod software_window;
 mod startup_player_files;
 mod system_fonts;
 mod toolbox_window_host;
@@ -992,6 +997,10 @@ fn run() -> Result<()> {
         // Set when the shell takes a graphics pass; consumed on the next event
         // loop entry, before the shell record is borrowed.
         let mut viewport_redraw_pending = false;
+        // The component editor's own modifier state. Each developer window
+        // sees only its own `ModifiersChanged`, so a shared field would hold
+        // whatever the last *other* window left there.
+        let mut component_editor_modifiers = winit::keyboard::ModifiersState::empty();
 
         let mut dock_tile_attached = false;
         Ok(Box::new(move |event, event_target| {
@@ -1022,6 +1031,18 @@ fn run() -> Result<()> {
                 // same reason: `AddPage`/`SwitchPage` act on their window
                 // inside the call that decided to, and winit cannot.
                 console_toolbox_window::reconcile_developer_toolbox_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
+                console_toolbox_window::reconcile_developer_object_list_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
+                console_toolbox_window::reconcile_developer_component_editor_window(
                     &mut app,
                     &mut developer_windows,
                     &mut next_developer_window_key,
@@ -1058,6 +1079,29 @@ fn run() -> Result<()> {
                             &event,
                             &mut app,
                             &mut developer_windows,
+                        );
+                        return;
+                    }
+                    if console_toolbox_window::object_list_window_key(&developer_windows)
+                        == Some(key)
+                    {
+                        console_toolbox_window::handle_developer_object_list_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
+                        );
+                        return;
+                    }
+                    if console_toolbox_window::component_editor_window_key(&developer_windows)
+                        == Some(key)
+                    {
+                        console_toolbox_window::handle_developer_component_editor_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
+                            &mut component_editor_modifiers,
                         );
                         return;
                     }
@@ -2408,6 +2452,9 @@ impl GameApp {
             console_viewport_context_menu_grab: None,
             developer_toolbox: Default::default(),
             developer_toolbox_effects: Vec::new(),
+            developer_object_list_open: false,
+            developer_component_editor: None,
+            developer_component_hosts: Vec::new(),
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),
             console_log_capture: None,
@@ -4814,6 +4861,26 @@ impl GameApp {
             return Ok(());
         }
         self.apply_ready_controls(tick, vec![NetworkControl::EmDrawTool(control)])
+    }
+
+    /// `C4Game::DropDef`'s half of the same seam (`C4Game.cpp:1667`).
+    ///
+    /// Placing an object is a *control* for the same reason moving one is: it
+    /// creates synchronized state, so every peer has to create it at the same
+    /// tick and in the same order.
+    fn submit_or_execute_editor_drop_definition(
+        &mut self,
+        control: clonk_engine::EmDropDefControlData,
+    ) -> Result<(), EngineError> {
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) = network.submit_decided_em_drop_def_control(tick, control, sync) {
+                tracing::error!(%error, "failed to submit an editor definition drop");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(tick, vec![NetworkControl::EmDropDef(control)])
     }
 
     /// `C4EditCursor::In`, called by the separate property-dialog script

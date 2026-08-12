@@ -1027,8 +1027,7 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `FolderSaveAddFailure::Fatal`, because silently dropping a component the user
   just edited would lose their edit. Pinned by
   `edited_component_hosts_reach_the_scenario_save_as_group_mutations`.
-  **Still open:** the editor surfaces — which do not exist on the reference
-  build; see the console-dialog note above.
+  The editors themselves now open — see the console editor card below.
 
 - **The viewport context menu and its three object commands landed.**
   `C4EditCursor::DoContextMenu` (`C4EditCursor.cpp:582-628`) has two bodies and
@@ -1127,11 +1126,106 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   because `InitGradeCtrl` sets `C4TLS_GradeMax - Grade` (`:719`).
   **Still open:** the preview swatch is the selection in words rather than
   `UpdatePreview`'s rendered material sample (`:601-708`), the material and
-  texture combos are drawn as open list boxes rather than pop-up combos, the
-  toolbox window carries only the first of `ToolboxChrome`'s five hints
+  texture combos are drawn as open list boxes rather than pop-up combos, and
+  the toolbox window carries only the first of `ToolboxChrome`'s five hints
   (winit has no utility type hint, window role, transient-for or
-  centre-on-parent), and the object-list window (`C4ObjectListDlg`, GTK-only)
-  and the Script/Title/Info component editors still have no surface.
+  centre-on-parent).
+
+- **The last three console editor surfaces landed: object placement, the
+  object list, and the component editors.**
+  All three were ported behaviour with no caller, and all three are
+  `_WIN32`- or GTK-only in C++, so the reference build reaches none of them.
+
+  **Object placement.** `C4Viewport::DropFiles` (`C4Viewport.cpp:225-240`) is
+  the editor's only way to create an object without typing script, and it and
+  the `WM_USER_DROPDEF` message beside it are both `_WIN32`-only.
+  `developer_drop` ports the decision: the batch is refused as a whole unless
+  `Console.Editing`; only `.c4d` is considered and **anything else is ignored
+  in silence**, because the `IDS_CNS_DROPNODEF` text lives inside that branch;
+  the id is read from the group's own `DefCore`, an already-loaded definition
+  wins, and only then is the file loaded and looked up a *second* time — C++
+  tests both. The two failure texts differ and the difference is real:
+  `DropFile` names the **file** (`GetFilename`), `DropDef` names the **id**
+  (`C4IdText`). The two C++ drop entry points disagree about the application
+  scale — `WM_USER_DROPDEF` divides by it (`:112`) and `DropFiles` does not
+  (`:236`), so at a scale other than 1 the same screen point drops an object in
+  two different places depending on which message carried it. The port takes
+  the dividing one for both: it is the conversion every other pointer path in a
+  viewport window already performs, and it is the one that puts the object
+  under the cursor. Nothing determinism-critical rides on the choice — the
+  position is decided locally and then travels inside the control.
+  `CID_EMDropDef` finally has an emitter. Pinned by
+  `drop_file_resolves_a_loaded_definition_before_loading_the_dropped_one`,
+  `drop_definition_reports_the_id_where_drop_file_reports_the_file`,
+  `drop_world_position_offsets_the_view_origin` and
+  `console_viewport_file_drop_emits_a_definition_drop_control`.
+  **Still open:** `Defs.Load` mid-round. The port has no runtime loader for a
+  definition it has never seen — only `ReloadDef` for one it already holds — so
+  a `.c4d` from outside the loaded set reports `IDS_CNS_DROPNODEF`, which is
+  the arm C++ takes when its own load fails.
+
+  **The object list.** `C4ObjectListDlg` exists only under
+  `WITH_DEVELOPER_MODE`; past that `#else` every method is an empty body
+  (`C4ObjectListDlg.cpp:791-805`), so `C4Console::EditObjects` opens nothing on
+  the reference build. The window is the ported `developer_inspection::
+  object_tree` drawn as rows — contained objects under their container, which
+  is the nesting that function already builds — with the two-way selection
+  binding `OnSelectionChanged` and `Update` implement between them
+  (`:599-646`). C++ guards that binding with an `updating_selection` flag
+  raised around every write; the port has the same guard in a different shape,
+  `SelectionWriter` tagging who wrote, so a surface recognises its own change
+  instead of a flag having to be lowered again. Unlike its three siblings
+  `EditObjects` carries **no** network refusal — the list only reads. Pinned by
+  `object_list_rows_nest_contents_under_their_container`,
+  `object_list_click_resolves_a_row_and_empty_space_selects_nothing`,
+  `object_list_scrolls_to_the_selection_and_hit_testing_follows_it` and
+  `developer_object_list_opens_and_binds_the_selection_both_ways`.
+  **Still open:** the per-object icon column, which `icon_cell_data_func`
+  renders from each definition's `PictureRect` (`:668-724`), and the
+  incremental `OnObjectAdded`/`OnObjectRemove` model updates — the port
+  rebuilds the rows from the snapshot each redraw instead, because the
+  snapshot *is* the object list and there is no second model to drift from it.
+
+  **The component editors.** `EditScript`/`EditTitle`/`EditInfo`
+  (`C4Console.cpp:1328-1351`) share a network refusal and guard their dialogs
+  with `#ifdef _WIN32`; the one statement that survives the macro is
+  `Game.ScriptEngine.ReLink(&Game.Defs)` at the end of `EditScript`, which runs
+  **whether or not the dialog opened or was cancelled** — so the port relinks
+  at open, not at commit. The commit rules were already ported and now have a
+  caller: `Accept` replaces the bytes and sets `Modified` **without comparing**,
+  so committing unchanged text still marks the component; `Cancel` mutates
+  nothing, not even the flag; and the save skips an unmodified host entirely
+  and **deletes** an emptied one rather than writing zero bytes. Those edits
+  now reach the scenario save through `component_save_mutations`, which had no
+  production caller either. Pinned by
+  `developer_component_editors_commit_accept_and_cancel_like_the_native_host`
+  and the editor surface's own four tests.
+  A gap worth knowing: the port keeps **no runtime `C4ComponentHost`**. C++
+  holds `Game.Script`, `Game.Title` and `Game.Info` for the whole round; here
+  the scenario's script reaches the engine as source and is never held as
+  bytes, and `Info.txt` is not read at all — so the editor loads the component
+  from the scenario group it will be saved back into. Three consequences of
+  that split are ported deliberately rather than left to fall out, because
+  each one loses data if it does. A component edited earlier this round
+  **reopens on its own committed bytes**, not the stale text still on disk, and
+  a second commit **replaces** the first rather than queueing a second write of
+  the same filename. Both hosts and the open editor are **cleared when the
+  round closes**, as `C4Game::Clear`'s `Info.Clear(); Title.Clear();
+  Script.Clear()` does (`C4Game.cpp:604-606`) — carried over, an emptied Info
+  host would have deleted the *next* scenario's `Info.txt`. And a second
+  editor cannot open over the first: `ShowDialog` is `DialogBoxParam`, i.e.
+  modal, so C++ cannot reach the console menu while one is up.
+  Enter is a **newline** and Ctrl/Cmd-Enter commits: the Win32 control is
+  multi-line with OK as a separate button, and a script editor whose most
+  common key closed it would be unusable. The editor window tracks its **own**
+  modifier state, because each developer window sees only its own
+  `ModifiersChanged` — a handler reading the shared field finds whatever the
+  last *other* window left there, which is what made the newline unreachable
+  in the first cut.
+  **Still open:** the editor surface is a plain line editor — no selection, no
+  clipboard, no undo, and the caret is drawn at the line start rather than
+  measured between glyphs. The Win32 dialog is an `EDITTEXT` control, so there
+  is no oracle for any of it.
 
 - **The edit cursor's overlay draw list landed.**
   Unlike the console's dialogs, `C4EditCursor::Draw` is *not* a native widget —

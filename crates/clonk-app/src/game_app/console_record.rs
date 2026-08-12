@@ -56,6 +56,13 @@ impl GameApp {
             // select that teardown path before clearing the round.
             self.startup_view = StartupView::NetworkLobby;
         }
+        // Components belong to the scenario that was open. C++ never has to
+        // clear them — `Game.Script`/`Title`/`Info` are cleared with the whole
+        // `C4Game` — but here they are `GameApp` fields, and an edit left
+        // behind would be written into the *next* scenario's save.
+        self.developer_component_editor = None;
+        self.developer_component_hosts.clear();
+        self.developer_object_list_open = false;
         self.return_to_menu();
         if boot_still_loading {
             self.mode = AppMode::Loading;
@@ -379,18 +386,22 @@ impl GameApp {
                         true,
                     );
                 }
-                DeveloperConsoleAction::EditObjects => {
-                    self.developer_console.out("Objects component selected");
-                }
-                DeveloperConsoleAction::EditScript => {
-                    self.developer_console.out("Script component selected");
-                }
-                DeveloperConsoleAction::EditTitle => {
-                    self.developer_console.out("Title component selected");
-                }
-                DeveloperConsoleAction::EditInfo => {
-                    self.developer_console.out("Info component selected");
-                }
+                // `C4Console::EditObjects` is one line: `ObjectListDlg.Open()`
+                // (`C4Console.cpp:1353-1356`). Unlike its three siblings it
+                // has no network refusal — the list only reads.
+                DeveloperConsoleAction::EditObjects => self.open_developer_object_list(),
+                // The three `C4Console::Edit*` entries, which share a network
+                // refusal and differ only in the component and in whether
+                // they relink (`C4Console.cpp:1328-1351`).
+                DeveloperConsoleAction::EditScript => self.open_developer_component_editor(
+                    clonk_engine::developer_components::EditableComponent::Script,
+                ),
+                DeveloperConsoleAction::EditTitle => self.open_developer_component_editor(
+                    clonk_engine::developer_components::EditableComponent::Title,
+                ),
+                DeveloperConsoleAction::EditInfo => self.open_developer_component_editor(
+                    clonk_engine::developer_components::EditableComponent::Info,
+                ),
             };
         }
         Ok(())

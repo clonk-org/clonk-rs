@@ -6043,6 +6043,326 @@
         );
     }
 
+    // C4Console.cpp:1328-1351 and C4ComponentHost.cpp:231-236,330-334 — the
+    // Script/Title/Info editors. Their commit rules were ported and pinned
+    // long before anything could open one.
+    #[test]
+    fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
+        use clonk_engine::developer_components::{ComponentSaveAction, EditableComponent};
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+
+        // The scenario the components are read from and written back to.
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let scenario = directory.path().join("Round.c4s");
+        std::fs::create_dir(&scenario).expect("the scenario group");
+        std::fs::write(scenario.join("Title.txt"), "Round\n").expect("a title component");
+        app.active_scenario
+            .as_mut()
+            .expect("a running scenario")
+            .path = Some(scenario.clone());
+
+        // Title opens on the component's own bytes.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
+            .expect("the console opened the title editor");
+        let edit = app
+            .developer_component_editor
+            .as_ref()
+            .expect("the title editor is open");
+        assert_eq!(edit.component, EditableComponent::Title);
+        assert_eq!(edit.host.filename(), "Title.txt");
+        assert_eq!(edit.text.lines(), ["Round", ""]);
+
+        // Cancel mutates nothing — not the bytes and not the modified flag —
+        // so the component contributes nothing to a save.
+        app.cancel_developer_component_editor();
+        assert!(app.developer_component_editor.is_none());
+        assert!(app.developer_component_hosts.is_empty());
+
+        // A component that does not exist yet opens empty rather than
+        // refusing: that is how a scenario grows one.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console opened the info editor");
+        let edit = app
+            .developer_component_editor
+            .as_mut()
+            .expect("the info editor is open");
+        assert_eq!(edit.text.lines(), [""]);
+        for character in "hello".chars() {
+            edit.text.insert(character);
+        }
+        app.commit_developer_component_editor();
+        assert!(app.developer_component_editor.is_none());
+        let [host] = app.developer_component_hosts.as_slice() else {
+            panic!("expected one committed host");
+        };
+        assert_eq!(
+            host.save_action(),
+            ComponentSaveAction::Write {
+                filename: "Info.txt".to_owned(),
+                data: b"hello".to_vec(),
+            }
+        );
+
+        // Emptying a component deletes it rather than writing zero bytes.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
+            .expect("the console reopened the title editor");
+        let edit = app
+            .developer_component_editor
+            .as_mut()
+            .expect("the title editor is open");
+        for _ in 0..16 {
+            edit.text.key(crate::developer_component_editor::ComponentEditorKey::Delete);
+        }
+        app.commit_developer_component_editor();
+        assert_eq!(
+            app.developer_component_hosts
+                .last()
+                .expect("the emptied host")
+                .save_action(),
+            ComponentSaveAction::Delete {
+                filename: "Title.txt".to_owned(),
+            }
+        );
+
+        // Reopening a component edited earlier this round shows **its** bytes,
+        // not the stale ones still on disk — C++ never has to think about
+        // this because its hosts are live for the whole round. And the second
+        // commit replaces the first rather than queueing a second write of
+        // the same filename.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console reopened the info editor");
+        let edit = app
+            .developer_component_editor
+            .as_mut()
+            .expect("the info editor is open");
+        assert_eq!(edit.text.lines(), ["hello"], "the committed bytes reopen");
+        edit.text.key(crate::developer_component_editor::ComponentEditorKey::End);
+        edit.text.insert('!');
+        app.commit_developer_component_editor();
+        assert_eq!(
+            app.developer_component_hosts
+                .iter()
+                .filter(|host| host.filename() == "Info.txt")
+                .count(),
+            1,
+            "one host per component, however many times it was edited"
+        );
+        assert_eq!(
+            app.developer_component_hosts
+                .iter()
+                .find(|host| host.filename() == "Info.txt")
+                .expect("the info host")
+                .save_action(),
+            ComponentSaveAction::Write {
+                filename: "Info.txt".to_owned(),
+                data: b"hello!".to_vec(),
+            }
+        );
+
+        // A second editor cannot open over the first: `ShowDialog` is modal,
+        // and letting one would discard whatever was being typed.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
+            .expect("the console opened the title editor");
+        let open = app
+            .developer_component_editor
+            .as_ref()
+            .expect("an editor is open")
+            .component;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console refused a second editor");
+        assert_eq!(
+            app.developer_component_editor
+                .as_ref()
+                .expect("the first editor survives")
+                .component,
+            open,
+            "the open editor is not replaced"
+        );
+        app.cancel_developer_component_editor();
+
+        // A network game refuses all three outright.
+        let (_events, _commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.developer_console.clear_log();
+        for action in [
+            DeveloperConsoleAction::EditScript,
+            DeveloperConsoleAction::EditTitle,
+            DeveloperConsoleAction::EditInfo,
+        ] {
+            app.dispatch_developer_console_actions(vec![action])
+                .expect("the console refused the editor");
+            assert!(
+                app.developer_component_editor.is_none(),
+                "a network game opens no component editor"
+            );
+        }
+        assert!(!app.developer_console.log().text().is_empty());
+
+        // Closing the round drops both the open editor and every committed
+        // host: they belong to the scenario that was open, and carrying them
+        // over would write one scenario's edit into the *next* one's save.
+        app.network = None;
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console opened the info editor");
+        assert!(app.developer_component_editor.is_some());
+        app.open_developer_object_list();
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::CloseGame])
+            .expect("the console closed the round");
+        assert!(app.developer_component_editor.is_none());
+        assert!(app.developer_component_hosts.is_empty());
+        assert!(!app.developer_object_list_open);
+    }
+
+    // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
+    // Objects component opens the object list, whose rows are the ported
+    // object tree and whose clicks write the edit cursor's selection.
+    #[test]
+    fn developer_object_list_opens_and_binds_the_selection_both_ways() {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        assert!(!app.developer_object_list_open);
+
+        // `EditObjects` is one line, and unlike Script/Title/Info it carries
+        // no network refusal — the list only reads.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditObjects])
+            .expect("the console opened the object list");
+        assert!(app.developer_object_list_open);
+        // Opening again is idempotent: C++ builds the window only when it has
+        // none.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditObjects])
+            .expect("the console opened the object list again");
+        assert!(app.developer_object_list_open);
+
+        let extent = (
+            crate::developer_object_list_view::OBJECT_LIST_WIDTH,
+            crate::developer_object_list_view::OBJECT_LIST_HEIGHT,
+        );
+        let surface = app.render_developer_object_list(extent.0, extent.1);
+        assert_eq!(surface.width(), extent.0);
+        assert!(surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+        // A click on the first row selects that object, stamped as the tree's
+        // own write so the edit cursor can tell it from its own.
+        let subject = app.snapshot.objects.first().expect("a live object").id;
+        app.developer_object_list_click((8, 8), extent);
+        assert_eq!(app.developer_selection.objects(), &[subject]);
+
+        // A click on empty space below the last row clears it — an empty
+        // `gtk_tree_selection_get_selected_rows` still runs the handler.
+        app.developer_object_list_click((8, extent.1 as i32 - 8), extent);
+        assert!(app.developer_selection.is_empty());
+
+        // The list mirrors a selection the *viewport* made, which is the other
+        // half of the binding.
+        app.developer_selection
+            .replace(SelectionWriter::EditCursor, subject);
+        let mirrored = app.render_developer_object_list(extent.0, extent.1);
+        assert_ne!(
+            mirrored.pixels(),
+            surface.pixels(),
+            "the selected row is drawn differently from an unselected one"
+        );
+
+        // Closing destroys it rather than hiding it, so the next Objects click
+        // builds a new window.
+        app.close_developer_object_list();
+        assert!(!app.developer_object_list_open);
+    }
+
+    // C4Viewport.cpp:225-240 and C4Game.cpp:1641-1676 — dropping a definition
+    // file on a console viewport is the editor's only way to create an object
+    // without typing script. `CID_EMDropDef`'s executor and wire codec landed
+    // long before anything could emit one.
+    #[test]
+    fn console_viewport_file_drop_emits_a_definition_drop_control() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        // Drawing is what publishes this window's own projection.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+
+        // `DefFileGetID` reads the id out of the dropped group's own
+        // `DefCore.txt`, so the file only has to declare a definition the
+        // engine already holds — which is exactly the case C++ takes without
+        // loading anything. The id has to be a real four-byte C4ID: that is
+        // what `DefCore` parses and what the control's `id` field carries.
+        let definition = "ROCK".to_owned();
+        app.engine
+            .register_definition(
+                Definition::from_script(&definition, "Rock", "#strict\n")
+                    .expect("the dropped definition compiles"),
+            )
+            .expect("the dropped definition registers");
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let source = directory.path().join("Dropped.c4d");
+        std::fs::create_dir(&source).expect("the dropped definition group");
+        std::fs::write(
+            source.join("DefCore.txt"),
+            format!("[DefCore]\nid={definition}\nVersion=4,9,8\nWidth=1\nHeight=1\n"),
+        )
+        .expect("the dropped DefCore");
+
+        let local = (40, 24);
+        app.drop_file_on_console_viewport(identity, &source, local);
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDropDef(drop), false)] = decided.as_slice() else {
+            panic!(
+                "expected one definition drop control, got {decided:?}; console said {:?}",
+                app.developer_console.log().text()
+            );
+        };
+        assert_eq!(drop.id, definition.as_bytes());
+        // The drop point is the viewport's own, added to the view origin.
+        assert_eq!(
+            (drop.x, drop.y),
+            (projection.target_x + local.0, projection.target_y + local.1)
+        );
+        assert_eq!(drop.by_client, 7);
+
+        // Anything that is not a `.c4d` is ignored in silence — C++'s failure
+        // text lives inside that branch.
+        app.drop_file_on_console_viewport(identity, std::path::Path::new("/tmp/Round.c4s"), local);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a scenario file is not a definition drop"
+        );
+
+        // A `.c4d` the engine does not hold emits nothing and says so.
+        app.developer_console.clear_log();
+        app.drop_file_on_console_viewport(
+            identity,
+            std::path::Path::new("/tmp/Missing.c4d"),
+            local,
+        );
+        assert!(commands.take_submitted_decided_controls().is_empty());
+        assert!(
+            app.developer_console.log().text().contains("Missing.c4d"),
+            "the failure names the file: {:?}",
+            app.developer_console.log().text()
+        );
+
+        // A console that may not edit refuses the whole drop, with the same
+        // message the draw tools use.
+        app.developer_console_editing_enabled = false;
+        app.developer_console.clear_log();
+        app.drop_file_on_console_viewport(identity, &source, local);
+        assert!(commands.take_submitted_decided_controls().is_empty());
+        assert!(!app.developer_console.log().text().is_empty());
+    }
+
     // C4EditCursor.cpp:361-374,503-518 and C4ToolsDlg.cpp:865-879 — the
     // context menu's Properties/Tools row is the only thing that opens the
     // toolbox, the page follows the cursor mode, and the landscape mode
