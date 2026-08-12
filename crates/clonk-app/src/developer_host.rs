@@ -55,7 +55,7 @@ impl DeveloperHost {
         match self {
             Self::Shell(shell) => &shell.window,
             Self::Viewport(viewport) => &viewport.window,
-            Self::Toolbox(toolbox) => &toolbox.window,
+            Self::Toolbox(toolbox) => &toolbox.surface.window,
         }
     }
 }

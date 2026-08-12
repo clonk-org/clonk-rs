@@ -60,6 +60,7 @@ mod runtime_join_save;
 mod save_browser;
 mod settings;
 mod shell_window_host;
+mod software_window;
 mod startup_player_files;
 mod system_fonts;
 mod toolbox_window_host;

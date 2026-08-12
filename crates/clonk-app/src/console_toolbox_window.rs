@@ -54,7 +54,7 @@ pub(crate) fn reconcile_developer_toolbox_window(
                         host.request_redraw();
                     }
                     if let Some(DeveloperHost::Toolbox(toolbox)) = windows.host_mut(key) {
-                        toolbox.window.set_title(&title);
+                        toolbox.surface.window.set_title(&title);
                         // `SwitchPage` restores the remembered coordinates on
                         // the way back up (`C4DevmodeDlg.cpp:108-114`). This
                         // is the arm that has one: the create arm can only
@@ -62,6 +62,7 @@ pub(crate) fn reconcile_developer_toolbox_window(
                         // while the window is visible.
                         if let Some((x, y)) = position {
                             toolbox
+                                .surface
                                 .window
                                 .set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                         }
@@ -110,7 +111,7 @@ pub(crate) fn reconcile_developer_toolbox_window(
                 if let Some(DeveloperHost::Toolbox(toolbox)) =
                     key.and_then(|key| windows.host_mut(key))
                 {
-                    toolbox.window.set_title(&title);
+                    toolbox.surface.window.set_title(&title);
                 }
             }
             // Only the last page's removal destroys it, which nothing does
@@ -169,7 +170,7 @@ pub(crate) fn handle_developer_toolbox_event(
                 .host_mut(key)
                 .and_then(DeveloperHost::as_toolbox_mut)
             {
-                toolbox.last_pointer = (position.x as i32, position.y as i32);
+                toolbox.surface.last_pointer = (position.x as i32, position.y as i32);
             }
         }
         Event::WindowEvent {
@@ -187,7 +188,7 @@ pub(crate) fn handle_developer_toolbox_event(
             else {
                 return;
             };
-            let (point, extent) = (toolbox.last_pointer, toolbox.surface_extent());
+            let (point, extent) = (toolbox.surface.last_pointer, toolbox.surface_extent());
             app.developer_toolbox_click(point, extent);
             windows.request_redraw(key);
         }
