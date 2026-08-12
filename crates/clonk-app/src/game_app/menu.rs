@@ -4789,14 +4789,28 @@ impl GameApp {
             return;
         }
         self.restart_restore_infos = RestartRestoreInfos::default();
-        self.return_to_menu_with_dialog_restore(true);
+        self.return_to_menu_with_dialog_restore(true, NetworkSessionTeardown::Clear);
     }
 
     pub(crate) fn return_to_menu_for_relaunch(&mut self) {
-        self.return_to_menu_with_dialog_restore(false);
+        self.return_to_menu_with_dialog_restore(false, NetworkSessionTeardown::Clear);
     }
 
-    fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
+    /// Tears the round down while the network session it ran on stays up.
+    ///
+    /// Only for a host restart that keeps every client connected
+    /// (`clonk_network::host_restart`); the caller is responsible for putting
+    /// the retained session into a lobby immediately afterwards, because this
+    /// leaves it attached to a round that no longer exists.
+    pub(crate) fn return_to_menu_retaining_network_session(&mut self) {
+        self.return_to_menu_with_dialog_restore(false, NetworkSessionTeardown::Retain);
+    }
+
+    fn return_to_menu_with_dialog_restore(
+        &mut self,
+        restore_dialog: bool,
+        session: NetworkSessionTeardown,
+    ) {
         // The save itself is already durable. If teardown wins the screenshot
         // readback race, discard its guarded thumbnail update so a later round
         // can never mutate this save.
@@ -4830,8 +4844,12 @@ impl GameApp {
         // down, after the evaluation and record work that still needs it and
         // before the rest of the game state goes (src/C4Game.cpp:544-582).
         // Leaving it to the lobby view below would strand a session torn down
-        // from inside a running round.
-        self.clear_live_network_session();
+        // from inside a running round. A retained session is the deliberate
+        // exception: the host restarting the round is keeping every client
+        // connected across it.
+        if session == NetworkSessionTeardown::Clear {
+            self.clear_live_network_session();
+        }
         self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;

@@ -3846,6 +3846,7 @@ impl GameApp {
                         NetworkEvent::PeerDisconnected { .. } => None,
                         NetworkEvent::PeerConnectionFailed { .. } => None,
                         NetworkEvent::HostRestarting { .. } => None,
+                        NetworkEvent::HostRestartLobby => None,
                         NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
@@ -4589,6 +4590,13 @@ impl GameApp {
                     // native does and the only proof the restart happened.
                     NetworkEvent::HostRestarting { rejoin_seconds } => {
                         self.arm_pending_host_rejoin(rejoin_seconds);
+                    }
+                    // Acted on immediately, unlike the reconnect notice above:
+                    // this one reports a restart that has already happened, and
+                    // no disconnect follows it to serve as the proof.
+                    NetworkEvent::HostRestartLobby => {
+                        self.follow_host_restart_into_lobby()?;
+                        break;
                     }
                     NetworkEvent::NetpuncherStateChanged {
                         game_ids,
@@ -5942,7 +5950,213 @@ impl GameApp {
         self.launch_pending_network_join()
     }
 
+    /// Follows a host that restarted the round without closing the session.
+    ///
+    /// The counterpart to [`Self::begin_pending_host_rejoin`], and the cheap
+    /// one: there is no disconnect to wait for and no join to repeat, because
+    /// the connection this notice arrived on is the connection the client keeps
+    /// using. Only the round is torn down; the manager, its sockets and the
+    /// host's client list all outlive it.
+    ///
+    /// A client with no live session has nothing to preserve and is left alone,
+    /// so a stray notice cannot displace whatever it is doing.
+    pub(crate) fn follow_host_restart_into_lobby(&mut self) -> Result<(), EngineError> {
+        if self.network.is_none()
+            || !matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_)))
+        {
+            return Ok(());
+        }
+        // The host is not going away, so the reconnect this client may have
+        // armed from an earlier notice is now the wrong answer.
+        self.pending_host_rejoin = None;
+        self.return_to_menu_retaining_network_session();
+        let Some(manager) = self.network.as_ref() else {
+            // The teardown found the session unusable after all. It has already
+            // dropped it, which leaves the ordinary dead-host presentation.
+            return Ok(());
+        };
+        let lobby =
+            NetworkLobbyState::new(manager.local_client_id(), self.player_name.clone(), false)
+                .with_external_chat(self.startup_irc_client_active())
+                .with_preloading(
+                    load_options_program_state(
+                        self.app_paths.as_ref(),
+                        Some(&self.startup_tooltip_resources),
+                    )
+                    .preloading,
+                    self.classic_lobby_labels(),
+                );
+        self.network_lobby = Some(lobby);
+        self.classic_host_lobby = None;
+        self.network_control_running = false;
+        self.mode = AppMode::Menu;
+        self.open_network_lobby();
+        Ok(())
+    }
+
+    /// Whether this round's restart can keep its network session up.
+    ///
+    /// A league round cannot: dropping the manager is what sends the league
+    /// `End`, and a session that outlives its round leaves this host registered
+    /// while the next `LeagueStart` asks the same server to register it again,
+    /// which is how a restart earns a rejected `Start`
+    /// (src/C4Network2.cpp:259-272,748-763,2292-2303). Everything else is free
+    /// to keep its clients connected.
+    pub(crate) fn network_round_restart_preserves_session(&self) -> bool {
+        self.network.is_some()
+            && matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
+            && !self.network_is_league
+    }
+
+    /// Tells connected clients the round restarted and this session did not.
+    fn announce_network_round_restart_into_lobby(&mut self) {
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.broadcast_host_restart_lobby() {
+            tracing::warn!(%error, "failed to announce the lobby restart to clients");
+        }
+    }
+
+    /// Restarts the round on the live session, and answers whether it did.
+    ///
+    /// Nothing is committed until the next round's scenario has been prepared.
+    /// Preparing is `&self`, so a host that cannot build the next lobby — a
+    /// missing scenario, unreadable resources — falls through to the ordinary
+    /// re-host below with its round, its session and its clients untouched.
+    fn try_restart_network_scenario_preserving_session(&mut self) -> Result<bool, EngineError> {
+        if !self.network_round_restart_preserves_session() {
+            return Ok(false);
+        }
+        let (Some(scenario), Some(mode)) =
+            (self.active_scenario.clone(), self.network_mode.clone())
+        else {
+            return Ok(false);
+        };
+        let definition_load = self
+            .active_definition_load
+            .clone()
+            .unwrap_or_else(|| self.scenario_seed_definition_load());
+        let mut staged = match self.prepare_network_host_scenario(scenario, definition_load) {
+            Ok(staged) => staged,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "cannot rebuild the round on the live session; re-hosting instead"
+                );
+                return Ok(false);
+            }
+        };
+
+        // Committed from here: the clients are told before the round goes, so
+        // they never see the end of it as a host that died.
+        let mut values = self.scenario_game_options.values().clone();
+        values.countdown = false;
+        values.lobby_is_league = false;
+        self.retain_restart_restore_mask_for_restart();
+        self.announce_network_round_restart_into_lobby();
+        self.return_to_menu_retaining_network_session();
+        self.scenario_game_options =
+            GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
+        self.scenario_selector_mode = ScenarioSelectorMode::NetworkHost;
+        self.initial_definition_seed = None;
+        self.startup_restart_diagnostics.begin_game_init();
+
+        // The staged scenario carries the round's fonts and loader. A fresh
+        // host installs both while its socket worker starts
+        // (`begin_startup_network_connection`); there is no worker to start
+        // here, so this is the only place they can be installed.
+        let initial_fonts = staged
+            .loader_screen
+            .as_ref()
+            .map(|loader| loader.resources().fonts().clone());
+        let initial_tooltip = staged.loader_initial_tooltip_font.clone();
+        let initial_native_source = staged.loader_initial_native_font_source.clone();
+        if let Some(fonts) = initial_fonts {
+            self.install_active_classic_fonts(fonts, Some(initial_tooltip), initial_native_source);
+        }
+        if let Some(loader) = staged.loader_screen.take() {
+            self.loader_screen = Some(loader);
+            self.loader_error = None;
+        }
+        self.network_lobby_min_players = Some(staged.lobby.min_players);
+        self.staged_network_host_scenario = Some(staged);
+
+        // Round-scoped session state the retained manager still holds. The
+        // teardown left it alone precisely because it does not know the session
+        // is being reused; the next round republishes all of it.
+        self.host_join_snapshot = None;
+        self.runtime_network_control_mode = None;
+        self.runtime_network_committed_control_mode = None;
+        self.runtime_network_committed_status = None;
+        self.runtime_network_join_allowed = None;
+        // Back to the clock a lobby starts from, not the finished round's:
+        // the next Go re-times from the prepared bootstrap the same way a
+        // freshly hosted session does.
+        self.network_control_clock = initial_network_control_clock(self.network_mode.as_ref());
+
+        let built = self
+            .network
+            .as_ref()
+            .map(|manager| self.build_classic_host_lobby(&mode, manager));
+        let Some(built) = built else {
+            return Ok(false);
+        };
+        match built {
+            Ok((lobby, options)) => {
+                self.classic_host_lobby = Some(lobby);
+                self.network_lobby = None;
+                self.scenario_game_options = options;
+                self.sync_classic_lobby_roster();
+                self.sync_classic_lobby_resource_ready();
+                self.replace_startup_view(StartupView::NetworkLobby);
+                self.mode = AppMode::Menu;
+                self.status_text.clear();
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.stop_music();
+                }
+                // The session is still in the state the finished round left it.
+                // A lobby that keeps announcing Go would have the next round's
+                // barrier already satisfied before anybody reached it.
+                self.reset_retained_session_to_lobby();
+                Ok(true)
+            }
+            Err(error) => {
+                // The clients have already been told to expect a lobby, and
+                // there is none. Dropping the session is what turns that into
+                // the disconnect they know how to recover from.
+                tracing::error!(%error, "cannot enter the restarted host lobby on the live session");
+                self.clear_live_network_session();
+                self.finish_network_host_start_failure(format!(
+                    "Network lobby unavailable: {error}"
+                ))?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Puts a retained session's status back where a lobby expects it.
+    fn reset_retained_session_to_lobby(&mut self) {
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        let status = clonk_network::NetworkStatus {
+            state: clonk_network::NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        };
+        if let Err(error) = network.change_status(status) {
+            tracing::warn!(%error, "failed to return the retained session to lobby status");
+        }
+    }
+
     pub(crate) fn restart_current_network_scenario(&mut self) -> Result<(), EngineError> {
+        // Preferred: keep the session up so every client follows the restart on
+        // the connection it already has, instead of watching it close and
+        // paying for a new one.
+        if self.try_restart_network_scenario_preserving_session()? {
+            return Ok(());
+        }
         // Before anything is torn down: a restart re-hosts from scratch, and
         // the only thing a client would otherwise observe is its connection
         // closing — indistinguishable from a dead host

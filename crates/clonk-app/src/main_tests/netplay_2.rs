@@ -10580,6 +10580,54 @@ fn client_follows_an_announced_host_restart_back_to_the_lobby() {
 }
 
 #[test]
+fn client_follows_a_session_preserving_restart_into_the_lobby() {
+    // The cheaper half of the same intent. Here the host keeps its session up,
+    // so there is no socket loss to observe and nothing to re-dial: the client
+    // leaves the round and re-enters the lobby on the connection it already
+    // holds. Contrast `client_follows_an_announced_host_restart_back_to_the_lobby`,
+    // which pays for a whole new connection to reach the same place.
+    let mut app = new_running_sandbox_app();
+    let local_client = 7;
+    let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+    app.control_clients.register(0, true, false);
+    app.control_clients.register(local_client, true, false);
+
+    event_tx
+        .send(NetworkEvent::HostRestartLobby)
+        .expect("queue the session-preserving restart");
+    app.process_network_events()
+        .expect("process the session-preserving restart");
+
+    assert_eq!(
+        app.mode,
+        AppMode::Menu,
+        "the round the host restarted is torn down"
+    );
+    assert!(
+        app.network.is_some(),
+        "the session the host kept up is the one this client keeps"
+    );
+    assert!(
+        app.startup_network_connection.is_none(),
+        "nothing is re-dialled: that is the whole point of the notice"
+    );
+    assert!(
+        app.pending_host_rejoin.is_none(),
+        "a preserved session has no reconnect to arm"
+    );
+    assert!(
+        app.network_lobby.is_some(),
+        "the client lands in the lobby rather than the game list"
+    );
+}
+
+#[test]
 fn an_oversized_rejoin_window_is_clamped() {
     // The window is a number off the wire. Honoured literally, a hostile or
     // buggy host could hold this client in a once-a-second reconnect loop for
