@@ -24,6 +24,15 @@ pub const DEFAULT_DISCOVERY_PORT: u16 = 11_114;
 pub const MAX_LAN_DISCOVERS: usize = 64;
 pub const REFERENCE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 pub const GAME_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the startup browser re-probes the LAN for games.
+///
+/// Deliberately shorter than the oracle's `C4NetGameDiscoveryInterval`, which
+/// leaves a game opened while the browser is on screen invisible for half a
+/// minute. Every probe makes each host on the group multicast an announce, and
+/// a C++ client re-fetches a reference for each announce it sees
+/// (src/C4StartupNetDlg.cpp:1133-1154,590-600), so this is not free to shorten
+/// further; the host's own opening announce covers the first seconds instead.
+pub const LAN_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const MASTERSERVER_FAST_RETRIES: u8 = 2;
 const REFERENCE_LIFETIME: Duration = Duration::from_secs(42);
 const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
@@ -1281,7 +1290,7 @@ struct SearchDeadlines {
 impl SearchDeadlines {
     fn armed_at(now: Instant) -> Self {
         Self {
-            lan_probe_at: now + GAME_SEARCH_INTERVAL,
+            lan_probe_at: now + LAN_DISCOVERY_INTERVAL,
             masterserver_query_at: now + GAME_SEARCH_INTERVAL,
         }
     }
@@ -1290,7 +1299,7 @@ impl SearchDeadlines {
         if now < self.lan_probe_at {
             return false;
         }
-        self.lan_probe_at += GAME_SEARCH_INTERVAL;
+        self.lan_probe_at = now + LAN_DISCOVERY_INTERVAL;
         true
     }
 
@@ -2970,6 +2979,49 @@ Title=Empty\n",
         let empty_until = now + EMPTY_REFERENCE_LIFETIME;
         assert!(!gate.begin_at(empty_until - Duration::from_millis(1), &command));
         assert!(gate.begin_at(empty_until, &command));
+    }
+
+    #[test]
+    fn lan_probes_run_more_often_than_the_masterserver_query() {
+        // Deliberate divergence. C4StartupNetDlg counts one countdown down per
+        // second and re-probes the LAN when it passes zero, so its game list
+        // and its masterserver row both refresh every thirty seconds (pinned
+        // oracle src/C4StartupNetDlg.cpp:1116-1131; src/C4StartupNetDlg.h:27,31).
+        // The port keeps the masterserver on the oracle's interval - that is a
+        // shared public server - and probes the LAN on its own.
+        assert!(LAN_DISCOVERY_INTERVAL < GAME_SEARCH_INTERVAL);
+        let now = Instant::now();
+        let mut deadlines = SearchDeadlines::armed_at(now);
+
+        assert!(!deadlines
+            .take_due_lan_probe_at(now + LAN_DISCOVERY_INTERVAL - Duration::from_millis(1)));
+        assert!(deadlines.take_due_lan_probe_at(now + LAN_DISCOVERY_INTERVAL));
+        assert!(
+            !deadlines.take_due_masterserver_query_at(now + LAN_DISCOVERY_INTERVAL),
+            "a LAN probe must not drag the masterserver query forward with it"
+        );
+        assert!(deadlines.take_due_masterserver_query_at(now + GAME_SEARCH_INTERVAL));
+    }
+
+    #[test]
+    fn a_stalled_search_worker_sends_one_catch_up_lan_probe() {
+        // A worker that missed its deadline owes one probe, not one per
+        // interval it slept through: C4StartupNetDlg reloads its countdown from
+        // the tick that fired it (pinned oracle src/C4StartupNetDlg.cpp:
+        // 1123-1127), so a stalled second never queues a burst.
+        let now = Instant::now();
+        let mut deadlines = SearchDeadlines::armed_at(now);
+        let stalled_until = now + GAME_SEARCH_INTERVAL * 2;
+
+        assert!(deadlines.take_due_lan_probe_at(stalled_until));
+
+        assert!(
+            !deadlines.take_due_lan_probe_at(
+                stalled_until + LAN_DISCOVERY_INTERVAL - Duration::from_millis(1)
+            ),
+            "the missed ticks are dropped rather than fired back to back"
+        );
+        assert!(deadlines.take_due_lan_probe_at(stalled_until + LAN_DISCOVERY_INTERVAL));
     }
 
     #[test]
