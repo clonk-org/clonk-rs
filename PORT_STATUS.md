@@ -1030,6 +1030,83 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   **Still open:** the editor surfaces — which do not exist on the reference
   build; see the console-dialog note above.
 
+- **The viewport context menu and its three object commands landed.**
+  `C4EditCursor::DoContextMenu` (`C4EditCursor.cpp:582-628`) has two bodies and
+  no third — `TrackPopupMenu` over `IDR_CONTEXTMENUS`' `VIEWPORT` popup under
+  `_WIN32`, a `GtkMenu` under `WITH_DEVELOPER_MODE` — so the reference build
+  compiles neither and Delete, Duplicate and Grab contents were unreachable
+  even though `EMMO_Remove`/`Duplicate`/`Exit` had executors, wire codecs and
+  parity tests. `clonk-frontend::developer_context_menu` keeps the portable
+  half: the five rows in both toolkits' order (`res/engine.rc:289-294`,
+  `C4EditCursor.cpp:93-97`), the four enablement rules — which the *ported*
+  `developer_cursor::context_menu` decides, not the view — and the caption the
+  Properties row swaps by mode. Three details are easy to lose. Delete,
+  Duplicate and Grab contents are **not gated on the cursor mode**
+  (`:588-590`), so a selection made in Edit mode is still deletable after
+  switching to Play, while Properties is gated on the mode *alone*. `Delete`
+  opens with `EditingOK` and `Duplicate` does **not** (`:350,376`), which the
+  port preserves rather than tidying. And `GrabContents` replaces the selection
+  with the container's own `Contents` and sets `Hold` **before** the control
+  goes out (`:640-651`), so `EMMO_Exit` carries what was inside, never the
+  container. `right_press` ports `RightButtonDown`'s `fCursorIsOnSelection`
+  arm (`:244-274`), which asks `C4Object::At` of every selected object rather
+  than `FindObject` — that is what lets a right-click inside a multi-object
+  selection keep it; `EditCursorHitTest::object_covers` is that `At`, carrying
+  `addtop()` through the sector shape rect. Pinned by
+  `console_viewport_context_menu_emits_the_object_commands`,
+  `console_viewport_grab_contents_exits_the_container_it_selected`,
+  `right_press_selects_under_the_cursor_only_outside_the_selection` and
+  `object_covers_asks_one_named_object_where_find_object_returns_the_stack`.
+  The **presentation is invented**, as the console shell's already is: a Win9x
+  popup drawn onto the viewport's own framebuffer, because a winit window
+  cannot host an OS popup. It is clamped into the window — a row outside it
+  could never be clicked — and it takes the click that lands on it, as both
+  toolkits do.
+
+- **The developer toolbox opens, with both pages.**
+  `C4DevmodeDlg`'s notebook model was ported and had no window;
+  `C4ToolsDlg`/`C4PropertyDlg` build native widget trees that the reference
+  build does not compile (`C4ToolsDlg::Open` falls through its `#endif` at
+  `:397` to `Active = true` plus an ordered refresh). `ToolboxWindowHost` gives
+  the notebook a real winit window on the viewport window's shape — a plain
+  `Pixels` surface blitted from a software `Surface`, no retained GPU renderer
+  — and `console_toolbox_window` drains the model's `ToolboxEffect`s once per
+  pass, the way the viewport windows are reconciled, because winit can only
+  build a window from the event loop's target. `developer_toolbox_view` draws
+  the Tools page from the *ported* inventory, grouping and enablement
+  (`developer_tools_page`, `C4ToolsDlg.cpp:289-377,912-940`) and the ported
+  material/texture catalogues (`developer_landscape`, `:482-548`), and the
+  Property page from `developer_property_text::property_panel_text` over the
+  live selection.
+  Four ported behaviours now have a caller. `OpenPropTools` picks the page by
+  cursor mode — Draw opens Tools, Edit *and Play* open Property
+  (`C4EditCursor.cpp:361-374`) — and the viewport context menu's
+  Properties/Tools row is the only thing that opens it, exactly as in C++.
+  `SetMode` clears the page the mode it left owns and reopens the toolbox
+  **only when one of the two was already up** (`:503-518`), so the console's
+  Draw button still shows no window on its own. `SetMaterial` runs
+  `AssertValidTexture` after the material lands (`:565-572`). And the three
+  landscape mode buttons are the one page control that is a *control*:
+  `SetLandscapeMode(iMode, false)` changes nothing locally and enqueues
+  `EMDT_SetMode` as `CDT_Decide` (`:865-879`), so every peer switches at the
+  same tick — the emitter that was missing, and with it the Dynamic landscape
+  that could not be drawn on. Pinned by
+  `developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls`,
+  `tools_page_places_every_control_inside_the_page_without_overlap`,
+  `tools_page_click_is_refused_by_every_disabled_control`,
+  `grade_scale_runs_inverted_and_clamps_to_its_range` and
+  `open_prop_tools_picks_the_page_by_cursor_mode`.
+  The **layout is invented** — there is no oracle for a pixel of it — but it
+  follows the box tree's grouping and order, and the grade scale runs inverted
+  because `InitGradeCtrl` sets `C4TLS_GradeMax - Grade` (`:719`).
+  **Still open:** the preview swatch is the selection in words rather than
+  `UpdatePreview`'s rendered material sample (`:601-708`), the material and
+  texture combos are drawn as open list boxes rather than pop-up combos, the
+  toolbox window carries only the first of `ToolboxChrome`'s five hints
+  (winit has no utility type hint, window role, transient-for or
+  centre-on-parent), and the object-list window (`C4ObjectListDlg`, GTK-only)
+  and the Script/Title/Info component editors still have no surface.
+
 - **The edit cursor's overlay draw list landed.**
   Unlike the console's dialogs, `C4EditCursor::Draw` is *not* a native widget —
   it draws through the engine's own rasterizer, so it has an exact pixel oracle.
@@ -1911,11 +1988,9 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   `console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor`,
   `console_draw_alt_picks_the_landscape_into_the_tools_without_drawing` and
   `a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture`.
-  **Still open:** the dialog chrome and its window host, gated on the keyed
-  developer window-host registry — so tool, grade, IFT, material and texture are
-  reachable only through the Alt picker and the ported defaults (Brush, grade 5,
-  IFT on, Earth over Rough), and `EMDT_SetMode` still has no emitter, which
-  leaves a Dynamic landscape undrawable from the console.
+  The dialog now has a window, so tool, grade, IFT, material and texture are
+  selectable rather than fixed at the Alt picker and the ported defaults — see
+  the toolbox card below.
 
 - Closed 2026-07-29: **Options control sheets draw the classic facets.**
   `C4StartupOptionsDlg` draws the Keyboard/Gamepad pages from facets, not text
