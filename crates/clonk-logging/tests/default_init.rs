@@ -167,14 +167,12 @@ const CALLOOP_STALE_SOURCE_MARKER: &str =
     "[calloop] Received an event for non-existence source: TokenInner { id: 3, version: 4419, sub_id: 0 }";
 const CALLOOP_PING_MARKER: &str = "[calloop] Failed to write a ping";
 
-/// winit's Wayland backend drives the compositor through calloop. Removing a
-/// source — a key-repeat timer, a `WaitUntil` deadline — can leave one last
-/// epoll event queued, and calloop then warns at `calloop::loop_logic` for a
-/// token that no longer exists. The token id stays put while the version
-/// climbs, which is the reuse of one slot, not a fault we can fix: we do not
-/// own those sources. The rest of `calloop` keeps `warn`.
+/// The Wayland key-repeat timer is reused rather than torn down, so this
+/// warning should no longer fire in a real session. If it does, it is a
+/// genuine calloop fault and must stay visible — same rule as the rest of
+/// the windowing stack.
 #[test]
-fn calloop_stale_source_warnings_stay_off_stderr() {
+fn calloop_loop_logic_warnings_reach_stderr() {
     if env::var_os(CHILD_MODE).is_some() {
         clonk_logging::init();
         tracing::warn!(target: "calloop::loop_logic", "{CALLOOP_STALE_SOURCE_MARKER}");
@@ -182,11 +180,11 @@ fn calloop_stale_source_warnings_stay_off_stderr() {
         return;
     }
 
-    let output = run_child("calloop_stale_source_warnings_stay_off_stderr", None, None);
+    let output = run_child("calloop_loop_logic_warnings_reach_stderr", None, None);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains(CALLOOP_STALE_SOURCE_MARKER),
-        "a stale-source warning reached stderr: {stderr}"
+        stderr.contains(CALLOOP_STALE_SOURCE_MARKER),
+        "a loop_logic warning was suppressed: {stderr}"
     );
     assert!(
         stderr.contains(CALLOOP_PING_MARKER),

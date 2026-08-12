@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{LoopHandle, RegistrationToken};
+use calloop::{Dispatcher, LoopHandle, RegistrationToken};
 use tracing::warn;
 
 use sctk::reexports::client::protocol::wl_keyboard::{
@@ -76,10 +76,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                 };
 
                 // Drop the repeat, if there were any.
-                keyboard_state.current_repeat = None;
-                if let Some(token) = keyboard_state.repeat_token.take() {
-                    keyboard_state.loop_handle.remove(token);
-                }
+                keyboard_state.cancel_repeat();
 
                 *data.window_id.lock().unwrap() = Some(window_id);
 
@@ -101,10 +98,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
 
                 // NOTE: we should drop the repeat regardless whether it was for the present
                 // window of for the window which just went gone.
-                keyboard_state.current_repeat = None;
-                if let Some(token) = keyboard_state.repeat_token.take() {
-                    keyboard_state.loop_handle.remove(token);
-                }
+                keyboard_state.cancel_repeat();
 
                 // NOTE: The check whether the window exists is essential as we might get a
                 // nil surface, regardless of what protocol says.
@@ -153,55 +147,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                 }
 
                 keyboard_state.current_repeat = Some(key);
-
-                // NOTE terminate ongoing timer and start a new timer.
-
-                if let Some(token) = keyboard_state.repeat_token.take() {
-                    keyboard_state.loop_handle.remove(token);
-                }
-
-                let timer = Timer::from_duration(delay);
-                let wl_keyboard = wl_keyboard.clone();
-                keyboard_state.repeat_token = keyboard_state
-                    .loop_handle
-                    .insert_source(timer, move |_, _, state| {
-                        // Required to handle the wakeups from the repeat sources.
-                        state.dispatched_events = true;
-
-                        let data = wl_keyboard.data::<KeyboardData>().unwrap();
-                        let seat_state = match state.seats.get_mut(&data.seat.id()) {
-                            Some(seat_state) => seat_state,
-                            None => return TimeoutAction::Drop,
-                        };
-
-                        let keyboard_state = match seat_state.keyboard_state.as_mut() {
-                            Some(keyboard_state) => keyboard_state,
-                            None => return TimeoutAction::Drop,
-                        };
-
-                        // NOTE: The removed on event source is batched, but key change to `None`
-                        // is instant.
-                        let repeat_keycode = match keyboard_state.current_repeat {
-                            Some(repeat_keycode) => repeat_keycode,
-                            None => return TimeoutAction::Drop,
-                        };
-
-                        key_input(
-                            keyboard_state,
-                            &mut state.events_sink,
-                            data,
-                            repeat_keycode,
-                            ElementState::Pressed,
-                            true,
-                        );
-
-                        // NOTE: the gap could change dynamically while repeat is going.
-                        match keyboard_state.repeat_info {
-                            RepeatInfo::Repeat { gap, .. } => TimeoutAction::ToDuration(gap),
-                            RepeatInfo::Disable => TimeoutAction::Drop,
-                        }
-                    })
-                    .ok();
+                keyboard_state.arm_repeat(delay, wl_keyboard);
             },
             WlKeyboardEvent::Key { key, state: WEnum::Value(WlKeyState::Released), .. } => {
                 let key = key + 8;
@@ -219,10 +165,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                     && keyboard_state.xkb_context.keymap_mut().unwrap().key_repeats(key)
                     && Some(key) == keyboard_state.current_repeat
                 {
-                    keyboard_state.current_repeat = None;
-                    if let Some(token) = keyboard_state.repeat_token.take() {
-                        keyboard_state.loop_handle.remove(token);
-                    }
+                    keyboard_state.cancel_repeat();
                 }
             },
             WlKeyboardEvent::Modifiers {
@@ -254,10 +197,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
             WlKeyboardEvent::RepeatInfo { rate, delay } => {
                 keyboard_state.repeat_info = if rate == 0 {
                     // Stop the repeat once we get a disable event.
-                    keyboard_state.current_repeat = None;
-                    if let Some(repeat_token) = keyboard_state.repeat_token.take() {
-                        keyboard_state.loop_handle.remove(repeat_token);
-                    }
+                    keyboard_state.cancel_repeat();
                     RepeatInfo::Disable
                 } else {
                     let gap = Duration::from_micros(1_000_000 / rate as u64);
@@ -288,6 +228,11 @@ pub struct KeyboardState {
     /// The token of the current handle inside the calloop's event loop.
     pub repeat_token: Option<RegistrationToken>,
 
+    /// Persistent repeat timer. Reused instead of remove+insert so a due
+    /// timeout that is already in the current dispatch batch cannot land on a
+    /// vacated slot (calloop then warns for a "non-existence source").
+    repeat_dispatcher: Option<Dispatcher<'static, Timer, WinitState>>,
+
     /// The current repeat raw key.
     pub current_repeat: Option<u32>,
 }
@@ -300,8 +245,98 @@ impl KeyboardState {
             xkb_context: Context::new().unwrap(),
             repeat_info: RepeatInfo::default(),
             repeat_token: None,
+            repeat_dispatcher: None,
             current_repeat: None,
         }
+    }
+
+    /// Stop repeating without destroying the calloop source.
+    ///
+    /// `remove` frees the slab slot immediately. If the timer already expired
+    /// in this `poll`, calloop still holds that token and warns. `disable`
+    /// unregisters the wheel entry but keeps the source, so a leftover event
+    /// is a no-op instead of a stale-token warning.
+    fn cancel_repeat(&mut self) {
+        self.current_repeat = None;
+        if let Some(token) = self.repeat_token {
+            let _ = self.loop_handle.disable(&token);
+        }
+    }
+
+    /// Arm or reschedule the single repeat timer for `delay`.
+    fn arm_repeat(&mut self, delay: Duration, wl_keyboard: &WlKeyboard) {
+        if let (Some(dispatcher), Some(token)) = (&self.repeat_dispatcher, self.repeat_token) {
+            dispatcher.as_source_mut().set_duration(delay);
+            if self.loop_handle.update(&token).is_ok() {
+                return;
+            }
+            self.repeat_token = None;
+        }
+
+        if self.repeat_dispatcher.is_none() {
+            let wl_keyboard = wl_keyboard.clone();
+            self.repeat_dispatcher = Some(Dispatcher::new(
+                Timer::from_duration(delay),
+                move |_, _, state| handle_repeat_timeout(&wl_keyboard, state),
+            ));
+        } else if let Some(dispatcher) = &self.repeat_dispatcher {
+            dispatcher.as_source_mut().set_duration(delay);
+        }
+
+        let Some(dispatcher) = self.repeat_dispatcher.clone() else {
+            return;
+        };
+        match self.loop_handle.register_dispatcher(dispatcher) {
+            Ok(token) => self.repeat_token = Some(token),
+            Err(_) => {
+                self.repeat_dispatcher = None;
+                self.repeat_token = None;
+            },
+        }
+    }
+}
+
+fn handle_repeat_timeout(wl_keyboard: &WlKeyboard, state: &mut WinitState) -> TimeoutAction {
+    // Required to handle the wakeups from the repeat sources.
+    state.dispatched_events = true;
+
+    let data = wl_keyboard.data::<KeyboardData>().unwrap();
+    let seat_state = match state.seats.get_mut(&data.seat.id()) {
+        Some(seat_state) => seat_state,
+        None => return TimeoutAction::Drop,
+    };
+
+    let keyboard_state = match seat_state.keyboard_state.as_mut() {
+        Some(keyboard_state) => keyboard_state,
+        None => return TimeoutAction::Drop,
+    };
+
+    // NOTE: The removed on event source is batched, but key change to `None`
+    // is instant.
+    let repeat_keycode = match keyboard_state.current_repeat {
+        Some(repeat_keycode) => repeat_keycode,
+        None => {
+            keyboard_state.repeat_token = None;
+            return TimeoutAction::Drop;
+        },
+    };
+
+    key_input(
+        keyboard_state,
+        &mut state.events_sink,
+        data,
+        repeat_keycode,
+        ElementState::Pressed,
+        true,
+    );
+
+    // NOTE: the gap could change dynamically while repeat is going.
+    match keyboard_state.repeat_info {
+        RepeatInfo::Repeat { gap, .. } => TimeoutAction::ToDuration(gap),
+        RepeatInfo::Disable => {
+            keyboard_state.repeat_token = None;
+            TimeoutAction::Drop
+        },
     }
 }
 

@@ -21,15 +21,8 @@ static INITIALIZED: OnceLock<()> = OnceLock::new();
 /// Graphics, windowing and event-loop crates log per-frame detail below `warn`
 /// that would bury our own output. This is applied ahead of any user directive
 /// so a more specific one — `LC_LOG=info,wgpu_hal=debug` — still wins.
-///
-/// `calloop::loop_logic` is the one module muted past `warn`. winit's Wayland
-/// backend removes timer sources (key-repeat, `WaitUntil`) while an epoll
-/// event for that token can still be queued; calloop then warns for a
-/// "non-existence source" whose id stays put while the version climbs. That
-/// is slot reuse, not a fault we can fix — we do not own those sources.
-/// The rest of `calloop` keeps `warn`.
 const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu=warn,wgpu_core=warn,wgpu_hal=warn,\
-     naga=warn,winit=warn,calloop=warn,calloop::loop_logic=error,mio=warn";
+     naga=warn,winit=warn,calloop=warn,mio=warn";
 /// Target of the panic hook. Deliberately not the script target: a Rust panic
 /// is not content output and has no business on the in-game message board.
 const PANIC_LOG_TARGET: &str = "panic";
