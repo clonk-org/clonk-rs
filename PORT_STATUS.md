@@ -2498,7 +2498,8 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
   scenario rotation — C++ has none either, parking in `C4AS_Startup` for the
   operator's next `/open` (`C4Application.cpp:428`), and the port's process
   simply exits, so a persistent server needs a supervisor restart.
-  `clonk-network::host_restart`'s `PID_PORT_HOST_RESTARTING` is unused by this
+  Neither of `clonk-network::host_restart`'s notices —
+  `PID_PORT_HOST_RESTARTING` or `PID_PORT_HOST_RESTART_LOBBY` — is used by this
   path. (c) The masterserver/league host signup is not exercised headlessly by
   any test. (d) The remaining `!console_mode` gates that a headless run also
   arguably wants — `failed_open_game_returns_to_startup` (`game_app/startup.rs`),
@@ -4426,6 +4427,48 @@ an ordered-map model gap.
   (`a_client_cannot_forge_a_restart_notice_through_the_forward_relay`).
   Without the notice the client path is byte-identical to today's, pinned by
   `client_host_socket_loss_continues_the_running_round_locally`.
+
+- **A restarted network round keeps its session and its clients connected**
+  (`clonk-network/src/host_restart.rs` PID `0x72`,
+  `GameApp::try_restart_network_scenario_preserving_session`,
+  `GameApp::follow_host_restart_into_lobby`,
+  `GameApp::return_to_menu_retaining_network_session`; same C++ anchors as the
+  entry above). Approved 2026-08-11, closing clonk-org/clonk-rs#241. The
+  reconnect above reaches the right place the expensive way: every client pays
+  for a fresh connection — handshake, admission and resource negotiation — to
+  re-enter a lobby it was already in. Here the host instead keeps the session,
+  its sockets and its client list up across the restart and rebuilds only the
+  round, so each client returns to the lobby on the connection it already holds
+  and nothing is re-dialled or re-transferred. The host broadcasts
+  `PID_PortHostRestartLobby` and returns its session status to
+  `NETWORK_STATE_LOBBY`; a client receiving it tears the round down through the
+  retained-session teardown and re-enters the lobby in place.
+
+  Three constraints shape it. **It commits nothing until it can deliver.**
+  `prepare_network_host_scenario` is `&self`, so the next round's scenario is
+  prepared *before* the notice is sent; a host that cannot prepare one falls
+  through to the reconnect path above with its round, session and clients
+  untouched, which is why the pre-existing sandbox restart tests still pass
+  unchanged. **A league round is excluded.** Dropping the manager is what sends
+  the league `End`, and a retained session would still be registered when the
+  next `LeagueStart` registered it again (src/C4Network2.cpp:259-272,2292-2303),
+  so `network_round_restart_preserves_session` refuses one
+  (`a_league_round_restart_still_clears_the_live_session`). **A stock C++ client
+  is no worse off.** This packet *is* sent on a session meant to survive, so the
+  `excCorrupt` close documented above costs a C++ peer a connection it would
+  otherwise have kept — but its round has ended either way, and closing is
+  exactly what that peer does today when the host tears the whole session down.
+  It reaches the same `OnClientDisconnect` and `ChangeToLocal`; the host simply
+  keeps serving the peers that understood the notice. That reasoning does not
+  generalise to a packet sent mid-round.
+
+  Still a lobby/session-lifecycle change only: the notice never enters the
+  control queue, so control ticks, `RandomCount` and simulation state are
+  untouched. The relay refusal covers this ID for free — it is the same `0x7x`
+  range — and is pinned separately by
+  `a_client_cannot_forge_a_lobby_restart_through_the_forward_relay`, because a
+  forged lobby restart ends a round that is otherwise healthy rather than one
+  that was already closing.
 
 - **Birds fly a steered heading instead of re-rolling a pure-axis ComDir once
   a second** (`planet/System.c4g/BirdFlight.c`, `#appendto BIRD`; departs from
