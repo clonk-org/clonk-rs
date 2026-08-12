@@ -383,15 +383,18 @@ impl GameApp {
                 // (`C4Console.cpp:1353-1356`). Unlike its three siblings it
                 // has no network refusal — the list only reads.
                 DeveloperConsoleAction::EditObjects => self.open_developer_object_list(),
-                DeveloperConsoleAction::EditScript => {
-                    self.developer_console.out("Script component selected");
-                }
-                DeveloperConsoleAction::EditTitle => {
-                    self.developer_console.out("Title component selected");
-                }
-                DeveloperConsoleAction::EditInfo => {
-                    self.developer_console.out("Info component selected");
-                }
+                // The three `C4Console::Edit*` entries, which share a network
+                // refusal and differ only in the component and in whether
+                // they relink (`C4Console.cpp:1328-1351`).
+                DeveloperConsoleAction::EditScript => self.open_developer_component_editor(
+                    clonk_engine::developer_components::EditableComponent::Script,
+                ),
+                DeveloperConsoleAction::EditTitle => self.open_developer_component_editor(
+                    clonk_engine::developer_components::EditableComponent::Title,
+                ),
+                DeveloperConsoleAction::EditInfo => self.open_developer_component_editor(
+                    clonk_engine::developer_components::EditableComponent::Info,
+                ),
             };
         }
         Ok(())

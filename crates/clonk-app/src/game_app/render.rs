@@ -3153,6 +3153,137 @@ impl GameApp {
         self.developer_tools.clear();
     }
 
+    /// `C4Console::EditScript`/`EditTitle`/`EditInfo`
+    /// (`C4Console.cpp:1328-1351`).
+    ///
+    /// All three open with the same refusal — `if (Game.Network.isEnabled())
+    /// return;` — and `EditScript` alone relinks, **unconditionally**: that
+    /// statement sits outside the `#ifdef _WIN32` that guards the dialog, so
+    /// it runs even when the editor never opened. The port keeps that, which
+    /// is why the relink is here rather than in the commit.
+    pub(crate) fn open_developer_component_editor(
+        &mut self,
+        component: clonk_engine::developer_components::EditableComponent,
+    ) {
+        use clonk_engine::developer_components::component_editor_available;
+
+        if !component_editor_available(self.network.is_some()) {
+            let message = self.runtime_resource_text(
+                "IDS_CNS_NONETEDIT",
+                "No editing while a network game is running.",
+            );
+            self.developer_console.out(&message);
+            return;
+        }
+        match self.load_developer_component(component) {
+            Some(edit) => self.developer_component_editor = Some(edit),
+            None => {
+                let message = self.runtime_resource_text("IDS_CNS_NOSCENARIO", "No scenario open.");
+                self.developer_console.out(&message);
+            }
+        }
+        // `Game.ScriptEngine.ReLink(&Game.Defs)` past the `#endif` (`:1342`).
+        if component.relinks_scripts() {
+            if let Err(error) = self.engine.relink_after_component_edit() {
+                tracing::error!(%error, "the component editor's relink failed");
+            }
+        }
+    }
+
+    /// Read a component's bytes out of the open scenario group.
+    ///
+    /// C++ has these already: `C4Game` holds a live `C4ComponentHost` per
+    /// component for the whole round. The port keeps none — the scenario's
+    /// script reaches the engine as source and is never held as bytes, and
+    /// `Info.txt` is not read at all — so the editor loads from the group it
+    /// will be saved back into.
+    fn load_developer_component(
+        &self,
+        component: clonk_engine::developer_components::EditableComponent,
+    ) -> Option<crate::DeveloperComponentEdit> {
+        use clonk_engine::developer_components::ComponentHost;
+
+        let scenario = self.developer_component_scenario_path()?;
+        let filename = developer_component_filename(component);
+        let group = clonk_resources::Group::open(&scenario).ok()?;
+        // A component that does not exist yet opens empty rather than
+        // refusing: that is how a scenario grows one.
+        let data = group.read_file(filename).unwrap_or_default();
+        Some(crate::DeveloperComponentEdit {
+            component,
+            text: crate::developer_component_editor::ComponentEditorText::opened(&data),
+            host: ComponentHost::loaded(filename, data),
+        })
+    }
+
+    /// The open scenario's group path, which is what a component is read
+    /// from and written back to. Both the running round and one still loading
+    /// answer, as the console's own caption does.
+    fn developer_component_scenario_path(&self) -> Option<std::path::PathBuf> {
+        self.active_scenario
+            .as_ref()
+            .and_then(|scenario| scenario.path.clone())
+            .or_else(|| {
+                self.loading_state
+                    .as_ref()
+                    .and_then(|loading| loading.scenario.path.clone())
+            })
+    }
+
+    /// `C4ComponentHost`'s OK arm (`C4ComponentHost.cpp:330-334`), plus the
+    /// Script editor's own reload.
+    pub(crate) fn commit_developer_component_editor(&mut self) {
+        use clonk_engine::developer_components::EditableComponent;
+
+        let Some(mut edit) = self.developer_component_editor.take() else {
+            return;
+        };
+        // `Accept` replaces the bytes and sets `Modified` **without
+        // comparing**, so committing unchanged text still marks the component
+        // for the save.
+        edit.host.accept(edit.text.bytes());
+        if edit.component == EditableComponent::Script {
+            // `C4Console::EditScript` reloads the scenario script into the
+            // engine and relinks; it must *not* re-run Initialize, because the
+            // scenario is already running and its objects exist.
+            let source = clonk_script::c4_string_from_bytes(edit.host.data());
+            let name = self
+                .developer_component_scenario_path()
+                .map(|scenario| scenario.join("Script.c").to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Script.c".to_owned());
+            if let Err(error) = self.engine.apply_scenario_script_edit(name, &source) {
+                tracing::error!(%error, "the edited scenario script did not link");
+            }
+        }
+        self.developer_component_hosts.push(edit.host);
+    }
+
+    /// `C4ComponentHost`'s Cancel arm, which mutates nothing — not even the
+    /// modified flag.
+    pub(crate) fn cancel_developer_component_editor(&mut self) {
+        if let Some(mut edit) = self.developer_component_editor.take() {
+            edit.host.cancel();
+        }
+    }
+
+    /// Draw the open editor, if there is one.
+    pub(crate) fn render_developer_component_editor(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Option<clonk_graphics::Surface> {
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let font = self.assets.font_arc();
+        let edit = self.developer_component_editor.as_mut()?;
+        let title = format!("{}  —  Enter commits, Escape cancels", edit.host.filename());
+        edit.text.render(&mut surface, font.as_ref(), &title);
+        Some(surface)
+    }
+
     /// `C4ObjectListDlg::Open` (`C4ObjectListDlg.cpp:726-787`), reached from
     /// `C4Console::EditObjects` (`C4Console.cpp:1353-1356`).
     ///
@@ -6381,5 +6512,22 @@ pub(crate) fn landscape_mode_value(mode: clonk_engine::developer_tools::Landscap
         LandscapeMode::Static => LANDSCAPE_MODE_STATIC,
         LandscapeMode::Exact => LANDSCAPE_MODE_EXACT,
         LandscapeMode::Undefined => LANDSCAPE_MODE_UNDEFINED,
+    }
+}
+
+/// The group entry each editable component lives in.
+///
+/// `Game.Script`, `Game.Title` and `Game.Info` are loaded from these names;
+/// the Script editor's is the unlocalised `Script.c`, because that is the file
+/// a scenario's own script is written to and the one `EditScript` reloads.
+pub(crate) fn developer_component_filename(
+    component: clonk_engine::developer_components::EditableComponent,
+) -> &'static str {
+    use clonk_engine::developer_components::EditableComponent;
+
+    match component {
+        EditableComponent::Script => "Script.c",
+        EditableComponent::Title => "Title.txt",
+        EditableComponent::Info => "Info.txt",
     }
 }

@@ -254,6 +254,165 @@ pub(crate) fn handle_developer_object_list_event(
     }
 }
 
+/// The component editor's registry key, if one is open.
+pub(crate) fn component_editor_window_key(
+    windows: &DeveloperWindows<DeveloperHost>,
+) -> Option<WindowId> {
+    windows.find_key(|host| matches!(host, DeveloperHost::ComponentEditor(_)))
+}
+
+/// Open or close the component editor window to match the console's request.
+pub(crate) fn reconcile_developer_component_editor_window(
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    next_key: &mut u64,
+    target: &winit::event_loop::ActiveEventLoop,
+) {
+    use crate::component_editor_window_host::build_component_editor_window;
+    use crate::developer_windows::HostPurpose;
+
+    let key = component_editor_window_key(windows);
+    match (app.developer_component_editor.is_some(), key) {
+        (true, None) => {
+            let title = app
+                .developer_component_editor
+                .as_ref()
+                .map(|edit| edit.host.filename().to_owned())
+                .unwrap_or_default();
+            match build_component_editor_window(target, &title) {
+                Ok(host) => {
+                    let key = WindowId(*next_key);
+                    *next_key += 1;
+                    tracing::debug!(%title, "opened the developer component editor");
+                    // The editor is a utility window like the object list, and
+                    // its close destroys it, so it shares that purpose's
+                    // semantics rather than the toolbox's hide-on-close.
+                    windows.insert(
+                        key,
+                        HostPurpose::ObjectList,
+                        DeveloperHost::ComponentEditor(host),
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to open the developer component editor");
+                    // Cancel rather than retry: `C4ComponentHost::Cancel`
+                    // mutates nothing, so the component is untouched.
+                    app.cancel_developer_component_editor();
+                }
+            }
+        }
+        (false, Some(key)) => {
+            windows.close(key);
+        }
+        _ => {}
+    }
+}
+
+/// The component editor window's own events.
+///
+/// The Win32 dialog is modal with OK and Cancel buttons; this window has a
+/// keyboard equivalent, because there is no dialog template to port and a
+/// text surface that could not be committed would be pointless.
+pub(crate) fn handle_developer_component_editor_event(
+    key: WindowId,
+    event: &winit::event::Event<crate::NetworkEventWake>,
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+) {
+    use crate::developer_component_editor::ComponentEditorKey;
+    use crate::developer_windows::DeveloperWindowPresenter;
+    use winit::event::{Event, WindowEvent};
+    use winit::keyboard::{Key, NamedKey};
+
+    match event {
+        // Closing the window is Cancel, which mutates nothing.
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            app.cancel_developer_component_editor();
+            windows.close(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(size),
+            ..
+        } => {
+            windows.resize(key, size.width.max(1), size.height.max(1));
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } => {
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::KeyboardInput {
+                event: key_event, ..
+            },
+            ..
+        } if key_event.state == winit::event::ElementState::Pressed => {
+            let Some(edit) = app.developer_component_editor.as_mut() else {
+                return;
+            };
+            let editing = match &key_event.logical_key {
+                Key::Named(NamedKey::ArrowLeft) => Some(ComponentEditorKey::Left),
+                Key::Named(NamedKey::ArrowRight) => Some(ComponentEditorKey::Right),
+                Key::Named(NamedKey::ArrowUp) => Some(ComponentEditorKey::Up),
+                Key::Named(NamedKey::ArrowDown) => Some(ComponentEditorKey::Down),
+                Key::Named(NamedKey::Home) => Some(ComponentEditorKey::Home),
+                Key::Named(NamedKey::End) => Some(ComponentEditorKey::End),
+                Key::Named(NamedKey::Backspace) => Some(ComponentEditorKey::Backspace),
+                Key::Named(NamedKey::Delete) => Some(ComponentEditorKey::Delete),
+                // Shift-Enter is the newline; plain Enter is OK, the way the
+                // dialog's default button is.
+                Key::Named(NamedKey::Enter) if app.keyboard_modifiers.shift_key() => {
+                    Some(ComponentEditorKey::Enter)
+                }
+                _ => None,
+            };
+            if let Some(editing) = editing {
+                edit.text.key(editing);
+                windows.request_redraw(key);
+                return;
+            }
+            match &key_event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    app.commit_developer_component_editor();
+                    windows.close(key);
+                }
+                Key::Named(NamedKey::Escape) => {
+                    app.cancel_developer_component_editor();
+                    windows.close(key);
+                }
+                Key::Named(NamedKey::Space) => {
+                    edit.text.insert(' ');
+                    windows.request_redraw(key);
+                }
+                Key::Character(text) => {
+                    for character in text.chars() {
+                        edit.text.insert(character);
+                    }
+                    windows.request_redraw(key);
+                }
+                _ => {}
+            }
+        }
+        Event::WindowEvent {
+            event: WindowEvent::RedrawRequested,
+            ..
+        } => {
+            if let Some(host) = windows.host_mut(key) {
+                if let Err(error) = host.present(app) {
+                    tracing::error!(%error, "developer component editor present failed");
+                    app.cancel_developer_component_editor();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The toolbox window's own events.
 pub(crate) fn handle_developer_toolbox_event(
     key: WindowId,

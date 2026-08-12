@@ -674,6 +674,40 @@ impl GameApp {
                     tracing::warn!(%error, component = name, "failed to write live save title");
                 }
             }
+            // Components the user edited this round. `C4ComponentHost::Save`
+            // skips an unmodified host entirely and *deletes* an emptied one
+            // rather than writing zero bytes (`C4ComponentHost.cpp:231-236`),
+            // both of which `component_save_mutations` already decides.
+            for mutation in developer_console_save::component_save_mutations(
+                self.developer_component_hosts
+                    .iter()
+                    .map(clonk_engine::developer_components::ComponentHost::save_action),
+            ) {
+                match mutation {
+                    developer_console_save::FolderSaveMutation::DeleteEntry { name } => {
+                        let name = String::from_utf8_lossy(&name).into_owned();
+                        folder_save_journal.delete_entry(&name);
+                        group.remove_entry(&name);
+                    }
+                    developer_console_save::FolderSaveMutation::PutFile {
+                        name, payload, ..
+                    } => {
+                        let name = String::from_utf8_lossy(&name).into_owned();
+                        folder_save_journal.put_file(
+                            &name,
+                            &payload,
+                            // Silently dropping a component the user just
+                            // edited would lose their edit.
+                            developer_console_save::FolderSaveAddFailure::Fatal,
+                        );
+                        group
+                            .add_file_bytes(name.as_str(), payload)
+                            .with_context(|| format!("write edited component {name}"))?;
+                    }
+                    // `component_save_mutations` produces only those two.
+                    _ => {}
+                }
+            }
             Ok(())
         })();
         if let Err(error) = mutation_result {

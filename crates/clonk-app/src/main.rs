@@ -22,12 +22,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod component_editor_window_host;
 mod console_toolbox_window;
 mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
 mod deferred_config;
 mod desktop_notification;
+mod developer_component_editor;
 mod developer_console_save;
 mod developer_host;
 mod developer_object_list_view;
@@ -1036,6 +1038,12 @@ fn run() -> Result<()> {
                     &mut next_developer_window_key,
                     event_target,
                 );
+                console_toolbox_window::reconcile_developer_component_editor_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
             }
             // Every viewport window redraws with the shell and only with it, the
             // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
@@ -1074,6 +1082,17 @@ fn run() -> Result<()> {
                         == Some(key)
                     {
                         console_toolbox_window::handle_developer_object_list_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
+                        );
+                        return;
+                    }
+                    if console_toolbox_window::component_editor_window_key(&developer_windows)
+                        == Some(key)
+                    {
+                        console_toolbox_window::handle_developer_component_editor_event(
                             key,
                             &event,
                             &mut app,
@@ -2429,6 +2448,8 @@ impl GameApp {
             developer_toolbox: Default::default(),
             developer_toolbox_effects: Vec::new(),
             developer_object_list_open: false,
+            developer_component_editor: None,
+            developer_component_hosts: Vec::new(),
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),
             console_log_capture: None,

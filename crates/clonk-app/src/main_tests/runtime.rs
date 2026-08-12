@@ -6043,6 +6043,107 @@
         );
     }
 
+    // C4Console.cpp:1328-1351 and C4ComponentHost.cpp:231-236,330-334 — the
+    // Script/Title/Info editors. Their commit rules were ported and pinned
+    // long before anything could open one.
+    #[test]
+    fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
+        use clonk_engine::developer_components::{ComponentSaveAction, EditableComponent};
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+
+        // The scenario the components are read from and written back to.
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let scenario = directory.path().join("Round.c4s");
+        std::fs::create_dir(&scenario).expect("the scenario group");
+        std::fs::write(scenario.join("Title.txt"), "Round\n").expect("a title component");
+        app.active_scenario
+            .as_mut()
+            .expect("a running scenario")
+            .path = Some(scenario.clone());
+
+        // Title opens on the component's own bytes.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
+            .expect("the console opened the title editor");
+        let edit = app
+            .developer_component_editor
+            .as_ref()
+            .expect("the title editor is open");
+        assert_eq!(edit.component, EditableComponent::Title);
+        assert_eq!(edit.host.filename(), "Title.txt");
+        assert_eq!(edit.text.lines(), ["Round", ""]);
+
+        // Cancel mutates nothing — not the bytes and not the modified flag —
+        // so the component contributes nothing to a save.
+        app.cancel_developer_component_editor();
+        assert!(app.developer_component_editor.is_none());
+        assert!(app.developer_component_hosts.is_empty());
+
+        // A component that does not exist yet opens empty rather than
+        // refusing: that is how a scenario grows one.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
+            .expect("the console opened the info editor");
+        let edit = app
+            .developer_component_editor
+            .as_mut()
+            .expect("the info editor is open");
+        assert_eq!(edit.text.lines(), [""]);
+        for character in "hello".chars() {
+            edit.text.insert(character);
+        }
+        app.commit_developer_component_editor();
+        assert!(app.developer_component_editor.is_none());
+        let [host] = app.developer_component_hosts.as_slice() else {
+            panic!("expected one committed host");
+        };
+        assert_eq!(
+            host.save_action(),
+            ComponentSaveAction::Write {
+                filename: "Info.txt".to_owned(),
+                data: b"hello".to_vec(),
+            }
+        );
+
+        // Emptying a component deletes it rather than writing zero bytes.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
+            .expect("the console reopened the title editor");
+        let edit = app
+            .developer_component_editor
+            .as_mut()
+            .expect("the title editor is open");
+        for _ in 0..16 {
+            edit.text.key(crate::developer_component_editor::ComponentEditorKey::Delete);
+        }
+        app.commit_developer_component_editor();
+        assert_eq!(
+            app.developer_component_hosts
+                .last()
+                .expect("the emptied host")
+                .save_action(),
+            ComponentSaveAction::Delete {
+                filename: "Title.txt".to_owned(),
+            }
+        );
+
+        // A network game refuses all three outright.
+        let (_events, _commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.developer_console.clear_log();
+        for action in [
+            DeveloperConsoleAction::EditScript,
+            DeveloperConsoleAction::EditTitle,
+            DeveloperConsoleAction::EditInfo,
+        ] {
+            app.dispatch_developer_console_actions(vec![action])
+                .expect("the console refused the editor");
+            assert!(
+                app.developer_component_editor.is_none(),
+                "a network game opens no component editor"
+            );
+        }
+        assert!(!app.developer_console.log().text().is_empty());
+    }
+
     // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
     // Objects component opens the object list, whose rows are the ported
     // object tree and whose clicks write the edit cursor's selection.
