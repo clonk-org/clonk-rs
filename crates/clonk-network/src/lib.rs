@@ -73,8 +73,9 @@ pub use capabilities::{
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
 pub use host_restart::{
-    decode_host_restart_notice, encode_host_restart_notice, DEFAULT_HOST_RESTART_REJOIN_SECONDS,
-    PID_PORT_HOST_RESTARTING,
+    decode_host_restart_lobby_notice, decode_host_restart_notice, encode_host_restart_lobby_notice,
+    encode_host_restart_notice, DEFAULT_HOST_RESTART_REJOIN_SECONDS, PID_PORT_HOST_RESTARTING,
+    PID_PORT_HOST_RESTART_LOBBY,
 };
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};

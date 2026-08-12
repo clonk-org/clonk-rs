@@ -33,7 +33,7 @@ pub(crate) async fn handle_client_message(
         }
         // Only the host restarts a session. A client claiming to is either
         // confused or hostile; either way there is nothing to act on.
-        ControlMessage::HostRestarting { .. } => {}
+        ControlMessage::HostRestarting { .. } | ControlMessage::HostRestartLobby => {}
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
                 let _ = route.outbound.try_send(ControlMessage::Pong(packet));
@@ -1640,6 +1640,15 @@ pub(crate) async fn broadcast_host_restarting(rejoin_seconds: u16, state: &mut H
         state,
         ConnectionTrafficClass::Message,
         ControlMessage::HostRestarting { rejoin_seconds },
+        None,
+    );
+}
+
+pub(crate) async fn broadcast_host_restart_lobby(state: &mut HostState) {
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::HostRestartLobby,
         None,
     );
 }
