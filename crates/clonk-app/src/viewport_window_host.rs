@@ -117,6 +117,26 @@ impl ViewportWindowHost {
         }
     }
 
+    /// The extent of the surface this window draws, which is the coordinate
+    /// space anything painted *onto* that surface is laid out in.
+    pub(crate) fn surface_extent(&self) -> (u32, u32) {
+        (self.buffer_width, self.buffer_height)
+    }
+
+    /// The last pointer position converted into that same space.
+    ///
+    /// `C4Viewport`'s handlers divide the message's coordinates by the
+    /// application scale before using them (`C4Viewport.cpp:181`); the port
+    /// keeps the raw position for the world projection, which applies its own
+    /// scale, and converts here for surface-space hit testing.
+    pub(crate) fn surface_pointer(&self) -> (i32, i32) {
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return self.last_pointer;
+        }
+        let convert = |value: i32| (value as f32 / self.scale) as i32;
+        (convert(self.last_pointer.0), convert(self.last_pointer.1))
+    }
+
     fn rebuild_framebuffer(&mut self) -> anyhow::Result<()> {
         use anyhow::Context;
 

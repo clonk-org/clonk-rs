@@ -399,6 +399,18 @@ pub(crate) struct GameApp {
     /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
     /// rubber band is armed.
     pub(crate) edit_cursor_drag_frame: Option<((i32, i32), (i32, i32))>,
+    /// `C4EditCursor::DoContextMenu`'s popup and the physical viewport whose
+    /// window it belongs to, in that window's surface coordinates.
+    ///
+    /// C++ hands the menu to the OS — `TrackPopupMenu` blocks until an item is
+    /// chosen (`C4EditCursor.cpp:597`) — and neither of its two bodies is
+    /// compiled on the reference build. A winit window cannot host an OS
+    /// popup, so the port draws it onto the viewport's own frame and keeps it
+    /// here until the next click resolves it.
+    pub(crate) console_viewport_context_menu: Option<(
+        u64,
+        clonk_frontend::developer_context_menu::ViewportContextMenu,
+    )>,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.

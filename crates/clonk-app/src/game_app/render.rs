@@ -2652,7 +2652,8 @@ impl GameApp {
                 self.edit_cursor_drag_frame = Some(((x, y), (x, y)));
                 self.developer_selection.clear(SelectionWriter::EditCursor)
             }
-            None => None,
+            // The bare clear is the right button's alone (`right_press`).
+            Some(SelectionEdit::Clear) | None => None,
         }
     }
 
@@ -2785,6 +2786,261 @@ impl GameApp {
             }
         }
         result
+    }
+
+    /// `C4EditCursor::RightButtonDown` (`C4EditCursor.cpp:244-274`).
+    ///
+    /// The selection is settled *before* the menu opens, so the enablement the
+    /// menu is built with already describes what its Delete would act on.
+    pub(crate) fn console_viewport_right_press(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        scale: f32,
+        control: bool,
+    ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        use clonk_engine::developer_cursor::{right_press, SelectionEdit};
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let (x, y) = self.console_viewport_world(identity, local, scale)?;
+        let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
+        // `fCursorIsOnSelection` — `pLnk->Obj->At(X, Y)` over the selection
+        // itself, not the topmost object under the cursor (`:251-257`).
+        let cursor_on_selection = self
+            .developer_selection
+            .objects()
+            .iter()
+            .any(|object| hit_test.object_covers(*object, x, y));
+        let target = hit_test.object_at(x, y, None);
+        match right_press(
+            self.console_cursor_mode(),
+            control,
+            target,
+            cursor_on_selection,
+        ) {
+            Some(SelectionEdit::Replace(object)) => self
+                .developer_selection
+                .replace(SelectionWriter::EditCursor, object),
+            Some(SelectionEdit::Clear) => {
+                self.developer_selection.clear(SelectionWriter::EditCursor)
+            }
+            // The right button produces neither a toggle nor a rubber band.
+            Some(SelectionEdit::Remove(_))
+            | Some(SelectionEdit::Add(_))
+            | Some(SelectionEdit::ClearAndDragFrame)
+            | None => None,
+        }
+    }
+
+    /// `C4EditCursor::RightButtonUp` -> `DoContextMenu` (`:332-340`,
+    /// `:582-628`).
+    ///
+    /// `local` is in the viewport window's *surface* coordinates, which is
+    /// where the popup is drawn — C++ pops up at the screen cursor, but this
+    /// menu lives on the viewport's own frame.
+    pub(crate) fn open_console_viewport_context_menu(&mut self, identity: u64, local: (i32, i32)) {
+        use clonk_engine::developer_cursor::context_menu;
+        use clonk_frontend::developer_context_menu::ViewportContextMenu;
+
+        // `Target = nullptr` — the hover is dropped before the menu opens.
+        self.developer_selection.set_hover(None);
+        let selection = self.developer_selection.objects();
+        // `Selection.GetObject()->Contents.ObjectCount()` asks the *first*
+        // selected object only (`:590`).
+        let contents = selection
+            .first()
+            .and_then(|object| self.snapshot.object(*object))
+            .map_or(0, |object| object.contents.len());
+        let enablement = context_menu(
+            self.console_cursor_mode(),
+            self.developer_console_editing(),
+            !selection.is_empty(),
+            contents,
+        );
+        let labels = self.console_viewport_context_labels();
+        self.console_viewport_context_menu = Some((
+            identity,
+            ViewportContextMenu::new(enablement, &labels, local),
+        ));
+    }
+
+    /// The resource strings `DoContextMenu` writes into the menu
+    /// (`:592-595`).
+    fn console_viewport_context_labels(
+        &self,
+    ) -> clonk_frontend::developer_context_menu::ViewportContextLabels {
+        use clonk_frontend::developer_context_menu::ViewportContextLabels;
+
+        let mut labels = ViewportContextLabels::default();
+        for (target, key, fallback) in [
+            (&mut labels.delete, "IDS_MNU_DELETE", "Delete"),
+            (&mut labels.duplicate, "IDS_MNU_DUPLICATE", "Duplicate"),
+            (&mut labels.contents, "IDS_MNU_CONTENTS", "Grab contents"),
+            (&mut labels.properties, "IDS_CNS_PROPERTIES", "Properties"),
+            (&mut labels.tools, "IDS_CNS_TOOLS", "Tools"),
+        ] {
+            *target = self.runtime_resource_text(key, fallback);
+        }
+        labels
+    }
+
+    /// Track the pointer over an open popup so its rows highlight.
+    pub(crate) fn console_viewport_context_menu_motion(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+    ) -> bool {
+        let Some((open, menu)) = self.console_viewport_context_menu.as_mut() else {
+            return false;
+        };
+        if *open != identity {
+            return false;
+        }
+        menu.handle_pointer_move(clonk_frontend::GuiPoint::new(
+            local.0 as f32,
+            local.1 as f32,
+        ));
+        true
+    }
+
+    /// A click while the popup is up. Returns whether the menu consumed it,
+    /// which is what keeps the click off the edit cursor underneath —
+    /// `TrackPopupMenu` is modal and GTK grabs the pointer.
+    pub(crate) fn console_viewport_context_menu_click(
+        &mut self,
+        identity: u64,
+        local: (i32, i32),
+        extent: (u32, u32),
+    ) -> bool {
+        use clonk_frontend::developer_context_menu::ViewportContextOutcome;
+
+        let Some((open, menu)) = self.console_viewport_context_menu.as_mut() else {
+            return false;
+        };
+        if *open != identity {
+            return false;
+        }
+        let outcome = menu.handle_pointer_up(
+            clonk_frontend::GuiPoint::new(local.0 as f32, local.1 as f32),
+            extent.0,
+            extent.1,
+        );
+        self.console_viewport_context_menu = None;
+        if let ViewportContextOutcome::Activate(item) = outcome {
+            self.activate_console_viewport_context_item(item);
+        }
+        true
+    }
+
+    /// Close the popup without running anything — the Escape key.
+    pub(crate) fn dismiss_console_viewport_context_menu(&mut self) -> bool {
+        self.console_viewport_context_menu.take().is_some()
+    }
+
+    /// Close the popup only if it belongs to `identity`, so one viewport's
+    /// window closing never takes a sibling's menu with it.
+    pub(crate) fn dismiss_console_viewport_context_menu_for(&mut self, identity: u64) -> bool {
+        self.console_viewport_context_menu
+            .take_if(|(open, _)| *open == identity)
+            .is_some()
+    }
+
+    /// `DoContextMenu`'s switch over the chosen item (`:602-608`).
+    fn activate_console_viewport_context_item(
+        &mut self,
+        item: clonk_frontend::developer_context_menu::ViewportContextItem,
+    ) {
+        use clonk_frontend::developer_context_menu::ViewportContextItem;
+
+        match item {
+            ViewportContextItem::Delete => self.console_delete_selection(),
+            ViewportContextItem::Duplicate => self.console_duplicate_selection(),
+            ViewportContextItem::GrabContents => self.console_grab_contents(),
+            // `OpenPropTools()` — the Tools and Property pages it switches to
+            // have no window yet, so the console says so rather than pretending
+            // the click did nothing.
+            ViewportContextItem::Properties => {
+                let message = self.runtime_resource_text("IDS_CNS_PROPERTIES", "Properties");
+                self.developer_console
+                    .out(&format!("{message}: not available yet"));
+            }
+        }
+    }
+
+    /// `C4EditCursor::Delete` (`:350-359`).
+    fn console_delete_selection(&mut self) {
+        if !self.console_editing_ok() {
+            return;
+        }
+        self.submit_editor_selection_action(clonk_engine::EMMO_REMOVE, "delete");
+    }
+
+    /// `C4EditCursor::Duplicate` (`:376-380`).
+    ///
+    /// C++ does **not** open this one with `EditingOK`, unlike `Delete` — the
+    /// menu item's own enablement is the only gate, so a caller reaching it
+    /// another way would duplicate during a replay.
+    fn console_duplicate_selection(&mut self) {
+        self.submit_editor_selection_action(clonk_engine::EMMO_DUPLICATE, "duplicate");
+    }
+
+    /// `C4EditCursor::GrabContents` (`:640-651`).
+    ///
+    /// The selection is *replaced* by the first selected object's contents and
+    /// only then exited, so the command acts on what was inside the container,
+    /// not on the container. `Hold` is set before the control goes out, which
+    /// is what lets the freed objects be dragged straight out of it.
+    fn console_grab_contents(&mut self) {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let Some(container) = self.developer_selection.objects().first().copied() else {
+            return;
+        };
+        let Some(contents) = self
+            .snapshot
+            .object(container)
+            .map(|object| object.contents.clone())
+        else {
+            return;
+        };
+        self.developer_selection
+            .select_frame(SelectionWriter::EditCursor, contents);
+        self.edit_cursor_hold = true;
+        self.submit_editor_selection_action(clonk_engine::EMMO_EXIT, "grab contents");
+    }
+
+    /// `EMMoveObject(action, 0, 0, nullptr, &Selection)` — the three menu
+    /// commands that carry no offset and no target object.
+    fn submit_editor_selection_action(&mut self, action: u8, what: &str) {
+        let objects = self
+            .developer_selection
+            .objects()
+            .iter()
+            .map(|id| id.as_u64() as i32)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_selection_script(clonk_engine::EmMoveObjectControlData {
+                action,
+                objects,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor {what}");
+        }
+    }
+
+    /// The edit cursor's mode as the ported console logic names it.
+    fn console_cursor_mode(&self) -> clonk_engine::developer_cursor::CursorMode {
+        use clonk_engine::developer_cursor::CursorMode;
+
+        match self.developer_console_edit_mode {
+            ConsoleEditMode::Play => CursorMode::Play,
+            ConsoleEditMode::Edit => CursorMode::Edit,
+            ConsoleEditMode::Draw => CursorMode::Draw,
+        }
     }
 
     /// This window's pointer position in world coordinates, through the
@@ -3321,6 +3577,16 @@ impl GameApp {
         // through; nothing else records this viewport's own ViewX/ViewY.
         self.console_viewport_projections
             .insert(identity, frame.projection);
+        // The context menu is *not* part of `C4Viewport::Draw`: C++ hands it to
+        // the window system, which paints it above the window entirely. With no
+        // OS popup to hand it to, the port paints it last, over everything the
+        // viewport just drew.
+        if let Some((open, menu)) = self.console_viewport_context_menu.as_ref() {
+            if *open == identity {
+                let font = self.assets.font_arc();
+                menu.render(&mut frame.surface, font.as_ref());
+            }
+        }
         Some(frame.surface)
     }
 
