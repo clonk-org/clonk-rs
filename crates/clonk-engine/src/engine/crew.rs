@@ -513,8 +513,8 @@ impl Engine {
                 self.audio_registry.clone(),
                 self.game_over_triggered,
                 || match callback.resolution() {
-                    Some(resolution) => script.call_pinned_with_ref_args(
-                        resolution.function.as_ref(),
+                    Some(resolution) => script.call_resolved_with_ref_args(
+                        resolution,
                         resolution.scope == clonk_script::ScriptFunctionScope::Global,
                         &args,
                     ),

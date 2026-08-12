@@ -6,14 +6,14 @@ const NO_CONTAINER_SENTINEL: i32 = 124;
 
 /// One queue-time-resolved `C4ObjResort::OrderFunc`. C++ stores the resolved
 /// `C4AulFunc *`, rather than looking the function name up again when the
-/// deferred resort executes. The immutable function clone pins that body and
+/// deferred resort executes. The immutable resolution pins that body and
 /// overload chain; the stable host identity supplies live native/global state
 /// without carrying the Rc-based ScriptEngine through Send + Sync errors.
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct ObjectOrderFunction {
     pub(crate) host_identity: clonk_script::ScriptHostIdentity,
-    pub(crate) pinned_function: Arc<clonk_script::Function>,
+    pub(crate) resolution: clonk_script::ScriptFunctionResolution,
     pub(crate) script_name: String,
     pub(crate) definition_context: Option<DefinitionId>,
     pub(crate) function: String,
@@ -38,7 +38,7 @@ impl std::fmt::Debug for ObjectOrderFunction {
 impl PartialEq for ObjectOrderFunction {
     fn eq(&self, other: &Self) -> bool {
         self.host_identity == other.host_identity
-            && self.pinned_function == other.pinned_function
+            && self.resolution == other.resolution
             && self.script_name == other.script_name
             && self.definition_context == other.definition_context
             && self.function == other.function
@@ -9237,7 +9237,7 @@ fn capture_object_order_function(
     }
     Ok(Some(ObjectOrderFunction {
         host_identity,
-        pinned_function: resolution.function,
+        resolution,
         script_name,
         definition_context,
         function,

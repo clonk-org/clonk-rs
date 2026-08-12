@@ -39,6 +39,7 @@ const RENDER_TOKEN_PRIME: u64 = 0x0000_0100_0000_01b3;
 #[cfg(test)]
 std::thread_local! {
     static MATERIAL_COUNT_FULL_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    pub(crate) static MASK_WRITE_BATCH_ACTIVATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(windows)]
@@ -78,6 +79,90 @@ enum PixelWrite {
     Raw,
     /// `C4SolidMask`'s `_SBackPix`.
     SolidMask,
+}
+
+/// Result of one ordered `C4SolidMask` Surface8 write. The callback runs
+/// immediately after this write, including for out-of-bounds and same-byte
+/// no-ops, so callers can preserve native side effects interleaved with the
+/// raster walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MaskWriteResult<T> {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) byte: u8,
+    pub(crate) old: Option<u8>,
+    pub(crate) changed: bool,
+    pub(crate) tag: T,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MaskWrite<T> {
+    x: i32,
+    y: i32,
+    byte: u8,
+    expected: Option<u8>,
+    tag: T,
+}
+
+impl<T> MaskWrite<T> {
+    pub(crate) fn set(x: i32, y: i32, byte: u8, tag: T) -> Self {
+        Self {
+            x,
+            y,
+            byte,
+            expected: None,
+            tag,
+        }
+    }
+
+    pub(crate) fn replace(x: i32, y: i32, expected: u8, byte: u8, tag: T) -> Self {
+        Self {
+            x,
+            y,
+            byte,
+            expected: Some(expected),
+            tag,
+        }
+    }
+}
+
+/// Read-only material-plane view exposed between writes of one mask batch.
+/// It intentionally cannot clone the grid or capture a render anchor: that
+/// makes it safe for the batch to retain unique mutable access to both COW
+/// planes until the ordered walk finishes.
+pub(crate) struct PixelGridMaskReadView<'a> {
+    width: u32,
+    height: u32,
+    bytes: &'a [u8],
+    densities: &'a [i32],
+    materials: &'a [Option<MaterialId>],
+}
+
+impl PixelGridMaskReadView<'_> {
+    fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            return None;
+        }
+        Some(self.bytes[y as usize * self.width as usize + x as usize])
+    }
+
+    fn density_at(&self, x: i32, y: i32) -> Option<i32> {
+        let byte = self.byte_at(x, y)?;
+        Some(
+            self.densities
+                .get((byte & 0x7f) as usize)
+                .copied()
+                .unwrap_or(0),
+        )
+    }
+
+    fn material_id_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        let byte = self.byte_at(x, y)?;
+        self.materials
+            .get((byte & 0x7f) as usize)
+            .copied()
+            .flatten()
+    }
 }
 
 /// A clipped half-open rectangle whose current texmap bytes must be
@@ -368,6 +453,12 @@ pub struct PixelGrid {
     /// cloned landscapes that both make a different first edit.
     #[serde(default)]
     render_token: u64,
+    /// Runtime-only identity for the current Surface8 lineage checkpoint.
+    /// Presentation caches retain this small token instead of the byte plane,
+    /// so the first later write opens a dirty generation without forcing a
+    /// full-plane COW copy.
+    #[serde(skip)]
+    render_lineage: RuntimeRenderLineage,
     /// Bounded COW generations joining a rendered/snapshotted byte plane to
     /// the dirty rectangle of its successor. A cache outside this ancestry
     /// performs a safe full rebuild.
@@ -379,6 +470,8 @@ pub struct PixelGrid {
     surface32_revision: u64,
     #[serde(skip)]
     surface32_render_token: u64,
+    #[serde(skip)]
+    surface32_render_lineage: RuntimeRenderLineage,
     #[serde(skip)]
     surface32_dirty_generations: VecDeque<PixelGridDirtyGeneration>,
     /// C4Landscape::SetPix queues relights until Draw::DoRelights. Direct
@@ -434,6 +527,38 @@ impl PartialEq for RuntimeTexmapIdentity {
 
 impl Eq for RuntimeTexmapIdentity {}
 
+/// Runtime-only identity shared by clones and lightweight render anchors.
+/// Equality deliberately ignores it because it is derived presentation
+/// bookkeeping, just like [`RuntimeTexmapIdentity`].
+#[derive(Debug, Clone, Default)]
+struct RuntimeRenderLineage(Arc<()>);
+
+impl PartialEq for RuntimeRenderLineage {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RuntimeRenderLineage {}
+
+/// Lightweight checkpoint for a frontend's persistent Surface32 cache.
+///
+/// It retains the revisions, content tokens and small lineage identities
+/// needed to recover dirty rectangles, but deliberately does not retain the
+/// authoritative Surface8 byte plane or sparse Surface32 replacements.
+#[derive(Debug, Clone)]
+pub struct PixelGridRenderAnchor {
+    width: u32,
+    height: u32,
+    texmap_identity: u64,
+    revision: u64,
+    render_token: u64,
+    render_lineage: Arc<()>,
+    surface32_revision: u64,
+    surface32_render_token: u64,
+    surface32_render_lineage: Arc<()>,
+}
+
 /// Identity of the two texmap name tables: FNV-1a over their bytes, with each
 /// table's length and each entry's length folded in so that `["ab", "c"]` and
 /// `["a", "bc"]`, and `[None]` and `[Some("")]`, all differ. Never zero, which
@@ -484,9 +609,11 @@ impl PixelGrid {
             texture_names,
             revision: 0,
             render_token,
+            render_lineage: RuntimeRenderLineage::default(),
             dirty_generations: VecDeque::new(),
             surface32_revision: 0,
             surface32_render_token: 0,
+            surface32_render_lineage: RuntimeRenderLineage::default(),
             surface32_dirty_generations: VecDeque::new(),
             pending_surface32_relights: Vec::new(),
             mask_background: RuntimeMaskBackground::default(),
@@ -514,6 +641,7 @@ impl PixelGrid {
         self.surface32_pixels = Arc::new(surface32_pixels);
         self.surface32_revision = 0;
         self.surface32_render_token = 0;
+        self.surface32_render_lineage = RuntimeRenderLineage::default();
         self.surface32_dirty_generations.clear();
         self.pending_surface32_relights.clear();
     }
@@ -566,6 +694,165 @@ impl PixelGrid {
     /// collision truth without ever reaching the rendered landscape.
     pub fn write_mask_byte(&mut self, x: i32, y: i32, byte: u8) {
         self.set_byte_impl(x, y, byte, PixelWrite::SolidMask);
+    }
+
+    /// Apply one native-order `C4SolidMask` raster walk while retaining unique
+    /// access to the COW byte and background stores. No storage or lineage is
+    /// split until the first in-bounds byte that actually changes.
+    fn write_mask_bytes<I, T, F>(&mut self, writes: I, mut after_each: F)
+    where
+        I: IntoIterator<Item = MaskWrite<T>>,
+        F: FnMut(MaskWriteResult<T>, &PixelGridMaskReadView<'_>),
+    {
+        let mut writes = writes.into_iter();
+        let first_changed = loop {
+            let Some(write) = writes.next() else {
+                return;
+            };
+            let MaskWrite {
+                x,
+                y,
+                byte,
+                expected,
+                tag,
+            } = write;
+            let old = self.byte_at(x, y);
+            if old.is_some_and(|old| old != byte && expected.is_none_or(|expected| old == expected))
+            {
+                break MaskWrite {
+                    x,
+                    y,
+                    byte,
+                    expected,
+                    tag,
+                };
+            }
+            let view = PixelGridMaskReadView {
+                width: self.width,
+                height: self.height,
+                bytes: self.bytes.as_slice(),
+                densities: &self.densities,
+                materials: &self.materials,
+            };
+            after_each(
+                MaskWriteResult {
+                    x,
+                    y,
+                    byte,
+                    old,
+                    changed: false,
+                    tag,
+                },
+                &view,
+            );
+        };
+
+        if self.material_counts.is_empty() && self.materials.iter().any(Option::is_some) {
+            self.rebuild_material_counts();
+        }
+        #[cfg(test)]
+        MASK_WRITE_BATCH_ACTIVATIONS.with(|activations| {
+            activations.set(activations.get() + 1);
+        });
+        let storage_was_shared = self.begin_surface8_change();
+        let PixelGrid {
+            width,
+            height,
+            bytes,
+            densities,
+            materials,
+            material_counts,
+            revision,
+            render_token,
+            dirty_generations,
+            mask_background,
+            ..
+        } = self;
+        let bytes = Arc::make_mut(bytes);
+        let mask_background = Arc::make_mut(&mut mask_background.0);
+        let mut first_actual_change = true;
+
+        for write in std::iter::once(first_changed).chain(writes) {
+            let MaskWrite {
+                x,
+                y,
+                byte,
+                expected,
+                tag,
+            } = write;
+            let slot = if x < 0 || y < 0 || x as u32 >= *width || y as u32 >= *height {
+                None
+            } else {
+                Some(y as usize * *width as usize + x as usize)
+            };
+            let old = slot.map(|slot| bytes[slot]);
+            let changed = old
+                .is_some_and(|old| old != byte && expected.is_none_or(|expected| old == expected));
+            if changed {
+                let slot = slot.expect("changed mask byte is in bounds");
+                let old = old.expect("changed mask byte has an old value");
+                let background = *mask_background.entry(slot).or_insert(old);
+                if byte == background {
+                    mask_background.remove(&slot);
+                }
+
+                let material_for_byte =
+                    |byte: u8| materials.get((byte & 0x7f) as usize).copied().flatten();
+                let old_material = material_for_byte(old);
+                let new_material = material_for_byte(byte);
+                if old_material != new_material {
+                    if let Some(old_material) = old_material {
+                        if let Some(count) = material_counts.get_mut(old_material.index()) {
+                            *count = count.wrapping_sub(1);
+                        }
+                    }
+                    if let Some(new_material) = new_material {
+                        if material_counts.len() <= new_material.index() {
+                            material_counts.resize(new_material.index() + 1, 0);
+                        }
+                        material_counts[new_material.index()] =
+                            material_counts[new_material.index()].wrapping_add(1);
+                    }
+                }
+
+                let base_revision = *revision;
+                let base_token = *render_token;
+                bytes[slot] = byte;
+                *revision = revision.wrapping_add(1);
+                *render_token =
+                    Self::advance_pixel_render_token(base_token, *revision, x, y, old, byte);
+                Self::record_lineage_change(
+                    dirty_generations,
+                    *revision,
+                    *render_token,
+                    base_revision,
+                    base_token,
+                    PixelGridDirtyRect::single(x, y),
+                    true,
+                    first_actual_change && storage_was_shared,
+                );
+                first_actual_change = false;
+            }
+
+            let view = PixelGridMaskReadView {
+                width: *width,
+                height: *height,
+                bytes,
+                densities,
+                materials,
+            };
+            after_each(
+                MaskWriteResult {
+                    x,
+                    y,
+                    byte,
+                    old,
+                    changed,
+                    tag,
+                },
+                &view,
+            );
+        }
     }
 
     /// `CSurface8::Circle` (`src/StdSurface8.cpp:231-239`). Its bottom and
@@ -688,6 +975,82 @@ impl PixelGrid {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Capture the presentation lineage without retaining either pixel store.
+    pub fn render_anchor(&self) -> PixelGridRenderAnchor {
+        let texmap_identity = if self.texmap_identity.0 == 0 {
+            texmap_identity(&self.material_names, &self.texture_names).0
+        } else {
+            self.texmap_identity.0
+        };
+        PixelGridRenderAnchor {
+            width: self.width,
+            height: self.height,
+            texmap_identity,
+            revision: self.revision,
+            render_token: self.render_token,
+            render_lineage: Arc::clone(&self.render_lineage.0),
+            surface32_revision: self.surface32_revision,
+            surface32_render_token: self.surface32_render_token,
+            surface32_render_lineage: Arc::clone(&self.surface32_render_lineage.0),
+        }
+    }
+
+    /// Whether Surface8 changed after `previous` was captured. Callers use
+    /// this only after [`Self::render_dirty_rects_since_anchor`] established
+    /// that the checkpoint is an ancestor.
+    pub fn surface8_changed_since(&self, previous: &PixelGridRenderAnchor) -> bool {
+        (self.revision, self.render_token) != (previous.revision, previous.render_token)
+    }
+
+    /// Lightweight-anchor counterpart to [`Self::render_dirty_rects_since`].
+    pub fn render_dirty_rects_since_anchor(
+        &self,
+        previous: &PixelGridRenderAnchor,
+    ) -> Option<Vec<PixelGridDirtyRect>> {
+        let current_texmap_identity = if self.texmap_identity.0 == 0 {
+            texmap_identity(&self.material_names, &self.texture_names).0
+        } else {
+            self.texmap_identity.0
+        };
+        if (self.width, self.height) != (previous.width, previous.height)
+            || current_texmap_identity != previous.texmap_identity
+        {
+            return None;
+        }
+        let same_surface8 =
+            (self.revision, self.render_token) == (previous.revision, previous.render_token);
+        if same_surface8 && !Arc::ptr_eq(&self.render_lineage.0, &previous.render_lineage) {
+            return None;
+        }
+        let mut rects = Self::render_lineage_dirty_rects(
+            self.revision,
+            self.render_token,
+            &self.dirty_generations,
+            previous.revision,
+            previous.render_token,
+            true,
+        )?;
+        let same_surface32 = (self.surface32_revision, self.surface32_render_token)
+            == (previous.surface32_revision, previous.surface32_render_token);
+        if same_surface32
+            && !Arc::ptr_eq(
+                &self.surface32_render_lineage.0,
+                &previous.surface32_render_lineage,
+            )
+        {
+            return None;
+        }
+        rects.extend(Self::render_lineage_dirty_rects(
+            self.surface32_revision,
+            self.surface32_render_token,
+            &self.surface32_dirty_generations,
+            previous.surface32_revision,
+            previous.surface32_render_token,
+            false,
+        )?);
+        Some(rects)
     }
 
     /// Returns the exact bounded cache rectangles connecting `previous` to
@@ -946,6 +1309,24 @@ impl PixelGrid {
         }
     }
 
+    fn begin_surface8_change(&mut self) -> bool {
+        let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+        let lineage_was_shared = Arc::strong_count(&self.render_lineage.0) > 1;
+        if lineage_was_shared {
+            self.render_lineage = RuntimeRenderLineage::default();
+        }
+        storage_was_shared || lineage_was_shared
+    }
+
+    fn begin_surface32_change(&mut self) -> bool {
+        let storage_was_shared = Arc::strong_count(&self.surface32_pixels) > 1;
+        let lineage_was_shared = Arc::strong_count(&self.surface32_render_lineage.0) > 1;
+        if lineage_was_shared {
+            self.surface32_render_lineage = RuntimeRenderLineage::default();
+        }
+        storage_was_shared || lineage_was_shared
+    }
+
     fn record_render_change(
         &mut self,
         base_revision: u64,
@@ -1090,7 +1471,7 @@ impl PixelGrid {
             return true;
         }
 
-        let storage_was_shared = Arc::strong_count(&self.surface32_pixels) > 1;
+        let storage_was_shared = self.begin_surface32_change();
         let base_revision = self.surface32_revision;
         let base_token = self.surface32_render_token;
         Arc::make_mut(&mut self.surface32_pixels).insert(slot, color);
@@ -1154,7 +1535,7 @@ impl PixelGrid {
         }
         removed.sort_unstable_by_key(|&(slot, _, _, _)| slot);
 
-        let storage_was_shared = Arc::strong_count(&self.surface32_pixels) > 1;
+        let storage_was_shared = self.begin_surface32_change();
         let base_revision = self.surface32_revision;
         let base_token = self.surface32_render_token;
         let pixels = Arc::make_mut(&mut self.surface32_pixels);
@@ -1248,7 +1629,7 @@ impl PixelGrid {
             (rect.width as i32).saturating_add(2),
             (rect.height as i32).saturating_add(16),
         );
-        let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+        let storage_was_shared = self.begin_surface8_change();
         let base_revision = self.revision;
         let base_token = self.render_token;
         self.adjust_material_counts_in_rect(rect, false);
@@ -1288,7 +1669,7 @@ impl PixelGrid {
             return;
         };
 
-        let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+        let storage_was_shared = self.begin_surface8_change();
         let base_revision = self.revision;
         let base_token = self.render_token;
         self.adjust_material_counts_in_rect(rect, false);
@@ -1418,16 +1799,17 @@ impl PixelGrid {
                 // stored background handles a mask put over another mask's
                 // MCVehic, which owns no background of its own
                 // (C4SolidMask.cpp:92-96).
-                let background = *self.mask_background.0.entry(slot).or_insert(old);
+                let mask_background = Arc::make_mut(&mut self.mask_background.0);
+                let background = *mask_background.entry(slot).or_insert(old);
                 if byte == background {
-                    self.mask_background.0.remove(&slot);
+                    mask_background.remove(&slot);
                 }
             } else {
                 // A real landscape change defines the new mask-free material.
                 // PrepareChange normally lifts the masks first
                 // (C4Landscape.cpp:2851-2880); one that lands anyway must not
                 // keep showing the byte a mask saved before it.
-                self.mask_background.0.remove(&slot);
+                Arc::make_mut(&mut self.mask_background.0).remove(&slot);
             }
             if write == PixelWrite::SetPix {
                 self.schedule_surface32_relight_around(x, y);
@@ -1451,7 +1833,7 @@ impl PixelGrid {
                         self.material_counts[new_material.index()].wrapping_add(1);
                 }
             }
-            let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+            let storage_was_shared = self.begin_surface8_change();
             let base_revision = self.revision;
             let base_token = self.render_token;
             Arc::make_mut(&mut self.bytes)[slot] = byte;
@@ -2526,8 +2908,14 @@ struct LandscapeInitialPixels {
 /// Runtime-only, and ignored by equality for the same reason as the other
 /// `Runtime*` helpers: it is derived from live masks, it is not engine state,
 /// and it must not reach a savegame, a snapshot or a replay checkpoint hash.
-#[derive(Debug, Clone, Default)]
-struct RuntimeMaskBackground(HashMap<usize, u8>);
+#[derive(Debug, Default)]
+struct RuntimeMaskBackground(Arc<rustc_hash::FxHashMap<usize, u8>>);
+
+impl Clone for RuntimeMaskBackground {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
 
 impl PartialEq for RuntimeMaskBackground {
     fn eq(&self, _other: &Self) -> bool {
@@ -2646,6 +3034,65 @@ pub struct Landscape {
     /// `pInitial`; legacy scenario loading recreates it before ApplyDiff.
     #[serde(skip)]
     initial_pixels: RuntimeInitialPixels,
+}
+
+/// The narrow landscape view consumed by C4MassMover instability creation.
+/// A solid-mask batch implements this without exposing its uniquely borrowed
+/// COW stores to cloning or render-anchor capture between ordered writes.
+pub(crate) trait LandscapeMaterialRead {
+    fn landscape_dimensions(&self) -> (i32, i32);
+    fn landscape_material_at(&self, x: i32, y: i32) -> Option<MaterialId>;
+}
+
+struct LandscapeMaskReadView<'a> {
+    grid: &'a PixelGridMaskReadView<'a>,
+    surface: &'a [i32],
+    solid_materials: &'a [Option<MaterialId>],
+    default_solid_material: Option<MaterialId>,
+    liquids: &'a [LiquidColumn],
+    default_liquid_material: Option<MaterialId>,
+}
+
+impl LandscapeMaterialRead for LandscapeMaskReadView<'_> {
+    fn landscape_dimensions(&self) -> (i32, i32) {
+        (self.grid.width as i32, self.grid.height as i32)
+    }
+
+    fn landscape_material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        if let Some(material) = self.grid.material_id_at(x, y) {
+            return Some(material);
+        }
+        let density = self.grid.density_at(x, y)?;
+        if density <= 0 {
+            return None;
+        }
+        let index = usize::try_from(x).ok()?;
+        if density >= C4M_SOLID {
+            if self.surface.is_empty() || index >= self.surface.len() {
+                return None;
+            }
+            self.solid_materials
+                .get(index)
+                .copied()
+                .flatten()
+                .or(self.default_solid_material)
+        } else {
+            self.liquids
+                .get(index)
+                .and_then(|column| column.material_at(y, self.default_liquid_material))
+        }
+    }
+}
+
+impl LandscapeMaterialRead for Landscape {
+    fn landscape_dimensions(&self) -> (i32, i32) {
+        self.grid_dimensions()
+            .unwrap_or((self.width() as i32, self.estimated_height()))
+    }
+
+    fn landscape_material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        self.material_at(x, y)
+    }
 }
 
 fn default_top_open() -> bool {
@@ -4194,6 +4641,56 @@ impl Landscape {
         if let Some(grid) = self.pixels.as_mut() {
             grid.write_mask_byte(x, y, byte);
         }
+    }
+
+    /// Ordered solid-mask Surface8 writes with one COW acquisition. The
+    /// callback sees the post-write material view for every input, including
+    /// same-byte no-ops, which retains Remove's per-pixel instability order.
+    pub(crate) fn grid_write_mask_bytes<I, T, F>(&mut self, writes: I, mut after_each: F)
+    where
+        I: IntoIterator<Item = MaskWrite<T>>,
+        F: FnMut(MaskWriteResult<T>, &dyn LandscapeMaterialRead),
+    {
+        let writes = writes.into_iter();
+        if self.pixels.is_none() {
+            for write in writes {
+                after_each(
+                    MaskWriteResult {
+                        x: write.x,
+                        y: write.y,
+                        byte: write.byte,
+                        old: None,
+                        changed: false,
+                        tag: write.tag,
+                    },
+                    self,
+                );
+            }
+            return;
+        }
+        let Landscape {
+            surface,
+            solid_materials,
+            default_solid_material,
+            liquids,
+            default_liquid_material,
+            pixels,
+            ..
+        } = self;
+        let Some(grid) = pixels.as_mut() else {
+            return;
+        };
+        grid.write_mask_bytes(writes, |result, grid| {
+            let view = LandscapeMaskReadView {
+                grid,
+                surface,
+                solid_materials,
+                default_solid_material: *default_solid_material,
+                liquids,
+                default_liquid_material: *default_liquid_material,
+            };
+            after_each(result, &view);
+        });
     }
 
     pub(crate) fn grid_set_byte(&mut self, x: i32, y: i32, byte: u8) {
@@ -8976,6 +9473,32 @@ func MoveMask(int x, int y)
     }
 
     #[test]
+    fn cloning_a_masked_grid_reuses_runtime_mask_storage() {
+        // C++ keeps solid-mask background bytes in the live C4SolidMask
+        // instances rather than copying them into every presentation
+        // snapshot (C4SolidMask.cpp:79-101). Rust's derived render helper is
+        // likewise runtime-only and may stay shared until either clone writes.
+        let mut grid = PixelGrid::new(
+            4,
+            4,
+            vec![1; 16],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+        grid.write_mask_byte(1, 1, 2);
+
+        let cloned = grid.clone();
+
+        assert!(Arc::ptr_eq(
+            &grid.mask_background.0,
+            &cloned.mask_background.0
+        ));
+        assert_eq!(cloned.byte_at(1, 1), Some(2));
+        assert_eq!(cloned.render_byte_at(1, 1), Some(1));
+    }
+
+    #[test]
     fn overlapping_masks_keep_the_one_background_under_them() {
         // Two masks over the same pixel: the second stores MCVehic over
         // MCVehic and its own Remove restores MCVehic (C4SolidMask.cpp:92-96),
@@ -9001,6 +9524,169 @@ func MoveMask(int x, int y)
         grid.write_mask_byte(0, 0, 3);
         assert_eq!(grid.render_byte_at(0, 0), Some(3));
         assert_eq!(grid.byte_at(0, 0), Some(3));
+    }
+
+    #[test]
+    fn batched_solid_mask_writes_match_scalar_surface8_state() {
+        // C4SolidMask visits the clipped mask in row-major order and performs
+        // one `_SBackPix` for every opaque pixel (C4SolidMask.cpp:79-101,
+        // 233-274). Batching the Rust storage access must retain the exact
+        // per-pixel mutation sequence, including doubled MCVehic writes.
+        let grid = || {
+            let mut grid = PixelGrid::new(
+                4,
+                2,
+                vec![1, 1, 3, 3, 1, 1, 3, 3],
+                vec![0; 128],
+                vec![None; 128],
+                vec![None; 128],
+            );
+            grid.materials = vec![
+                None,
+                MaterialId::new(0),
+                MaterialId::new(1),
+                MaterialId::new(2),
+            ];
+            grid.rebuild_material_counts();
+            grid
+        };
+        let scalar_writes = [
+            (0, 0, 2, 0_usize),
+            (1, 0, 2, 1),
+            (0, 0, 2, 2),
+            (2, 0, 2, 3),
+            (0, 0, 1, 4),
+            (3, 1, 2, 5),
+        ];
+        let mut scalar = grid();
+        let mut scalar_results = Vec::new();
+        for &(x, y, byte, tag) in &scalar_writes {
+            let old = scalar.byte_at(x, y);
+            scalar.write_mask_byte(x, y, byte);
+            scalar_results.push((tag, old, old != Some(byte)));
+        }
+
+        let mut batched = grid();
+        let mut batched_results = Vec::new();
+        let writes = scalar_writes.map(|(x, y, byte, tag)| MaskWrite::set(x, y, byte, tag));
+        batched.write_mask_bytes(writes, |result, _view| {
+            batched_results.push((result.tag, result.old, result.changed));
+        });
+
+        assert_eq!(batched_results, scalar_results);
+        assert_eq!(
+            serde_json::to_value(&batched).expect("batched grid serializes"),
+            serde_json::to_value(&scalar).expect("scalar grid serializes")
+        );
+        assert_eq!(batched.material_counts, scalar.material_counts);
+        for y in 0..2 {
+            for x in 0..4 {
+                assert_eq!(batched.byte_at(x, y), scalar.byte_at(x, y));
+                assert_eq!(batched.render_byte_at(x, y), scalar.render_byte_at(x, y));
+            }
+        }
+    }
+
+    #[test]
+    fn all_noop_solid_mask_batch_preserves_cow_storage_and_lineage() {
+        // A doubled MCVehic put is a same-byte `_SBackPix` and therefore has
+        // no C4Landscape state effect (C4SolidMask.cpp:92-96). In particular,
+        // a storage batching seam must not turn that no-op into a snapshot or
+        // render-lineage split.
+        let mut grid = PixelGrid::new(
+            2,
+            2,
+            vec![2; 4],
+            vec![0; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+        grid.materials = vec![None, None, MaterialId::new(0)];
+        let bytes = Arc::clone(&grid.bytes);
+        let background = Arc::clone(&grid.mask_background.0);
+        let lineage = Arc::clone(&grid.render_lineage.0);
+        let anchor = grid.render_anchor();
+        let before = serde_json::to_value(&grid).expect("grid serializes");
+        MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| rebuilds.set(0));
+        let mut callbacks = Vec::new();
+
+        grid.write_mask_bytes(
+            [
+                MaskWrite::set(0, 0, 2, 7),
+                MaskWrite::set(-1, 0, 2, 8),
+                MaskWrite::set(2, 1, 2, 9),
+            ],
+            |result, _| {
+                callbacks.push((result.tag, result.old, result.changed));
+            },
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![(7, Some(2), false), (8, None, false), (9, None, false)]
+        );
+        assert!(Arc::ptr_eq(&grid.bytes, &bytes));
+        assert!(Arc::ptr_eq(&grid.mask_background.0, &background));
+        assert!(Arc::ptr_eq(&grid.render_lineage.0, &lineage));
+        assert_eq!(
+            grid.render_dirty_rects_since_anchor(&anchor),
+            Some(Vec::new())
+        );
+        assert_eq!(serde_json::to_value(&grid).unwrap(), before);
+        MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
+    }
+
+    #[test]
+    fn batched_mask_removal_preserves_instability_probe_sequence_and_materials() {
+        // Remove restores each used mask pixel and immediately calls
+        // CheckInstabilityRange before visiting the next one
+        // (C4SolidMask.cpp:244-257). A later restored neighbor must therefore
+        // not become visible to an earlier probe.
+        let materials = MaterialSet::from_resource_library(
+            &MaterialLibrary::parse(
+                "[Material Earth]\nName=Earth\nDensity=100\n\n\
+                 [Material Vehicle]\nName=Vehicle\nDensity=100\n\n\
+                 [Material Water]\nName=Water\nDensity=25\nInstable=1\n",
+            )
+            .expect("materials parse"),
+        );
+        let landscape = || {
+            let mut landscape = raster_grid_landscape(3, 3, vec![2; 9]);
+            landscape.resolve_grid_materials(|name| materials.id_of(name));
+            landscape
+        };
+        let scalar_writes = [(1, 1, 3, ()), (2, 1, 1, ())];
+
+        let mut scalar = landscape();
+        let mut scalar_movers = crate::mass_mover::MassMoverSet::new();
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+        for &(x, y, byte, ()) in &scalar_writes {
+            scalar.grid_write_mask_byte(x, y, byte);
+            scalar_movers.check_instability_range_for_landscape(&scalar, &materials, x, y);
+        }
+        let scalar_probes =
+            crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow().clone());
+
+        let mut batched = landscape();
+        let mut batched_movers = crate::mass_mover::MassMoverSet::new();
+        crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow_mut().clear());
+        let writes = scalar_writes.map(|(x, y, byte, tag)| MaskWrite::set(x, y, byte, tag));
+        batched.grid_write_mask_bytes(writes, |result, view| {
+            batched_movers
+                .check_instability_range_for_landscape(view, &materials, result.x, result.y);
+        });
+        let batched_probes =
+            crate::mass_mover::MASS_MOVER_INSTABILITY_PROBES.with(|probes| probes.borrow().clone());
+
+        assert_eq!(batched_probes, scalar_probes);
+        assert_eq!(
+            serde_json::to_value(&batched_movers).expect("batched movers serialize"),
+            serde_json::to_value(&scalar_movers).expect("scalar movers serialize")
+        );
+        assert_eq!(
+            serde_json::to_value(&batched).expect("batched landscape serializes"),
+            serde_json::to_value(&scalar).expect("scalar landscape serializes")
+        );
     }
 
     #[test]

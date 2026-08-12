@@ -1782,7 +1782,7 @@ impl Engine {
                 self.environment,
                 self.audio_registry.clone(),
                 self.game_over_triggered,
-                || script.call_pinned_with_ref_args(&resolution.function, true, args),
+                || script.call_resolved_with_ref_args(&resolution, true, args),
             );
         self.rng = rng;
         self.audio_registry = audio_state;

@@ -1066,10 +1066,6 @@ impl Engine {
             }
 
             dbg_stage(&self.objects[idx], "POSTMOVE");
-            // Masks follow every state change this frame
-            // (C4Object::UpdateSolidMask fires from UpdatePos/Enter/
-            // Exit/DoCon; the end-of-exec update covers the net state).
-            self.update_solid_mask(idx);
             self.update_sector_for_index(idx);
             // Script effect timers execute HERE in C++ — pEffects->Execute
             // follows ExecAction and ExecMovement inside C4Object::Execute
@@ -2804,14 +2800,14 @@ impl Engine {
     pub(crate) fn apply_callback_outcome(
         &mut self,
         index: usize,
-        outcome: compat::EffectContextOutcome,
+        mut outcome: compat::EffectContextOutcome,
         action_library: &ActionLibrary,
         object_id: ObjectId,
         definition_id: &str,
         clamp_velocity: bool,
     ) -> Result<(), EngineError> {
-        let solid_mask_operations = outcome.solid_mask_operations.clone();
-        let host_raster_preview = outcome.host_raster_preview.clone();
+        let solid_mask_operations = std::mem::take(&mut outcome.solid_mask_operations);
+        let host_raster_preview = outcome.host_raster_preview.take();
         // The outcome's outer-object, spawn, and foreign-object channels do
         // not preserve the interleaving of synchronous UpdateSolidMask
         // calls. Apply every non-mask state change first while suppressing

@@ -97,6 +97,12 @@ thread_local! {
     #[cfg(test)]
     static COMPILED_BINDING_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
+    static COMPILED_STACK_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static COMPILED_REGISTERED_SLOT_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static COMPILED_CALL_ARGUMENT_TEMPORARIES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
     static DIAGNOSTIC_OBJECT_FORMATTER_CALLS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static DIAGNOSTIC_FRAME_STRING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
@@ -108,6 +114,8 @@ thread_local! {
     static DIRECT_BINDING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static NESTED_GENERIC_SCRIPT_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static COMPILED_SOURCE_VALIDATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -128,6 +136,16 @@ fn compiled_function_execution_count() -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn reset_compiled_source_validations() {
+    COMPILED_SOURCE_VALIDATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn compiled_source_validations() -> usize {
+    COMPILED_SOURCE_VALIDATIONS.with(Cell::get)
+}
+
+#[cfg(test)]
 fn reset_compiled_binding_heap_spills() {
     COMPILED_BINDING_HEAP_SPILLS.with(|count| count.set(0));
 }
@@ -135,6 +153,13 @@ fn reset_compiled_binding_heap_spills() {
 #[cfg(test)]
 fn compiled_binding_heap_spills() -> usize {
     COMPILED_BINDING_HEAP_SPILLS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_compiled_executor_heap_spills() {
+    COMPILED_STACK_HEAP_SPILLS.with(|count| count.set(0));
+    COMPILED_REGISTERED_SLOT_HEAP_SPILLS.with(|count| count.set(0));
+    COMPILED_CALL_ARGUMENT_TEMPORARIES.with(|count| count.set(0));
 }
 
 #[cfg(test)]
@@ -3286,6 +3311,14 @@ impl<'a> ScriptFunctionTarget<'a> {
             validate_compiled_source: true,
         }
     }
+
+    fn resolved(resolution: &'a crate::engine::ScriptFunctionResolution) -> Self {
+        if resolution.has_trusted_snapshot() {
+            Self::installed(&resolution.function)
+        } else {
+            Self::validated(&resolution.function)
+        }
+    }
 }
 
 impl<'a> Vm<'a> {
@@ -3812,14 +3845,30 @@ impl<'a> Vm<'a> {
         function: &Function,
         args: Vec<CallArg>,
     ) -> Result<Value, RuntimeError> {
+        self.call_script_target_args(ScriptFunctionTarget::validated(function), args)
+    }
+
+    pub(crate) fn call_resolved_args(
+        &self,
+        resolution: &crate::engine::ScriptFunctionResolution,
+        args: Vec<CallArg>,
+    ) -> Result<Value, RuntimeError> {
+        self.call_script_target_args(ScriptFunctionTarget::resolved(resolution), args)
+    }
+
+    fn call_script_target_args(
+        &self,
+        target: ScriptFunctionTarget<'_>,
+        args: Vec<CallArg>,
+    ) -> Result<Value, RuntimeError> {
         let depth = 0usize;
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
         maybe_grow(|| {
             self.invoke_script_function(
-                &function.name,
-                ScriptFunctionTarget::validated(function),
+                &target.function.name,
+                target,
                 args.into_iter().collect(),
                 depth,
                 ObjectState::default(),
@@ -3838,6 +3887,24 @@ impl<'a> Vm<'a> {
         args: &[Value],
         cells: &LocalCells,
     ) -> Result<Value, RuntimeError> {
+        self.call_script_target_with_cells(ScriptFunctionTarget::validated(function), args, cells)
+    }
+
+    pub(crate) fn call_resolved_with_cells(
+        &self,
+        resolution: &crate::engine::ScriptFunctionResolution,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<Value, RuntimeError> {
+        self.call_script_target_with_cells(ScriptFunctionTarget::resolved(resolution), args, cells)
+    }
+
+    fn call_script_target_with_cells(
+        &self,
+        target: ScriptFunctionTarget<'_>,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::external).collect();
         let depth = 0usize;
         if depth >= MAX_CALL_DEPTH {
@@ -3845,8 +3912,8 @@ impl<'a> Vm<'a> {
         }
         maybe_grow(|| {
             self.invoke_script_function(
-                &function.name,
-                ScriptFunctionTarget::validated(function),
+                &target.function.name,
+                target,
                 args,
                 depth,
                 cells.state.clone(),
@@ -10083,6 +10150,11 @@ enum CompiledInstruction {
         slot: usize,
         delta: i32,
     },
+    IncrementEffectSlot {
+        argument_count: usize,
+        delta: i32,
+        return_old: bool,
+    },
     Call {
         site: usize,
     },
@@ -10106,6 +10178,7 @@ pub(crate) struct CompiledFunction {
     instructions: Vec<CompiledInstruction>,
     call_sites: Vec<CompiledCallSite>,
     max_stack: usize,
+    uses_effect_slots: bool,
     diagnostic_name: Arc<str>,
     diagnostic_source_name: Option<Arc<str>>,
 }
@@ -10136,6 +10209,10 @@ impl CompiledFunctionCache {
     }
 
     fn validated(&self, function: &Function, validate_source: bool) -> Option<&CompiledFunction> {
+        #[cfg(test)]
+        if validate_source {
+            COMPILED_SOURCE_VALIDATIONS.with(|count| count.set(count.get() + 1));
+        }
         (!validate_source
             || self.params == function.params
                 && self.body == function.body
@@ -10155,6 +10232,7 @@ struct CompiledFunctionBuilder {
     call_sites: Vec<CompiledCallSite>,
     stack_depth: usize,
     max_stack: usize,
+    uses_effect_slots: bool,
     strict_level: Option<u8>,
 }
 
@@ -10173,6 +10251,7 @@ impl CompiledFunctionBuilder {
             call_sites: Vec::new(),
             stack_depth: 0,
             max_stack: 0,
+            uses_effect_slots: false,
             strict_level: function.strict_level,
         };
 
@@ -10330,6 +10409,44 @@ impl CompiledFunctionBuilder {
                 self.compile_expression(value)?;
                 self.instructions
                     .push(CompiledInstruction::Unary(operation.clone()));
+            }
+            Expr::PreIncrement(value)
+            | Expr::PostIncrement(value)
+            | Expr::PreDecrement(value)
+            | Expr::PostDecrement(value) => {
+                let Expr::Call {
+                    callee,
+                    args,
+                    is_optional: false,
+                    forward_rest: false,
+                } = value.as_ref()
+                else {
+                    return None;
+                };
+                if !matches!(callee.as_ref(), Expr::Variable(name) if name == "EffectVar") {
+                    return None;
+                }
+                for argument in args {
+                    self.compile_expression(argument)?;
+                }
+                self.uses_effect_slots = true;
+                let delta = if matches!(expression, Expr::PreIncrement(_) | Expr::PostIncrement(_))
+                {
+                    1
+                } else {
+                    -1
+                };
+                self.collection_instruction(
+                    args.len(),
+                    CompiledInstruction::IncrementEffectSlot {
+                        argument_count: args.len(),
+                        delta,
+                        return_old: matches!(
+                            expression,
+                            Expr::PostIncrement(_) | Expr::PostDecrement(_)
+                        ),
+                    },
+                )?;
             }
             Expr::Binary(left, operation @ (BinaryOp::And | BinaryOp::Or), right)
                 if self.strict_level.unwrap_or(0) >= 2 =>
@@ -10525,6 +10642,7 @@ impl CompiledFunctionBuilder {
             instructions: self.instructions,
             call_sites: self.call_sites,
             max_stack: self.max_stack,
+            uses_effect_slots: self.uses_effect_slots,
             diagnostic_name: Arc::from(function.name.as_str()),
             diagnostic_source_name: function.source_name().map(Arc::from),
         })
@@ -10876,6 +10994,9 @@ impl CompiledFunction {
         if ValueStackReservation::check(self.max_stack).is_err() {
             return Ok(None);
         }
+        if self.uses_effect_slots && !vm.host_functions.contains_key("EffectVar") {
+            return Ok(None);
+        }
         let mut call_targets = SmallVec::<[CompiledCallTarget<'_>; 32]>::new();
         for site in &self.call_sites {
             let name = &site.name;
@@ -10923,8 +11044,16 @@ impl CompiledFunction {
             }
             return Ok(None);
         }
-        let mut stack = Vec::with_capacity(self.max_stack);
-        let mut registered_slots = vec![false; bindings.len()];
+        let mut stack = SmallVec::<[TrackedValue; 16]>::with_capacity(self.max_stack);
+        let mut registered_slots = SmallVec::<[bool; 16]>::from_elem(false, bindings.len());
+        #[cfg(test)]
+        if stack.spilled() {
+            COMPILED_STACK_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
+        }
+        #[cfg(test)]
+        if registered_slots.spilled() {
+            COMPILED_REGISTERED_SLOT_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
+        }
         let mut instruction = 0;
         loop {
             match &self.instructions[instruction] {
@@ -11074,6 +11203,64 @@ impl CompiledFunction {
                     reference.write(Value::Int(old_value.wrapping_add(*delta)))?;
                     registered_slots[*slot] = true;
                 }
+                CompiledInstruction::IncrementEffectSlot {
+                    argument_count,
+                    delta,
+                    return_old,
+                } => {
+                    let argument_start = stack
+                        .len()
+                        .checked_sub(*argument_count)
+                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let _retained_stack = ValueStackReservation::reserve(argument_start)?;
+                    let arguments = stack
+                        .drain(argument_start..)
+                        .map(CallArg::Value)
+                        .collect::<CallArgs>();
+                    #[cfg(test)]
+                    record_call_arg_heap_spill(arguments.spilled());
+                    let function = vm
+                        .host_functions
+                        .get("EffectVar")
+                        .expect("compiled effect-slot host prevalidated");
+                    let caller = env.caller_context();
+                    let arg_values = {
+                        let _parameter_slots = ValueStackReservation::reserve(
+                            function.parameter_count().unwrap_or(3),
+                        )?;
+                        let _guard = CallerContextGuard::enter(Some(caller.clone()));
+                        let prepared_args =
+                            vm.prepare_registered_host_call_args("EffectVar", function, arguments)?;
+                        vm.call_args_to_values(&prepared_args)?.into_vec()
+                    };
+                    let reference = LValueRef::HostPath {
+                        function: function.callback().clone(),
+                        args: arg_values,
+                        caller,
+                        global_call_context_hook: vm
+                            .retain_global_call_context_for_host_paths
+                            .then(|| vm.global_call_context_hook.cloned())
+                            .flatten(),
+                        segments: Vec::new(),
+                        legacy_pin: None,
+                    };
+                    let _operand_slot = ValueStackReservation::reserve(1)?;
+                    let operation = if *delta > 0 { "increment" } else { "decrement" };
+                    let old_value = Vm::counter_operand(reference.read()?, operation)?;
+                    let new_value = old_value.wrapping_add(*delta);
+                    reference.write(Value::Int(new_value))?;
+                    let value = if *return_old {
+                        TrackedValue::runtime(Value::Int(old_value))
+                    } else {
+                        // Prefix AB_Inc1/AB_Dec1 leaves the reference on the
+                        // stack. Materialize it after the host write so an
+                        // invalid EffectVar slot retains the host's nil result.
+                        reference.read_tracked()?
+                    }
+                    .set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(value);
+                }
                 CompiledInstruction::Call { site } => {
                     let call_site = &self.call_sites[*site];
                     let name = &call_site.name;
@@ -11084,8 +11271,7 @@ impl CompiledFunction {
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
                     let _retained_stack = ValueStackReservation::reserve(argument_start)?;
                     let arguments = stack
-                        .split_off(argument_start)
-                        .into_iter()
+                        .drain(argument_start..)
                         .map(CallArg::Value)
                         .collect::<CallArgs>();
                     #[cfg(test)]
@@ -11123,7 +11309,7 @@ impl CompiledFunction {
                         .len()
                         .checked_sub(*element_count)
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let value = TrackedValue::array(stack.split_off(start)).set_copy();
+                    let value = TrackedValue::array(stack.drain(start..).collect()).set_copy();
                     stack.push(value);
                 }
                 CompiledInstruction::MakeProplist(entry_count) => {
@@ -11134,14 +11320,17 @@ impl CompiledFunction {
                         .len()
                         .checked_sub(value_count)
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let mut values = stack.split_off(start).into_iter();
-                    let mut entries = Vec::with_capacity(*entry_count);
-                    while let Some(key) = values.next() {
-                        let value = values.next().ok_or_else(|| {
-                            RuntimeError::new("internal compiled proplist value missing")
-                        })?;
-                        entries.push((key.value, value));
-                    }
+                    let entries = {
+                        let mut values = stack.drain(start..);
+                        let mut entries = Vec::with_capacity(*entry_count);
+                        while let Some(key) = values.next() {
+                            let value = values.next().ok_or_else(|| {
+                                RuntimeError::new("internal compiled proplist value missing")
+                            })?;
+                            entries.push((key.value, value));
+                        }
+                        entries
+                    };
                     let value = TrackedValue::proplist(entries).set_copy();
                     stack.push(value);
                 }
@@ -11675,6 +11864,175 @@ mod tests {
     }
 
     #[test]
+    fn repeated_compiled_scalar_calls_keep_executor_buffers_inline() {
+        // C++ evaluates AB_CALL arguments in its fixed C4AulExec::Values stack
+        // and keeps the frame's local slots there as well (C4AulExec.cpp:
+        // 62-63,330-347,1217-1223), without per-call buffer allocations.
+        reset_compiled_executor_heap_spills();
+        let result = execute_script(
+            r#"#strict 2
+                func AddOne(value) { return value + 1; }
+                func Probe(iterations) {
+                    var value = 0;
+                    var index = 0;
+                    while (index < iterations) {
+                        value = AddOne(value);
+                        index++;
+                    }
+                    return value;
+                }
+            "#,
+            "Probe",
+            &[Value::Int(64)],
+        )
+        .expect("repeated compiled calls succeed");
+
+        assert_eq!(result, Value::Int(64));
+        assert_eq!(
+            (
+                COMPILED_STACK_HEAP_SPILLS.with(Cell::get),
+                COMPILED_REGISTERED_SLOT_HEAP_SPILLS.with(Cell::get),
+                COMPILED_CALL_ARGUMENT_TEMPORARIES.with(Cell::get),
+            ),
+            (0, 0, 0),
+        );
+    }
+
+    #[test]
+    fn effect_slot_decrements_stay_in_the_compiled_executor() {
+        // EffectVar(...) is parsed as one retained C4Value reference and
+        // AB_Dec1 reads and writes that reference once (C4AulParse.cpp:
+        // 2311-2344; C4AulExec.cpp:450-487).
+        reset_compiled_function_execution_count();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(10_i32));
+        let writes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host_slot = std::sync::Arc::clone(&slot);
+        let host_writes = std::sync::Arc::clone(&writes);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("EffectVar", move |args| {
+            if let Some(value) = args.get(3).and_then(Value::as_c4_int) {
+                *host_slot.lock().expect("effect slot lock") = value;
+                host_writes
+                    .lock()
+                    .expect("effect write log lock")
+                    .push(value);
+            }
+            Ok(Value::Int(*host_slot.lock().expect("effect slot lock")))
+        });
+        engine
+            .load_script(
+                r#"#strict 2
+                    func Probe(iterations) {
+                        var total = 0;
+                        var index = 0;
+                        while (index < iterations) {
+                            total += --EffectVar(0, 0, 1);
+                            index++;
+                        }
+                        return total * 10 + EffectVar(0, 0, 1);
+                    }
+                "#,
+            )
+            .expect("script loads");
+
+        assert_eq!(
+            engine
+                .call("Probe", &[Value::Int(3)])
+                .expect("effect slot loop succeeds"),
+            Value::Int(247)
+        );
+        assert_eq!(
+            *writes.lock().expect("effect write log lock"),
+            vec![9, 8, 7]
+        );
+        assert_eq!(compiled_function_execution_count(), 1);
+    }
+
+    #[test]
+    fn compiled_prefix_effect_slot_decrement_materializes_the_written_reference() {
+        // Prefix AB_Dec1 leaves its C4Value reference on the stack, so the
+        // result is materialized through FnEffectVar after the write. An
+        // invalid effect number therefore remains nil rather than exposing
+        // the arithmetic temporary (C4AulExec.cpp:450-487;
+        // C4Script.cpp:5576-5586).
+        reset_compiled_function_execution_count();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("EffectVar", |_| Ok(Value::Nil));
+        engine
+            .load_script(
+                r#"#strict 2
+                    func Probe() {
+                        return --EffectVar(0, 0, 0);
+                    }
+                "#,
+            )
+            .expect("script loads");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("probe succeeds"),
+            Value::Nil
+        );
+        assert_eq!(compiled_function_execution_count(), 1);
+    }
+
+    #[test]
+    fn compiled_effect_slot_update_retains_lower_expression_operands_through_host_access() {
+        // AB_CALL pops EffectVar's three native parameters after retaining its
+        // returned reference. AB_Add's left operand then remains below that
+        // reference while AB_Dec1 reads, writes, and materializes it
+        // (C4AulExec.cpp:450-487,682-702,1216-1297).
+        let observed_stack_sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host_observed_stack_sizes = std::sync::Arc::clone(&observed_stack_sizes);
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(2_i32));
+        let host_slot = std::sync::Arc::clone(&slot);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("EffectVar", move |args| {
+            host_observed_stack_sizes
+                .lock()
+                .expect("stack-size log lock")
+                .push(VALUE_STACK_SIZE.with(Cell::get));
+            if let Some(value) = args.get(3).and_then(Value::as_c4_int) {
+                *host_slot.lock().expect("effect slot lock") = value;
+            }
+            Ok(Value::Int(*host_slot.lock().expect("effect slot lock")))
+        });
+        engine
+            .load_script(
+                "#strict 2\n\
+                 func Probe() { return 1 + --EffectVar(0, 0, 1); }\n\
+                 func Interpreted() { if (false) return [1][0]; return 1 + --EffectVar(0, 0, 1); }",
+            )
+            .expect("script loads");
+
+        reset_compiled_function_execution_count();
+        assert_eq!(
+            engine.call("Probe", &[]).expect("probe succeeds"),
+            Value::Int(2)
+        );
+        assert_eq!(compiled_function_execution_count(), 1);
+        assert_eq!(
+            *observed_stack_sizes.lock().expect("stack-size log lock"),
+            vec![12, 12, 12],
+            "the external ten-slot frame, lower operand, and counter reference stay live",
+        );
+        *slot.lock().expect("effect slot lock") = 2;
+        observed_stack_sizes
+            .lock()
+            .expect("stack-size log lock")
+            .clear();
+        assert_eq!(
+            engine.call("Interpreted", &[]).expect("probe succeeds"),
+            Value::Int(2)
+        );
+        assert_eq!(compiled_function_execution_count(), 1);
+        assert_eq!(
+            *observed_stack_sizes.lock().expect("stack-size log lock"),
+            vec![12, 12, 12],
+            "the compiled instruction must retain exactly the AST path's C++ stack shape",
+        );
+    }
+
+    #[test]
     fn compiled_call_materializes_a_reference_return_before_returning_it_as_a_value() {
         // A value-context AB_CALL of a `func &` result is followed by
         // SetNoRef/C4Value::Set, which canonicalizes a retained C4ID(0) to
@@ -11915,10 +12273,12 @@ mod tests {
             .expect("original function remains owned")
             .body = replacement.body;
 
+        reset_compiled_source_validations();
         let value = Vm::new(&functions, &host_functions, &var_decls, None)
             .call_pinned_args(&functions["Probe"], Vec::new())
             .expect("mutated function executes");
         assert_eq!(value, Value::Int(2));
+        assert_eq!(compiled_source_validations(), 1);
     }
 
     #[test]

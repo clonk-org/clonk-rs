@@ -859,6 +859,36 @@ fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
 }
 
 #[test]
+fn swallowed_script_error_keeps_a_presentable_landscape_snapshot() {
+    // C++ fail-safe execution reports a scenario-script error but keeps the
+    // current game and its landscape presentable (C4AulExec.cpp:1318-1342).
+    let mut app = new_running_sandbox_app();
+    app.engine.clear_scenario_script();
+    app.engine
+        .install_scenario_script(
+            "LandscapeSnapshotError.c",
+            "#strict 3\nglobal func Step(state, frame, random) { return NoSuchFunctionAnywhere(); }",
+        )
+        .expect("install failing Step fixture");
+    assert!(app.snapshot.landscape.is_some());
+    let mut schedule = frame_schedule_for_mode(
+        app.mode,
+        app.engine.game_tick_delay_ms(),
+        app.engine.game_tick_delay_revision(),
+        app.max_refresh_delay_ms,
+    );
+    let mut accumulator = schedule.simulation_interval;
+
+    advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+        .expect("script error is swallowed like native fail-safe execution");
+
+    assert!(
+        app.snapshot.landscape.is_some(),
+        "the next redraw must not lose terrain after a nonfatal script error"
+    );
+}
+
+#[test]
 fn render_floor_reserves_a_share_of_the_wall_clock_for_drawing() {
     // A machine that cannot hold the tick budget must still repaint.
     // `AutomaticFrameSkip` alone cannot do this: it is a one-shot latch on

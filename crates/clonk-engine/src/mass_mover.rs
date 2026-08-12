@@ -1,5 +1,12 @@
-use crate::{Engine, Landscape, MaterialId, MaterialSet};
+use crate::landscape::LandscapeMaterialRead;
+use crate::{Engine, MaterialId, MaterialSet};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static MASS_MOVER_INSTABILITY_PROBES: std::cell::RefCell<Vec<(i32, i32, Option<MaterialId>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// `C4MassMoverChunk` (C4MassMover.h:25).
 pub(crate) const MASS_MOVER_CHUNK: i32 = 10_000;
@@ -264,9 +271,9 @@ impl MassMoverSet {
         Some(bytes)
     }
 
-    pub(crate) fn check_instability_range_for_landscape(
+    pub(crate) fn check_instability_range_for_landscape<L: LandscapeMaterialRead + ?Sized>(
         &mut self,
-        landscape: &Landscape,
+        landscape: &L,
         materials: &MaterialSet,
         tx: i32,
         ty: i32,
@@ -279,33 +286,40 @@ impl MassMoverSet {
         }
     }
 
-    fn check_instability_for_landscape(
+    fn check_instability_for_landscape<L: LandscapeMaterialRead + ?Sized>(
         &mut self,
-        landscape: &Landscape,
+        landscape: &L,
         materials: &MaterialSet,
         x: i32,
         y: i32,
     ) -> bool {
-        let instable = landscape
-            .material_at(x, y)
+        let material = landscape.landscape_material_at(x, y);
+        #[cfg(test)]
+        MASS_MOVER_INSTABILITY_PROBES.with(|probes| {
+            probes.borrow_mut().push((x, y, material));
+        });
+        let instable = material
             .and_then(|id| materials.get_by_id(id))
             .map(|material| material.instable())
             .unwrap_or(false);
         instable && self.create_for_landscape(landscape, x, y).is_some()
     }
 
-    fn create_for_landscape(&mut self, landscape: &Landscape, x: i32, y: i32) -> Option<usize> {
+    fn create_for_landscape<L: LandscapeMaterialRead + ?Sized>(
+        &mut self,
+        landscape: &L,
+        x: i32,
+        y: i32,
+    ) -> Option<usize> {
         if self.count() == MASS_MOVER_CHUNK {
             return None;
         }
         let index = self.find_free_slot()?;
-        let (width, height) = landscape
-            .grid_dimensions()
-            .unwrap_or((landscape.width() as i32, landscape.estimated_height()));
+        let (width, height) = landscape.landscape_dimensions();
         if !(0..width).contains(&x) || !(0..height).contains(&y) {
             return None;
         }
-        let material = landscape.material_at(x, y);
+        let material = landscape.landscape_material_at(x, y);
         self.bump_count();
         let material = material?;
         self.fill_slot(

@@ -3344,8 +3344,8 @@ impl Definition {
         let cells = clonk_script::LocalCells::from_local_vars(local_vars);
         compat::register_session_local_cells(object_id, cells.clone());
         let result = match callback.resolution() {
-            Some(resolution) => self.script.call_pinned_with_cells_and_this(
-                resolution.function.as_ref(),
+            Some(resolution) => self.script.call_resolved_with_cells_and_this(
+                resolution,
                 resolution.scope == clonk_script::ScriptFunctionScope::Global,
                 args,
                 &cells,
@@ -3437,8 +3437,8 @@ impl Definition {
             audio,
             function,
             |script, cells, this| match callback.resolution() {
-                Some(resolution) => script.call_pinned_with_cells_and_this(
-                    resolution.function.as_ref(),
+                Some(resolution) => script.call_resolved_with_cells_and_this(
+                    resolution,
                     resolution.scope == clonk_script::ScriptFunctionScope::Global,
                     &arg_values,
                     cells,
@@ -4708,16 +4708,16 @@ impl Definition {
                         {
                             callback
                                 .script
-                                .call_pinned_with_cells_and_this_for_effect_callback(
-                                    &callback.resolution.function,
+                                .call_resolved_with_cells_and_this_for_effect_callback(
+                                    &callback.resolution,
                                     true,
                                     &args,
                                     &context_cells,
                                     context_this,
                                 )
                         } else {
-                            callback.script.call_pinned_with_cells_and_this(
-                                &callback.resolution.function,
+                            callback.script.call_resolved_with_cells_and_this(
+                                &callback.resolution,
                                 true,
                                 &args,
                                 &context_cells,
@@ -4732,8 +4732,8 @@ impl Definition {
                         let cells = clonk_script::LocalCells::from_local_vars(&HashMap::new());
                         return callback
                             .script
-                            .call_pinned_with_cells_and_this_for_effect_callback(
-                                &callback.resolution.function,
+                            .call_resolved_with_cells_and_this_for_effect_callback(
+                                &callback.resolution,
                                 true,
                                 &args,
                                 &cells,
@@ -4743,7 +4743,7 @@ impl Definition {
                     }
                     return callback
                         .script
-                        .call_pinned_with_ref_args(&callback.resolution.function, true, &args)
+                        .call_resolved_with_ref_args(&callback.resolution, true, &args)
                         .map(|(value, _)| Some((value, HashMap::new())));
                 }
                 if context_object.is_some() {

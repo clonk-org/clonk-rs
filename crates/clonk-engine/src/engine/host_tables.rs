@@ -507,6 +507,51 @@ impl Engine {
         result
     }
 
+    /// Select the paused-engine objects whose C4Object::ClearPointers fields
+    /// may name `target`, without cloning their complete ObjectState. The
+    /// caller resolves callback-local/exclusively borrowed entries from its
+    /// own object store.
+    ///
+    /// # Safety
+    ///
+    /// The `lazy_host_world_object` contract applies. Every index in
+    /// `excluded` is skipped before dereferencing object storage.
+    unsafe fn lazy_host_world_pointer_referrers(
+        source: *const (),
+        target: ObjectId,
+        excluded: &HashSet<usize>,
+    ) -> Vec<(usize, ObjectId)> {
+        let engine = source.cast::<Self>();
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let target_number = i32::try_from(target.as_u64()).ok();
+        let mut result = Vec::new();
+        for index in 0..objects.len() {
+            if excluded.contains(&index) {
+                continue;
+            }
+            // SAFETY: skipped indices are the only entries that may be
+            // exclusively borrowed by the callback wrapper.
+            let object = unsafe { &*objects.as_ptr().add(index) };
+            let references_target = object.state.action.target == Some(target)
+                || object.state.action.target2 == Some(target)
+                || object.state.layer == Some(target)
+                || object.commands.command_views().iter().any(|command| {
+                    command.target == Some(target) || command.target2 == Some(target)
+                })
+                || target_number.is_some_and(|target| {
+                    object
+                        .state
+                        .effects
+                        .iter()
+                        .any(|effect| effect.command_target == Some(target))
+                });
+            if references_target {
+                result.push((index, object.id));
+            }
+        }
+        result
+    }
+
     /// Project one C4Player into callback-local state on its first value
     /// query. Numeric validity and indexed order are seeded separately, so
     /// callbacks that do not inspect player data clone none of it.
@@ -605,26 +650,53 @@ impl Engine {
         let engine = source.cast::<Self>();
         let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
         let exec_list = unsafe { &*std::ptr::addr_of!((*engine).exec_list) };
-        let mut statuses = seeded_statuses.clone();
-        for index in 0..objects.len() {
-            if excluded.contains(&index) {
-                continue;
+        let index_cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
+        let mut master_order = Vec::with_capacity(exec_list.len());
+        master_order.extend(exec_list.iter().rev().copied().filter(|id| {
+            if let Some(status) = seeded_statuses.get(id) {
+                return *status != ObjectStatus::Inactive;
             }
-            // SAFETY: object-vector shape is frozen for the synchronous call,
-            // and every exclusively borrowed entry is excluded above.
-            let object = unsafe { &*objects.as_ptr().add(index) };
-            statuses.insert(object.id, object.state.status);
-        }
-        exec_list
-            .iter()
-            .rev()
-            .copied()
-            .filter(|id| {
-                statuses
+            let cached_index = index_cache
+                .1
+                .get(id)
+                .copied()
+                .filter(|&index| index < objects.len() && !excluded.contains(&index));
+            let cached_index = cached_index.filter(|&index| {
+                // SAFETY: the index is in bounds and not among the entries
+                // held through an outstanding callback-local `&mut`.
+                unsafe { &*objects.as_ptr().add(index) }.id == *id
+            });
+            // The provider contract keeps the cache current. Retain an
+            // identity-checked fallback for diagnostics/tests that inject a
+            // stale cache, matching `find_object_index`'s fail-safe behavior.
+            let index = cached_index.or_else(|| {
+                (0..objects.len()).find(|index| {
+                    if excluded.contains(index) {
+                        return false;
+                    }
+                    // SAFETY: checked in bounds and excluded callback-local
+                    // mutable entries before constructing this shared view.
+                    unsafe { &*objects.as_ptr().add(*index) }.id == *id
+                })
+            });
+            let Some(index) = index else {
+                return seeded_statuses
                     .get(id)
-                    .is_some_and(|status| *status != ObjectStatus::Inactive)
-            })
-            .collect()
+                    .is_some_and(|status| *status != ObjectStatus::Inactive);
+            };
+            if excluded.contains(&index) {
+                return seeded_statuses
+                    .get(id)
+                    .is_some_and(|status| *status != ObjectStatus::Inactive);
+            }
+            // SAFETY: object-vector shape is frozen and exclusively borrowed
+            // entries were rejected above.
+            let object = unsafe { &*objects.as_ptr().add(index) };
+            #[cfg(test)]
+            HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(|count| count.set(count.get() + 1));
+            object.state.status != ObjectStatus::Inactive
+        }));
+        master_order
     }
 
     pub(crate) fn note_solid_mask_host_state_changed(&self) {
@@ -681,7 +753,6 @@ impl Engine {
             || player_order.clone(),
             |players| players.iter().copied().collect(),
         );
-        let crew_selection = self.crew_selection_states();
         let solid_mask_state = self.host_solid_mask_state();
         let sky_adjustment = self
             .sky
@@ -703,7 +774,7 @@ impl Engine {
             Rc::clone(&self.default_rank_names),
             transfer_zones,
             HashMap::new(),
-            crew_selection,
+            HashMap::new(),
             self.next_object_id,
             self.team_home_base_rule,
         )
@@ -839,6 +910,7 @@ impl Engine {
                 Self::lazy_host_world_objects,
                 Self::lazy_host_world_landscape,
             )
+            .with_pointer_referrers(Self::lazy_host_world_pointer_referrers)
             // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
             // execution. APIs such as FindBase walk the forward list, but
             // most callbacks never inspect it, so snapshot it on first use.

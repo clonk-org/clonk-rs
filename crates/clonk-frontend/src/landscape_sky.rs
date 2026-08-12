@@ -162,7 +162,7 @@ fn landscape_tile_layout(width: u32, height: u32) -> Vec<LandscapeTileLayout> {
 }
 
 pub(crate) struct LandscapeRenderCache {
-    pub(crate) grid: PixelGrid,
+    pub(crate) grid: PixelGridRenderAnchor,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) shade_materials: bool,
@@ -230,7 +230,7 @@ impl LandscapeRenderCache {
             })
             .collect();
         Self {
-            grid,
+            grid: grid.render_anchor(),
             width,
             height,
             shade_materials,

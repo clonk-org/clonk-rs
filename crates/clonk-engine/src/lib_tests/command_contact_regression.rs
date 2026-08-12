@@ -706,6 +706,30 @@ fn lazy_master_order_ignores_stale_object_index_cache() {
 }
 
 #[test]
+fn lazy_master_order_reads_live_statuses_without_projecting_a_table() {
+    let mut engine = Engine::new();
+    engine
+        .register_script_definition("ORDR", "Order", "")
+        .expect("definition registers");
+    for _ in 0..64 {
+        engine
+            .spawn_object(SpawnConfig::new("ORDR"))
+            .expect("object spawns");
+    }
+    let expected = engine.exec_list.iter().rev().copied().collect::<Vec<_>>();
+
+    HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(|count| count.set(0));
+    let world = engine.host_world_context_for_object(0);
+
+    assert_eq!(world.master_object_ids(), expected);
+    assert_eq!(
+        HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(Cell::get),
+        expected.len() - 1,
+        "master-order lookup must read each unseeded source status exactly once"
+    );
+}
+
+#[test]
 fn lazy_host_world_action_callback_seeds_only_caller() {
     let mut engine = Engine::with_seed(0);
     engine
