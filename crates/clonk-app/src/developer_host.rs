@@ -9,6 +9,7 @@
 //! GPU renderer built from its surface and a viewport window does not.
 
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
+use crate::object_list_window_host::ObjectListWindowHost;
 use crate::shell_window_host::ShellWindowHost;
 use crate::toolbox_window_host::ToolboxWindowHost;
 use crate::viewport_window_host::ViewportWindowHost;
@@ -20,6 +21,9 @@ pub enum DeveloperHost {
     /// The `C4DevmodeDlg` notebook. There is one for the process, and it
     /// outlives every close — only shutdown removes its record.
     Toolbox(ToolboxWindowHost),
+    /// The `C4ObjectListDlg` utility window, which its own close *destroys*
+    /// (`C4ObjectListDlg.cpp:592-597`).
+    ObjectList(ObjectListWindowHost),
 }
 
 impl DeveloperHost {
@@ -29,7 +33,7 @@ impl DeveloperHost {
     pub fn as_shell_mut(&mut self) -> Option<&mut ShellWindowHost> {
         match self {
             Self::Shell(shell) => Some(shell),
-            Self::Viewport(_) | Self::Toolbox(_) => None,
+            Self::Viewport(_) | Self::Toolbox(_) | Self::ObjectList(_) => None,
         }
     }
 
@@ -38,7 +42,15 @@ impl DeveloperHost {
     pub fn as_toolbox_mut(&mut self) -> Option<&mut ToolboxWindowHost> {
         match self {
             Self::Toolbox(toolbox) => Some(toolbox),
-            Self::Shell(_) | Self::Viewport(_) => None,
+            Self::Shell(_) | Self::Viewport(_) | Self::ObjectList(_) => None,
+        }
+    }
+
+    /// The object list's concrete state, for the row a click resolves to.
+    pub fn as_object_list_mut(&mut self) -> Option<&mut ObjectListWindowHost> {
+        match self {
+            Self::ObjectList(list) => Some(list),
+            Self::Shell(_) | Self::Viewport(_) | Self::Toolbox(_) => None,
         }
     }
 
@@ -46,7 +58,7 @@ impl DeveloperHost {
     pub fn viewport_identity(&self) -> Option<u64> {
         match self {
             Self::Viewport(viewport) => Some(viewport.identity),
-            Self::Shell(_) | Self::Toolbox(_) => None,
+            Self::Shell(_) | Self::Toolbox(_) | Self::ObjectList(_) => None,
         }
     }
 
@@ -56,6 +68,7 @@ impl DeveloperHost {
             Self::Shell(shell) => &shell.window,
             Self::Viewport(viewport) => &viewport.window,
             Self::Toolbox(toolbox) => &toolbox.surface.window,
+            Self::ObjectList(list) => &list.surface.window,
         }
     }
 }
@@ -66,6 +79,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Shell(shell) => shell.resize(width, height),
             Self::Viewport(viewport) => viewport.resize(width, height),
             Self::Toolbox(toolbox) => toolbox.resize(width, height),
+            Self::ObjectList(list) => list.resize(width, height),
         }
     }
 
@@ -74,6 +88,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Shell(shell) => shell.request_redraw(),
             Self::Viewport(viewport) => viewport.request_redraw(),
             Self::Toolbox(toolbox) => toolbox.request_redraw(),
+            Self::ObjectList(list) => list.request_redraw(),
         }
     }
 
@@ -82,6 +97,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Shell(shell) => shell.set_visible(visible),
             Self::Viewport(viewport) => viewport.set_visible(visible),
             Self::Toolbox(toolbox) => toolbox.set_visible(visible),
+            Self::ObjectList(list) => list.set_visible(visible),
         }
     }
 
@@ -90,6 +106,7 @@ impl DeveloperWindowHost for DeveloperHost {
             Self::Shell(shell) => shell.visible(),
             Self::Viewport(viewport) => viewport.visible(),
             Self::Toolbox(toolbox) => toolbox.visible(),
+            Self::ObjectList(list) => list.visible(),
         }
     }
 }
@@ -100,6 +117,7 @@ impl DeveloperWindowPresenter<GameApp> for DeveloperHost {
             Self::Shell(shell) => shell.present(app),
             Self::Viewport(viewport) => viewport.present(app),
             Self::Toolbox(toolbox) => toolbox.present(app),
+            Self::ObjectList(list) => list.present(app),
         }
     }
 }

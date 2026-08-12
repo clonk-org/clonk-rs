@@ -125,6 +125,135 @@ pub(crate) fn reconcile_developer_toolbox_window(
     }
 }
 
+/// The object list's registry key, if it has a window.
+pub(crate) fn object_list_window_key(
+    windows: &DeveloperWindows<DeveloperHost>,
+) -> Option<WindowId> {
+    windows.find_key(|host| matches!(host, DeveloperHost::ObjectList(_)))
+}
+
+/// Open or close the object list window to match the console's request.
+///
+/// `C4ObjectListDlg::Open` creates the window only when it has none
+/// (`C4ObjectListDlg.cpp:728`), so a second Objects click on an open list does
+/// nothing — which is what makes this a reconcile rather than a command.
+pub(crate) fn reconcile_developer_object_list_window(
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    next_key: &mut u64,
+    target: &winit::event_loop::ActiveEventLoop,
+) {
+    use crate::developer_windows::HostPurpose;
+    use crate::object_list_window_host::build_object_list_window;
+
+    let key = object_list_window_key(windows);
+    match (app.developer_object_list_open, key) {
+        (true, None) => match build_object_list_window(target) {
+            Ok(host) => {
+                let key = WindowId(*next_key);
+                *next_key += 1;
+                tracing::debug!("opened the developer object list window");
+                windows.insert(
+                    key,
+                    HostPurpose::ObjectList,
+                    DeveloperHost::ObjectList(host),
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to open the developer object list");
+                // Leaving the request set would retry the failed build on
+                // every pass for the rest of the round.
+                app.close_developer_object_list();
+            }
+        },
+        (false, Some(key)) => {
+            windows.close(key);
+        }
+        _ => {}
+    }
+}
+
+/// The object list window's own events.
+pub(crate) fn handle_developer_object_list_event(
+    key: WindowId,
+    event: &winit::event::Event<crate::NetworkEventWake>,
+    app: &mut crate::GameApp,
+    windows: &mut DeveloperWindows<DeveloperHost>,
+) {
+    use crate::developer_windows::DeveloperWindowPresenter;
+    use winit::event::{Event, WindowEvent};
+
+    match event {
+        // The `"destroy"` handler nulls the window and the model; this list is
+        // destroyed rather than hidden (`C4ObjectListDlg.cpp:592-597`).
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            app.close_developer_object_list();
+            windows.close(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(size),
+            ..
+        } => {
+            windows.resize(key, size.width.max(1), size.height.max(1));
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } => {
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
+            if let Some(list) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_object_list_mut)
+            {
+                list.surface.last_pointer = (position.x as i32, position.y as i32);
+            }
+        }
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            let Some(list) = windows
+                .host_mut(key)
+                .and_then(DeveloperHost::as_object_list_mut)
+            else {
+                return;
+            };
+            let (point, extent) = (list.surface.last_pointer, list.surface_extent());
+            app.developer_object_list_click(point, extent);
+            windows.request_redraw(key);
+        }
+        Event::WindowEvent {
+            event: WindowEvent::RedrawRequested,
+            ..
+        } => {
+            if let Some(host) = windows.host_mut(key) {
+                if let Err(error) = host.present(app) {
+                    tracing::error!(%error, "developer object list present failed");
+                    // A lost surface is not recoverable here: the window has
+                    // hidden itself, and the list keeps nothing worth waiting
+                    // for, so it closes as its own close button would.
+                    app.close_developer_object_list();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The toolbox window's own events.
 pub(crate) fn handle_developer_toolbox_event(
     key: WindowId,

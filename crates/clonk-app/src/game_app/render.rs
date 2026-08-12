@@ -3153,6 +3153,101 @@ impl GameApp {
         self.developer_tools.clear();
     }
 
+    /// `C4ObjectListDlg::Open` (`C4ObjectListDlg.cpp:726-787`), reached from
+    /// `C4Console::EditObjects` (`C4Console.cpp:1353-1356`).
+    ///
+    /// Opening is idempotent: C++ creates the window only `if (window ==
+    /// nullptr)`, so a second Objects click on an open list does nothing.
+    pub(crate) fn open_developer_object_list(&mut self) {
+        self.developer_object_list_open = true;
+    }
+
+    /// The `"destroy"` handler, which nulls the window and the model rather
+    /// than hiding them (`:592-597`).
+    pub(crate) fn close_developer_object_list(&mut self) {
+        self.developer_object_list_open = false;
+    }
+
+    /// Draw the object list at the window's extent.
+    pub(crate) fn render_developer_object_list(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> clonk_graphics::Surface {
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let rows = self.developer_object_list_rows();
+        let font = self.assets.font_arc();
+        crate::developer_object_list_view::render_object_list(
+            &mut surface,
+            font.as_ref(),
+            &rows,
+            self.developer_selection.objects(),
+        );
+        surface
+    }
+
+    /// The list's rows, rebuilt from the live snapshot.
+    fn developer_object_list_rows(&self) -> Vec<crate::developer_object_list_view::ObjectListRow> {
+        use clonk_engine::developer_inspection::object_tree;
+
+        let tree = object_tree(&self.snapshot.render_order, &self.snapshot);
+        crate::developer_object_list_view::object_list_rows(&tree, |id| {
+            // `name_cell_data_func` draws `object->GetName()` (`:659-664`),
+            // which is the custom name when there is one and the definition's
+            // otherwise.
+            self.snapshot
+                .object(id)
+                .map(|object| {
+                    object.custom_name.clone().unwrap_or_else(|| {
+                        self.engine
+                            .definition(&object.definition_id)
+                            .map(|definition| definition.name().to_owned())
+                            .unwrap_or_else(|| object.definition_id.clone())
+                    })
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// `C4ObjectListDlg::OnSelectionChanged` (`:599-620`).
+    ///
+    /// The tree writes the edit cursor's selection wholesale — `Clear()` then
+    /// one `Add` per selected row — and the `updating_selection` guard on both
+    /// sides is what stops that write echoing back as a fresh tree update.
+    /// The port has the same guard in a different shape:
+    /// [`clonk_engine::developer_selection::SelectionWriter`] tags the writer,
+    /// so a surface can recognise its own change instead of a flag having to
+    /// be raised and lowered around every write.
+    pub(crate) fn developer_object_list_click(&mut self, point: (i32, i32), extent: (u32, u32)) {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let rows = self.developer_object_list_rows();
+        let selected_row = rows.iter().position(|row| {
+            self.developer_selection
+                .objects()
+                .first()
+                .is_some_and(|id| row.id == *id)
+        });
+        match crate::developer_object_list_view::object_list_hit(
+            &rows,
+            selected_row,
+            extent.0,
+            extent.1,
+            point,
+        ) {
+            Some(object) => self
+                .developer_selection
+                .replace(SelectionWriter::ObjectTree, object),
+            // No path under the pointer: `gtk_tree_selection_get_selected_rows`
+            // returns an empty list and the handler still clears.
+            None => self.developer_selection.clear(SelectionWriter::ObjectTree),
+        };
+    }
+
     /// Draw one toolbox page at the window's extent.
     pub(crate) fn render_developer_toolbox_page(
         &mut self,

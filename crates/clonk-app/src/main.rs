@@ -30,6 +30,7 @@ mod deferred_config;
 mod desktop_notification;
 mod developer_console_save;
 mod developer_host;
+mod developer_object_list_view;
 mod developer_toolbox;
 mod developer_toolbox_view;
 mod developer_tools_page;
@@ -50,6 +51,7 @@ mod local_control;
 use clonk_app_netplay::network;
 mod network_team_assignment;
 use clonk_app_menus::object_menu;
+mod object_list_window_host;
 mod offline_savegame;
 mod offline_startup;
 mod output_folders;
@@ -1028,6 +1030,12 @@ fn run() -> Result<()> {
                     &mut next_developer_window_key,
                     event_target,
                 );
+                console_toolbox_window::reconcile_developer_object_list_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
             }
             // Every viewport window redraws with the shell and only with it, the
             // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
@@ -1055,6 +1063,17 @@ fn run() -> Result<()> {
                     // projection and no player lock.
                     if console_toolbox_window::toolbox_window_key(&developer_windows) == Some(key) {
                         console_toolbox_window::handle_developer_toolbox_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
+                        );
+                        return;
+                    }
+                    if console_toolbox_window::object_list_window_key(&developer_windows)
+                        == Some(key)
+                    {
+                        console_toolbox_window::handle_developer_object_list_event(
                             key,
                             &event,
                             &mut app,
@@ -2409,6 +2428,7 @@ impl GameApp {
             console_viewport_context_menu_grab: None,
             developer_toolbox: Default::default(),
             developer_toolbox_effects: Vec::new(),
+            developer_object_list_open: false,
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),
             console_log_capture: None,

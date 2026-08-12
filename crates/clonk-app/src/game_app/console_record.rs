@@ -379,9 +379,10 @@ impl GameApp {
                         true,
                     );
                 }
-                DeveloperConsoleAction::EditObjects => {
-                    self.developer_console.out("Objects component selected");
-                }
+                // `C4Console::EditObjects` is one line: `ObjectListDlg.Open()`
+                // (`C4Console.cpp:1353-1356`). Unlike its three siblings it
+                // has no network refusal — the list only reads.
+                DeveloperConsoleAction::EditObjects => self.open_developer_object_list(),
                 DeveloperConsoleAction::EditScript => {
                     self.developer_console.out("Script component selected");
                 }

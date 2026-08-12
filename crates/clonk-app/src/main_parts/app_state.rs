@@ -428,6 +428,10 @@ pub(crate) struct GameApp {
     /// only place winit will build one, can apply them.
     pub(crate) developer_toolbox: crate::developer_toolbox::DeveloperToolbox,
     pub(crate) developer_toolbox_effects: Vec<crate::developer_toolbox::ToolboxEffect>,
+    /// `C4ObjectListDlg`'s `window != nullptr` — the whole of its state.
+    /// Everything the list draws is read from the snapshot at redraw, so
+    /// unlike the toolbox there is no model to keep beside the window.
+    pub(crate) developer_object_list_open: bool,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.

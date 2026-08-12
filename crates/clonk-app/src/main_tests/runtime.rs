@@ -6043,6 +6043,65 @@
         );
     }
 
+    // C4Console.cpp:1353-1356 and C4ObjectListDlg.cpp:599-646,726-787 — the
+    // Objects component opens the object list, whose rows are the ported
+    // object tree and whose clicks write the edit cursor's selection.
+    #[test]
+    fn developer_object_list_opens_and_binds_the_selection_both_ways() {
+        use clonk_engine::developer_selection::SelectionWriter;
+
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        assert!(!app.developer_object_list_open);
+
+        // `EditObjects` is one line, and unlike Script/Title/Info it carries
+        // no network refusal — the list only reads.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditObjects])
+            .expect("the console opened the object list");
+        assert!(app.developer_object_list_open);
+        // Opening again is idempotent: C++ builds the window only when it has
+        // none.
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditObjects])
+            .expect("the console opened the object list again");
+        assert!(app.developer_object_list_open);
+
+        let extent = (
+            crate::developer_object_list_view::OBJECT_LIST_WIDTH,
+            crate::developer_object_list_view::OBJECT_LIST_HEIGHT,
+        );
+        let surface = app.render_developer_object_list(extent.0, extent.1);
+        assert_eq!(surface.width(), extent.0);
+        assert!(surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+        // A click on the first row selects that object, stamped as the tree's
+        // own write so the edit cursor can tell it from its own.
+        let subject = app.snapshot.objects.first().expect("a live object").id;
+        app.developer_object_list_click((8, 8), extent);
+        assert_eq!(app.developer_selection.objects(), &[subject]);
+
+        // A click on empty space below the last row clears it — an empty
+        // `gtk_tree_selection_get_selected_rows` still runs the handler.
+        app.developer_object_list_click((8, extent.1 as i32 - 8), extent);
+        assert!(app.developer_selection.is_empty());
+
+        // The list mirrors a selection the *viewport* made, which is the other
+        // half of the binding.
+        app.developer_selection
+            .replace(SelectionWriter::EditCursor, subject);
+        let mirrored = app.render_developer_object_list(extent.0, extent.1);
+        assert_ne!(
+            mirrored.pixels(),
+            surface.pixels(),
+            "the selected row is drawn differently from an unselected one"
+        );
+
+        // Closing destroys it rather than hiding it, so the next Objects click
+        // builds a new window.
+        app.close_developer_object_list();
+        assert!(!app.developer_object_list_open);
+    }
+
     // C4Viewport.cpp:225-240 and C4Game.cpp:1641-1676 — dropping a definition
     // file on a console viewport is the editor's only way to create an object
     // without typing script. `CID_EMDropDef`'s executor and wire codec landed
