@@ -2265,7 +2265,14 @@ impl AudioContext {
             let music = match worker.load_music_owned(data) {
                 Ok(music) => music,
                 Err(error) => {
-                    tracing::warn!(%error, "music decode failed");
+                    // C4MusicSystem::Execute retries when nothing is playing.
+                    // A missing FluidSynth/SoundFont/libxmp is process-global,
+                    // so a MIDI-only catalog would warn on every frame.
+                    if error.is_missing_optional_decoder() {
+                        tracing::debug!(%error, "music decode failed");
+                    } else {
+                        tracing::warn!(%error, "music decode failed");
+                    }
                     return;
                 }
             };
