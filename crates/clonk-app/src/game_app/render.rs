@@ -2956,15 +2956,306 @@ impl GameApp {
             ViewportContextItem::Delete => self.console_delete_selection(),
             ViewportContextItem::Duplicate => self.console_duplicate_selection(),
             ViewportContextItem::GrabContents => self.console_grab_contents(),
-            // `OpenPropTools()` — the Tools and Property pages it switches to
-            // have no window yet, so the console says so rather than pretending
-            // the click did nothing.
-            ViewportContextItem::Properties => {
-                let message = self.runtime_resource_text("IDS_CNS_PROPERTIES", "Properties");
-                self.developer_console
-                    .out(&format!("{message}: not available yet"));
+            ViewportContextItem::Properties => self.open_developer_prop_tools(),
+        }
+    }
+
+    /// `C4EditCursor::OpenPropTools` (`C4EditCursor.cpp:361-374`).
+    ///
+    /// The page follows the cursor mode, and both pages exist from the first
+    /// call: `C4DevmodeDlg::AddPage` appends without showing, so the notebook
+    /// holds them whichever one is switched to (`C4DevmodeDlg.cpp:53-77`).
+    pub(crate) fn open_developer_prop_tools(&mut self) {
+        use crate::developer_windows::ToolboxPage;
+        use crate::toolbox_window_host::prop_tools_page;
+
+        let page = prop_tools_page(self.console_cursor_mode());
+        // `C4ToolsDlg::Open`'s tail on a build with no dialog of its own:
+        // `Active = true` plus the ordered refresh (`C4ToolsDlg.cpp:399-408`).
+        if page == ToolboxPage::Tools {
+            let _ = self.developer_tools.open();
+        }
+        for page in [ToolboxPage::Tools, ToolboxPage::Property] {
+            let effect = self.developer_toolbox.add_page(page);
+            self.developer_toolbox_effects.extend(effect);
+        }
+        let position = self.developer_toolbox.remembered_position();
+        let effect = self.developer_toolbox.switch_page(page, position);
+        self.developer_toolbox_effects.extend(effect);
+    }
+
+    /// `C4EditCursor::SetMode`'s prop-tools arm (`C4EditCursor.cpp:503-518`).
+    ///
+    /// A mode change clears the page the mode it *left* owns and reopens the
+    /// toolbox only when one of the two was already up — switching modes never
+    /// opens it from nothing, which is why the console's Draw button alone
+    /// still shows no window.
+    pub(crate) fn apply_developer_cursor_mode_change(
+        &mut self,
+        previous: clonk_engine::developer_cursor::CursorMode,
+    ) {
+        use clonk_engine::developer_cursor::{set_mode, PropertyToolsPage};
+
+        let change = set_mode(
+            previous,
+            self.console_cursor_mode(),
+            self.developer_tools.active(),
+            self.developer_toolbox.current_page()
+                == Some(crate::developer_windows::ToolboxPage::Property),
+        );
+        // `Clear()` drops `Active` and nothing else, which is why re-opening
+        // restores the previous selection rather than the defaults.
+        if change.clear_page == Some(PropertyToolsPage::Tools) {
+            self.developer_tools.clear();
+        }
+        if change.reopen_prop_tools {
+            self.open_developer_prop_tools();
+        }
+    }
+
+    /// Draw one toolbox page at the window's extent.
+    pub(crate) fn render_developer_toolbox_page(
+        &mut self,
+        page: crate::developer_windows::ToolboxPage,
+        width: u32,
+        height: u32,
+    ) -> clonk_graphics::Surface {
+        use crate::developer_windows::ToolboxPage;
+
+        let mut surface = clonk_graphics::Surface::new(
+            width.max(1),
+            height.max(1),
+            clonk_graphics::PixelFormat::Rgba8888,
+        );
+        let font = self.assets.font_arc();
+        match page {
+            ToolboxPage::Tools => self
+                .developer_tools_page_model()
+                .render(&mut surface, font.as_ref()),
+            ToolboxPage::Property => {
+                let text = self.developer_property_page_text();
+                crate::developer_toolbox_view::render_property_page(
+                    &mut surface,
+                    font.as_ref(),
+                    &text,
+                );
             }
         }
+        surface
+    }
+
+    /// A click on whichever page the toolbox shows.
+    pub(crate) fn developer_toolbox_click(&mut self, point: (i32, i32), extent: (u32, u32)) {
+        use crate::developer_toolbox_view::ToolsPageAction;
+        use crate::developer_windows::ToolboxPage;
+
+        // The property page is a read-only text box (`IDC_EDITOUTPUT`).
+        if self.developer_toolbox.current_page() != Some(ToolboxPage::Tools) {
+            return;
+        }
+        let Some(action) = self
+            .developer_tools_page_model()
+            .hit(extent.0, extent.1, point)
+        else {
+            return;
+        };
+        match action {
+            // The one control on the page that is a synchronized *control*:
+            // every peer has to change landscape mode at the same tick
+            // (`C4ToolsDlg.cpp:875-879`).
+            ToolsPageAction::SetLandscapeMode(mode) => self.submit_editor_landscape_mode(mode),
+            ToolsPageAction::SetTool(tool) => self.developer_tools.set_tool(tool, false),
+            ToolsPageAction::SetIft(ift) => {
+                self.developer_tools.set_ift(ift);
+            }
+            ToolsPageAction::SetGrade(grade) => {
+                self.developer_tools.set_grade(grade);
+            }
+            // `C4ToolsDlg::SetMaterial` runs `AssertValidTexture` after the
+            // material lands (`:565-572`), which is what stops a Static
+            // landscape being handed a pair its tex map has no slot for.
+            ToolsPageAction::SetMaterial(material) => {
+                self.developer_tools.set_material(material);
+                self.assert_valid_developer_texture();
+            }
+            ToolsPageAction::SetTexture(texture) => self.developer_tools.set_texture(texture),
+        }
+    }
+
+    /// `C4ToolsDlg::AssertValidTexture` (`C4ToolsDlg.cpp:965-983`).
+    fn assert_valid_developer_texture(&mut self) {
+        let Some(state) = self.engine.developer_landscape_tool_state() else {
+            return;
+        };
+        if let Some(texture) = clonk_engine::developer_landscape::corrected_tool_texture(
+            state.texmap(),
+            self.developer_tools.material(),
+            self.developer_tools.texture(),
+            state.mode,
+        ) {
+            self.developer_tools.set_texture(texture);
+        }
+    }
+
+    /// `C4ToolsDlg::SetLandscapeMode(iMode, false)` (`C4ToolsDlg.cpp:865-879`).
+    ///
+    /// The local path *changes nothing*: it confirms the one destructive
+    /// transition and enqueues `EMDT_SetMode`. The dialog state moves only
+    /// when that control comes back out of the queue, which is what keeps
+    /// every peer's landscape mode identical.
+    fn submit_editor_landscape_mode(
+        &mut self,
+        target: clonk_engine::developer_tools::LandscapeMode,
+    ) {
+        use clonk_engine::developer_tools::landscape_mode_needs_confirmation;
+
+        let Some(mode) = self.engine.landscape().map(|landscape| landscape.mode()) else {
+            return;
+        };
+        if landscape_mode_needs_confirmation(landscape_mode_of(mode), target) {
+            // `Console.Message(IDS_CNS_EXACTTOSTATIC, true)` is a task-modal
+            // yes/no box under `_WIN32`/`WITH_DEVELOPER_MODE` and returns true
+            // unasked past them (`C4Console.cpp:841-853`). The reference build
+            // therefore never asks; the port takes the same answer and says
+            // what it cost, on the surface its other console notices use.
+            let message = self.runtime_resource_text(
+                "IDS_CNS_EXACTTOSTATIC",
+                "Switching to a static landscape discards the exact landscape.",
+            );
+            self.developer_console.out(&message);
+        }
+        if let Err(error) =
+            self.submit_or_execute_editor_draw_tool(clonk_engine::EmDrawToolControlData {
+                action: clonk_engine::EMDT_SET_MODE,
+                mode: landscape_mode_value(target),
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor landscape mode");
+        }
+    }
+
+    /// Everything the Tools page draws, read fresh — C++ refreshes the same
+    /// controls from `Game.Landscape` on every `Open` and `EnableControls`.
+    pub(crate) fn developer_tools_page_model(
+        &self,
+    ) -> crate::developer_toolbox_view::ToolsPageModel {
+        use crate::developer_toolbox_view::ToolsPageModel;
+        use clonk_engine::developer_tools::LandscapeMode;
+
+        let state = self.engine.developer_landscape_tool_state();
+        let material = self.developer_tools.material().to_owned();
+        ToolsPageModel {
+            mode: state.as_ref().map_or(LandscapeMode::Undefined, |state| {
+                landscape_mode_of(state.mode)
+            }),
+            tool: self.developer_tools.tool(),
+            grade: self.developer_tools.grade(),
+            ift: self.developer_tools.ift(),
+            materials: state
+                .as_ref()
+                .map(|state| state.material_catalog())
+                .unwrap_or_default(),
+            textures: state
+                .as_ref()
+                .map(|state| state.texture_catalog(&material))
+                .unwrap_or_default(),
+            texture: self.developer_tools.texture().to_owned(),
+            material,
+        }
+    }
+
+    /// `C4PropertyDlg::Update` over the live selection
+    /// (`C4PropertyDlg.cpp:169-256`).
+    fn developer_property_page_text(&self) -> String {
+        use clonk_engine::developer_property_text::{property_panel_text, PropertyPanelStrings};
+
+        let mut strings = PropertyPanelStrings {
+            no_object: String::new(),
+            type_line: String::new(),
+            owner: String::new(),
+            contents: String::new(),
+            action: String::new(),
+            locals: String::new(),
+            effects: String::new(),
+            multiple_objects: String::new(),
+        };
+        for (target, key, fallback) in [
+            (&mut strings.no_object, "IDS_CNS_NOOBJECT", "No object"),
+            (&mut strings.type_line, "IDS_CNS_TYPE", "Type: %s (%s)"),
+            (&mut strings.owner, "IDS_CNS_OWNER", "Owner: %s"),
+            (&mut strings.contents, "IDS_CNS_CONTENTS", "Contents:"),
+            (&mut strings.action, "IDS_CNS_ACTION", "Action:"),
+            (&mut strings.locals, "IDS_CNS_LOCALS", "Local variables:"),
+            (&mut strings.effects, "IDS_CNS_EFFECTS", "Effects:"),
+            (
+                &mut strings.multiple_objects,
+                "IDS_CNS_MULTIPLEOBJECTS",
+                "%d objects selected",
+            ),
+        ] {
+            *target = self.runtime_resource_text(key, fallback);
+        }
+        let selection = self.developer_selection.objects();
+        let object = selection
+            .first()
+            .filter(|_| selection.len() == 1)
+            .and_then(|id| self.developer_property_page_object(*id));
+        property_panel_text(&strings, selection.len(), object.as_ref())
+    }
+
+    /// One selected object's already-formatted detail, in C++'s section order.
+    fn developer_property_page_object(
+        &self,
+        id: clonk_engine::ObjectId,
+    ) -> Option<clonk_engine::developer_property_text::PropertyPanelObject> {
+        use clonk_engine::developer_inspection::{effect_lines, name_list};
+        use clonk_engine::developer_locals::local_lines;
+        use clonk_engine::developer_property_text::PropertyPanelObject;
+
+        let object = self.snapshot.object(id)?;
+        let definition = object.definition_id.clone();
+        let name_of = |id: &str| {
+            self.engine
+                .definition(id)
+                .map(|definition| definition.name().to_owned())
+        };
+        let contents = name_list(&object.contents, &self.snapshot, name_of);
+        Some(PropertyPanelObject {
+            name: object
+                .custom_name
+                .clone()
+                .or_else(|| name_of(&definition))
+                .unwrap_or_else(|| definition.clone()),
+            id: definition.clone(),
+            // `ValidPlr(cobj->Owner)` (`:190-194`) — NO_OWNER prints no line.
+            owner: self
+                .engine
+                .player(object.owner)
+                .map(|player| player.name().to_owned()),
+            contents: (!contents.is_empty()).then_some(contents),
+            // `Action.Act != ActIdle` (`:203-208`).
+            action: object
+                .action_procedure
+                .clone()
+                .filter(|action| !action.is_empty()),
+            locals: local_lines(&object.local_vars, &self.developer_local_names(&definition)),
+            effects: effect_lines(&object.effects),
+        })
+    }
+
+    /// A definition's declared `local` names, which decide the named half of
+    /// the panel's locals section.
+    fn developer_local_names(&self, definition: &str) -> Vec<String> {
+        self.engine
+            .definition(definition)
+            .map(|definition| {
+                definition
+                    .local_variable_names()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// `C4EditCursor::Delete` (`:350-359`).
@@ -3033,7 +3324,7 @@ impl GameApp {
     }
 
     /// The edit cursor's mode as the ported console logic names it.
-    fn console_cursor_mode(&self) -> clonk_engine::developer_cursor::CursorMode {
+    pub(crate) fn console_cursor_mode(&self) -> clonk_engine::developer_cursor::CursorMode {
         use clonk_engine::developer_cursor::CursorMode;
 
         match self.developer_console_edit_mode {
@@ -5814,5 +6105,40 @@ impl GameApp {
             frontend,
             definition_load,
         )
+    }
+}
+
+/// `Game.Landscape.Mode` as the ported tools state names it.
+///
+/// The two spellings exist because `C4LSC_*` is an untyped `int32_t` on the
+/// control wire and in the landscape, while the console's own logic is written
+/// against an enum that cannot hold a fifth value.
+pub(crate) fn landscape_mode_of(mode: i32) -> clonk_engine::developer_tools::LandscapeMode {
+    use clonk_engine::developer_tools::LandscapeMode;
+    use clonk_engine::landscape::{
+        LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+    };
+
+    match mode {
+        LANDSCAPE_MODE_DYNAMIC => LandscapeMode::Dynamic,
+        LANDSCAPE_MODE_STATIC => LandscapeMode::Static,
+        LANDSCAPE_MODE_EXACT => LandscapeMode::Exact,
+        _ => LandscapeMode::Undefined,
+    }
+}
+
+/// The `C4LSC_*` value an `EMDT_SetMode` control carries.
+pub(crate) fn landscape_mode_value(mode: clonk_engine::developer_tools::LandscapeMode) -> i32 {
+    use clonk_engine::developer_tools::LandscapeMode;
+    use clonk_engine::landscape::{
+        LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+        LANDSCAPE_MODE_UNDEFINED,
+    };
+
+    match mode {
+        LandscapeMode::Dynamic => LANDSCAPE_MODE_DYNAMIC,
+        LandscapeMode::Static => LANDSCAPE_MODE_STATIC,
+        LandscapeMode::Exact => LANDSCAPE_MODE_EXACT,
+        LandscapeMode::Undefined => LANDSCAPE_MODE_UNDEFINED,
     }
 }

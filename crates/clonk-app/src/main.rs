@@ -22,6 +22,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod advanced_config;
 mod classic_record_stream;
+mod console_toolbox_window;
 mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
@@ -30,6 +31,7 @@ mod desktop_notification;
 mod developer_console_save;
 mod developer_host;
 mod developer_toolbox;
+mod developer_toolbox_view;
 mod developer_tools_page;
 mod developer_windows;
 mod display_backend;
@@ -60,6 +62,7 @@ mod settings;
 mod shell_window_host;
 mod startup_player_files;
 mod system_fonts;
+mod toolbox_window_host;
 mod update_check;
 mod update_download;
 mod viewport_window_host;
@@ -1015,6 +1018,15 @@ fn run() -> Result<()> {
                     scale,
                     event_target,
                 );
+                // The `C4DevmodeDlg` notebook needs the same treatment for the
+                // same reason: `AddPage`/`SwitchPage` act on their window
+                // inside the call that decided to, and winit cannot.
+                console_toolbox_window::reconcile_developer_toolbox_window(
+                    &mut app,
+                    &mut developer_windows,
+                    &mut next_developer_window_key,
+                    event_target,
+                );
             }
             // Every viewport window redraws with the shell and only with it, the
             // way `C4GraphicsSystem::Execute` runs `cvp->Execute()` for each
@@ -1022,15 +1034,12 @@ fn run() -> Result<()> {
             // event-loop pass instead would ignore the frame schedule, the
             // automatic frame skip and the repaint floor, and spin.
             if std::mem::take(&mut viewport_redraw_pending) {
-                for key in developer_windows.keys().collect::<Vec<_>>() {
-                    if developer_windows
-                        .host(key)
-                        .and_then(developer_host::DeveloperHost::viewport_identity)
-                        .is_some()
-                    {
-                        developer_windows.request_redraw(key);
-                    }
-                }
+                // The toolbox rides the same pass: its pages read live engine
+                // state — the landscape mode, the selection — so a page left
+                // to repaint only on its own events would show a stale one.
+                // Hidden records are skipped, as a hidden GTK window draws
+                // nothing.
+                developer_windows.request_redraw_visible();
             }
             // An event naming a viewport window is that window's alone. Resolving
             // it before the shell destructure keeps the shell arms — all of which
@@ -1040,6 +1049,18 @@ fn run() -> Result<()> {
                     .find_key(|host| host.window().id() == os_window)
                     .filter(|key| *key != developer_windows::SHELL_WINDOW)
                 {
+                    // The toolbox is a child window too, but its events are
+                    // nothing like a viewport's — it has no edit cursor, no
+                    // projection and no player lock.
+                    if console_toolbox_window::toolbox_window_key(&developer_windows) == Some(key) {
+                        console_toolbox_window::handle_developer_toolbox_event(
+                            key,
+                            &event,
+                            &mut app,
+                            &mut developer_windows,
+                        );
+                        return;
+                    }
                     console_viewport_windows::handle_console_viewport_event(
                         key,
                         &event,
@@ -2384,6 +2405,8 @@ impl GameApp {
             edit_cursor_last_world: None,
             edit_cursor_drag_frame: None,
             console_viewport_context_menu: None,
+            developer_toolbox: Default::default(),
+            developer_toolbox_effects: Vec::new(),
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),
             console_log_capture: None,

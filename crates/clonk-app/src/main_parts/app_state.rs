@@ -411,6 +411,13 @@ pub(crate) struct GameApp {
         u64,
         clonk_frontend::developer_context_menu::ViewportContextMenu,
     )>,
+    /// `C4Console::ToolsDlg` and `PropertyDlg`'s shared `C4DevmodeDlg`
+    /// notebook. The model owns every decision about the window
+    /// ([`crate::developer_toolbox`]); the runner owns the window itself, so
+    /// the effects it produces queue here until the event loop, which is the
+    /// only place winit will build one, can apply them.
+    pub(crate) developer_toolbox: crate::developer_toolbox::DeveloperToolbox,
+    pub(crate) developer_toolbox_effects: Vec<crate::developer_toolbox::ToolboxEffect>,
     /// Native `C4Console::Editing` starts true and is irreversibly cleared
     /// when `EnableControls` observes a no-input playback. Opening another
     /// game defaults the edit cursor mode, but does not restore this latch.
