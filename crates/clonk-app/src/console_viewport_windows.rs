@@ -408,6 +408,24 @@ pub(crate) fn handle_console_viewport_event(
             app.open_console_viewport_context_menu(identity, local);
             windows.request_redraw(key);
         }
+        // `WM_DROPFILES` — the editor's only way to create an object without
+        // typing script (`C4Viewport.cpp:106-109,225-240`). winit delivers one
+        // path per event where Win32 hands over a whole `HDROP`, so each is
+        // its own `DropFiles` call.
+        Event::WindowEvent {
+            event: WindowEvent::DroppedFile(path),
+            ..
+        } => {
+            let Some(DeveloperHost::Viewport(viewport)) = windows.host_mut(key) else {
+                return;
+            };
+            // `DragQueryPoint` gives the drop point; winit's `DroppedFile`
+            // carries none, so the position the pointer was last seen at is
+            // the only one there is.
+            let (identity, local) = (viewport.identity, viewport.surface_pointer());
+            app.drop_file_on_console_viewport(identity, path, local);
+            windows.request_redraw(key);
+        }
         // Escape closes the popup without running anything, as it does for
         // both native menus.
         Event::WindowEvent {

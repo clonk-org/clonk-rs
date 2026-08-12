@@ -2838,6 +2838,98 @@ impl GameApp {
     /// `local` is in the viewport window's *surface* coordinates, which is
     /// where the popup is drawn — C++ pops up at the screen cursor, but this
     /// menu lives on the viewport's own frame.
+    /// `C4Viewport::DropFiles` (`C4Viewport.cpp:225-240`) for one dropped
+    /// path.
+    ///
+    /// The gate is asked once per drop and reports `IDS_CNS_NONETEDIT`, which
+    /// is why it is here rather than inside the ported decision: winit
+    /// delivers `DroppedFile` one path at a time, so a batch arrives as
+    /// several events and each one is its own `DropFiles` call.
+    pub(crate) fn drop_file_on_console_viewport(
+        &mut self,
+        identity: u64,
+        path: &std::path::Path,
+        local: (i32, i32),
+    ) {
+        use clonk_engine::developer_drop::{drop_file, drop_world_position, DropOutcome};
+
+        let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
+            return;
+        };
+        let outcome = drop_file(
+            self.developer_console_editing(),
+            path,
+            |path| self.dropped_definition_id(path),
+            |id| self.engine.definition(id).is_some(),
+            // `Defs.Load(szFilename, C4D_Load_RX, …)` mid-round. The port has
+            // no runtime loader for a definition it has never seen — only
+            // `ReloadDef` for one it already holds — so the second lookup
+            // fails and the drop reports `IDS_CNS_DROPNODEF`, which is the
+            // arm C++ takes when its own load fails.
+            |_| false,
+        );
+        match outcome {
+            DropOutcome::Refused => {
+                let message =
+                    self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
+                self.developer_console.out(&message);
+            }
+            // Not a definition file: C++ says nothing at all.
+            DropOutcome::Ignored => {}
+            DropOutcome::NoDefinition(name) => {
+                let message = self.runtime_resource_text("IDS_CNS_DROPNODEF", "%s: no definition");
+                self.developer_console
+                    .out(&message.replacen("%s", &name, 1));
+            }
+            DropOutcome::Drop(id) => {
+                let (x, y) = drop_world_position(projection.target_x, projection.target_y, local);
+                self.submit_editor_drop_definition(&id, x, y);
+            }
+        }
+    }
+
+    /// `DefFileGetID` (`C4Game.cpp:1631-1639`) — the definition id a `.c4d`
+    /// declares.
+    ///
+    /// A definition the engine already loaded from that path answers without
+    /// touching the disk, which is also the only way a *packed* pack member
+    /// resolves; otherwise the group's own `DefCore.txt` is read, exactly as
+    /// C++ opens the group and loads the core.
+    fn dropped_definition_id(&self, path: &std::path::Path) -> Option<clonk_engine::DefinitionId> {
+        if let Some(id) = self
+            .engine
+            .definition_id_for_source_path(&path.to_string_lossy())
+        {
+            return Some(id);
+        }
+        let group = clonk_resources::Group::open(path).ok()?;
+        clonk_resources::DefCore::load(&group)
+            .ok()
+            .map(|core| core.id)
+    }
+
+    /// `C4Game::DropDef` — `Control.DoInput(CID_EMDropDef, …, CDT_Decide)`
+    /// (`C4Game.cpp:1667`).
+    fn submit_editor_drop_definition(&mut self, id: &str, x: i32, y: i32) {
+        let mut packed = *b"NONE";
+        let bytes = id.as_bytes();
+        if bytes.len() != packed.len() {
+            tracing::warn!(%id, "a dropped definition id is not four bytes");
+            return;
+        }
+        packed.copy_from_slice(bytes);
+        if let Err(error) =
+            self.submit_or_execute_editor_drop_definition(clonk_engine::EmDropDefControlData {
+                id: packed,
+                x,
+                y,
+                ..Default::default()
+            })
+        {
+            tracing::error!(%error, "failed to submit an editor definition drop");
+        }
+    }
+
     pub(crate) fn open_console_viewport_context_menu(&mut self, identity: u64, local: (i32, i32)) {
         use clonk_engine::developer_cursor::context_menu;
         use clonk_frontend::developer_context_menu::ViewportContextMenu;

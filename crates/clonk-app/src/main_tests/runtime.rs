@@ -6043,6 +6043,97 @@
         );
     }
 
+    // C4Viewport.cpp:225-240 and C4Game.cpp:1641-1676 — dropping a definition
+    // file on a console viewport is the editor's only way to create an object
+    // without typing script. `CID_EMDropDef`'s executor and wire codec landed
+    // long before anything could emit one.
+    #[test]
+    fn console_viewport_file_drop_emits_a_definition_drop_control() {
+        let mut app = new_lightweight_running_sandbox_app();
+        app.console_mode = true;
+        app.developer_console_edit_mode = ConsoleEditMode::Edit;
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(None)])
+            .expect("console ownerless viewport");
+        let identity = app
+            .physical_viewports
+            .last()
+            .expect("a console viewport")
+            .physical_identity;
+        // Drawing is what publishes this window's own projection.
+        assert!(app.render_console_viewport(identity, 320, 200).is_some());
+        let projection = app.console_viewport_projections[&identity];
+
+        // `DefFileGetID` reads the id out of the dropped group's own
+        // `DefCore.txt`, so the file only has to declare a definition the
+        // engine already holds — which is exactly the case C++ takes without
+        // loading anything. The id has to be a real four-byte C4ID: that is
+        // what `DefCore` parses and what the control's `id` field carries.
+        let definition = "ROCK".to_owned();
+        app.engine
+            .register_definition(
+                Definition::from_script(&definition, "Rock", "#strict\n")
+                    .expect("the dropped definition compiles"),
+            )
+            .expect("the dropped definition registers");
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let source = directory.path().join("Dropped.c4d");
+        std::fs::create_dir(&source).expect("the dropped definition group");
+        std::fs::write(
+            source.join("DefCore.txt"),
+            format!("[DefCore]\nid={definition}\nVersion=4,9,8\nWidth=1\nHeight=1\n"),
+        )
+        .expect("the dropped DefCore");
+
+        let local = (40, 24);
+        app.drop_file_on_console_viewport(identity, &source, local);
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, clonk_engine::ControlPacket::EmDropDef(drop), false)] = decided.as_slice() else {
+            panic!(
+                "expected one definition drop control, got {decided:?}; console said {:?}",
+                app.developer_console.log().text()
+            );
+        };
+        assert_eq!(drop.id, definition.as_bytes());
+        // `DropFiles` adds the drop point to the view origin *unscaled* — the
+        // `WM_USER_DROPDEF` path beside it is the one that divides by scale.
+        assert_eq!(
+            (drop.x, drop.y),
+            (projection.target_x + local.0, projection.target_y + local.1)
+        );
+        assert_eq!(drop.by_client, 7);
+
+        // Anything that is not a `.c4d` is ignored in silence — C++'s failure
+        // text lives inside that branch.
+        app.drop_file_on_console_viewport(identity, std::path::Path::new("/tmp/Round.c4s"), local);
+        assert!(
+            commands.take_submitted_decided_controls().is_empty(),
+            "a scenario file is not a definition drop"
+        );
+
+        // A `.c4d` the engine does not hold emits nothing and says so.
+        app.developer_console.clear_log();
+        app.drop_file_on_console_viewport(
+            identity,
+            std::path::Path::new("/tmp/Missing.c4d"),
+            local,
+        );
+        assert!(commands.take_submitted_decided_controls().is_empty());
+        assert!(
+            app.developer_console.log().text().contains("Missing.c4d"),
+            "the failure names the file: {:?}",
+            app.developer_console.log().text()
+        );
+
+        // A console that may not edit refuses the whole drop, with the same
+        // message the draw tools use.
+        app.developer_console_editing_enabled = false;
+        app.developer_console.clear_log();
+        app.drop_file_on_console_viewport(identity, &source, local);
+        assert!(commands.take_submitted_decided_controls().is_empty());
+        assert!(!app.developer_console.log().text().is_empty());
+    }
+
     // C4EditCursor.cpp:361-374,503-518 and C4ToolsDlg.cpp:865-879 — the
     // context menu's Properties/Tools row is the only thing that opens the
     // toolbox, the page follows the cursor mode, and the landscape mode

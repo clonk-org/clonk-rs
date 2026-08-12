@@ -3607,6 +3607,17 @@ impl NetworkManager {
         self.submit_decided_control(tick, clonk_engine::ControlPacket::EmDrawTool(control), sync)
     }
 
+    pub fn submit_decided_em_drop_def_control(
+        &self,
+        tick: Tick,
+        mut control: clonk_engine::EmDropDefControlData,
+        sync: bool,
+    ) -> Result<()> {
+        control.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the editor-control wire field"))?;
+        self.submit_decided_control(tick, clonk_engine::ControlPacket::EmDropDef(control), sync)
+    }
+
     pub fn submit_custom_command(
         &self,
         tick: Tick,

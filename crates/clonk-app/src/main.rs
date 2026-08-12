@@ -4816,6 +4816,26 @@ impl GameApp {
         self.apply_ready_controls(tick, vec![NetworkControl::EmDrawTool(control)])
     }
 
+    /// `C4Game::DropDef`'s half of the same seam (`C4Game.cpp:1667`).
+    ///
+    /// Placing an object is a *control* for the same reason moving one is: it
+    /// creates synchronized state, so every peer has to create it at the same
+    /// tick and in the same order.
+    fn submit_or_execute_editor_drop_definition(
+        &mut self,
+        control: clonk_engine::EmDropDefControlData,
+    ) -> Result<(), EngineError> {
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) = network.submit_decided_em_drop_def_control(tick, control, sync) {
+                tracing::error!(%error, "failed to submit an editor definition drop");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(tick, vec![NetworkControl::EmDropDef(control)])
+    }
+
     /// `C4EditCursor::In`, called by the separate property-dialog script
     /// entry. Selection ownership stays with the edit cursor; this snapshots
     /// its live C++-ordered object numbers into one `EMMO_Script` packet.
