@@ -61,9 +61,10 @@ class RustCoverageGateTests(unittest.TestCase):
             {
                 frozenset(("app-test-shard-1", "app-test-shard-10")),
                 frozenset(("app-test-shard-2", "app-test-shard-7")),
-                frozenset(("app-test-shard-3", "app-test-shard-12")),
+                frozenset(("app-test-shard-3",)),
                 frozenset(("app-test-shard-4", "app-test-shard-9")),
-                frozenset(("app-test-shard-5", "app-test-shard-11")),
+                frozenset(("app-test-shard-5",)),
+                frozenset(("app-test-shard-11", "app-test-shard-12")),
                 frozenset(("app-test-shard-6", "app-test-shard-8")),
             },
         )
@@ -87,7 +88,7 @@ class RustCoverageGateTests(unittest.TestCase):
         # The two compile-time sharded packages appear once per feature group;
         # every other package belongs to exactly one collector.
         package_counts = Counter(selected_packages)
-        self.assertEqual(package_counts.pop("clonk-app"), 6)
+        self.assertEqual(package_counts.pop("clonk-app"), 7)
         self.assertEqual(package_counts.pop("clonk-engine-integration-tests"), 2)
         self.assertEqual(
             package_counts,
@@ -107,9 +108,9 @@ class RustCoverageGateTests(unittest.TestCase):
             coverage,
         )
         self.assertIn("cancel-in-progress: true", coverage)
-        self.assertEqual(coverage.count("actions/cache/restore@"), 11)
-        self.assertEqual(coverage.count("fail-on-cache-miss: true"), 11)
-        self.assertEqual(coverage.count("if: ${{ !inputs.upload-diagnostics }}"), 11)
+        self.assertEqual(coverage.count("actions/cache/restore@"), 12)
+        self.assertEqual(coverage.count("fail-on-cache-miss: true"), 12)
+        self.assertEqual(coverage.count("if: ${{ !inputs.upload-diagnostics }}"), 12)
         self.assertIn("actions/download-artifact@", coverage)
         self.assertIn("if: inputs.upload-diagnostics", coverage)
         self.assertIn(
@@ -117,7 +118,7 @@ class RustCoverageGateTests(unittest.TestCase):
             coverage,
         )
         self.assertIn("merge-multiple: true", coverage)
-        self.assertIn("EXPECTED_FRAGMENT_COUNT: '11'", coverage)
+        self.assertIn("EXPECTED_FRAGMENT_COUNT: '12'", coverage)
         self.assertIn('if [[ "${#fragments[@]}" -ne "$EXPECTED_FRAGMENT_COUNT" ]]', coverage)
         self.assertIn("diff -u", coverage)
         self.assertIn("python3 scripts/merge-rust-coverage.py", coverage)
@@ -161,7 +162,12 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertNotIn("github.run_attempt", cache_lines)
 
         artifacts = re.findall(r"(?m)^            artifact: (.+)$", collectors)
-        self.assertEqual(len(artifacts), 11)
+        self.assertEqual(len(artifacts), 12)
+        self.assertIn("app-3", artifacts)
+        self.assertIn("app-11-12", artifacts)
+        self.assertNotIn("app-3-12", artifacts)
+        self.assertIn("app-5", artifacts)
+        self.assertNotIn("app-5-11", artifacts)
         self.assertIn(
             "target/coverage-fragments/${{ matrix.artifact }}.lcov.gz",
             collectors,
@@ -251,7 +257,7 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertIn(
             "pattern: rust-coverage-fragment-${{ github.run_id }}-*", html
         )
-        self.assertIn("EXPECTED_FRAGMENT_COUNT: '11'", html)
+        self.assertIn("EXPECTED_FRAGMENT_COUNT: '12'", html)
         self.assertIn("python3 scripts/merge-rust-coverage.py", html)
         self.assertIn("--output target/coverage/lcov.info", html_command_text)
         self.assertNotIn("--fail-under-lines", html)

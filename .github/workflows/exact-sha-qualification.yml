@@ -54,18 +54,22 @@ jobs:
             artifact: app-2-7
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
-          - name: app 3+12/12
-            artifact: app-3-12
+          - name: app 3/12
+            artifact: app-3
             apt: libasound2-dev libudev-dev
-            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-3,app-test-shard-12 --no-fail-fast --locked
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
           - name: app 4+9/12
             artifact: app-4-9
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
-          - name: app 5+11/12
-            artifact: app-5-11
+          - name: app 5/12
+            artifact: app-5
             apt: libasound2-dev libudev-dev
-            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-5,app-test-shard-11 --no-fail-fast --locked
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
+          - name: app 11+12/12
+            artifact: app-11-12
+            apt: libasound2-dev libudev-dev
+            command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-11,app-test-shard-12 --no-fail-fast --locked
           - name: app 6+8/12
             artifact: app-6-8
             apt: libasound2-dev libudev-dev
@@ -220,12 +224,12 @@ jobs:
           key: rust-coverage-fragment-${{ github.run_id }}-app-2-7
           fail-on-cache-miss: true
 
-      - name: Restore coverage fragment / app-3-12
+      - name: Restore coverage fragment / app-3
         if: ${{ !inputs.upload-diagnostics }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/coverage-fragments/app-3-12.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-3-12
+          path: target/coverage-fragments/app-3.lcov.gz
+          key: rust-coverage-fragment-${{ github.run_id }}-app-3
           fail-on-cache-miss: true
 
       - name: Restore coverage fragment / app-4-9
@@ -236,12 +240,20 @@ jobs:
           key: rust-coverage-fragment-${{ github.run_id }}-app-4-9
           fail-on-cache-miss: true
 
-      - name: Restore coverage fragment / app-5-11
+      - name: Restore coverage fragment / app-5
         if: ${{ !inputs.upload-diagnostics }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/coverage-fragments/app-5-11.lcov.gz
-          key: rust-coverage-fragment-${{ github.run_id }}-app-5-11
+          path: target/coverage-fragments/app-5.lcov.gz
+          key: rust-coverage-fragment-${{ github.run_id }}-app-5
+          fail-on-cache-miss: true
+
+      - name: Restore coverage fragment / app-11-12
+        if: ${{ !inputs.upload-diagnostics }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/coverage-fragments/app-11-12.lcov.gz
+          key: rust-coverage-fragment-${{ github.run_id }}-app-11-12
           fail-on-cache-miss: true
 
       - name: Restore coverage fragment / app-6-8
@@ -294,14 +306,15 @@ jobs:
 
       - name: Enforce merged line coverage floor
         env:
-          EXPECTED_FRAGMENT_COUNT: '11'
+          EXPECTED_FRAGMENT_COUNT: '12'
         run: |
           expected=(
             app-1-10
             app-2-7
-            app-3-12
+            app-3
             app-4-9
-            app-5-11
+            app-5
+            app-11-12
             app-6-8
             engine-1
             engine-2
@@ -356,14 +369,15 @@ jobs:
 
       - name: Merge Rust coverage fragments
         env:
-          EXPECTED_FRAGMENT_COUNT: '11'
+          EXPECTED_FRAGMENT_COUNT: '12'
         run: |
           expected=(
             app-1-10
             app-2-7
-            app-3-12
+            app-3
             app-4-9
-            app-5-11
+            app-5
+            app-11-12
             app-6-8
             engine-1
             engine-2
