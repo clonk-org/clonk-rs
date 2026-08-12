@@ -69,7 +69,9 @@ class MergeQueueGateTests(unittest.TestCase):
             reusable.count("if: ${{ always() && inputs.upload-diagnostics }}"),
             2,
         )
-        self.assertIn("needs: release-context", qualification)
+        self.assertIn(
+            "needs: [release-context, linux, windows-smoke]", qualification
+        )
         self.assertIn(
             "needs.release-context.outputs.release == 'true'", qualification
         )

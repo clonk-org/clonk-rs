@@ -126,20 +126,41 @@ class CiLatencyTests(unittest.TestCase):
                 "  windows-release-tools:"
             )
         ]
-        coverage = qualification[
+        coverage_fragments = qualification[
+            qualification.index("  coverage-fragments:") : qualification.index(
+                "  coverage:"
+            )
+        ]
+        coverage_report = qualification[
             qualification.index("  coverage:") : qualification.index(
+                "  developer-feedback:"
+            )
+        ]
+        developer_feedback = qualification[
+            qualification.index("  developer-feedback:") : qualification.index(
                 "  recording-host-oracles:"
             )
         ]
-        recording_host = qualification[qualification.index("  recording-host-oracles:") :]
+        recording_host = qualification[
+            qualification.index("  recording-host-oracles:") :
+        ]
         windows_producer = main[main.index("  windows-release-tools:") :]
 
         for producer in (linux_producer, windows_producer):
             self.assertIn("cancel-in-progress: false", producer)
-        for diagnostic in (coverage, recording_host):
+        for diagnostic in (
+            coverage_fragments,
+            coverage_report,
+            developer_feedback,
+            recording_host,
+        ):
             self.assertIn("cancel-in-progress: true", diagnostic)
+        self.assertIn(
+            'group: "main-coverage-report-${{ inputs.concurrency-suffix }}"',
+            coverage_report,
+        )
         self.assertIn("needs: linux-landing-cache", caller)
-        self.assertIn("save-if: false", coverage)
+        self.assertIn("save-if: false", developer_feedback)
         self.assertIn("publish-recording-host-cache: true", caller)
 
     def test_post_merge_work_leaves_the_next_landing_runner_budget(self):
@@ -175,15 +196,57 @@ class CiLatencyTests(unittest.TestCase):
 
         claims = {
             "linux-landing-cache-rolling": "app 2/12",
-            "main-coverage-rolling": "app 3/12",
+            "main-coverage-app-1-10-rolling": "app 3/12",
+            "main-coverage-app-2-7-rolling": "app 4/12",
             "main-recording-host-rolling": "app 5/12",
+            "main-coverage-app-3-12-rolling": "app 6/12",
+            "main-coverage-app-4-9-rolling": "app 7/12",
+            "main-coverage-app-5-11-rolling": "app 8/12",
+            "main-coverage-app-6-8-rolling": "app 9/12",
+            "main-coverage-engine-1-rolling": "app 11/12",
+            "main-coverage-engine-2-rolling": "app 12/12",
+            "main-coverage-remaining-1-rolling": "app netplay 1/2",
+            "main-coverage-remaining-2-rolling": "app netplay 2/2",
+            "main-developer-feedback-rolling": "engine integration 1/2",
+            "main-coverage-engine-and-frontend-units-rolling": "workspace quality",
+            "main-coverage-report-rolling": "engine contracts",
             "windows-landing-cache-rolling": "windows-smoke",
         }
         for group, claimant in claims.items():
             with self.subTest(group=group):
                 self.assertEqual(landing.count(f"'{group}'"), 1)
                 self.assertIn(claimant, landing)
-                self.assertIn(group.removesuffix("rolling"), main + qualification)
+
+        linux_claims = {
+            group: claimant
+            for group, claimant in claims.items()
+            if group != "windows-landing-cache-rolling"
+        }
+        for group, claimant in linux_claims.items():
+            with self.subTest(claimant=claimant):
+                self.assertIn(
+                    f"matrix.name == '{claimant}' && '{group}'", landing
+                )
+
+        artifacts = set(
+            re.findall(r"(?m)^            artifact: (.+)$", qualification)
+        )
+        self.assertEqual(
+            {
+                group
+                for group in claims
+                if group.startswith("main-coverage-")
+                and group != "main-coverage-report-rolling"
+            },
+            {f"main-coverage-{artifact}-rolling" for artifact in artifacts},
+        )
+        for group in (
+            "linux-landing-cache-rolling",
+            "main-recording-host-rolling",
+            "main-developer-feedback-rolling",
+            "windows-landing-cache-rolling",
+        ):
+            self.assertIn(group.removesuffix("rolling"), main + qualification)
 
         self.assertIn(
             "format('landing-linux-{0}-{1}', github.run_id, matrix.name)",
@@ -356,7 +419,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertEqual(
             len(re.findall(r"(?m)^          - name: ", linux)),
             18,
-            "18 Linux rows plus Windows smoke leave one Free runner slot",
+            "18 Linux rows plus Windows and release context fill 20 runner slots",
         )
 
         self.assertIn("if: matrix.apt != ''", linux)
@@ -415,10 +478,18 @@ class CiLatencyTests(unittest.TestCase):
         self.assertNotIn("fetch-depth: 0", workflow)
         self.assertIn("python3-pil", workflow)
 
-    def test_slow_diagnostics_are_post_merge_and_release_sha_is_not_cancelled(self):
+    def test_slow_diagnostics_yield_to_landing_but_release_qualification_does_not(self):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
         qualification = QUALIFICATION.read_text(encoding="utf-8")
+        main_caller = main[
+            main.index("  exact-sha-qualification:") : main.index(
+                "  windows-release-tools:"
+            )
+        ]
+        release_caller = landing[
+            landing.index("  release-qualification:") : landing.index("  linux:")
+        ]
 
         self.assertNotIn("cargo llvm-cov", landing)
         self.assertNotIn("runs-on: macos-latest", landing)
@@ -427,26 +498,30 @@ class CiLatencyTests(unittest.TestCase):
         )
         self.assertIn("cargo llvm-cov", qualification)
         self.assertIn("runs-on: macos-latest", qualification)
-        self.assertIn(
-            "startsWith(github.event.head_commit.message, 'chore: release ')",
-            main,
-        )
-        self.assertIn("&& github.sha ||", main)
+        self.assertIn("concurrency-suffix: rolling", main_caller)
+        self.assertIn("concurrency-suffix: ${{ github.sha }}", release_caller)
         self.assertIn("cancel-in-progress: true", qualification)
 
     def test_post_merge_render_probe_consumes_a_fresh_deterministic_replay(self):
         workflow = QUALIFICATION.read_text(encoding="utf-8")
-        replay = workflow.index("- name: Generate deterministic replay evidence")
-        render = workflow.index("- name: Render the replay snapshot")
-        coverage = workflow.index("- name: Collect instrumented workspace coverage")
+        developer = workflow[
+            workflow.index("  developer-feedback:") : workflow.index(
+                "  recording-host-oracles:"
+            )
+        ]
+        replay = developer.index("- name: Generate deterministic replay evidence")
+        render = developer.index("- name: Render the replay snapshot")
+        upload = developer.index("- name: Upload developer-feedback artifacts")
 
         self.assertLess(replay, render)
-        self.assertLess(render, coverage)
+        self.assertLess(render, upload)
+        self.assertIn("if: inputs.upload-diagnostics", developer)
+        self.assertNotIn("cargo llvm-cov", developer)
         self.assertIn(
             "dev_feedback_replay::real_scenario_replays_repeat_with_native_group_order",
-            workflow[replay:render],
+            developer[replay:render],
         )
-        self.assertIn("dev_feedback_render --ignored --exact", workflow[render:coverage])
+        self.assertIn("dev_feedback_render --ignored --exact", developer[render:upload])
 
     def test_post_merge_replay_writes_to_the_repository_artifact_root(self):
         workflow = QUALIFICATION.read_text(encoding="utf-8")
@@ -461,8 +536,8 @@ class CiLatencyTests(unittest.TestCase):
     def test_post_merge_render_uses_repository_artifact_paths(self):
         workflow = QUALIFICATION.read_text(encoding="utf-8")
         render = workflow.index("- name: Render the replay snapshot")
-        coverage = workflow.index("- name: Collect instrumented workspace coverage")
-        render_step = workflow[render:coverage]
+        upload = workflow.index("- name: Upload developer-feedback artifacts")
+        render_step = workflow[render:upload]
 
         for path in (
             "LC_DEV_CHECK_SNAPSHOT: ${{ github.workspace }}/target/dev-check/snapshot-final.json",

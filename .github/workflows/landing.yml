@@ -141,7 +141,7 @@ jobs:
 
   release-qualification:
     name: Qualify release candidate
-    needs: release-context
+    needs: [release-context, linux, windows-smoke]
     if: needs.release-context.outputs.release == 'true'
     permissions:
       contents: read
@@ -160,14 +160,26 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # The queue admits one candidate at a time. Three long required rows also
-    # hold the rolling post-merge groups, canceling obsolete diagnostics before
-    # they can consume the standard runner budget. Release-SHA lanes differ.
+    # The queue admits one candidate at a time. Required rows also hold every
+    # rolling post-merge lane, canceling obsolete diagnostics before they can
+    # consume the standard runner budget. Release-SHA lanes differ.
     concurrency:
       group: >-
         ${{ github.event_name == 'merge_group' && matrix.name == 'app 2/12' && 'linux-landing-cache-rolling'
-          || github.event_name == 'merge_group' && matrix.name == 'app 3/12' && 'main-coverage-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 3/12' && 'main-coverage-app-1-10-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 4/12' && 'main-coverage-app-2-7-rolling'
           || github.event_name == 'merge_group' && matrix.name == 'app 5/12' && 'main-recording-host-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 6/12' && 'main-coverage-app-3-12-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 7/12' && 'main-coverage-app-4-9-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 8/12' && 'main-coverage-app-5-11-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 9/12' && 'main-coverage-app-6-8-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 11/12' && 'main-coverage-engine-1-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app 12/12' && 'main-coverage-engine-2-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app netplay 1/2' && 'main-coverage-remaining-1-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'app netplay 2/2' && 'main-coverage-remaining-2-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'engine integration 1/2' && 'main-developer-feedback-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'workspace quality' && 'main-coverage-engine-and-frontend-units-rolling'
+          || github.event_name == 'merge_group' && matrix.name == 'engine contracts' && 'main-coverage-report-rolling'
           || format('landing-linux-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: ${{ github.event_name == 'merge_group' }}
     defaults:

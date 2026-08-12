@@ -75,7 +75,9 @@ jobs:
     uses: ./.github/workflows/exact-sha-qualification.yml
     with:
       source-sha: ${{ github.sha }}
-      concurrency-suffix: "${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+      # Landing already qualified release commits at their exact SHA. All
+      # post-merge diagnostics yield their runner slots to the next candidate.
+      concurrency-suffix: rolling
       publish-recording-host-cache: true
       upload-diagnostics: true
 

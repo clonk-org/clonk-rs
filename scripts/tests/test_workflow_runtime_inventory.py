@@ -91,6 +91,20 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
                     line,
                 )
 
+    def test_exact_sha_coverage_uses_current_pinned_cache_handoffs(self):
+        workflow = EXACT_SHA_QUALIFICATION_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "actions/cache/restore@"
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
+            workflow,
+        )
+        self.assertIn(
+            "actions/cache/save@"
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
+            workflow,
+        )
+
     def test_landing_smoke_covers_c4group_everywhere_it_is_inventoried(self):
         expected = {
             "Test the launcher and path resolution": "-p clonk-c4group",
@@ -267,6 +281,23 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertNotIn("rust.yml", artifact_resolver)
         self.assertIn(
             "run-id: ${{ steps.artifacts.outputs.run-id }}", release
+        )
+        qualification = EXACT_SHA_QUALIFICATION_WORKFLOW.read_text(encoding="utf-8")
+        collectors = qualification[
+            qualification.index("  coverage-fragments:") : qualification.index(
+                "  coverage:"
+            )
+        ]
+        upload = collectors.index("- name: Upload coverage fragment")
+        self.assertIn(
+            "if: inputs.upload-diagnostics",
+            collectors[upload : upload + 180],
+        )
+        self.assertIn("actions/cache/save@", collectors)
+        handoff = collectors.index("- name: Hand off coverage fragment")
+        self.assertIn(
+            "if: ${{ !inputs.upload-diagnostics }}",
+            collectors[handoff : handoff + 180],
         )
 
     def test_installer_smoke_compiles_the_release_icon_branch(self):
