@@ -650,6 +650,7 @@ where
             // no round yet, so there is nothing to return to a lobby. The join
             // in progress carries on into whichever round the host is building.
             ControlMessage::HostRestartLobby => continue,
+            ControlMessage::ControlWaitAttribution(_) => continue,
             ControlMessage::JoinData(join_data) => {
                 let remote_connection_id = connection.remote_connection_id().ok_or(
                     ConnectionHandshakeError::ReducerInvariant(
@@ -842,6 +843,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::PortCapabilities(_) => crate::PID_PORT_CAPABILITIES,
         ControlMessage::HostRestarting { .. } => crate::PID_PORT_HOST_RESTARTING,
         ControlMessage::HostRestartLobby => crate::PID_PORT_HOST_RESTART_LOBBY,
+        ControlMessage::ControlWaitAttribution(_) => crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION,
         ControlMessage::Ping(_) => 0x00,
         ControlMessage::Pong(_) => 0x01,
         ControlMessage::ConnectionRequest(_) => 0x02,
@@ -1236,6 +1238,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::PortCapabilities(_) => "PID_PortCapabilities",
         ControlMessage::HostRestarting { .. } => "PID_PortHostRestarting",
         ControlMessage::HostRestartLobby => "PID_PortHostRestartLobby",
+        ControlMessage::ControlWaitAttribution(_) => "PID_PortControlWaitAttribution",
         ControlMessage::Ping(_) => "PID_Ping",
         ControlMessage::Pong(_) => "PID_Pong",
         ControlMessage::ConnectionRequest(_) => "PID_Conn",

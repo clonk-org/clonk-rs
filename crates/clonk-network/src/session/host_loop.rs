@@ -439,6 +439,7 @@ pub(crate) async fn run_host(
             NETWORK_STATE_GO | NETWORK_STATE_PAUSE
         ),
         control_mode: config.initial_status.control_mode,
+        control_waiting_clients: BTreeMap::new(),
         straggler_late: Default::default(),
         peer_capabilities: Default::default(),
         async_control_wait: None,
@@ -1836,6 +1837,16 @@ impl HostState {
         self.client_performance.record_cadence(tick, reached_at);
         if tick != self.coordinator.current_tick() {
             return;
+        }
+        if self.control_mode != 0 {
+            let waiting = self
+                .coordinator
+                .clients_missing(tick)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            if !waiting.is_empty() {
+                self.control_waiting_clients.entry(tick).or_insert(waiting);
+            }
         }
         if let Some(waiting) = self
             .async_control_wait

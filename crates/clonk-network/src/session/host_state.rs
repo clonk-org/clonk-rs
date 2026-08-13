@@ -107,6 +107,9 @@ pub(crate) struct HostState {
     pub(crate) last_chase_target_update: Option<tokio::time::Instant>,
     pub(crate) game_started: bool,
     pub(crate) control_mode: i32,
+    /// Clients whose contribution was still missing when the host first
+    /// reached each host-routed control tick.
+    pub(crate) control_waiting_clients: BTreeMap<Tick, BTreeSet<ClientId>>,
     /// Consecutive ticks each client has failed to deliver before the host
     /// packed without it.
     pub(crate) straggler_late: std::collections::BTreeMap<ClientId, u32>,

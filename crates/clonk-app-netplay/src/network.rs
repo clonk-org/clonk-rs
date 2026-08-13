@@ -426,6 +426,9 @@ pub struct NetworkControlClock {
     /// Measured lateness of the last consumed control tick; see
     /// `observe_control_lateness_ms`.
     control_lateness_ms: Option<i32>,
+    /// Host-side attribution for the same lateness sample, when a capable
+    /// host published it before the aggregate control packet.
+    control_wait_attribution: Option<clonk_network::ControlWaitAttribution>,
     target_tick: Option<i32>,
     local_activated: Option<bool>,
     /// Sizes PreSend from the delivery-time tail rather than its mean -- a
@@ -470,6 +473,7 @@ impl NetworkControlClock {
             avg_control_send_time_us: 0,
             control_send_time_ms: None,
             control_lateness_ms: None,
+            control_wait_attribution: None,
             target_tick: None,
             local_activated: None,
             latency: ControlLatencyEstimator::new(),
@@ -552,6 +556,20 @@ impl NetworkControlClock {
     /// the loop instead of feeding it.
     pub fn observe_control_lateness_ms(&mut self, control_lateness_ms: i32) {
         self.control_lateness_ms = Some(control_lateness_ms.max(0));
+        self.control_wait_attribution = None;
+    }
+
+    /// Records raw control lateness plus the host's classification of the wait.
+    pub fn observe_attributed_control_lateness_ms(
+        &mut self,
+        control_lateness_ms: i32,
+        attribution: clonk_network::ControlWaitAttribution,
+    ) {
+        self.control_lateness_ms = Some(control_lateness_ms.max(0));
+        self.control_wait_attribution = i32::try_from(attribution.tick)
+            .ok()
+            .filter(|tick| *tick == self.control_tick)
+            .map(|_| attribution);
     }
 
     pub fn control_presend(self) -> i32 {
@@ -631,7 +649,14 @@ impl NetworkControlClock {
         // its horizon purely from waiting on the slowest client — a delay its
         // own PreSend cannot shorten, since PreSend moves when a participant
         // sends and never when it executes.
-        let sample = match (ping_sample, self.control_lateness_ms) {
+        let attributable_lateness = self.control_lateness_ms.filter(|_| {
+            !self.control_wait_attribution.is_some_and(|attribution| {
+                i32::try_from(attribution.tick).ok() == Some(self.control_tick)
+                    && attribution.waited_for_other
+                    && !attribution.waited_for_recipient
+            })
+        });
+        let sample = match (ping_sample, attributable_lateness) {
             (Some(ping), Some(lateness)) => ping.max(lateness),
             (Some(ping), None) => ping,
             (None, _) => return None,
@@ -746,6 +771,7 @@ struct NetworkWorkerReady {
     voice_sender: clonk_network::VoiceSender,
     voice_event_rx: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
     control_send_time: clonk_network::ControlSendTimeSnapshot,
+    control_wait_attribution: clonk_network::ControlWaitAttributionSnapshot,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
     /// Why this host is running unregistered, when the league server refused
     /// the `Start` that `C4Network2::InitHost` survives
@@ -1445,6 +1471,7 @@ pub struct NetworkManager {
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     network_io_statistics: clonk_network::NetworkIoStatistics,
     control_send_time: clonk_network::ControlSendTimeSnapshot,
+    control_wait_attribution: clonk_network::ControlWaitAttributionSnapshot,
     #[cfg(any(test, feature = "test-hooks"))]
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -3233,6 +3260,9 @@ pub struct ControlTickCost {
     /// Measured interval from reaching the control tick to consuming it, when
     /// the probe for this tick was still current.
     pub lateness_ms: Option<i32>,
+    /// Host-side classification for this exact tick, when both peers support
+    /// the out-of-band attribution packet.
+    pub wait_attribution: Option<clonk_network::ControlWaitAttribution>,
 }
 
 impl NetworkManager {
@@ -3364,6 +3394,7 @@ impl NetworkManager {
             league_record_runtime: ready.league_record_runtime,
             network_io_statistics: ready.network_io_statistics,
             control_send_time: ready.control_send_time,
+            control_wait_attribution: ready.control_wait_attribution,
             #[cfg(any(test, feature = "test-hooks"))]
             test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -4589,6 +4620,7 @@ impl NetworkManager {
         self.worker.as_ref()?;
         let consumed_at = tokio::time::Instant::now();
         let send_time_ms = self.control_send_time.sample(&client_ids);
+        let wait_attribution = self.control_wait_attribution.sample(tick);
         // How long the game loop actually waited for this tick: from reaching
         // the control tick to the aggregate becoming available. The probe is
         // stamped by `control_tick_reached` on the frame the cadence came round,
@@ -4616,6 +4648,7 @@ impl NetworkManager {
         Some(ControlTickCost {
             send_time_ms,
             lateness_ms,
+            wait_attribution,
         })
     }
 
@@ -5054,6 +5087,7 @@ impl NetworkManager {
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
                 control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
+                control_wait_attribution: Default::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
                 test_voice_outbound: None,
@@ -5091,6 +5125,7 @@ impl NetworkManager {
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
                 control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
+                control_wait_attribution: Default::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
                 test_voice_outbound: None,
@@ -5166,6 +5201,7 @@ impl NetworkManager {
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
                 control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
+                control_wait_attribution: Default::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
                 test_voice_outbound: None,
@@ -6224,6 +6260,7 @@ async fn run_host_worker_with_voice_enabled(
         voice_sender,
         voice_event_rx,
         control_send_time: host.control_send_time_snapshot(),
+        control_wait_attribution: Default::default(),
         league_start_response,
         league_start_failure,
         league_runtime_available: league_runtime.is_some(),
@@ -7609,6 +7646,7 @@ async fn run_client_worker_with_voice_enabled(
         voice_sender,
         voice_event_rx,
         control_send_time: client.control_send_time_snapshot(),
+        control_wait_attribution: client.control_wait_attribution_snapshot(),
         league_start_response: None,
         league_start_failure: None,
         league_runtime_available: league_runtime.is_some(),
@@ -14837,6 +14875,13 @@ Message=Server says Andr\xe9\r\n\
                 [HOST_CLIENT_ID, 7, 8],
                 [(7, 100), (8, 300)],
             );
+        let attribution = clonk_network::ControlWaitAttribution {
+            tick: 7,
+            waited_for_recipient: false,
+            waited_for_other: true,
+        };
+        manager.control_wait_attribution =
+            clonk_network::ControlWaitAttributionSnapshot::from_attributions([attribution]);
         manager.worker = Some(std::thread::spawn(|| {}));
         let (result_tx, result_rx) = mpsc::channel();
         let caller = std::thread::spawn(move || {
@@ -14865,9 +14910,14 @@ Message=Server says Andr\xe9\r\n\
 
         let (sample, before, after) = observed.test_value();
         assert_eq!(
-            sample.map(|cost| cost.send_time_ms),
+            sample.as_ref().map(|cost| cost.send_time_ms),
             Some(66),
             "the game thread reads the latest topology snapshot directly"
+        );
+        assert_eq!(
+            sample.and_then(|cost| cost.wait_attribution),
+            Some(attribution),
+            "the matching host attribution is sampled at the same boundary"
         );
         let consumed_at = queued_consumed_at.test_value();
         assert!((before..=after).contains(&consumed_at));
@@ -14991,7 +15041,14 @@ Message=Server says Andr\xe9\r\n\
         }
 
         clock.observe_control_send_time_ms(20);
-        clock.observe_control_lateness_ms(300);
+        clock.observe_attributed_control_lateness_ms(
+            300,
+            clonk_network::ControlWaitAttribution {
+                tick: 20,
+                waited_for_recipient: true,
+                waited_for_other: false,
+            },
+        );
         let change = clock.calculate_performance_for_mode(2).test_value();
 
         assert!(
@@ -14999,6 +15056,36 @@ Message=Server says Andr\xe9\r\n\
             "host-route ping alone must not hide the local client's measured lateness"
         );
         assert_eq!(clock.control_latency_budget(), Duration::from_millis(300));
+    }
+
+    #[test]
+    fn host_wait_for_another_client_keeps_a_healthy_clients_ping_horizon() {
+        let mut clock = NetworkControlClock::new(0, 2);
+
+        for frame in (0..=38).step_by(2) {
+            clock.observe_control_send_time_ms(20);
+            clock.calculate_performance_for_mode(2);
+            clock.complete_control_frame_at(frame);
+        }
+
+        clock.observe_control_send_time_ms(20);
+        clock.observe_attributed_control_lateness_ms(
+            300,
+            clonk_network::ControlWaitAttribution {
+                tick: 20,
+                waited_for_recipient: false,
+                waited_for_other: true,
+            },
+        );
+        clock.calculate_performance_for_mode(2);
+
+        assert_eq!(clock.control_presend(), 1);
+        assert_eq!(clock.control_latency_budget(), Duration::from_millis(20));
+        assert_eq!(
+            clock.control_lateness_ms(),
+            Some(300),
+            "diagnostics retain the measured wait even when it is not this client's budget"
+        );
     }
 
     #[test]

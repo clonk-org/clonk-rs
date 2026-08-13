@@ -632,6 +632,7 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
         crate::NetworkIoStatistics::new(network_statistics_now_ms()),
         commands,
         ControlSendTimeSnapshot::default(),
+        crate::ControlWaitAttributionSnapshot::default(),
         event_tx,
         voice_commands,
         voice_events,
@@ -671,6 +672,7 @@ pub(crate) async fn run_client_loop_with_routes(
     io_statistics: crate::NetworkIoStatistics,
     mut commands: mpsc::Receiver<ClientCommand>,
     control_send_time: ControlSendTimeSnapshot,
+    control_wait_attribution: crate::ControlWaitAttributionSnapshot,
     event_tx: mpsc::Sender<ClientEvent>,
     mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
     voice_events: mpsc::Sender<crate::VoiceFrame>,
@@ -1680,6 +1682,13 @@ pub(crate) async fn run_client_loop_with_routes(
                 };
                 match result {
                     Ok(ControlMessage::PortCapabilities(_)) => {}
+                    Ok(ControlMessage::ControlWaitAttribution(attribution)) => {
+                        record_host_control_wait_attribution(
+                            ingress_peer_id,
+                            attribution,
+                            &control_wait_attribution,
+                        );
+                    }
                     // Only the host restarts the session, so a notice relayed
                     // by a peer client says nothing about the host's intent.
                     Ok(ControlMessage::HostRestarting { .. })
@@ -2662,11 +2671,37 @@ fn apply_client_membership(
     }
 }
 
+fn record_host_control_wait_attribution(
+    ingress_peer_id: ClientId,
+    attribution: crate::ControlWaitAttribution,
+    snapshot: &crate::ControlWaitAttributionSnapshot,
+) {
+    if ingress_peer_id == HOST_CLIENT_ID {
+        snapshot.publish(attribution);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+
+    #[test]
+    fn only_the_host_can_publish_control_wait_attribution() {
+        let snapshot = crate::ControlWaitAttributionSnapshot::default();
+        let attribution = crate::ControlWaitAttribution {
+            tick: 73,
+            waited_for_recipient: false,
+            waited_for_other: true,
+        };
+
+        record_host_control_wait_attribution(7, attribution, &snapshot);
+        assert_eq!(snapshot.sample(73), None);
+
+        record_host_control_wait_attribution(HOST_CLIENT_ID, attribution, &snapshot);
+        assert_eq!(snapshot.sample(73), Some(attribution));
+    }
 
     #[test]
     fn received_control_deduplication_prunes_once_per_advancing_tick() {

@@ -794,7 +794,14 @@ impl GameApp {
                             if let Some(cost) = control_tick_cost {
                                 clock.observe_control_send_time_ms(cost.send_time_ms);
                                 if let Some(lateness_ms) = cost.lateness_ms {
-                                    clock.observe_control_lateness_ms(lateness_ms);
+                                    if let Some(attribution) = cost.wait_attribution {
+                                        clock.observe_attributed_control_lateness_ms(
+                                            lateness_ms,
+                                            attribution,
+                                        );
+                                    } else {
+                                        clock.observe_control_lateness_ms(lateness_ms);
+                                    }
                                 }
                             }
                             if let Some(change) = clock.calculate_performance_for_mode(control_mode)

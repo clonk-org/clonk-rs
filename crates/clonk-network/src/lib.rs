@@ -10,6 +10,7 @@ mod connection_liveness;
 mod control;
 mod control_latency;
 mod control_record;
+mod control_wait;
 mod dual_stack;
 mod forward_packet;
 mod host_game_reference;
@@ -73,6 +74,9 @@ pub use capabilities::{
 };
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
+pub use control_wait::{
+    ControlWaitAttribution, ControlWaitAttributionSnapshot, PID_PORT_CONTROL_WAIT_ATTRIBUTION,
+};
 pub use host_restart::{
     decode_host_restart_lobby_notice, decode_host_restart_notice, encode_host_restart_lobby_notice,
     encode_host_restart_notice, DEFAULT_HOST_RESTART_REJOIN_SECONDS, PID_PORT_HOST_RESTARTING,

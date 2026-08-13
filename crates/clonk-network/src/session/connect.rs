@@ -1526,6 +1526,8 @@ where
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
     let control_send_time = ControlSendTimeSnapshot::default();
     let worker_control_send_time = control_send_time.clone();
+    let control_wait_attribution = crate::ControlWaitAttributionSnapshot::default();
+    let worker_control_wait_attribution = control_wait_attribution.clone();
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
     let (voice_command_tx, voice_command_rx) =
         mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
@@ -1539,6 +1541,7 @@ where
         io_statistics.clone(),
         command_rx,
         worker_control_send_time,
+        worker_control_wait_attribution,
         event_tx,
         voice_command_rx,
         voice_event_tx,
@@ -1569,6 +1572,7 @@ where
     Ok(ClientHandle {
         command_tx,
         control_send_time,
+        control_wait_attribution,
         event_rx: Some(event_rx),
         voice_sender,
         voice_event_rx: Some(voice_event_rx),

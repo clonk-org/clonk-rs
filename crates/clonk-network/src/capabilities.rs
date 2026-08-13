@@ -53,10 +53,13 @@ impl PortCapabilities {
     pub const ELIDED_EMPTY_CONTROL: u32 = 1 << 2;
     /// Best-effort voice media carried outside reliable packet accounting.
     pub const VOICE_CHAT: u32 = 1 << 3;
+    /// Host-routed control waits identify whether this client or a different
+    /// participant held up the aggregate tick.
+    pub const CONTROL_WAIT_ATTRIBUTION: u32 = 1 << 4;
 
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
-        Self::from_bits(Self::VOICE_CHAT)
+        Self::from_bits(Self::VOICE_CHAT | Self::CONTROL_WAIT_ATTRIBUTION)
     }
 
     pub fn from_bits(bits: u32) -> Self {
@@ -234,6 +237,17 @@ mod tests {
     }
 
     #[test]
+    fn control_wait_attribution_requires_positive_peer_evidence() {
+        let mut registry = PeerCapabilityRegistry::default();
+
+        assert!(!registry.peer_supports(7, PortCapabilities::CONTROL_WAIT_ATTRIBUTION));
+
+        registry.record(7, PortCapabilities::supported());
+
+        assert!(registry.peer_supports(7, PortCapabilities::CONTROL_WAIT_ATTRIBUTION));
+    }
+
+    #[test]
     fn one_cpp_participant_holds_the_whole_session_on_the_compatible_path() {
         // Session-scoped capabilities change the merged control packet every
         // participant must read, so a single silent peer disables them.
@@ -267,8 +281,8 @@ mod tests {
         // this build cannot keep, and the peer would encode for it.
         assert_eq!(
             PortCapabilities::supported().bits(),
-            PortCapabilities::VOICE_CHAT,
-            "voice media is the only implemented extension"
+            PortCapabilities::VOICE_CHAT | PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
+            "the advertised mask must name exactly the implemented extensions"
         );
     }
 

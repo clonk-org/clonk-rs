@@ -41,7 +41,9 @@ pub(crate) async fn handle_client_message(
         }
         // Only the host restarts a session. A client claiming to is either
         // confused or hostile; either way there is nothing to act on.
-        ControlMessage::HostRestarting { .. } | ControlMessage::HostRestartLobby => {}
+        ControlMessage::HostRestarting { .. }
+        | ControlMessage::HostRestartLobby
+        | ControlMessage::ControlWaitAttribution(_) => {}
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
                 let _ = route.outbound.try_send(ControlMessage::Pong(packet));
@@ -1192,6 +1194,18 @@ async fn fulfill_resync_request(client_id: ClientId, from_tick: Tick, state: &mu
     }
 }
 
+fn control_wait_attribution_for(
+    tick: Tick,
+    recipient: ClientId,
+    waiting: &BTreeSet<ClientId>,
+) -> Option<crate::ControlWaitAttribution> {
+    (!waiting.is_empty()).then(|| crate::ControlWaitAttribution {
+        tick,
+        waited_for_recipient: waiting.contains(&recipient),
+        waited_for_other: waiting.iter().any(|client_id| *client_id != recipient),
+    })
+}
+
 pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState) {
     let aggregated = match aggregate_ready_batch(&batch) {
         Ok(packet) => packet,
@@ -1212,6 +1226,32 @@ pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState
     // already received each contribution and pack this packet themselves
     // (src/C4GameControlNetwork.cpp:763-777).
     if state.control_mode != 0 {
+        let waiting = state
+            .control_waiting_clients
+            .remove(&batch.tick())
+            .unwrap_or_default();
+        for client_id in state
+            .coordinator
+            .client_ids()
+            .filter(|client_id| *client_id != HOST_CLIENT_ID)
+        {
+            if !state.peer_capabilities.peer_supports(
+                client_id as i32,
+                crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
+            ) {
+                continue;
+            }
+            if let Some(attribution) =
+                control_wait_attribution_for(batch.tick(), client_id, &waiting)
+            {
+                let _ = try_send_host_message(
+                    state,
+                    client_id,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::ControlWaitAttribution(attribution),
+                );
+            }
+        }
         broadcast_control(&aggregated, state).await;
     }
     let _ = state
@@ -1894,5 +1934,33 @@ pub(crate) async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &m
             .event_tx
             .send(HostEvent::StatusCommitted(state.status_barrier.status))
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_wait_attribution_distinguishes_the_late_recipient_from_healthy_peers() {
+        let waiting = BTreeSet::from([7]);
+
+        assert_eq!(
+            control_wait_attribution_for(73, 7, &waiting),
+            Some(crate::ControlWaitAttribution {
+                tick: 73,
+                waited_for_recipient: true,
+                waited_for_other: false,
+            })
+        );
+        assert_eq!(
+            control_wait_attribution_for(73, 8, &waiting),
+            Some(crate::ControlWaitAttribution {
+                tick: 73,
+                waited_for_recipient: false,
+                waited_for_other: true,
+            })
+        );
+        assert_eq!(control_wait_attribution_for(73, 8, &BTreeSet::new()), None);
     }
 }

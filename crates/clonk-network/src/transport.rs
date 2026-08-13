@@ -301,6 +301,8 @@ pub enum ControlMessage {
     /// connection carries straight on into the new lobby. See
     /// [`crate::host_restart`].
     HostRestartLobby,
+    /// Which participant class held up one host-routed aggregate tick.
+    ControlWaitAttribution(crate::ControlWaitAttribution),
 }
 
 #[derive(Debug)]
@@ -657,6 +659,11 @@ impl<S> ControlTransport<S> {
             ControlMessage::HostRestartLobby => {
                 frame.extend(crate::encode_host_restart_lobby_notice());
             }
+            ControlMessage::ControlWaitAttribution(attribution) => {
+                frame.extend(crate::control_wait::encode_control_wait_attribution(
+                    attribution,
+                ));
+            }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
                 let control_tick = i32::try_from(control_tick)
@@ -844,6 +851,13 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
             .ok_or(TransportError::UnsupportedPacket(
                 crate::PID_PORT_HOST_RESTART_LOBBY,
             )),
+        crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION => {
+            crate::control_wait::decode_control_wait_attribution(body)
+                .map(ControlMessage::ControlWaitAttribution)
+                .ok_or(TransportError::UnsupportedPacket(
+                    crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION,
+                ))
+        }
         other => Err(TransportError::UnsupportedPacket(other)),
     }
 }
@@ -1391,6 +1405,32 @@ mod tests {
         let decoded = parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("notice decodes");
 
         assert_eq!(decoded, ControlMessage::HostRestartLobby);
+    }
+
+    /// Wait attribution is presentation-side timing metadata, not a lockstep
+    /// control, so it travels as its own port packet and stays keyed to the
+    /// control tick whose host-side wait it describes.
+    #[test]
+    fn host_wait_attribution_round_trips_through_the_frame_codec() {
+        let attribution = crate::ControlWaitAttribution {
+            tick: 73,
+            waited_for_recipient: false,
+            waited_for_other: true,
+        };
+        let frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::ControlWaitAttribution(attribution),
+        )
+        .expect("attribution encodes");
+
+        assert_eq!(
+            frame[FRAME_HEADER_LEN],
+            crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION
+        );
+
+        let decoded =
+            parse_control_message(&frame[FRAME_HEADER_LEN..]).expect("attribution decodes");
+
+        assert_eq!(decoded, ControlMessage::ControlWaitAttribution(attribution));
     }
 
     /// A stock C++ peer never sends this, so the port must never *require* it —
