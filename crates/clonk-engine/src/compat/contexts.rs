@@ -4639,10 +4639,12 @@ impl EffectHostContext {
             }
             // Energy stays the snapshot value on purpose: the paths that
             // depend on mid-call energy (DoEnergy, the death checks, the
-            // active-scope GetEnergy) read the scope state directly, and
-            // the foreign GetEnergy stale read is pinned by existing
-            // behavior — do not overlay without a differential test
-            // (PORT_STATUS, Script host model).
+            // active-scope GetEnergy) read the scope state directly, so
+            // overlaying it here would change nothing they observe. What
+            // it WOULD change is a foreign GetEnergy, whose stale read is
+            // pinned by existing tests — and energy feeds AssignDeath, so
+            // moving when a new value becomes visible is a sync-visible
+            // change. Do not overlay it without a C++ differential first.
             object.ocf = scope.staged_ocf(scope.ocf());
         }
         // The snapshot contents list re-checks each child's live state:
@@ -5912,8 +5914,13 @@ impl EffectHostContext {
         if !resolvable {
             return None;
         }
-        // VM sessions own their locals, so a call onto an in-flight scope
-        // reads the pre-call snapshot (divergence noted in PORT_STATUS).
+        // A VM session owns its `local` cells for the length of the call,
+        // so a call onto an object whose own script is already in flight
+        // cannot see that session's uncommitted writes: it starts from the
+        // pre-call snapshot. C++ keeps named locals on the C4Object itself,
+        // where the nested call would read them live — a known divergence,
+        // narrowed by the `overlay_foreign_cells` pass below, which does
+        // replay earlier cross-object LocalN writes onto the snapshot.
         let mut snapshot_locals = world_object
             .as_ref()
             .and_then(|object| object.full_state())

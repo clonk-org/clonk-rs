@@ -2830,10 +2830,16 @@ Title=Empty\n",
         // C4NetIOSimpleUDP::InitBroadcast joins ff02::1 with
         // ipv6mr_interface=0 and leaves the destination scope unset; it does
         // not enumerate or fan out over interfaces (pristine 9ffa0a5d
-        // src/C4NetIO.cpp:1587-1633). Wherever that join succeeds the port
+        // src/C4NetIO.cpp:1587-1633, under its own `// TODO: do multicast on
+        // all interfaces?` at :1623). Wherever that join succeeds the port
         // still sends exactly that one datagram; the fan-out below is reached
-        // only once the kernel has refused it (PORT_STATUS.md, deliberate
-        // divergences).
+        // only once the kernel has refused it, because on a host whose default
+        // multicast route has no IPv6-capable interface -- a Mac with IPv6
+        // switched off on its only LAN NIC is enough -- the C++ join returns
+        // EADDRNOTAVAIL and every send EHOSTUNREACH, so LAN discovery is dead
+        // in both directions (clonk-org/clonk-rs#107). Enumerating cannot
+        // desync: discovery only selects which game to join, before any
+        // control is exchanged.
         let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
 
         assert_eq!(

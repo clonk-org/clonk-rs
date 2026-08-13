@@ -730,7 +730,14 @@ impl Engine {
     /// on the menu's command object (C4ObjectMenu::MenuCommand ->
     /// C4Object::MenuCommand DirectExec, C4ObjectMenu.cpp:505-527 /
     /// C4Object.cpp:3756-3760). The app-side menu UI must route its Enter
-    /// here; see the PORT_STATUS `object menus` row for what remains.
+    /// here. What remains for object menus is draw-side, not input-side:
+    /// native Contents/Get/Put, Activate and base-sell rows still resolve
+    /// their symbol against the frame's snapshot instead of capturing it at
+    /// refill as `C4ObjectMenu::RefillInternal` does, so such a row can draw
+    /// blank for one frame (clonk-org/clonk-rs#364), and a Dialog row
+    /// hit-tests off the item recipe rather than the resolved facet
+    /// (`C4Menu.cpp:138`, clonk-org/clonk-rs#375). No parity gate has a menu
+    /// section, so neither of those is machine-checked.
     pub fn menu_user_enter(
         &mut self,
         object_id: ObjectId,
@@ -1025,8 +1032,10 @@ impl Engine {
     /// (`Contained->Controller = Controller`, :3367). The com is consumed
     /// either way — DirectCom returns unconditionally. The hardcoded
     /// non-script fallbacks (COM_Down exit, COM_Throw command,
-    /// COM_Up/COM_Dig base buy/sell, Take/Take2; :3243-3306) are command-AI
-    /// features not yet ported — see PORT_STATUS.
+    /// COM_Up/COM_Dig base buy/sell, Take/Take2; :3243-3306) are not ported:
+    /// each drives the container command AI (Exit/Throw/Buy/Sell), so they
+    /// cannot land ahead of it (clonk-org/clonk-rs#334), and only a container
+    /// whose script leaves the com unhandled reaches them at all.
     fn contained_control(
         &mut self,
         crew_index: usize,

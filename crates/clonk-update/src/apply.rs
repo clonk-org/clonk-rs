@@ -1263,10 +1263,15 @@ fn carry_over_names(component: &str, locations: &Locations) -> Result<Vec<String
     if component != "content" {
         return Ok(Vec::new());
     }
-    // Installed state currently records only the archive digest, not the
-    // archive's owned names. Consequently an omitted release pack and an
+    // Installed state currently records only the archive's digest and version,
+    // not the top-level names it owned, so an omitted release pack and an
     // omitted user pack are indistinguishable here. Preserve the established
-    // user-pack contract; PORT_STATUS.md records the ownership-inventory gap.
+    // user-pack contract: deleting a user-installed scenario or definition is
+    // unrecoverable, whereas an official pack a later release drops merely
+    // lingers as hybrid content. Engine and planet swaps are exact snapshots
+    // and have no such ambiguity. Closing this needs a package/installed-state
+    // ownership inventory so the applier can retain only names the previous
+    // release never owned (clonk-org/clonk-rs#395).
     if !std::fs::symlink_metadata(&locations.destination).is_ok_and(|meta| meta.is_dir()) {
         return Ok(Vec::new());
     }

@@ -3,9 +3,14 @@
 //! `c4group_ng.cpp` opens each group in turn and runs the whole command list
 //! against it, printing the contents when no command was given (:110-134).
 //!
-//! Commands whose group primitives this port does not expose yet report
-//! themselves on stderr and set a failing exit status rather than being
-//! silently ignored — see the `c4group` row in `PORT_STATUS.md`.
+//! Commands whose group primitives this port does not expose yet — `-g` and
+//! `-y`, update generation and application — report themselves on stderr and
+//! set a failing exit status rather than being silently ignored, because a
+//! silent success would read as an applied update. They depend on the
+//! `C4UpdatePackage` format (`C4Update.cpp`, 909 lines), where `C4GroupEx`
+//! reaches into `C4Group`'s private header and entry cores
+//! (`C4Update.cpp:149-200`); `clonk-resources` exposes no equivalent, so that
+//! is a separate subsystem port rather than a CLI concern.
 
 mod apply_update;
 mod cli;

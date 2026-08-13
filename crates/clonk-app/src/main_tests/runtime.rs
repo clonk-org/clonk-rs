@@ -8828,17 +8828,31 @@ fn render_inactive_bitmask_gates_unfocused_fullscreen_and_console_redraw() {
 }
 
 /// The *shipped* default carries the Fullscreen bit as well, so an
-/// Alt-Tabbed game keeps drawing (clonk-org/clonk-rs#57; recorded under
-/// PORT_STATUS.md "Deliberate divergences").
+/// Alt-Tabbed game keeps drawing. This is a deliberate divergence from the
+/// oracle, approved 2026-08-05, fixing clonk-org/clonk-rs#57.
 ///
-/// Only the graphics half of `C4Application::Execute` is gated on activity
-/// (C4Application.cpp:451-478): the round keeps executing, and in a network
-/// game it must, because every other peer is waiting on this one's control.
-/// With C++'s Console-only default (C4Config.cpp:481) the picture therefore
-/// stops at the moment of deactivation while the world runs on, and refocus
-/// snaps it forward — a freeze followed by a fast-forward, over a session
-/// that never actually stalled. A player who writes the key still gets the
-/// oracle behaviour, in both directions.
+/// `C4GraphicsSystem::StartDrawing` refuses to draw an inactive window unless
+/// the active shell's bit is set (C4GraphicsSystem.cpp:96-106), and `C4Config`
+/// defaults that mask to `Console` alone (C4Config.cpp:481). But only the
+/// graphics half of `C4Application::Execute` is gated on activity —
+/// `Game.Execute()` is not (C4Application.cpp:451-478): the round keeps
+/// executing, and in a network game it must, because lockstep means every
+/// other peer is waiting on this client's control. The oracle default
+/// therefore stops the picture at the moment of deactivation while the world
+/// runs on, and refocus snaps it forward — a freeze followed by the
+/// fast-forward filed as clonk-org/clonk-rs#56, over a session that never
+/// actually stalled. Measured on macOS before this change: an inactive shell
+/// presented **1 frame in 197 s while the simulation executed 7062**.
+///
+/// The divergence is the *default* only; a `RenderInactive` the player writes
+/// is honoured verbatim in both directions, and `RenderInactive=2` restores
+/// C++ exactly. It is safe because it is presentation-only and in the safe
+/// direction: it adds frames, never removes a simulation step. Nothing on the
+/// path reads or writes `C4Fixed`, `C4Random`, movement or control ordering,
+/// and the gate is per-client local state no peer can observe, so two clients
+/// configured differently stay in lockstep and cross-play against a stock
+/// LegacyClonk client is unaffected. Neither `parity verify` nor
+/// `engine-snapshots verify` can see it; neither presents.
 #[test]
 fn the_shipped_default_keeps_an_unfocused_game_window_drawing() {
     let mask = |body| runtime_config_value(body, |paths| load_render_inactive_mask(Some(paths)));

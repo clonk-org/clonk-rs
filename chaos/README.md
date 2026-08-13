@@ -60,8 +60,8 @@ opposite of the intuition that led to the work.
   model has competing bulk traffic (`cross_traffic_*_bps`), but the session
   harness does not yet put resource fragments into the same strictly-ordered
   reliable-UDP stream as control. That is the mechanism behind the multi-second
-  freezes described in `PORT_STATUS.md`, so the numbers here currently understate
-  a session where anyone is still downloading.
+  control freezes seen when a peer is still downloading resources, so the
+  numbers here currently understate such a session.
 - The transport-level view (`clonk_network::sim`) and the session view
   (`clonk_network::sim_session`) are separate models. The session harness does not
   drive real `ReliableUdpEndpointCore` endpoints; it drives the real

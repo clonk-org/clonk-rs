@@ -428,8 +428,31 @@ pub struct NetworkControlClock {
     control_lateness_ms: Option<i32>,
     target_tick: Option<i32>,
     local_activated: Option<bool>,
-    /// Sizes PreSend from the delivery-time tail rather than its mean. See
-    /// `ControlLatencyEstimator` and the PORT_STATUS divergence entry.
+    /// Sizes PreSend from the delivery-time tail rather than its mean -- a
+    /// deliberate divergence from C++'s `C4GameControlNetwork::CalcPerformance`,
+    /// which sizes the horizon off a 1/150 EWMA of the *mean* control send time
+    /// (LegacyClonk 7d43b47 src/C4GameControlNetwork.cpp:382-447). That mean
+    /// sits below the delivery time of roughly half of all control packets, so
+    /// a link with any jitter stalls *every* participant on about half its
+    /// ticks forever; and the 150-sample constant is ~8 s at ControlRate 2, so
+    /// a link that gets slower stalls on every tick for that whole span before
+    /// the horizon reacts. `ControlLatencyEstimator` instead tracks a decaying
+    /// peak envelope (immediate attack, C++'s slow decay) plus a
+    /// mean-absolute-deviation margin over upward surprises only; on a steady
+    /// link the deviation collapses and the envelope equals the mean, so
+    /// healthy connections keep exactly C++'s budget. Measured over 24 seeds x
+    /// 400 control ticks, an 80 ms RTT / +-20 ms jitter / 1% loss link went
+    /// from 27.19% frozen time and a 231 ms worst hitch to 0.18% and 31 ms,
+    /// charging 57 ms -> 81 ms of mean input latency.
+    /// Determinism is untouched: PreSend only selects which tick a client
+    /// stamps its *own* input for. Every participant still executes that tick's
+    /// control at that tick, the wire format and the delivered control stream
+    /// are unchanged, and PreSend already varies per client in C++ (each adapts
+    /// from its own ping, and `SetPreSend` is script-settable), so a C++ peer
+    /// needs no knowledge of this.
+    /// Do not feed this budget to `avg_control_send_time`: that script- and
+    /// dialog-visible field must stay C++'s exact 1/150 EWMA, and only the
+    /// PreSend decision may read the envelope.
     latency: ControlLatencyEstimator,
     /// Simulation frames represented by completed control intervals after GO.
     startup_simulation_frames_completed: u64,
@@ -14883,9 +14906,13 @@ Message=Server says Andr\xe9\r\n\
         // The ACT field keeps C++'s exact rolling average: CalcPerformance
         // retains 149/150 of the previous microsecond average and adds 1/150 of
         // the latest topology-aware millisecond control-send sample
-        // (src/C4GameControlNetwork.cpp:382-447). PreSend itself no longer
-        // reads that average -- see the PORT_STATUS divergence entry -- so this
-        // pins the average and the 1..15 clamp, and the sizing is pinned below.
+        // (src/C4GameControlNetwork.cpp:382-447). PreSend itself deliberately
+        // no longer reads that average: C++'s mean sits below roughly half of
+        // all control delivery times, so it stalls every participant on about
+        // half the ticks of any jittery link, and this port sizes the horizon
+        // from a decaying delivery-time envelope instead. The ACT average and
+        // the 1..15 clamp must stay bit-exact with C++ regardless, so this test
+        // pins those two, and the divergent sizing is pinned below.
         let mut clock = NetworkControlClock::new(0, 1);
         assert_eq!(clock.control_presend(), 1);
         assert_eq!(clock.avg_control_send_time(), 0);

@@ -75,8 +75,8 @@ pre-push:
     # concurrent session's unformatted uncommitted work blocks your unrelated
     # push. That happened immediately — four dirty `clonk-network/session*.rs`
     # files from another session rejected a push whose only content was
-    # `Cargo.lock` and `PORT_STATUS.md`. A hook that forces `--no-verify` for
-    # honest pushes is worse than no hook.
+    # `Cargo.lock` and a documentation file. A hook that forces `--no-verify`
+    # for honest pushes is worse than no hook.
     - name: rustfmt-pushed-commits
       run: |
         base="$(git rev-parse --verify --quiet origin/main || true)"

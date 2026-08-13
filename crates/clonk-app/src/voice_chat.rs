@@ -1,3 +1,33 @@
+//! Proximity voice chat: source authentication, speaking state and the
+//! positional mix.
+//!
+//! This is a deliberate Rust-only extension (clonk-org/clonk-rs#301), **not a
+//! parity claim** — there is no C++ oracle for any of it. It is opt-in
+//! push-to-talk and opens the microphone only for a held configured key.
+//!
+//! **The determinism boundary is the invariant to protect.** Fixed 20 ms,
+//! 16 kHz mono IMA ADPCM frames travel on a bounded, droppable UDP media lane
+//! after positive Rust-to-Rust capability negotiation. They never enter
+//! lockstep controls, snapshots, savegames, records/replays, sync checks or
+//! PostMortem recovery, and nothing here may change that: a peer that cannot
+//! decode voice, or drops every frame, must still stay in perfect lockstep,
+//! which is also what keeps cross-play against a stock LegacyClonk client
+//! working. The lane's droppability is load-bearing — do not add
+//! retransmission or ordering requirements to it.
+//!
+//! Source identity is authenticated rather than trusted: each admitted UDP
+//! route exchanges an unpredictable media cookie over its reliable control
+//! stream, the receiving route supplies the source client ID, and
+//! [`authenticated_selected_voice_crew`] revalidates that the claimed player
+//! belongs to that client before resolving the live selected
+//! `PlayerState.cursor`.
+//!
+//! Playback uses the existing linear 700-pixel positional mix; the speaker
+//! glyph additionally obeys per-viewport object/FoW visibility. Landscape
+//! openness and obstacles deliberately do not occlude speech
+//! (clonk-org/clonk-rs#418), and the media lane is not encrypted
+//! (clonk-org/clonk-rs#426).
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 

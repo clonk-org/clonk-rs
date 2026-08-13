@@ -514,7 +514,28 @@ fn network(config: &Config) -> AdvancedConfigSection {
             i32_row(config, section, "PortUDP", 11_113),
             i32_row(config, section, "PortDiscovery", 11_114),
             i32_row(config, section, "PortRefServer", 11_111),
-            // 2 = CNM_Async; see the PORT_STATUS divergence entry.
+            // 2 = `CNM_Async`, where C++ ships 0 (`CNM_Decentral`) in
+            // `C4Config.cpp` and labels async experimental
+            // (`C4GameOptions.cpp:93`). Only the default differs: the
+            // mechanism is a faithful port of `PackCompleteCtrl`
+            // (C4GameControlNetwork.cpp:741-784, deadline mirroring :754).
+            // In lockstep the host cannot publish a tick until every client's
+            // control for it arrives, so the slowest link paces the session and
+            // one bad peer stalls everyone; async bounds that wait at
+            // `ControlRate * AsyncMaxWait * 1000 / TargetFPS` (106 ms at
+            // defaults) and drops the absent input rather than deferring it.
+            // Determinism is unaffected — only the host decides the timeout and
+            // it still broadcasts one authoritative aggregate that every client
+            // executes identically. The drop is silent: a player whose input
+            // misses the deadline gets no client-side signal that it was
+            // discarded. Measured over 16 seeds x 400 ticks with
+            // PreSend active, p99/max shared-tick lateness against a 250 ms
+            // peer fell 232/281 ms -> 190/206 ms for 32 dropped packets, and a
+            // 60 ms/10%-loss peer was unchanged at 93/106 ms with 0 drops.
+            // Do not tune the budget down to chase the tail: it must stay above
+            // ordinary delivery time, or a peer that is consistently slow is
+            // dropped on nearly every tick (`AsyncMaxWait` 1 dropped 6490 of
+            // 6400 ticks against a 250 ms peer without PreSend).
             i32_row(config, section, "ControlMode", 2),
             validated_text_row(config, section, "LocalName", "Unknown", |value| {
                 validate_network_name(value, false)

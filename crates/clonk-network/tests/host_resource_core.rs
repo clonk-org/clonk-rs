@@ -100,12 +100,22 @@ fn cpp_publishes_a_packed_scenario_with_separate_content_and_file_checksums() {
     assert!(publication.core.loadable);
     assert_eq!(publication.core.file_size, packed.len() as u32);
     assert_eq!(publication.core.file_crc, c4group_file_crc(&packed));
-    // 10 KiB, OpenClonk's value, not LegacyClonk's 100 KiB. Resource chunks and
+    // 10 KiB, OpenClonk's value, not LegacyClonk's 100 KiB (C++
+    // `C4NetResChunkSize`, src/C4Network2Res.h:27). Resource chunks and
     // control share one strictly-ordered reliable-UDP sequence space whenever a
     // peer has no TCP route -- the ordinary internet topology, since NAT
     // punch-through is UDP-only -- so a 100 KiB chunk puts 206 datagrams ahead
-    // of every later control packet and one lost fragment withholds all of them.
-    // See the PORT_STATUS divergence entry.
+    // of every later control packet and one lost fragment withholds all of them
+    // until the repair lands; 10 KiB is 21 datagrams. Chunk size travels per
+    // resource in the core and is honoured by whoever downloads it, so a stock
+    // C++ peer follows this unmodified, and `RESOURCE_MAX_LOADS` is scaled with
+    // it to keep C++'s 2 MB of outstanding bulk. Serving code must take each
+    // chunk's *length* from the core's own stride, never from the hardcoded
+    // 100 KiB of src/C4Network2Res.cpp:1268-1269: that literal is
+    // self-consistent only because every core C++ publishes carries
+    // `ChunkSize = C4NetResChunkSize`, and copying it made each chunk overlap
+    // the following nine -- the host served the file ten times over and the
+    // fragment burst stayed 206.
     assert_eq!(publication.core.chunk_size, 10 * 1024);
     assert_eq!(publication.core.file_sha, None);
     assert_eq!(

@@ -10,8 +10,15 @@
 //! Exact mode.
 //!
 //! This module is the read side only — dialog state, rendering, shortcuts and
-//! `EMDrawTool` emission stay out — they belong to the Tools/draw dialog
-//! (`C4ToolsDlg`), tracked in `PORT_STATUS.md`.
+//! `EMDrawTool` emission stay out by design; they belong to the Tools/draw
+//! dialog (`C4ToolsDlg`) and live in `developer_tools` and the app's toolbox,
+//! whose remaining surfaces are tracked in clonk-org/clonk-rs#398. The split
+//! exists so the console
+//! reads the catalogue and picker the native dialog reads instead of
+//! reconstructing engine internals of its own: the material list, the
+//! valid/invalid texture partition and `ApplyToolPicker`'s answer must come
+//! from the engine's live material map and tex-map, or a picked pair can name
+//! a tex-map slot the landscape does not actually hold.
 
 /// `C4TLS_MatSky` (`C4ToolsDlg.h:43`): the sky pseudo-material heading the
 /// material list, and the picker's answer for an empty pixel.

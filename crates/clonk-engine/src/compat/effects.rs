@@ -3977,10 +3977,18 @@ mod reload_particle_tests {
 
     // C4Script.cpp:5161-5165 -> C4Game::ReloadParticle (C4Game.cpp:2369-2394).
     //
-    // This freezes the script-visible contract before the synchronous-access
-    // design lands (see PORT_STATUS.md): every case where C++ returns false
-    // must keep returning false afterwards, so the change can only ever turn a
-    // *successful* reload from false into true.
+    // This freezes the script-visible contract: every case where C++ returns
+    // false — network game, nil name, unknown name, and a definition carrying no
+    // `Filename`, which `C4ParticleDef::Reload` refuses without
+    // (`C4Particles.cpp:197`) — must keep returning false. The builtin answers
+    // the script synchronously from state seeded *before* the call and stages
+    // the accepted name for `Engine::apply_particle_reload_requests`, so the
+    // only movement this contract permits is a *successful* reload turning from
+    // false into true. That is exactly the one residual divergence: a reload
+    // passing all four checks and then failing on I/O reports true where C++
+    // reports false, while the engine still runs the full failure arm (every
+    // particle in the system cleared, then the definition removed). Do not
+    // relax these cases to accommodate that path.
     #[test]
     fn reload_particle_reports_false_for_every_name_cpp_cannot_reload() {
         // `if (!szName) return false;` — the nil safety check.

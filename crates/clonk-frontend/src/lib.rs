@@ -14457,13 +14457,20 @@ mod tests {
 
     #[test]
     fn high_dpi_cursor_tiers_climb_the_shipped_ladder_by_physical_width() {
-        // Deliberate divergence (PORT_STATUS "Deliberate divergences"): C++
-        // pins the sheet at index 5 for every width above 1280 and only steps
-        // up with Graphics.Scale (src/C4GraphicsResource.cpp:474-491), so a
-        // 4K panel at Scale=100 draws a 50px pointer and the shipped 75..338px
-        // sheets are never used. The eight sizes are authored on an exact
-        // 50/1280 ratio, so selecting by physical width keeps C++'s angular
-        // size and every tier stays a 1:1 blit.
+        // Deliberate divergence from the oracle, opt-in through
+        // `Graphics.HighDpiCursor` (default off; `Classic` keeps the C++
+        // ladder byte-for-byte). C++
+        // `C4GraphicsResource::ReloadResolutionDependentFiles` pins the sheet
+        // at index 5 for every width above 1280 and only steps up with
+        // Graphics.Scale (src/C4GraphicsResource.cpp:468-491), so a 4K panel
+        // at Scale=100 draws a 50px pointer and the shipped
+        // 75/100/150/225/338px sheets are never loaded. The eight sizes are
+        // authored on an exact 50/1280 ratio, so selecting by physical width
+        // reproduces C++'s angular size at every resolution and every tier
+        // stays a 1:1 blit of existing art. Presentation-only: the cell size
+        // feeds C4MouseControl's draw offsets (src/C4MouseControl.cpp:333-344)
+        // and never a control or a game coordinate, so two clients on
+        // different tiers stay in lockstep.
         let hd = |width: u32, scale: f32| {
             CursorAtlas::index_for_tiers(width, scale, CursorTiers::HighDpi)
         };

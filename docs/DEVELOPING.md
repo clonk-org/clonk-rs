@@ -180,8 +180,9 @@ The explicit Clippy target set covers every production library, binary, and
 test without rebuilding `test = false` libraries as implicit benchmark
 harnesses. The three Criterion benchmarks remain opt-in through their `bench`
 features.
-Behavior changes can additionally require the relevant scenario sweep/audit
-and rebuilt live C++ comparison described in `PORT_STATUS.md`.
+Behavior changes can additionally require the relevant scenario sweep/audit and
+a rebuilt live C++ comparison against an oracle checkout selected by
+`LEGACYCLONK_ORACLE_ROOT`.
 
 `.github/workflows/landing.yml` keeps pull-request admission small, then runs
 the exhaustive workspace suite as compile-time shards against the exact merge

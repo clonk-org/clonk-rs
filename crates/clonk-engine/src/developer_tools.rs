@@ -5,8 +5,21 @@
 //! (`C4EditCursor.cpp:74,159,234,301-304`).
 //!
 //! This is the state machine only — dialog chrome, the shared developer window
-//! host and the control-queue round trip for `EMDT_SetMode` stay out; the
-//! console-surface entries in `PORT_STATUS.md` track what remains.
+//! host and the control-queue round trip for `EMDT_SetMode` stay out. That is
+//! not a gap in the port: the reference build has no tools window at all.
+//! `C4ToolsDlg::Open` creates one only under `_WIN32` or `WITH_DEVELOPER_MODE`,
+//! which defaults to OFF (`CMakeLists.txt:205-206`), so on that build it falls
+//! through (`C4ToolsDlg.cpp:262`) to `Active = true` plus an ordered refresh
+//! and `Clear` drops `Active` and nothing else — which is why re-opening
+//! restores the previous selection rather than the defaults. Against that
+//! build this retained state *is* the dialog; the rendered surfaces are
+//! tracked in clonk-org/clonk-rs#398 (preview swatch and material/texture
+//! combos) and clonk-org/clonk-rs#379 (window focus and raise).
+//!
+//! A landscape-mode change must stay a *control*: `SetLandscapeMode`
+//! (`C4ToolsDlg.cpp:865-894`) changes nothing locally and enqueues
+//! `EMDT_SetMode` as `CDT_Decide`, so every peer switches on the same tick.
+//! Applying a mode change locally instead would desync a network game.
 
 /// `C4TLS_*` (`C4ToolsDlg.h:33-37`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
