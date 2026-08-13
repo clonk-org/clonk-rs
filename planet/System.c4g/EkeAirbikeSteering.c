@@ -21,7 +21,7 @@
 //    Hyperfly, but the same line drops the Shoot action, so turning ends the
 //    burst that ControlThrow started (Script.c:92-105,371-395).
 //
-// This append replaces the steering policy only, for a human pilot only:
+// This append replaces the steering policy, for a human pilot only:
 //
 // - The four steering controls maintain the set of keys the pilot is holding
 //   instead of latching one axis, and resolve it exactly the way the engine
@@ -34,13 +34,25 @@
 //   magnitude the engine accelerates with, so the bike brakes exactly as fast
 //   as it accelerates -- the symmetry DFA_WALK already has in C++
 //   (`if ((xdir > -WalkAccel) && (xdir < +WalkAccel)) xdir = 0;`,
-//   C4Object.cpp:4796). Terminal speed and the Float physical still belong to
-//   the engine; this only removes momentum the pilot is no longer asking for.
+//   C4Object.cpp:4796). Terminal speed is still the engine's clamp on the
+//   Float physical; this only removes momentum the pilot is no longer asking
+//   for.
 // - Only the Fly-family actions are reset by a turn, so a burst survives
 //   steering. The Hyperfly boost keeps its shipped shape -- a double tap
-//   raises the Float physical to 800 and a turn ends it -- and simply becomes
+//   trades the Float physical up and a turn ends it -- and simply becomes
 //   hold-to-dash like everything else, so the four-times-higher bound is only
 //   spent while the pilot is asking for it.
+//
+// A fourth change, approved 2026-08-12 and applying to BOTH pilots: the bike
+// is slow. It is Procedure=FLOAT and its script never writes velocity, so its
+// maximum speed is entirely FIXED100(Float) -- and the shipped ladder floors
+// that at 200, the same 2.0 px/frame bound the pilot walks under, with the
+// dash at 800 (Script.c:33-42,55-64,303-314). Both flight bounds are doubled
+// here, to 400 and 1600. FloatAccel is the engine's and is untouched, so the
+// ramp to each bound doubles in length and the bike keeps its momentum-heavy
+// feel instead of becoming twitchy. Unlike the steering policy this is NOT
+// gated on the pilot being an SF5B: hold-to-steer needs releases only a human
+// emits, but a speed bound belongs to the vehicle.
 //
 // Hold-to-steer needs releases, and only a human pilot produces them. The GPED
 // remote control reaches the bike through these very handlers -- it is itself
@@ -48,18 +60,22 @@
 // `target -> ControlLeft(this())` lands on the replaced ControlLeft
 // (GPED.c4d/Script.c:15-73) -- but no definition in content/ declares a
 // Control*Released at all, so a held direction would latch write-only there.
-// Every control and the glide therefore test `GetID(clonk) == SF5B` and fall
-// through to the shipped pure-axis body otherwise.
+// Every steering control and the glide therefore test `GetID(clonk) == SF5B`
+// and fall through to the shipped pure-axis body otherwise.
 //
-// Deliberately NOT changed: FloatAccel, the Float physical and its Hyperfly
-// ladder, the ActMap, the weapon modes, the dismount rule, Hit/Damage, and the
-// whole GPED remote-control path (see also EkeGpedRemoteControl.c).
+// Deliberately NOT changed: FloatAccel, the 50-point Flying() decay step,
+// Diving()'s 100 underwater clamp, the SetPhysical("Float", 0, 2) dismount and
+// Entrance park, the ActMap, the weapon modes, the dismount rule, Hit/Damage,
+// and the whole GPED remote-control *steering* path (see also
+// EkeGpedRemoteControl.c).
 //
-// One consequence worth naming: Hit() explodes the bike above
-// `Abs(GetXDir()) >= 70`, i.e. 7.0 px/frame (Script.c:481-486), which only the
-// Hyperfly bound of 8.0 can reach. That threshold is untouched, but the ram is
-// now a maneuver you have to hold the dash through rather than one a released
-// key coasts into.
+// Two consequences worth naming. Hit() explodes the bike above
+// `Abs(GetXDir()) >= 70`, i.e. 7.0 px/frame (Script.c:481-486). Cruise at 4.0
+// still cannot reach it, so the ram remains a maneuver you have to hold the
+// dash through rather than one a released key coasts into -- but a 16.0 dash
+// overshoots that threshold far more easily than the shipped 8.0 did. And the
+// glide brake is one FloatAccel step a frame by design, so stopping from a
+// saturated dash takes about 160 frames where it used to take 80.
 //
 // Determinism contract: no Random() draw is added or reordered, and every
 // write is to synchronized object state from synchronized control input, so
@@ -86,6 +102,14 @@ private func ABH_Left()  { return(1); }
 private func ABH_Right() { return(2); }
 private func ABH_Up()    { return(4); }
 private func ABH_Down()  { return(8); }
+
+/* Speed ladder */
+
+// Both bounds are exactly twice the shipped ones. DFA_FLOAT clamps each axis
+// to FIXED100(Float), so these are 4.0 and 16.0 px/frame
+// (oracle C4Object.cpp:5291-5309).
+private func AirbikeCruiseFloat() { return(400); }
+private func AirbikeDashFloat()   { return(1600); }
 
 /* Held-direction bookkeeping */
 
@@ -204,14 +228,31 @@ func ControlLeftDouble(object clonk)
 {
   if (GetAction(clonk) ne "AirbikeFly") return(0);
   if (AirbikeHeldSteering(clonk)) AirbikeSteerPress(clonk, ABH_Left());
-  return(_inherited(clonk));
+  var engaged = _inherited(clonk);
+  AirbikeDashApply();
+  return(engaged);
 }
 
 func ControlRightDouble(object clonk)
 {
   if (GetAction(clonk) ne "AirbikeFly") return(0);
   if (AirbikeHeldSteering(clonk)) AirbikeSteerPress(clonk, ABH_Right());
-  return(_inherited(clonk));
+  var engaged = _inherited(clonk);
+  AirbikeDashApply();
+  return(engaged);
+}
+
+// The shipped handlers set the boost and swap the action together
+// (Script.c:33-42,55-64), and they refuse the dash outright when the bike is
+// facing the other way or in liquid. Reading the action back is therefore the
+// test for "the dash actually engaged", and it keeps the raise off every path
+// the shipped gates rejected. Not gated on AirbikeHeldSteering: the bound
+// belongs to the vehicle, so a GPED remote pilot gets it too.
+private func AirbikeDashApply()
+{
+  if (GetAction() ne "Hyperfly") return(0);
+  SetPhysical("Float", AirbikeDashFloat(), 2);
+  return(1);
 }
 
 func ControlUp(object clonk)
@@ -300,7 +341,19 @@ func ControlRequest(object requester)
 func Flying()
 {
   if (!GetEffect("AirbikeGlide", this())) AddEffect("AirbikeGlide", this(), 1, 1, this());
-  return(_inherited());
+
+  var result = _inherited();
+
+  // The shipped ladder runs first -- it also calls PilotLost(), which the
+  // abandoned-bike path depends on -- and it clamps to a hard-coded 200 floor
+  // while stepping anything above that down by 50 (Script.c:303-314). Lift the
+  // floor afterwards: the raise costs one extra write per StartCall while the
+  // bike is already at the cruise bound, and it turns what would have been the
+  // dash decay's step past 400 into the new resting value.
+  if (GetPhysical("Float") < AirbikeCruiseFloat())
+    SetPhysical("Float", AirbikeCruiseFloat(), 2);
+
+  return(result);
 }
 
 // FloatAccel = FIXED100(10), i.e. 10 hundredths of a pixel per frame.
