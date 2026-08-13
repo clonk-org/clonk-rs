@@ -403,9 +403,23 @@ use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, Transfe
 pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
-/// Product default: C++ parameterless SetGameSpeed's integer 1000 / 38 timer.
-/// The oracle's OpenGame default is 28 ms; PORT_STATUS.md records why the port
-/// deliberately starts at the faster, still deterministic 26 ms cadence.
+/// Product default: C++ parameterless `SetGameSpeed`'s integer `1000 / 38 = 26`
+/// ms timer (`src/C4Script.cpp:5219-5230`), not the 28 ms application timer
+/// `C4Game::OpenGame` installs (`src/C4Game.cpp:443`). Deliberate divergence,
+/// approved 2026-08-09: a 28 ms timer is capped at 35.714 updates per wall-clock
+/// second even when a frame costs no CPU time, so it cannot satisfy the product
+/// requirement that Hazard remain at or above 38 updates/s. Explicit
+/// `SetGameSpeed` calls and their timer-revision behavior are unchanged.
+///
+/// Blast radius: this cadence does not enter savegames, synchronized controls or
+/// simulation snapshots, so the state after a fixed frame/control sequence is
+/// unchanged and port peers remain lockstep deterministic. It changes only
+/// wall-time pacing — offline play and recordings advance about 7.7% faster,
+/// more frames can occur between independent one-second timer pulses, and a
+/// mixed Rust/C++ session can still be bounded by a 28 ms C++ peer. Do not
+/// relabel the native 28 ms graphics-budget diagnostics as the product
+/// scheduler; they stay oracle-relative. Pinned by
+/// `default_timer_uses_the_parameterless_game_speed_cadence`.
 pub const DEFAULT_GAME_TARGET_FPS: u64 = 38;
 pub const DEFAULT_GAME_TICK_DELAY_MS: u64 = 1_000 / DEFAULT_GAME_TARGET_FPS;
 

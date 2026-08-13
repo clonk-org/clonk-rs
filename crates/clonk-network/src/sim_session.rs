@@ -831,8 +831,25 @@ mod tests {
         // TargetFPS = 106 ms at defaults) every single tick, and the healthy
         // players pay it with him. Over a nominal 11 s session they finish about
         // 10 s behind -- the game runs at roughly half speed for four players
-        // because of one. This is the residual PORT_STATUS.md:353-357 warns
-        // about, measured end to end.
+        // because of one. No lookahead can close this: sizing PreSend from
+        // measured lateness explicitly does not rescue a machine that cannot
+        // execute ticks fast enough, because PreSend selects when a participant
+        // *sends*, never when it executes.
+        //
+        // Adaptive `ControlRate` was investigated and **rejected** — do not
+        // attempt it again. A control tick costs `ControlRate` simulation
+        // frames *and lasts* `ControlRate` frames, so the rate cancels out and
+        // a machine whose per-frame cost exceeds the per-frame budget is
+        // overloaded at every rate. `ControlRate` buys packet rate and jitter
+        // tolerance, not one millisecond of CPU. Pinned by
+        // `control_rate_tests`, and directly by
+        // `a_wider_control_cadence_cannot_rescue_a_cpu_bound_client` below.
+        //
+        // The levers that do work are the host giving up on the straggler
+        // (`straggler_patience`, default 4) or demotion. A slower *frame* rate
+        // would also work but slows the game for everyone, which is the
+        // outcome the straggler work exists to avoid. This test measures the
+        // residual end to end with the host's patience off.
         let mut clients = vec![ClientProfile::healthy(); 4];
         clients[0].cpu = CpuProfile::potato();
         let report = run_session(&SessionConfig {

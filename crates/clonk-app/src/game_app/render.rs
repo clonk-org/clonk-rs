@@ -7,19 +7,30 @@
 use super::*;
 
 impl GameApp {
-    /// Compose the port's opt-in diagnostics overlay (`Graphics.ShowStats`).
+    /// Compose the port's opt-in diagnostics overlay (`Graphics.ShowStats`,
+    /// plus a default-unbound `StatsToggle` key — both off by default).
     ///
-    /// C++ has no counterpart, so this is a divergence and is recorded as one
-    /// in `PORT_STATUS.md`. It exists because the upper board's readout is
-    /// `C4Game::FPS`, which counts executed *game* frames
-    /// (C4Game.cpp:1915-1916): C++ presents once per tick so that number is
-    /// also its render rate, while this port deliberately decouples the two
-    /// and therefore has a second rate with nowhere to appear. Composing
-    /// nothing is the whole gate — with the key off no draw site exists.
+    /// C++ has no counterpart, so this is a deliberate divergence. The upper
+    /// board draws exactly one frame rate under `Config.General.FPS`
+    /// (C4UpperBoard.cpp:81-86), and it is `C4Game::FPS`: `cFPS++` counts
+    /// executed *game* frames (C4Game.cpp:1915-1916) and `C4Game::Sec1Timer`
+    /// samples it (C4Game.cpp:1758-1762). C++ presents once per tick, so there
+    /// that single number is also the render rate; this port moves the present
+    /// rate independently (smooth presentation, the presentation-detail
+    /// governor, automatic graphics skips, the refuse-to-draw-while-inactive
+    /// gate), so a presentation stall cannot reach the screen at all. Measured
+    /// on `content/mods/Super_Mega_Ultra_Extrem_Wettlauf.c4s`: 35.7 simulation
+    /// FPS held steady across a 9.03 -> 0.93 collapse in presentation
+    /// submission rate, and establishing which half was slow cost a two-hour
+    /// investigation (causes filed as clonk-org/clonk-rs#158 and #159).
+    /// Composing nothing is the whole gate — with the key off no draw site
+    /// exists and the frame is byte-identical to the one shipped today.
     ///
     /// Every value read here is presentation-only. Nothing on this path
     /// touches `C4Fixed`, `C4Random`, control ordering or any other
-    /// determinism-critical state.
+    /// determinism-critical state, so two clients with the key set differently
+    /// stay in lockstep and cross-play against a stock LegacyClonk client is
+    /// unaffected.
     pub(crate) fn update_diagnostics_overlay(&mut self) {
         if !self.display_flags.show_stats {
             self.graphics.set_diagnostics_overlay_text(None);

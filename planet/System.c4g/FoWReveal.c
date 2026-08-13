@@ -40,9 +40,9 @@
 // new callback. It changes only the criterion CheckClonk hands FindObjects,
 // on a definition that exists in exactly one scenario. It is nonetheless a
 // *simulation* divergence, not a presentation one -- SetObjectStatus fires
-// earlier than in C++ -- so it is recorded in PORT_STATUS.md, every peer
-// stays in sync with every other peer because they all load this file, and
-// Dragon Rock replays recorded before it will not reproduce.
+// earlier than in C++. Every peer stays in sync with every other peer because
+// they all load this file, but Dragon Rock replays recorded before it will
+// not reproduce.
 //
 // Deliberately NOT changed: the shipped rect itself, the 20-tick poll, the
 // script-player exclusion, the GetController(o) > NO_OWNER guard, Activate,

@@ -1808,11 +1808,25 @@ impl<'a> Parser<'a> {
             // The speculative preflight predates the `(!x) = y` precedence
             // fix and now contributes only a fallback error. A lexer error
             // never becomes a token, so `reset_speculative` has nothing to
-            // replay for the text the preflight scanned past — which is why
-            // `!Foo(<oversized literal>)` still compiles, recorded under
-            // "Open" in PORT_STATUS.md. Its AST must never choose
-            // precedence: replay and parse only the unary operand, so
-            // `!x = y` stays `(!x) = y`.
+            // replay for the text the preflight scanned past and the lexer
+            // cursor stays beyond it: `!Foo(99999999999999999999999)` then
+            // compiles as though the argument were absent, where without the
+            // preflight it fails with `integer literal out of range` at
+            // column 24. Known open gap (clonk-org/clonk-rs#363).
+            // Deleting the preflight restored the right error and column in
+            // every probed shape with the whole `clonk-script` suite green,
+            // but that is not the close: C++ never raises this error at all
+            // — `C4AulParse.cpp:704-744` scans literals through
+            // `%SCNdPTR`/`%SCNxPTR` and truncates at the `AB_INT` push — so
+            // what the oracle does with a literal wider than 64 bits has to
+            // be established before choosing between deleting the preflight
+            // and widening the truncation. Latent for shipped content: the
+            // widest literals across the 2,132 `.c` files under `content/`
+            // are 10 decimal and 8 hex digits, none overflowing the lexer's
+            // `i64`/`u64` scan, and `parity verify` compiles no such script.
+            // Whatever changes here, this AST must never choose precedence:
+            // replay and parse only the unary operand, so `!x = y` stays
+            // `(!x) = y`.
             if self.speculative_tokens.is_none() {
                 self.begin_speculative();
                 let speculative_result = self.parse_assignment();

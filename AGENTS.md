@@ -15,8 +15,8 @@ for live differential work.
 - C++ is the golden oracle. When Rust and C++ differ, C++ is right — unless you
   can *prove* a C++ bug that cannot affect determinism.
 - **Never** close a parity failure by editing a test to match Rust, by making
-  Rust stricter/looser than C++, or by stubbing a determinism-critical path. Log
-  gaps you cannot close in `PORT_STATUS.md`; never silently skip one.
+  Rust stricter/looser than C++, or by stubbing a determinism-critical path.
+  Open an issue for a gap you cannot close; never silently skip one.
 - Determinism-critical (must be bit-exact): C4Fixed math, C4Random (incl.
   `RandomCount`), movement/physics, landscape & material reactions,
   PXS/mass-mover, weather, particles, the C4Script VM, cross-checks/OCF,
@@ -27,7 +27,7 @@ for live differential work.
 - `cargo xtask parity verify` is **not** proof of full-scenario parity. The
   golden is ~31 primitive sections, so a change to players, savegames or
   scenario init passes it untouched. Extend the golden when you change behavior
-  outside its coverage; `PORT_STATUS.md` holds the open gaps.
+  outside its coverage; the open issues hold the known gaps.
 
 ## TDD (Kent Beck) — required workflow
 
@@ -121,7 +121,7 @@ the issue assigned forever and the next session skips it. If you stop without
 landing, say so on the issue and `gh issue edit <n> --repo clonk-org/clonk-rs
 --remove-assignee @me`.
 
-**Cite issues as `owner/repo#N`** in comments, docs and `PORT_STATUS.md` — this
+**Cite issues as `owner/repo#N`** in comments and docs — this
 repository is public, a bare `#28` is ambiguous between `clonk-org/clonk-rs` and
 `legacyclonk/LegacyClonk`, and only the qualified form renders as a link.
 
@@ -130,8 +130,8 @@ all name items in a work queue that lives outside this repository, so to any
 reader they assert that a constraint exists while withholding what it is. The
 bare form is worse than opaque: up to nine cards share one `L###` across
 milestones, so it is ambiguous even with the queue in hand. Write the fact
-instead — what is missing, what it blocks, which C++ symbol it mirrors — and put
-anything that needs tracking in `PORT_STATUS.md`, which ships with the code.
+instead — what is missing, what it blocks, which C++ symbol it mirrors — and
+open an issue for anything that needs tracking.
 
 **Name tests for the behaviour they pin, never for the item that prompted
 them.** 494 tests carried an `l###_`/`m##_l###_` prefix until it was stripped;
@@ -145,9 +145,7 @@ shard instead of failing — grep the filters before any rename, and diff
 `issue #N` spellings. It deliberately does not reject a bare `#N` or a bare
 `L###`: object and definition numbers (`WIPF #564`, `KING #5129`) and C4IDs
 (`"L111"`) are spelled the same way. `CHANGELOG.md` is exempt because git-cliff
-regenerates it from landed commit subjects. `PORT_STATUS.md` still records the
-prefixed names of four About-dialog tests that were *deleted*; that is a
-historical record, not a live reference.
+regenerates it from landed commit subjects.
 
 ## Pull requests — how work lands
 
@@ -303,8 +301,19 @@ failure rejects the `Landing gate` and evicts the entry.
 These are requirements, not a status report on this worktree — run and report
 them for the revision you are completing; focused tests do not imply the gates
 pass. Engine snapshots and `parity verify` check different things; neither
-replaces the other. `PORT_STATUS.md` lists extra focused gates and the narrow
-accepted skips.
+replaces the other.
+
+Three focused runs are worth doing by hand when you touch the areas they cover:
+
+```sh
+cargo nextest run -p clonk-engine-integration-tests --test engine_it -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
+cargo nextest run -p clonk-engine-integration-tests --test engine_it -E 'test(/^virtual_player_harness::/)'
+cargo nextest run -p clonk-app -E 'test(/app_virtual_keyboard_(completes|flings|opens)/)'
+```
+
+The only `#[ignore]`s left in the tree are explicit opt-ins — manual timing
+probes, live-service checks and C++ differential executables. There is no
+accepted parity skip: an ignored test that is not one of those is a defect.
 
 Green gates are what let you *open* the pull request, not the end of the task.
 The change is done when it has [landed](#pull-requests--how-work-lands).

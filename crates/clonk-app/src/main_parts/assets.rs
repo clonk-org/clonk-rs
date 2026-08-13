@@ -19,8 +19,26 @@ pub(crate) const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); //
 /// so a machine slow enough to spend an entire application pass inside
 /// `advance_simulation_pass` never repaints at all. Spring's game controller
 /// keeps a comparable slice for drawing while it fast-forwards; this is a
-/// deliberate presentation-only divergence for slow hardware (see
-/// `PORT_STATUS.md`).
+/// deliberate presentation-only divergence for slow hardware.
+///
+/// `C4Application::Execute` runs at most one `Game.Execute()` per pass and
+/// draws in the same pass (LegacyClonk 7d43b47 src/C4Application.cpp:463-476,
+/// 451-478), so C++ hands drawing a slot every pass and an overloaded machine
+/// runs the *game* slow instead. Here one pass can drain the whole clamped
+/// 250 ms backlog (`MAX_ACCUMULATED_TIME`) without returning to the event
+/// loop, and the ported `AutoFrameSkip` cannot help — it is a one-shot latch
+/// consumed at a graphics opportunity that never arrives. Arithmetic from
+/// these constants (no Pi was in the loop): at 35 ms per simulation frame and
+/// a 10 ms graphics pass a pass used to drain 9 frames / ~315 ms with no
+/// repaint (~3 Hz, arbitrarily worse under `/fast N`), while a budget of
+/// `max(28 ms, 5.67 x 10 ms) = 57 ms` runs ~2 frames and yields, putting
+/// repaints near 14 Hz for about 15 % of the CPU.
+///
+/// Determinism is unaffected and must stay that way: the budget is checked
+/// only *after* a frame executed, unspent backlog stays in the accumulator,
+/// so the same simulation frames run in the same order, just spread over more
+/// application passes. Nothing here is visible to script or to the control
+/// stream.
 pub(crate) const RENDER_RESERVE_PERCENT: u32 = 15;
 /// Hard repaint floor (~2 Hz). `/fast N`, the network catch-up divisor and a
 /// long catch-up burst can each suppress every graphics opportunity for an
@@ -4471,9 +4489,18 @@ fn runtime_player_key_slot(name: &str) -> Option<(usize, ControlBindingId)> {
 }
 
 fn runtime_registered_key_name(name: &str) -> bool {
-    // `StatsToggle` is a port-only diagnostic binding. It deliberately follows
-    // every C++ registration so no shipped binding changes meaning; see the
-    // `Graphics.ShowStats` divergence in PORT_STATUS.md.
+    // `StatsToggle` is a port-only diagnostic binding, default-unbound and
+    // gated behind opt-in `Graphics.ShowStats`. It exists because C++ draws a
+    // single frame rate (src/C4UpperBoard.cpp:81-86) and that number is
+    // `C4Game::FPS`, a count of executed *game* frames (C4Game.cpp:1915-1916,
+    // sampled by `C4Game::Sec1Timer`, C4Game.cpp:1758-1762); C++ presents once
+    // per tick so there it is also the render rate, while here smooth
+    // presentation, the detail governor, automatic graphics skips and the
+    // inactive gate all move the present rate independently — measured 35.7
+    // simulation FPS held steady across a 9.03 -> 0.93 collapse in presented
+    // frames, invisible to the ported counter. It deliberately registers after
+    // every C++ action and yields the chord to all of them, so no shipped
+    // binding changes meaning; keep it last.
     RUNTIME_REGISTERED_GLOBAL_KEYS
         .split_ascii_whitespace()
         .any(|registered| registered == name)
@@ -8629,8 +8656,16 @@ pub(crate) fn configured_snap_text_to_pixels(config: &[u8]) -> bool {
 }
 
 /// `Graphics.SkyDither`: opt in to sub-LSB dithering of the sky gradient.
-/// C++ emits the fade as a plain interpolated quad, so this defaults off and
-/// is recorded as a deliberate divergence in `PORT_STATUS.md`.
+/// C++ emits the fade as one plain interpolated quad into an 8-bit target, so
+/// visible bands equal the channel delta spread over viewport height: the
+/// shipped default fade `RGB(28,64,152)→RGB(192,196,252)` spans 100 blue
+/// steps, a band every ~22 rows at 2160p, and it worsens as panels grow. The
+/// divergence adds interleaved-gradient noise on a triangular PDF spanning one
+/// step before the framebuffer quantizes; the mean is unchanged, so the result
+/// is closer to the exact ramp than the banded output. It is presentation-only
+/// and is set only on the sky path and only on a quad whose corner colours
+/// actually differ, and it defaults off so the default path stays
+/// byte-identical to the oracle.
 pub(crate) fn configured_sky_dither(config: &[u8]) -> bool {
     configured_remaster_feature(config, "SkyDither")
 }
@@ -8638,20 +8673,33 @@ pub(crate) fn configured_sky_dither(config: &[u8]) -> bool {
 /// `Graphics.SmoothPresentation`: opt in to presenting at the display's own
 /// refresh period instead of C++'s 30 ms `Graphics.MaxRefreshDelay` ceiling.
 ///
-/// C++ chose 30 ms against a 28 ms game tick, which welds presentation to one
-/// frame per tick. That is invisible for world content — the simulation really
-/// does advance only every 28 ms — but the mouse pointer is drawn *into* the
-/// frame (`draw_classic_gui_cursor`) with the platform cursor hidden, so the
-/// refresh period is also the pointer's update period. On a 120 Hz panel that
-/// is a 35.7 Hz pointer next to a 120 Hz system cursor.
+/// C++ defaults `Graphics.MaxRefreshDelay` to 30 (src/C4Config.cpp:485)
+/// against a 28 ms game tick, so `C4Application` leaves that tick undivided
+/// (src/C4Application.cpp:510-531) and presents once per tick; the startup
+/// timer is a flat 16 ms. That is invisible for world content — the simulation
+/// really does advance only every 28 ms — but the mouse pointer is drawn *into*
+/// the frame (`draw_classic_gui_cursor`) with the platform cursor hidden, so
+/// the refresh period is also the pointer's update period: measured 35.7 Hz in
+/// game and 62.9 Hz in the startup menu against a 120 Hz panel whose GPU pass
+/// costs 0.83 ms and whose event loop is idle 96 % of the time.
 ///
 /// This substitutes the panel period for the ceiling of the **startup timer**
 /// only, and changes nothing else: the divisor is C++'s own
-/// (`refresh_interval_for_tick`) and the 16 ms logic tick is untouched. The game
-/// timer deliberately keeps the oracle ceiling — measured, subdividing it buys
-/// +0.6 FPS for an 8 ms longer average pass and 49x the automatic frame skips,
-/// because in game the pass cost binds first. See `RefreshCeilings` and the
-/// `PORT_STATUS.md` divergence entry.
+/// (`refresh_interval_for_tick`) and the 16 ms logic tick is untouched, so menu
+/// animation ages identically. The **game timer keeps the oracle ceiling
+/// unconditionally** (`RefreshCeilings`) and must continue to: that is what
+/// keeps all four C++-mirrored per-render behaviours — the C4Viewport camera
+/// smoother, `C4MessageBoard::Execute` plus the screen fader, flash-message
+/// `remaining_draws` and the object-audibility cache — from ever seeing a
+/// changed cadence. Subdividing the game timer was measured and rejected: on
+/// an M4 Max at Scale=300 fullscreen a 7 ms ceiling moved presentation 35.66 ->
+/// 36.30 FPS while the average graphics pass grew 10.49 -> 18.17 ms and
+/// automatic frame skips went 2 -> 98, because in game the pass cost and
+/// swapchain back-pressure bind long before the timer does. The default
+/// therefore stays at the oracle's 30 permanently; an unlogged
+/// `DEFAULT_MAX_REFRESH_DELAY_MS = 16` divergence was landed and correctly
+/// reverted for exactly that reason, and the faster cadence is reachable only
+/// through this key or `Graphics.Remaster`.
 pub(crate) fn configured_smooth_presentation(config: &[u8]) -> bool {
     configured_remaster_feature(config, "SmoothPresentation")
 }

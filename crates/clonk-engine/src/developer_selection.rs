@@ -11,7 +11,18 @@
 //! This module owns identity, ordering, mutation, pruning and notification
 //! only. Pointer hit testing, editor gestures, overlays and dialog content stay
 //! out: pointer projection lives in `clonk-frontend::viewport_projection`, and
-//! the property and object-list surfaces are tracked in `PORT_STATUS.md`.
+//! the property and object-list surfaces are drawn by the app. Keeping them out
+//! is deliberate — C++ compiles those dialogs only under `WITH_DEVELOPER_MODE`
+//! (past `C4ObjectListDlg`'s `#else` every method is an empty body,
+//! `C4ObjectListDlg.cpp:791-805`, so `C4Console::EditObjects` opens nothing on
+//! the reference build), so the one thing every build shares is this model.
+//! Both surfaces write back through this single owner and tag their writes with
+//! a [`SelectionWriter`], which is how the port reproduces C++'s
+//! `updating_selection` guard; a surface that owned its own copy of the
+//! selection instead would echo its own writes back at itself. Remaining
+//! console surfaces are tracked in clonk-org/clonk-rs#389 (component editor
+//! selection, clipboard and undo), clonk-org/clonk-rs#399 (mid-round
+//! definition drops) and clonk-org/clonk-rs#408 (object-list icon column).
 
 use crate::ObjectId;
 

@@ -933,8 +933,11 @@ impl Engine {
         // (C4Movement.cpp:553-575; the outer ExecMovement gate has already
         // selected this DoMovement invocation). A callback changing
         // Contained/category does not retroactively skip this tail.
-        // The entry Splash (:450-451, OCF_HitSpeed2 && Mass>3) draws
-        // synced RNG and is a documented PORT_STATUS gap.
+        // The entry Splash (:450-451, OCF_HitSpeed2 && Mass>3) draws from
+        // the SYNCHRONIZED Random() stream — the bubble draws first, then
+        // the extracted-material cast (C4Object.cpp:6093-6110) — so its
+        // draw count and order are determinism-critical: never skip it,
+        // reorder its draws, or move them onto an unsynced stream.
         let probe = {
             let state = &self.objects[idx].state;
             let float_line = self

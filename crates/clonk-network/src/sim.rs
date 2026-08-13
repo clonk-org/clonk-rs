@@ -574,9 +574,14 @@ pub struct ControlDeliveryConfig {
     pub lookahead: Lookahead,
     /// Which of the two real client pacings to replay; see [`replay_lockstep`].
     ///
-    /// The frozen-time figures recorded in `PORT_STATUS.md` for the PreSend and
-    /// redundancy divergences were all measured with this **on**, which that
-    /// recipe does not mention. With it off the schedule slips instead of
+    /// The frozen-time figures on record for the two control-delivery
+    /// divergences — PreSend sized from the delivery-time envelope instead of
+    /// C++'s 1/150 EWMA of the *mean* send time
+    /// (`C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47
+    /// src/C4GameControlNetwork.cpp:382-447), and the historical
+    /// redundant-control-datagram experiment — were all measured with this
+    /// **on**, which the `link_impairment` recipe that produced them does not
+    /// mention. With it off the schedule slips instead of
     /// hitching, so a late packet is absorbed rather than counted and the same
     /// run reports roughly two orders of magnitude less frozen time. Reproducing
     /// those numbers therefore needs `LC_CATCHUP=1`: 80 ms / +-20 ms / 1% with
@@ -952,10 +957,12 @@ mod tests {
 
     #[test]
     fn burst_episodes_are_scheduled_in_time_not_per_datagram() {
-        // PORT_STATUS.md:457-460 — an earlier per-datagram draw made every
-        // redundant configuration manufacture its own extra loss, so redundancy
-        // measured as harmful for a reason the physical link does not share.
-        // Sending each datagram three times must not triple the drop count.
+        // A burst is an episode on the link's timeline, not a per-packet coin
+        // flip: an earlier per-datagram draw made every redundant configuration
+        // manufacture its own extra loss, so redundancy measured as harmful for
+        // a reason the physical link does not share. Redundancy policy was
+        // decided from runs of this rig, so the bias mattered. Sending each
+        // datagram three times must not triple the drop count.
         let single = ControlDeliveryConfig {
             conditions: LinkConditions {
                 rtt_ms: 80,
@@ -1196,8 +1203,11 @@ mod tests {
 
     #[test]
     fn an_unmetered_link_is_unchanged_by_the_bandwidth_model() {
-        // The recorded PORT_STATUS measurements must keep reproducing, so a
-        // profile that sets no rate must behave exactly as before.
+        // The frozen-time figures on record for the envelope-PreSend divergence
+        // (27.19% -> 0.18% at 80 ms RTT / +-20 ms jitter / 1% loss, `LC_DUP=2`,
+        // 24 seeds x 400 control ticks) were all taken on unmetered profiles and
+        // must keep reproducing, so the bandwidth model must leave a profile
+        // that sets no rate behaving exactly as it did before it existed.
         let config = ControlDeliveryConfig {
             conditions: LinkConditions {
                 rtt_ms: 80,
@@ -1238,9 +1248,18 @@ mod tests {
 
     #[test]
     fn the_adaptive_horizon_exceeds_the_cpp_mean_on_a_jittery_link() {
-        // The divergence recorded in PORT_STATUS.md:359-393: the mean sits below
-        // roughly half of all delivery times, so it stalls on about half the
-        // ticks; the envelope covers the tail it was blind to.
+        // The deliberate divergence: C++ sizes the PreSend horizon from a 1/150
+        // EWMA of the *mean* control send time
+        // (`C4GameControlNetwork::CalcPerformance`, LegacyClonk 7d43b47
+        // src/C4GameControlNetwork.cpp:382-447), and the mean sits below roughly
+        // half of all delivery times, so a jittery link stalls on about half its
+        // ticks forever. This port tracks a decaying peak envelope plus a
+        // mean-absolute-deviation margin, which covers the tail the mean was
+        // blind to: 27.19% -> 0.18% frozen time at 80 ms / +-20 ms / 1%. On a
+        // steady link the deviation collapses and the envelope equals the mean,
+        // so a healthy connection keeps exactly C++'s budget. Determinism is
+        // untouched — PreSend only picks which tick a client stamps its *own*
+        // input for, and it already varies per client in C++.
         let jittery = LinkConditions {
             rtt_ms: 150,
             jitter_ms: 40,

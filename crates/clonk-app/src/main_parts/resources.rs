@@ -3821,13 +3821,22 @@ pub(crate) const RENDER_INACTIVE_CONSOLE: u32 = 1 << 1;
 /// draws into an inactive window: the bit for the *active shell* must be set
 /// (C4GraphicsSystem.cpp:96-106).
 ///
-/// **Deliberate divergence** (PORT_STATUS.md): the default carries *both* bits
-/// where C++ adapts `Console` alone (C4Config.cpp:481), so an Alt-Tabbed game
-/// keeps drawing. Only the graphics half of `C4Application::Execute` is gated
-/// on activity (C4Application.cpp:451-478) — the round runs on, and in a
-/// network game it must — so the oracle default stops the picture at the moment
-/// of deactivation and snaps it forward on refocus (clonk-org/clonk-rs#57). A
-/// value the player writes is still honoured verbatim, in both directions.
+/// **Deliberate divergence:** the default carries *both* bits where C++ adapts
+/// `Console` alone (C4Config.cpp:481), so an Alt-Tabbed game keeps drawing.
+/// Only the graphics half of `C4Application::Execute` is gated on activity —
+/// `Game.Execute()` is not (C4Application.cpp:451-478) — so the round runs on,
+/// and in a network game it must: lockstep means every other peer waits on this
+/// client's control. The oracle default therefore freezes the picture at
+/// deactivation, advances the world behind it and snaps forward on refocus;
+/// measured on macOS before this change, an inactive shell presented **1 frame
+/// in 197 s while the simulation executed 7062** (clonk-org/clonk-rs#57, and the
+/// snap-forward filed as clonk-org/clonk-rs#56). Presentation-only, so
+/// determinism is untouched. The divergence is the *default* only: a
+/// `RenderInactive` the player writes is honoured verbatim in both directions,
+/// and `RenderInactive=2` restores C++ exactly. C++ needed no notion of a
+/// *hidden* window because Win32 deactivation minimizes its fullscreen window
+/// (C4FullScreen.cpp:139-145); once the port draws while unfocused the two come
+/// apart, so `WindowEvent::Occluded` gates every mask separately.
 pub(crate) fn load_render_inactive_mask(paths: Option<&AppPaths>) -> u32 {
     native_config_text(
         &load_native_config_bytes(paths),
@@ -4231,8 +4240,32 @@ pub(crate) fn build_network_host_preparation(
         generated_team_name_template: app.generated_team_name_template.clone(),
         player_sources,
         config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
-            // CNM_Async, diverging from C++'s CNM_Decentral default. See the
-            // PORT_STATUS divergence entry for the measurements.
+            // CNM_Async, diverging from C++'s CNM_Decentral default (C++ ships 0
+            // and labels async experimental, C4GameOptions.cpp:93). Only the
+            // default changes: the mechanism is a faithful port —
+            // `force_expired_async_control` mirrors `PackCompleteCtrl`
+            // (C4GameControlNetwork.cpp:741-784) and its deadline mirrors :754.
+            // In lockstep the host cannot publish tick T until every client's
+            // control for T arrives, so one bad peer paces everyone. Async bounds
+            // that wait at `ControlRate * AsyncMaxWait * 1000 / TargetFPS`
+            // (106 ms at these defaults) and packs whoever arrived; the absent
+            // client's input is dropped, not deferred. Determinism is unaffected:
+            // only the host decides the timeout and it broadcasts one
+            // authoritative aggregate, so every client executes identical
+            // control, and a straggler's late packet is rejected as stale rather
+            // than replayed on a later tick.
+            // Measured over 16 seeds x 400 ticks with one impaired peer, *with
+            // PreSend active* (that pairing is the whole basis for this default):
+            // p99/max shared-tick lateness decentral -> async 232/281 ->
+            // 190/206 ms against a 250 ms peer, 346/408 -> 311/337 ms with 8
+            // clients and one at 400 ms, and unchanged at 93/106 ms with zero
+            // drops on a 60 ms/10%-loss peer, so it is free where not needed.
+            // PreSend is what keeps the cost at 32-66 dropped packets (0.5-1% of
+            // ticks); without it the same runs drop 1006-2162. The drop is
+            // silent — no client-side signal that input was discarded — and
+            // `AsyncMaxWait` must stay above ordinary delivery time rather than
+            // being tuned down to chase the tail: at 1 it dropped on nearly every
+            // tick against a 250 ms peer without PreSend.
             control_mode: integer("Network", "ControlMode", 2),
             control_rate: integer("Network", "ControlRate", 2),
             async_max_wait: integer("Network", "AsyncMaxWait", 2),

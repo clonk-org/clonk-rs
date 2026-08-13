@@ -61,7 +61,6 @@ pub const RELIABLE_UDP_DATA_PAYLOAD_LIMIT: usize = MAX_DATAGRAM_SIZE - DATA_PACK
 /// This changes only *when* a repair is re-requested. The delivered packet
 /// stream, its ordering and the wire format are untouched, so simulation state
 /// cannot observe it, and a C++ peer answers the extra asks unchanged.
-/// Recorded in PORT_STATUS.md.
 ///
 /// Do not lower this below roughly 2x a transatlantic round trip: the point is
 /// to re-ask after a lost repair, not to duplicate repairs on exactly the

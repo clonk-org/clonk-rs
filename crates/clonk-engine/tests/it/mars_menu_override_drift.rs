@@ -14,8 +14,32 @@
 //! override can be re-checked against it deliberately.
 //!
 //! A failure is not a defect. It means: read the new shipped function, decide
-//! whether the divergence in `PORT_STATUS.md` still says what we want, and
-//! re-pin.
+//! whether the divergence it feeds still says what we want, and re-pin.
+//!
+//! The two divergences guarded here, both approved 2026-08-04 under
+//! clonk-org/clonk-rs#119:
+//!
+//! - `MarsOrderCapsule.c` (`#appendto BASE`) prices a capsule order before it
+//!   is delivered. Shipped `ClonkMars.c4d/Structures.c4d/Base.c4d/
+//!   Script.c:133-155` spends the player's money one item at a time with no
+//!   check and no report — `Buy` is called without `fShowErrors`, so
+//!   `C4Player::Buy` takes its silent branch (`C4Player.cpp:849-853`) — and
+//!   the first item that does not fit abandons every product still to come.
+//! - `MenuRangeRow.c` (`#appendto MS4C`) collapses a Menu2 range from three
+//!   rows into one that adds on a primary and takes back on a secondary
+//!   activation. Shipped `Menu2.c4d/Menu.c4d/Script.c:108-143` emits three
+//!   rows per range into a menu the engine draws as one narrow column of
+//!   single-line rows (`C4Menu.cpp:359-365`, `C4Menu.cpp:650-664`), so there
+//!   is no wider layout for them to use.
+//!
+//! Both live in `planet/System.c4g`, the port's own engine data, which never
+//! reaches a stock LegacyClonk client — that is what makes them safe, because
+//! both move synchronized state and *would* desync cross-play against one: a
+//! refused order makes zero `Buy` calls instead of a partial run, and a greyed
+//! range row creates one dummy object where the shipped branch creates three,
+//! so the object-number counter advances differently. Neither `parity verify`
+//! nor `engine-snapshots verify` can see any of it; neither executes content
+//! C4Script, and the replay goldens run no ClonkMars scenario.
 
 use crate::support::real_scenario::content_root;
 use clonk_resources::Group;

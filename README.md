@@ -102,8 +102,9 @@ installed (`rustup target add aarch64-apple-darwin x86_64-apple-darwin`); with
 only the host one, the command logs a warning and packages a
 single-architecture build named after the host triple.
 
-Contributor documentation lives in [`AGENTS.md`](AGENTS.md) and
-[`PORT_STATUS.md`](PORT_STATUS.md).
+Contributor documentation lives in [`AGENTS.md`](AGENTS.md). Remaining port
+work is tracked in
+[the issue tracker](https://github.com/clonk-org/clonk-rs/issues).
 
 ## Licensing
 

@@ -8497,9 +8497,17 @@ impl GraphicsSystem {
         let fog = self.fog_draw_context();
         // C4GraphicsOverlay always passes a local C4DrawTransform pointer,
         // including for a logically identity overlay. It is therefore always
-        // non-exact in PerformBlt. Retain the established straight rasterizer
-        // for a logical identity; its half-pixel geometry is tracked with the
-        // DrawXFloat inward-bounds work in `PORT_STATUS.md`.
+        // non-exact in PerformBlt, which insets the source by half a texel per
+        // side and forces linear filtering whenever the application scale is
+        // not 100% (src/StdDDraw2.cpp:676-694, src/StdGL.cpp:527). Retain the
+        // established straight rasterizer for a logical identity rather than
+        // converging here: the difference is presentation-only half-pixel
+        // geometry, the same fractional-destination question as
+        // `C4Facet::DrawXFloat`'s inward crop to integer edges
+        // (C4Facet.cpp:306-319, ported in `software_draw::draw_x_float_crop`).
+        // Converging it is deliberately not attempted here and has no issue of
+        // its own: it needs a pixel oracle for the half-texel inset first, and
+        // no gate presents, so a change made blind could not be shown correct.
         // The ActMap facet stays in unscaled coordinates, so the source
         // rectangle carries the source graphics' Scale exactly like every
         // other facet-drawn overlay mode (C4DefGraphics.cpp:826).
@@ -9279,9 +9287,14 @@ impl GraphicsSystem {
 
     /// Whether a MODE_Action/MODE_Base graphics overlay mirrors with the host
     /// object's facing. C++ does not: C4GraphicsOverlay::Draw blits with
-    /// `iPhaseY = 0` and the overlay's own transform, never the host's
-    /// `pDrawTransform` (C4DefGraphics.cpp:825). This preserves the port's
-    /// pre-existing overlay behaviour unchanged; see PORT_STATUS.md.
+    /// `iPhaseY = 0` and the overlay's own `C4DrawTransform`, never the host's
+    /// `pDrawTransform` (C4DefGraphics.cpp:820-826). This preserves the port's
+    /// pre-existing overlay behaviour unchanged, quarantined behind this one
+    /// helper rather than converged: no test covers the behaviour, so closing
+    /// the gap needs its own oracle first (clonk-org/clonk-rs#354).
+    /// MODE_ExtraGraphics is unaffected — it *does* inherit the host
+    /// transform in C++ (C4DefGraphics.cpp:794-806), which the port already
+    /// reproduces.
     pub(crate) fn resolve_overlay_action_flip(
         graphics: &DefinitionActionGraphics,
         direction: Direction,
