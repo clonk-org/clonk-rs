@@ -10304,6 +10304,7 @@ mod tests {
             viewport_overlays_visible: true,
             players: Vec::new(),
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             game_time_seconds: 61,
             message_board: MessageBoardOverlay {
                 log_lines: vec!["Player join: Test".to_string()],
@@ -10384,6 +10385,7 @@ mod tests {
                 flash_command: 0,
             }],
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             game_time_seconds: 0,
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
@@ -10538,6 +10540,7 @@ mod tests {
                 viewport_overlays_visible: true,
                 players: Vec::new(),
                 crew_name_labels: Vec::new(),
+                speaking: SpeakingOverlay::default(),
                 game_time_seconds: 0,
                 message_board: MessageBoardOverlay::default(),
                 clock_text: None,
@@ -15073,6 +15076,225 @@ mod tests {
     }
 
     #[test]
+    fn speaking_indicator_draws_gui_sound_phase_over_remote_selected_crew() {
+        let mut snapshot = make_snapshot();
+        let object_id = snapshot.objects[0].id;
+        snapshot.objects[0].owner = 2;
+        snapshot.objects[0].ocf |= clonk_engine::ocf::CREW_MEMBER;
+        snapshot.players = vec![
+            PlayerState {
+                id: 1,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 2,
+                cursor: Some(object_id),
+                crew: vec![object_id],
+                ..PlayerState::default()
+            },
+        ];
+
+        let phase_color = [231_u8, 71, 193, 255];
+        let other_color = [13_u8, 197, 41, 255];
+        let mut pixels = other_color.repeat(240 * 360);
+        for y in 120..160 {
+            for x in 200..240 {
+                let start = (y * 240 + x) * 4;
+                pixels[start..start + 4].copy_from_slice(&phase_color);
+            }
+        }
+        let gui_icons = ImageData::new(240, 360, pixels);
+        let mut graphics = test_graphics(200, 120, 120, "Remote speaking crew");
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            viewport_overlays_visible: true,
+            players: Vec::new(),
+            crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay {
+                object_ids: vec![object_id],
+                gui_icons: Some(gui_icons),
+            },
+            game_time_seconds: 0,
+            message_board: MessageBoardOverlay::default(),
+            clock_text: None,
+            frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
+            show_portraits: true,
+            show_commands: true,
+            show_command_keys: true,
+        });
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+
+        let mut found_phase = false;
+        let mut leaked_other_phase = false;
+        for pixel in graphics.surface().pixels().chunks_exact(4) {
+            found_phase |= pixel == phase_color;
+            leaked_other_phase |= pixel == other_color;
+        }
+        assert!(
+            found_phase,
+            "GUIIcons phase 23 is drawn above the speaking crew"
+        );
+        assert!(
+            !leaked_other_phase,
+            "no neighboring GUIIcons phase may leak into the viewport",
+        );
+
+        let phase_pixels = |graphics: &GraphicsSystem| {
+            graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .filter(|pixel| *pixel == phase_color)
+                .count()
+        };
+
+        let container_id = ObjectId::new(object_id.as_u64() + 1);
+        let mut container = snapshot.objects[0].clone();
+        container.id = container_id;
+        container.position = Vector2::new(1_000, 900);
+        container.ocf &= !clonk_engine::ocf::CREW_MEMBER;
+        container.container = None;
+        snapshot.objects[0].container = Some(container_id);
+        snapshot.objects[0].position = Vector2::new(100, 60);
+        snapshot.objects.push(container);
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert!(
+            phase_pixels(&graphics) > 0,
+            "a selected crew member keeps its speaking indicator while contained",
+        );
+
+        snapshot.objects[1].visibility = VIS_OWNER;
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert_eq!(
+            phase_pixels(&graphics),
+            0,
+            "an invisible containing object must hide its occupant's speaking indicator",
+        );
+
+        snapshot.objects[1].visibility = 0;
+        snapshot.objects[0].container = Some(ObjectId::new(container_id.as_u64() + 1));
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert_eq!(
+            phase_pixels(&graphics),
+            0,
+            "a missing container ancestor must fail closed",
+        );
+
+        snapshot.objects[0].container = Some(container_id);
+        snapshot.objects[1].container = Some(object_id);
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert_eq!(
+            phase_pixels(&graphics),
+            0,
+            "a malformed containment cycle must fail closed",
+        );
+        snapshot.objects[0].container = None;
+        snapshot.objects[1].container = None;
+
+        snapshot.objects[0].visibility = VIS_OWNER;
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert_eq!(
+            phase_pixels(&graphics),
+            0,
+            "a remote owner-only crew position must not leak through its speaking icon",
+        );
+
+        snapshot.objects[0].visibility = 0;
+        graphics.viewport_overlays_visible = false;
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert_eq!(
+            phase_pixels(&graphics),
+            0,
+            "film replay suppresses process-local speaking state",
+        );
+
+        graphics.viewport_overlays_visible = true;
+        snapshot.players[0].fog_of_war = true;
+        snapshot.environment.fow_resolution = 8;
+        snapshot.environment.fow_color = 0;
+        snapshot.fow_players.insert(
+            1,
+            FogOfWarPlayerFrame {
+                view_objects: Vec::new(),
+                view_target: None,
+            },
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        assert_eq!(
+            phase_pixels(&graphics),
+            0,
+            "fog modulation must prevent the speaking icon revealing shrouded crew",
+        );
+    }
+
+    #[test]
     fn scale_two_cursor_mark_keeps_selected_native_cell_size() {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].owner = 1;
@@ -15234,6 +15456,7 @@ mod tests {
             viewport_overlays_visible: true,
             players,
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             game_time_seconds: 0,
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
@@ -15349,6 +15572,7 @@ mod tests {
                         }]
                     })
                     .unwrap_or_default(),
+                speaking: SpeakingOverlay::default(),
                 game_time_seconds: 0,
                 message_board: MessageBoardOverlay::default(),
                 clock_text: None,
@@ -15468,6 +15692,7 @@ mod tests {
             viewport_overlays_visible: false,
             players,
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             game_time_seconds: 0,
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
@@ -15738,6 +15963,7 @@ mod tests {
             viewport_overlays_visible: true,
             players,
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             game_time_seconds: 0,
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
@@ -15822,6 +16048,7 @@ mod tests {
             viewport_overlays_visible: true,
             players,
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             game_time_seconds: 0,
             message_board: MessageBoardOverlay::default(),
             clock_text: None,

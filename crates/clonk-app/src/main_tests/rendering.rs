@@ -414,6 +414,7 @@ fn viewport_button_stack_is_wired_into_the_late_app_render() {
         game_time_seconds: 0,
         message_board: MessageBoardOverlay::default(),
         crew_name_labels: Vec::new(),
+        speaking: SpeakingOverlay::default(),
         clock_text: None,
         frames_per_second: None,
         upper_board_mode: clonk_frontend::hud::UpperBoardMode::Full,
@@ -1946,6 +1947,39 @@ fn viewport_overlay_collection_skips_unpresented_remote_players() {
         &observer_viewport,
     );
     assert_eq!(overlays.len(), 2);
+}
+
+#[test]
+fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
+    let mut app = new_lightweight_running_sandbox_app();
+    let (player_id, selected) = {
+        let player = app.snapshot.players.first_mut().test_value();
+        let selected = player.cursor.test_value();
+        player.at_client = clonk_engine::PlayerAtClient::new(7);
+        player.view_cursor = Some(ObjectId::new(selected.as_u64() + 10_000));
+        (player.id, selected)
+    };
+    app.snapshot
+        .objects
+        .iter_mut()
+        .find(|object| object.id == selected)
+        .test_value()
+        .ocf |= clonk_engine::ocf::CREW_MEMBER;
+
+    assert_eq!(
+        collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id)]),
+        vec![selected],
+        "voice ownership maps to the real selected crew cursor, not ViewCursor",
+    );
+    assert!(
+        collect_speaking_overlay_objects(&app.snapshot, &[(8, player_id)]).is_empty(),
+        "a client must not mark another client's player as speaking",
+    );
+    assert_eq!(
+        collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id), (7, player_id)]),
+        vec![selected],
+        "repeated activity frames must not draw the same selected cursor twice",
+    );
 }
 
 #[test]

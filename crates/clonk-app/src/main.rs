@@ -71,6 +71,7 @@ mod toolbox_window_host;
 mod update_check;
 mod update_download;
 mod viewport_window_host;
+mod voice_chat;
 mod window_icon;
 
 // Step 6a of the decomposition campaign (rust/REFACTOR_PLAN.md): per-area
@@ -107,6 +108,8 @@ mod game_app_sound;
 mod game_app_startup;
 #[path = "game_app/update.rs"]
 mod game_app_update;
+#[path = "game_app/voice.rs"]
+mod game_app_voice;
 
 #[path = "main_parts/app_state.rs"]
 mod main_app_state;
@@ -272,8 +275,8 @@ use clonk_frontend::{
     MainMenuItem, MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode,
     MessageBoardOverlay, MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
     RenderedAudibilityCall, RenderedObjectAudibilityCalls, ScenarioEntry, ScenarioKind,
-    SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip,
-    ViewportEdgeScroll, ViewportInput, ViewportPointer,
+    SkyRenderState, SpeakingOverlay, StartupMainMenu, StartupMenu, StartupMenuAction,
+    StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer,
 };
 use clonk_graphics::clonk_font::{
     font_image_lookup_tag, inline_image_token, FontImageProvider, FontImageRef,
@@ -1975,9 +1978,14 @@ impl GameApp {
                 }
             }
         }
+        let voice_enabled = audio_options.voice_enabled;
         let network_mode = runtime.network.clone();
         let network = match network_mode.clone() {
-            Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
+            Some(mode) => Some(NetworkManager::for_mode_with_voice_enabled(
+                mode,
+                runtime.player_owner,
+                voice_enabled,
+            )?),
             None => None,
         };
         let player_name = runtime.player_name.clone();
@@ -2316,6 +2324,7 @@ impl GameApp {
             local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
             engine_key_repeated: false,
+            key_event_suppresses_text: false,
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
@@ -2413,6 +2422,7 @@ impl GameApp {
             active_description_definition_modules: Vec::new(),
             active_game_graphics: None,
             audio,
+            voice_chat: crate::voice_chat::VoiceChatState::default(),
             #[cfg(test)]
             ui_sound_log: Vec::new(),
             #[cfg(test)]
@@ -3861,6 +3871,7 @@ impl GameApp {
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
+        self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
         self.primary_pointer_left_down = false;
         self.ingame_menu_close_pointer_capture = None;

@@ -74,6 +74,125 @@ async fn next_host_puncher_event(
     std::future::pending().await
 }
 
+async fn next_host_voice_media(
+    events: &mut Option<mpsc::Receiver<crate::udp_session::ReliableUdpVoiceDatagram>>,
+) -> crate::udp_session::ReliableUdpVoiceDatagram {
+    if let Some(events) = events.as_mut() {
+        if let Some(event) = events.recv().await {
+            return event;
+        }
+    }
+    std::future::pending().await
+}
+
+fn host_voice_routes(
+    state: &HostState,
+) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceRouteCookie)> {
+    if !state.config.voice_enabled {
+        return Vec::new();
+    }
+    let mut selected = BTreeSet::new();
+    state
+        .accepted_routes
+        .values()
+        .filter_map(|route| {
+            if !route.voice_auth.is_negotiated() {
+                return None;
+            }
+            let cookie = route.voice_auth.send_cookie()?;
+            (route.protocol == crate::NetworkProtocol::Udp && selected.insert(route.client_id))
+                .then_some((
+                    route.client_id,
+                    crate::canonical_reliable_udp_peer_address(route.peer_addr),
+                    cookie,
+                ))
+        })
+        .collect()
+}
+
+fn host_voice_ingress(
+    state: &HostState,
+    source: SocketAddr,
+) -> Option<(ClientId, crate::voice::VoiceRouteCookie)> {
+    if !state.config.voice_enabled {
+        return None;
+    }
+    let source = crate::canonical_reliable_udp_peer_address(source);
+    state.accepted_routes.values().find_map(|route| {
+        if !route.voice_auth.is_negotiated() {
+            return None;
+        }
+        let peer = crate::canonical_reliable_udp_peer_address(route.peer_addr);
+        (route.protocol == crate::NetworkProtocol::Udp && peer == source)
+            .then(|| {
+                route
+                    .voice_auth
+                    .receive_cookie()
+                    .map(|cookie| (route.client_id, cookie))
+            })
+            .flatten()
+    })
+}
+
+fn send_host_voice_frame(
+    frame: crate::VoiceFrame,
+    udp_handle: Option<&crate::ReliableUdpSessionHandle>,
+    state: &HostState,
+) {
+    let Some(udp_handle) = udp_handle else {
+        return;
+    };
+    let frame = frame.with_authenticated_source(HOST_CLIENT_ID);
+    for (_, peer, cookie) in host_voice_routes(state) {
+        if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
+            cookie,
+            &crate::voice::VoicePacket::Relayed(frame.clone()),
+        ) {
+            let _ = udp_handle.try_send_voice_media(peer, wire);
+        }
+    }
+}
+
+fn handle_host_voice_media(
+    media: crate::udp_session::ReliableUdpVoiceDatagram,
+    udp_handle: Option<&crate::ReliableUdpSessionHandle>,
+    voice_events: &mpsc::Sender<crate::VoiceFrame>,
+    state: &HostState,
+    limiter: &mut crate::voice::VoiceIngressLimiter,
+) {
+    let Some((source_client_id, receive_cookie)) = host_voice_ingress(state, media.peer) else {
+        return;
+    };
+    let Some(packet) = crate::voice::admit_voice_ingress(
+        &media.payload,
+        receive_cookie,
+        source_client_id,
+        limiter,
+        Instant::now(),
+    ) else {
+        return;
+    };
+    let Some((frame, direct_recipients)) =
+        crate::voice::authenticate_host_ingress(source_client_id, packet)
+    else {
+        return;
+    };
+    let _ = voice_events.try_send(frame.clone());
+    let Some(udp_handle) = udp_handle else {
+        return;
+    };
+    for (client_id, peer, cookie) in host_voice_routes(state) {
+        if crate::voice::host_relay_selects(client_id, source_client_id, &direct_recipients) {
+            if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
+                cookie,
+                &crate::voice::VoicePacket::Relayed(frame.clone()),
+            ) {
+                let _ = udp_handle.try_send_voice_media(peer, wire);
+            }
+        }
+    }
+}
+
 async fn emit_host_netpuncher_state(state: &HostState) {
     let local_addresses = state
         .client_addresses
@@ -190,6 +309,9 @@ pub(crate) async fn run_host(
     mut commands: mpsc::Receiver<HostCommand>,
     control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<HostEvent>,
+    mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
+    voice_events: mpsc::Sender<crate::VoiceFrame>,
+    voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let listener_addr = listener
@@ -201,6 +323,9 @@ pub(crate) async fn run_host(
     let mut puncher_events = udp_hub
         .as_mut()
         .map(crate::ReliableUdpSessionHub::take_puncher_event_receiver);
+    let mut voice_media = udp_hub
+        .as_mut()
+        .map(crate::ReliableUdpSessionHub::take_voice_media_receiver);
     let mut puncher_start_errors = Vec::new();
     if let Some(hub) = udp_hub.as_ref() {
         for address in selected_puncher_addresses(&config.netpuncher_addresses) {
@@ -351,6 +476,7 @@ pub(crate) async fn run_host(
     // simulation/control clock (oracle-src-pinned src/C4Network2.cpp:674-697).
     let mut runtime_dynamic_timer = interval(Duration::from_secs(1));
     let mut published_control_send_time_epoch = None;
+    let mut voice_ingress_limiter = crate::voice::VoiceIngressLimiter::default();
 
     if let Some(error) = udp_start_error {
         let _ = state
@@ -372,6 +498,17 @@ pub(crate) async fn run_host(
     }
 
     loop {
+        voice_ingress_limiter.retain_sources(
+            state
+                .accepted_routes
+                .values()
+                .filter(|route| route.protocol == crate::NetworkProtocol::Udp)
+                .map(|route| route.client_id),
+        );
+        voice_available.store(
+            !host_voice_routes(&state).is_empty(),
+            std::sync::atomic::Ordering::Release,
+        );
         if published_control_send_time_epoch != Some(state.control_send_time_epoch) {
             publish_host_control_send_time(&state, &control_send_time);
             published_control_send_time_epoch = Some(state.control_send_time_epoch);
@@ -394,6 +531,8 @@ pub(crate) async fn run_host(
         // arm. A command racing this check can be delayed by at most one
         // network operation before the next pass observes it.
         let command_pending = !commands.is_empty();
+        let voice_media_ready = state.config.voice_enabled
+            && crate::voice::voice_media_may_run(command_pending, !client_rx.is_empty());
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
@@ -842,6 +981,22 @@ pub(crate) async fn run_host(
                     HostCommand::Shutdown => break,
                 }
             }
+            // Media is deliberately below admitted route/control input and
+            // game commands in this biased select. Its handler is synchronous
+            // and bounded, so an event racing the readiness snapshot waits for
+            // at most one media transition.
+            media = next_host_voice_media(&mut voice_media), if voice_media_ready => {
+                handle_host_voice_media(
+                    media,
+                    udp_handle.as_ref(),
+                    &voice_events,
+                    &state,
+                    &mut voice_ingress_limiter,
+                );
+            }
+            Some(frame) = voice_commands.recv(), if voice_media_ready => {
+                send_host_voice_frame(frame, udp_handle.as_ref(), &state);
+            }
             _ = wait_for_chase_target_update(chase_target_update_deadline) => {
                 update_chase_targets(&mut state).await;
             }
@@ -877,6 +1032,7 @@ pub(crate) async fn run_host(
         }
     }
 
+    voice_available.store(false, std::sync::atomic::Ordering::Release);
     client_rx.close();
     admission_rx.close();
     for route in state.accepted_routes.values() {
@@ -1203,6 +1359,12 @@ pub(crate) async fn handle_client_accepted(
         ));
         return;
     }
+    let voice_auth = if state.config.voice_enabled && protocol == crate::NetworkProtocol::Udp {
+        crate::voice::VoiceRouteAuthentication::new_udp()
+    } else {
+        crate::voice::VoiceRouteAuthentication::default()
+    };
+    let voice_announcement = voice_auth.announcement();
     let replaced_route = state.accepted_routes.insert(
         connection_id,
         AcceptedConnectionRoute {
@@ -1212,10 +1374,17 @@ pub(crate) async fn handle_client_accepted(
             protocol,
             ping: RoutePingLag::default(),
             outbound: outbound.clone(),
+            voice_auth,
         },
     );
     state.invalidate_control_send_time();
     debug_assert!(replaced_route.is_none());
+    if let Some(announcement) = voice_announcement {
+        if let Some(cookie) = voice_auth.receive_cookie() {
+            outbound.set_voice_receive_cookie(cookie);
+        }
+        let _ = outbound.try_send(ControlMessage::PortCapabilities(announcement));
+    }
     if state.clients.contains_key(&client_id) {
         if setup_tx.send(Ok(())).is_err() {
             state.accepted_routes.remove(&connection_id);

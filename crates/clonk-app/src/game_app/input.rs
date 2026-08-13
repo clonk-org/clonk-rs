@@ -3277,6 +3277,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        self.key_event_suppresses_text = false;
         // `C4Game::DoKeyboardInput` updates its `PressedKeys` map as its very
         // first statement, ahead of the keyboard-scope computation and of any
         // dialog claim (`C4Game.cpp:2143-2155`), so a key-up always clears the
@@ -3287,6 +3288,10 @@ impl GameApp {
         // (`C4Game.cpp:3566-3570`) drops it without ever reaching
         // `C4Player::InCom`.
         self.engine_key_repeated = self.note_physical_engine_key(key, state);
+        if self.handle_voice_key(key, state) {
+            self.key_event_suppresses_text = true;
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
         self.note_classic_lobby_non_pointer_input();

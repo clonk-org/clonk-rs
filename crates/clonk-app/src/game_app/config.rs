@@ -1375,6 +1375,14 @@ impl GameApp {
             .set_control_key_names(configured_control_key_names(&self.bindings));
 
         let reloaded_audio = AudioOptions::load(paths);
+        if self.audio.is_none() && reloaded_audio.voice_enabled {
+            match AudioContext::try_new_with_paths(reloaded_audio.clone(), paths) {
+                Ok(audio) => self.audio = Some(audio),
+                Err(error) => {
+                    tracing::warn!(%error, "voice opt-in could not initialise audio");
+                }
+            }
+        }
         if let Some(audio) = self.audio.as_mut() {
             let music_volume = reloaded_audio.music_volume_percent();
             let sound_volume = reloaded_audio.sound_volume_percent();

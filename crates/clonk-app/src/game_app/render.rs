@@ -4603,6 +4603,10 @@ impl GameApp {
             }
         }
         let crew_name_labels = self.crew_name_overlays(&viewports);
+        let speaking_object_ids = collect_speaking_overlay_objects(
+            &self.snapshot,
+            &self.voice_chat.active_speakers(Instant::now()),
+        );
         let overlay = GraphicsOverlay {
             frame_text: &self.frame_text,
             status_text: &self.status_text,
@@ -4612,6 +4616,12 @@ impl GameApp {
             game_time_seconds: self.game_time_seconds(),
             message_board,
             crew_name_labels,
+            speaking: SpeakingOverlay {
+                gui_icons: (!speaking_object_ids.is_empty())
+                    .then(|| self.assets.dialog_image("GUIIcons.png"))
+                    .flatten(),
+                object_ids: speaking_object_ids,
+            },
             clock_text: self
                 .display_flags
                 .clock

@@ -159,6 +159,26 @@ sheet's four toggles, two sliders, and six persisted keys are live; unresolved
 dependencies and other unported descendants fail at typed boundaries instead
 of showing Rust fallbacks.
 
+Proximity voice chat is a deliberate Rust-only extension for
+clonk-org/clonk-rs#301, not a parity claim. It is opt-in push-to-talk and opens
+the microphone only for a held configured key. Fixed 20 ms, 16 kHz mono IMA
+ADPCM frames travel on a bounded, droppable UDP media lane after positive
+Rust-to-Rust capability negotiation; they never enter lockstep controls,
+snapshots, savegames, records/replays, sync checks, or PostMortem recovery.
+Each admitted UDP route exchanges an unpredictable media cookie over its
+reliable control stream; the receiving route supplies the source client ID,
+then the app revalidates that the claimed player belongs to that client and
+resolves the live selected `PlayerState.cursor`. Playback uses the existing
+linear 700-pixel positional mix; the speaker glyph additionally obeys
+per-viewport object/FoW visibility. Landscape openness and obstacles
+deliberately do not occlude speech.
+
+The media lane is not encrypted. Remaining extensions, rather than hidden
+parity gaps, are jitter buffering and loss concealment, terrain/path occlusion,
+observer and multiple-local-player source policy, input-device selection and
+hotplug, echo/noise/automatic-gain processing, voice activation, per-peer voice
+mute UI, multi-speaker headroom, and large-session relay scaling.
+
 ## Gates
 
 ```sh

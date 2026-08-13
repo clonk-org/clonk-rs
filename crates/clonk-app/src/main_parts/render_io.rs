@@ -1988,6 +1988,21 @@ pub(crate) fn collect_player_overlays(
     collect_player_overlays_filtered(engine, snapshot, focus_id, bindings, gamepad_bindings, None)
 }
 
+pub(crate) fn collect_speaking_overlay_objects(
+    snapshot: &SimulationSnapshot,
+    active_speakers: &[(i32, i32)],
+) -> Vec<ObjectId> {
+    let mut seen = HashSet::with_capacity(active_speakers.len());
+    active_speakers
+        .iter()
+        .filter_map(|&(by_client, player_id)| {
+            crate::voice_chat::authenticated_selected_voice_crew(snapshot, by_client, player_id)
+                .map(|object| object.id)
+        })
+        .filter(|object_id| seen.insert(*object_id))
+        .collect()
+}
+
 /// Prepare overlay state only for players presented by a physical viewport.
 ///
 /// C4GraphicsSystem iterates its viewport list and C4Viewport::DrawOverlay

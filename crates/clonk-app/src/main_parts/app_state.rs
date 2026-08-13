@@ -112,6 +112,10 @@ pub(crate) struct GameApp {
     /// down as a parameter. `GameApp::handle_key` resolves it once at the same
     /// point so every early-returning handler leaves the same latch behind.
     pub(crate) engine_key_repeated: bool,
+    /// Whether the physical-key route consumed this event before winit's
+    /// paired `KeyEvent::text` is considered. Push-to-talk keys use this to
+    /// avoid also typing into a focused game-shell edit control.
+    pub(crate) key_event_suppresses_text: bool,
     /// Raw Tab state is tracked before modifier/dialog scope lookup because a
     /// held key can cross into or out of a PRIO_PlrControl binding.
     pub(crate) scoreboard_tab_raw_pressed: bool,
@@ -304,6 +308,9 @@ pub(crate) struct GameApp {
     /// `None` means the process-startup Graphics.c4g bundle is active.
     pub(crate) active_game_graphics: Option<GameGraphicsResources>,
     pub(crate) audio: Option<AudioContext>,
+    /// Presentation-only proximity voice state; never serialized or passed to
+    /// the deterministic engine.
+    pub(crate) voice_chat: crate::voice_chat::VoiceChatState,
     #[cfg(test)]
     pub(crate) ui_sound_log: Vec<String>,
     #[cfg(test)]

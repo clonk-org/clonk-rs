@@ -728,6 +728,12 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
     let control_send_time = ControlSendTimeSnapshot::default();
     let worker_control_send_time = control_send_time.clone();
     let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
+    let (voice_command_tx, voice_command_rx) =
+        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let voice_sender = crate::VoiceSender::new(voice_command_tx);
+    let voice_available = voice_sender.availability();
+    let (voice_event_tx, voice_event_rx) =
+        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let task_io_statistics = io_statistics.clone();
     let join_handle = tokio::spawn(async move {
@@ -741,6 +747,9 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
             command_rx,
             worker_control_send_time,
             event_tx.clone(),
+            voice_command_rx,
+            voice_event_tx,
+            voice_available,
             shutdown_rx,
         )
         .await;
@@ -752,6 +761,8 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
         command_tx,
         control_send_time,
         event_rx: Some(event_rx),
+        voice_sender,
+        voice_event_rx: Some(voice_event_rx),
         shutdown_tx: Some(shutdown_tx),
         join_handle,
         udp_local_addr,
@@ -1130,6 +1141,7 @@ where
         mesh_tcp_bind_address: _,
         mesh_udp_bind_address: _,
         mesh_punchers: _,
+        voice_enabled,
     } = config;
     let wire_name =
         clonk_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
@@ -1277,7 +1289,7 @@ where
         ),
         None => None,
     };
-    let mut routes = ClientRouteManager::new();
+    let mut routes = ClientRouteManager::new().with_voice_enabled(voice_enabled);
     if let Some(outbound) = udp_outbound {
         routes.add_udp_route(
             primary_local_connection_id,
@@ -1515,6 +1527,12 @@ where
     let control_send_time = ControlSendTimeSnapshot::default();
     let worker_control_send_time = control_send_time.clone();
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
+    let (voice_command_tx, voice_command_rx) =
+        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let voice_sender = crate::VoiceSender::new(voice_command_tx);
+    let voice_available = voice_sender.availability();
+    let (voice_event_tx, voice_event_rx) =
+        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_client_loop_with_routes(
         routes,
@@ -1522,6 +1540,9 @@ where
         command_rx,
         worker_control_send_time,
         event_tx,
+        voice_command_rx,
+        voice_event_tx,
+        voice_available,
         shutdown_rx,
         host_peer_addr,
         client_addresses,
@@ -1549,6 +1570,8 @@ where
         command_tx,
         control_send_time,
         event_rx: Some(event_rx),
+        voice_sender,
+        voice_event_rx: Some(voice_event_rx),
         shutdown_tx: Some(shutdown_tx),
         join_handle,
         client_id,

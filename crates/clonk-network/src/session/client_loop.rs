@@ -505,6 +505,101 @@ async fn publish_client_ready(
     }
 }
 
+async fn receive_optional_voice_media(
+    events: &mut Option<mpsc::Receiver<crate::udp_session::ReliableUdpVoiceDatagram>>,
+) -> crate::udp_session::ReliableUdpVoiceDatagram {
+    if let Some(events) = events.as_mut() {
+        if let Some(event) = events.recv().await {
+            return event;
+        }
+    }
+    std::future::pending().await
+}
+
+fn client_voice_available(transport: &ClientRouteManager) -> bool {
+    !transport.authenticated_voice_send_routes().is_empty()
+}
+
+fn send_client_voice_frame(
+    frame: crate::VoiceFrame,
+    local_client_id: ClientId,
+    transport: &ClientRouteManager,
+    udp_handle: Option<&crate::ReliableUdpSessionHandle>,
+) {
+    let Some(udp_handle) = udp_handle else {
+        return;
+    };
+    let frame = frame.with_authenticated_source(local_client_id);
+    let routes = transport.authenticated_voice_send_routes();
+    let mut direct_recipients = Vec::new();
+    for (peer_id, peer, cookie) in routes
+        .iter()
+        .copied()
+        .filter(|(peer_id, _, _)| *peer_id != HOST_CLIENT_ID)
+    {
+        if direct_recipients.len() == crate::voice::MAX_VOICE_DIRECT_RECIPIENTS {
+            break;
+        }
+        let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
+            cookie,
+            &crate::voice::VoicePacket::Direct(frame.clone()),
+        ) else {
+            continue;
+        };
+        if udp_handle.try_send_voice_media(peer, wire) {
+            direct_recipients.push(peer_id);
+        }
+    }
+    let Some((_, host_peer, host_cookie)) = routes
+        .into_iter()
+        .find(|(peer_id, _, _)| *peer_id == HOST_CLIENT_ID)
+    else {
+        return;
+    };
+    let relay = crate::voice::VoicePacket::RelayRequest {
+        frame,
+        direct_recipients,
+    };
+    if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cookie, &relay) {
+        let _ = udp_handle.try_send_voice_media(host_peer, wire);
+    }
+}
+
+fn handle_client_voice_media(
+    media: crate::udp_session::ReliableUdpVoiceDatagram,
+    transport: &ClientRouteManager,
+    voice_events: &mpsc::Sender<crate::VoiceFrame>,
+    known_clients: &BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    limiter: &mut crate::voice::VoiceIngressLimiter,
+) {
+    let Some((ingress_peer_id, receive_cookie)) = transport.authenticated_voice_ingress(media.peer)
+    else {
+        return;
+    };
+    let Ok(packet) =
+        crate::voice::decode_authenticated_voice_packet(&media.payload, receive_cookie)
+    else {
+        return;
+    };
+    let Some(frame) = crate::voice::authenticate_client_ingress(
+        ingress_peer_id,
+        ingress_peer_id == HOST_CLIENT_ID,
+        packet,
+    ) else {
+        return;
+    };
+    if !i32::try_from(frame.client_id)
+        .ok()
+        .is_some_and(|client_id| known_clients.contains_key(&client_id))
+    {
+        return;
+    }
+    if !limiter.allow(frame.client_id, Instant::now()) {
+        return;
+    }
+    let _ = voice_events.try_send(frame);
+}
+
 #[cfg(test)]
 pub(crate) async fn run_client_loop_with_addresses<S>(
     transport: crate::ControlTransport<S>,
@@ -527,12 +622,20 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
         transport,
         liveness,
     );
+    let (_voice_command_tx, voice_commands) =
+        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (voice_events, _voice_event_rx) =
+        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let voice_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
     run_client_loop_with_routes(
         routes,
         crate::NetworkIoStatistics::new(network_statistics_now_ms()),
         commands,
         ControlSendTimeSnapshot::default(),
         event_tx,
+        voice_commands,
+        voice_events,
+        voice_available,
         shutdown_rx,
         host_peer_addr,
         client_addresses,
@@ -569,6 +672,9 @@ pub(crate) async fn run_client_loop_with_routes(
     mut commands: mpsc::Receiver<ClientCommand>,
     control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<ClientEvent>,
+    mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
+    voice_events: mpsc::Sender<crate::VoiceFrame>,
+    voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
     host_peer_addr: Option<SocketAddr>,
     mut client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
@@ -591,22 +697,6 @@ pub(crate) async fn run_client_loop_with_routes(
     let local_core = mesh_request_template.local_core.clone();
     // What the host announced it can do beyond the C++ protocol. Empty until it
     // says so, which is exactly where a stock C++ host leaves it.
-    let mut peer_capabilities = crate::PeerCapabilityRegistry::default();
-    // Announce ourselves once, unprompted, but only when there is something to
-    // announce. Safe against any peer: C++'s `HandlePacket` switch has no
-    // `default:` case, so a stock host ignores the ID entirely and never
-    // answers -- and that silence is precisely how we conclude it is C++ (see
-    // `crate::capabilities`). An *empty* announcement, though, says nothing the
-    // default does not already imply, so while this build implements no Tier 2
-    // feature it is not worth a packet or a change to the message sequence
-    // every connection currently produces.
-    if crate::PortCapabilities::supported().bits() != 0 {
-        let _ = transport
-            .send_message(ControlMessage::PortCapabilities(
-                crate::PortCapabilities::supported(),
-            ))
-            .await;
-    }
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
     let mut client_performance = ClientPerformanceStats::new(CLIENT_BACKLOG_LIMIT);
     let mut next_control_request_at = resource_state.next_control_request_at;
@@ -623,6 +713,10 @@ pub(crate) async fn run_client_loop_with_routes(
     let mesh_udp_handle = mesh_udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::handle);
+    let mut voice_media = mesh_udp_hub
+        .as_mut()
+        .map(crate::ReliableUdpSessionHub::take_voice_media_receiver);
+    let mut voice_ingress_limiter = crate::voice::VoiceIngressLimiter::default();
     let mut mesh_udp_accept_enabled = mesh_udp_hub.is_some();
 
     if let Some(local_addresses) = client_addresses
@@ -730,6 +824,15 @@ pub(crate) async fn run_client_loop_with_routes(
     }
 
     'outer: loop {
+        voice_ingress_limiter.retain_sources(
+            client_cores
+                .keys()
+                .filter_map(|client_id| ClientId::try_from(*client_id).ok()),
+        );
+        voice_available.store(
+            client_voice_available(&transport),
+            std::sync::atomic::Ordering::Release,
+        );
         if transport.control_send_time_needs_publish() {
             let local_client_id = ClientId::try_from(resource_state.catalog.local_client_id())
                 .unwrap_or(HOST_CLIENT_ID);
@@ -761,6 +864,8 @@ pub(crate) async fn run_client_loop_with_routes(
         // Give an already-queued game command deterministic service; a
         // command racing this snapshot waits for at most one network branch.
         let command_pending = !commands.is_empty();
+        let voice_media_ready = transport.voice_enabled()
+            && crate::voice::voice_media_may_run(command_pending, transport.has_pending_input());
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => break,
@@ -1574,13 +1679,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     other => other,
                 };
                 match result {
-                    Ok(ControlMessage::PortCapabilities(capabilities)) => {
-                        // The host telling us what it supports. Recorded against
-                        // the host's client id; a stock C++ host never sends
-                        // this, so it stays absent and the compatible path
-                        // stands.
-                        peer_capabilities.record(HOST_CLIENT_ID as i32, capabilities);
-                    }
+                    Ok(ControlMessage::PortCapabilities(_)) => {}
                     // Only the host restarts the session, so a notice relayed
                     // by a peer client says nothing about the host's intent.
                     Ok(ControlMessage::HostRestarting { .. })
@@ -2285,8 +2384,28 @@ pub(crate) async fn run_client_loop_with_routes(
                     }
                 }
             }
+            media = receive_optional_voice_media(&mut voice_media), if voice_media_ready => {
+                handle_client_voice_media(
+                    media,
+                    &transport,
+                    &voice_events,
+                    &client_cores,
+                    &mut voice_ingress_limiter,
+                );
+            }
+            Some(frame) = voice_commands.recv(), if voice_media_ready => {
+                if let Ok(local_client_id) = ClientId::try_from(local_core.client_id) {
+                    send_client_voice_frame(
+                        frame,
+                        local_client_id,
+                        &transport,
+                        mesh_udp_handle.as_ref(),
+                    );
+                }
+            }
         }
     }
+    voice_available.store(false, std::sync::atomic::Ordering::Release);
     if let Some(task) = pending_secondary.take() {
         task.abort();
         let _ = task.await;

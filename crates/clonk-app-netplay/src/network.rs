@@ -720,6 +720,8 @@ impl NetworkControlClock {
 #[derive(Debug)]
 struct NetworkWorkerReady {
     local_client_id: ClientId,
+    voice_sender: clonk_network::VoiceSender,
+    voice_event_rx: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
     control_send_time: clonk_network::ControlSendTimeSnapshot,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
     /// Why this host is running unregistered, when the league server refused
@@ -1396,6 +1398,8 @@ pub struct NetworkManager {
     control_tick_probe: Mutex<Option<ControlTickProbe>>,
     current_frame: Arc<AtomicI32>,
     event_rx: Receiver<NetworkEvent>,
+    voice_sender: Option<clonk_network::VoiceSender>,
+    voice_event_rx: Option<tokio_mpsc::Receiver<clonk_network::VoiceFrame>>,
     telemetry_rx: Receiver<NetworkEvent>,
     event_wake: NetworkEventWakeHandle,
     worker: Option<thread::JoinHandle<()>>,
@@ -1413,6 +1417,32 @@ pub struct NetworkManager {
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
     #[cfg(any(test, feature = "test-hooks"))]
     test_lobby_client_telemetry: Arc<Mutex<Option<RuntimeLobbyClientTelemetry>>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    test_voice_outbound: Option<tokio_mpsc::Sender<clonk_network::VoiceFrame>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    test_voice_available: bool,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestVoiceChannels {
+    inbound: tokio_mpsc::Sender<clonk_network::VoiceFrame>,
+    outbound: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl TestVoiceChannels {
+    pub fn send_inbound(
+        &self,
+        frame: clonk_network::VoiceFrame,
+    ) -> std::result::Result<(), clonk_network::VoiceFrame> {
+        self.inbound
+            .try_send(frame)
+            .map_err(|error| error.into_inner())
+    }
+
+    pub fn try_recv_outbound(&mut self) -> Option<clonk_network::VoiceFrame> {
+        self.outbound.try_recv().ok()
+    }
 }
 
 const MASTERSERVER_SIGNUP_PENDING: u8 = 0;
@@ -3021,12 +3051,39 @@ enum WorkerMode {
     Host {
         settings: HostSettings,
         local_owner: i32,
+        voice_enabled: bool,
     },
     Client {
         settings: ClientSettings,
         local_owner: i32,
+        voice_enabled: bool,
         startup_cancellation: Option<NetworkStartupCancellation>,
     },
+}
+
+impl WorkerMode {
+    fn for_mode(mode: NetworkMode, local_owner: i32, voice_enabled: bool) -> Self {
+        match mode {
+            NetworkMode::Host(settings) => Self::Host {
+                settings,
+                local_owner,
+                voice_enabled,
+            },
+            NetworkMode::Client(settings) => Self::Client {
+                settings,
+                local_owner,
+                voice_enabled,
+                startup_cancellation: None,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn voice_enabled(&self) -> bool {
+        match self {
+            Self::Host { voice_enabled, .. } | Self::Client { voice_enabled, .. } => *voice_enabled,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -3151,18 +3208,15 @@ impl NetworkManager {
         mode: NetworkMode,
         local_owner: i32,
     ) -> std::result::Result<Self, NetworkStartError> {
-        let worker_mode = match mode {
-            NetworkMode::Host(settings) => WorkerMode::Host {
-                settings,
-                local_owner,
-            },
-            NetworkMode::Client(settings) => WorkerMode::Client {
-                settings,
-                local_owner,
-                startup_cancellation: None,
-            },
-        };
-        Self::spawn(worker_mode)
+        Self::for_mode_with_voice_enabled(mode, local_owner, true)
+    }
+
+    pub fn for_mode_with_voice_enabled(
+        mode: NetworkMode,
+        local_owner: i32,
+        voice_enabled: bool,
+    ) -> std::result::Result<Self, NetworkStartError> {
+        Self::spawn(WorkerMode::for_mode(mode, local_owner, voice_enabled))
     }
 
     pub fn for_client_cancellable(
@@ -3170,9 +3224,24 @@ impl NetworkManager {
         local_owner: i32,
         startup_cancellation: NetworkStartupCancellation,
     ) -> std::result::Result<Self, NetworkStartError> {
+        Self::for_client_cancellable_with_voice_enabled(
+            settings,
+            local_owner,
+            startup_cancellation,
+            true,
+        )
+    }
+
+    pub fn for_client_cancellable_with_voice_enabled(
+        settings: ClientSettings,
+        local_owner: i32,
+        startup_cancellation: NetworkStartupCancellation,
+        voice_enabled: bool,
+    ) -> std::result::Result<Self, NetworkStartError> {
         let worker_mode = WorkerMode::Client {
             settings,
             local_owner,
+            voice_enabled,
             startup_cancellation: Some(startup_cancellation),
         };
         Self::spawn(worker_mode)
@@ -3248,6 +3317,8 @@ impl NetworkManager {
             control_tick_probe: Mutex::new(None),
             current_frame,
             event_rx,
+            voice_sender: Some(ready.voice_sender),
+            voice_event_rx: Some(ready.voice_event_rx),
             telemetry_rx,
             event_wake: event_tx.wake.clone(),
             worker: Some(worker),
@@ -3265,6 +3336,10 @@ impl NetworkManager {
             test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             #[cfg(any(test, feature = "test-hooks"))]
             test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
+            #[cfg(any(test, feature = "test-hooks"))]
+            test_voice_outbound: None,
+            #[cfg(any(test, feature = "test-hooks"))]
+            test_voice_available: false,
         })
     }
 
@@ -4847,6 +4922,48 @@ impl NetworkManager {
         events
     }
 
+    /// Whether at least one live UDP route positively negotiated the
+    /// best-effort Rust voice lane.
+    pub fn voice_available(&self) -> bool {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if self.test_voice_available {
+            return true;
+        }
+        self.voice_sender
+            .as_ref()
+            .is_some_and(clonk_network::VoiceSender::is_available)
+    }
+
+    /// Queues one voice frame without waiting. Saturation drops media at its
+    /// dedicated bounded lane and cannot delay lockstep commands.
+    pub fn try_send_voice(
+        &self,
+        frame: clonk_network::VoiceFrame,
+    ) -> std::result::Result<(), clonk_network::VoiceSendError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(sender) = self.test_voice_outbound.as_ref() {
+            return sender.try_send(frame).map_err(|error| match error {
+                tokio_mpsc::error::TrySendError::Full(_) => clonk_network::VoiceSendError::Full,
+                tokio_mpsc::error::TrySendError::Closed(_) => clonk_network::VoiceSendError::Closed,
+            });
+        }
+        self.voice_sender
+            .as_ref()
+            .ok_or(clonk_network::VoiceSendError::Closed)?
+            .try_send(frame)
+    }
+
+    pub fn poll_voice_frames(&mut self) -> Vec<clonk_network::VoiceFrame> {
+        let Some(receiver) = self.voice_event_rx.as_mut() else {
+            return Vec::new();
+        };
+        let mut frames = Vec::new();
+        while let Ok(frame) = receiver.try_recv() {
+            frames.push(frame);
+        }
+        frames
+    }
+
     pub fn install_event_waker(&self, callback: NetworkEventWakeCallback) {
         self.event_wake.install(callback);
     }
@@ -4877,6 +4994,8 @@ impl NetworkManager {
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
+                voice_sender: None,
+                voice_event_rx: None,
                 telemetry_rx,
                 event_wake: event_tx.wake.clone(),
                 worker: None,
@@ -4892,6 +5011,8 @@ impl NetworkManager {
                 control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
+                test_voice_outbound: None,
+                test_voice_available: false,
             },
             event_tx,
         )
@@ -4910,6 +5031,8 @@ impl NetworkManager {
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
+                voice_sender: None,
+                voice_event_rx: None,
                 telemetry_rx,
                 event_wake: event_tx.wake.clone(),
                 worker: None,
@@ -4925,9 +5048,24 @@ impl NetworkManager {
                 control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
+                test_voice_outbound: None,
+                test_voice_available: false,
             },
             event_tx,
         )
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub_with_voice_for_client_id(
+        local_client_id: ClientId,
+    ) -> (Self, NetworkEventSender, TestVoiceChannels) {
+        let (mut manager, events) = Self::test_stub_for_client_id(local_client_id);
+        let (inbound, inbound_rx) = tokio_mpsc::channel(8);
+        let (outbound_tx, outbound) = tokio_mpsc::channel(8);
+        manager.voice_event_rx = Some(inbound_rx);
+        manager.test_voice_outbound = Some(outbound_tx);
+        manager.test_voice_available = true;
+        (manager, events, TestVoiceChannels { inbound, outbound })
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -4964,6 +5102,8 @@ impl NetworkManager {
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
+                voice_sender: None,
+                voice_event_rx: None,
                 telemetry_rx,
                 event_wake: event_tx.wake.clone(),
                 worker: None,
@@ -4983,6 +5123,8 @@ impl NetworkManager {
                 control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
+                test_voice_outbound: None,
+                test_voice_available: false,
             },
             event_tx,
             TestNetworkCommands {
@@ -5691,10 +5833,12 @@ async fn run_worker(
         WorkerMode::Host {
             settings,
             local_owner,
+            voice_enabled,
         } => {
-            run_host_worker(
+            run_host_worker_with_voice_enabled(
                 settings,
                 local_owner,
+                voice_enabled,
                 &mut command_rx,
                 &mut control_tick_rx,
                 &mut control_performance_rx,
@@ -5708,11 +5852,13 @@ async fn run_worker(
         WorkerMode::Client {
             settings,
             local_owner,
+            voice_enabled,
             startup_cancellation,
         } => {
-            run_client_worker(
+            run_client_worker_with_voice_enabled(
                 settings,
                 local_owner,
+                voice_enabled,
                 &mut command_rx,
                 &mut control_tick_rx,
                 &mut control_performance_rx,
@@ -5730,10 +5876,39 @@ async fn run_worker(
 
 // Keep host worker channels explicit so their ownership and shutdown behavior
 // remain visible at every production and test entry point.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_host_worker(
     settings: HostSettings,
     local_owner: i32,
+    command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
+    control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
+    control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
+    event_tx: NetworkEventSender,
+    telemetry_tx: SyncSender<NetworkEvent>,
+    local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+    netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
+) -> Result<()> {
+    run_host_worker_with_voice_enabled(
+        settings,
+        local_owner,
+        true,
+        command_rx,
+        control_tick_rx,
+        control_performance_rx,
+        event_tx,
+        telemetry_tx,
+        local_id_tx,
+        netpuncher_state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_host_worker_with_voice_enabled(
+    settings: HostSettings,
+    local_owner: i32,
+    voice_enabled: bool,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
     control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
@@ -5779,6 +5954,7 @@ async fn run_host_worker(
             ..HostConfig::default()
         },
     };
+    host_config.voice_enabled = voice_enabled;
     let is_prepared = settings.prepared.is_some();
     let tcp_bind_address =
         (!is_prepared || host_config.configured_tcp_port != Some(0)).then_some(settings.bind_addr);
@@ -5988,8 +6164,12 @@ async fn run_host_worker(
         }
     }
     netpuncher_state.lock().local_addresses = local_addresses.clone();
+    let voice_sender = host.voice_sender();
+    let voice_event_rx = host.take_voice_receiver();
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: HOST_CLIENT_ID,
+        voice_sender,
+        voice_event_rx,
         control_send_time: host.control_send_time_snapshot(),
         league_start_response,
         league_start_failure,
@@ -7241,10 +7421,43 @@ async fn wait_for_startup_cancellation(cancellation: Option<&NetworkStartupCance
 
 // Keep client worker channels explicit so their ownership and shutdown behavior
 // remain visible at every production and test entry point.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_client_worker(
     settings: ClientSettings,
     local_owner: i32,
+    command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
+    control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
+    control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
+    event_tx: NetworkEventSender,
+    telemetry_tx: SyncSender<NetworkEvent>,
+    local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+    netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
+    current_frame_source: Arc<AtomicI32>,
+    startup_cancellation: Option<NetworkStartupCancellation>,
+) -> Result<()> {
+    run_client_worker_with_voice_enabled(
+        settings,
+        local_owner,
+        true,
+        command_rx,
+        control_tick_rx,
+        control_performance_rx,
+        event_tx,
+        telemetry_tx,
+        local_id_tx,
+        netpuncher_state,
+        current_frame_source,
+        startup_cancellation,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_client_worker_with_voice_enabled(
+    settings: ClientSettings,
+    local_owner: i32,
+    voice_enabled: bool,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
     control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
@@ -7281,6 +7494,7 @@ async fn run_client_worker(
     };
     let mut client_config = ClientConfig::new(player_name.clone(), participant_kind)
         .with_compatibility_build(settings.compatibility_build)
+        .with_voice_enabled(voice_enabled)
         .with_group_maker(settings.group_maker)
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
@@ -7335,8 +7549,12 @@ async fn run_client_worker(
             }
         }
     });
+    let voice_sender = client.voice_sender();
+    let voice_event_rx = client.take_voice_receiver();
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: client_id,
+        voice_sender,
+        voice_event_rx,
         control_send_time: client.control_send_time_snapshot(),
         league_start_response: None,
         league_start_failure: None,
@@ -8801,6 +9019,28 @@ mod tests {
                 .compatibility_build,
             clonk_network::CURRENT_GAME_BUILD + 2
         );
+    }
+
+    #[test]
+    fn worker_mode_carries_the_explicit_voice_policy_to_either_role() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
+        let host = WorkerMode::for_mode(
+            NetworkMode::Host(HostSettings {
+                bind_addr: address,
+                player_name: "Host".to_string(),
+                prepared: None,
+            }),
+            0,
+            false,
+        );
+        let client = WorkerMode::for_mode(
+            NetworkMode::Client(ClientSettings::new(address, "Alice")),
+            1,
+            true,
+        );
+
+        assert!(!host.voice_enabled());
+        assert!(client.voice_enabled());
     }
 
     #[tokio::test]
@@ -15103,5 +15343,46 @@ Message=Server says Andr\xe9\r\n\
                 .controls,
             vec![control]
         );
+    }
+
+    #[test]
+    fn network_manager_voice_lane_is_nonblocking_and_separate_from_events() {
+        let (mut manager, events) = NetworkManager::test_stub();
+        let frame = clonk_network::VoiceFrame::outbound(7, 1, 0, vec![0; 164]).unwrap();
+
+        assert!(!manager.voice_available());
+        assert_eq!(
+            manager.try_send_voice(frame),
+            Err(clonk_network::VoiceSendError::Closed),
+        );
+        assert!(manager.poll_voice_frames().is_empty());
+        events
+            .send(NetworkEvent::Error("control-plane event".to_string()))
+            .unwrap();
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::Error("control-plane event".to_string())],
+        );
+    }
+
+    #[test]
+    fn voice_test_stub_drives_the_same_detached_runtime_seam() {
+        let (mut manager, _events, mut voice) =
+            NetworkManager::test_stub_with_voice_for_client_id(7);
+        let inbound = clonk_network::VoiceFrame {
+            client_id: 3,
+            player_id: 17,
+            stream_epoch: 1,
+            sequence: 0,
+            payload: vec![0; 164],
+        };
+        voice.send_inbound(inbound.clone()).unwrap();
+
+        assert!(manager.voice_available());
+        assert_eq!(manager.poll_voice_frames(), vec![inbound]);
+
+        let outbound = clonk_network::VoiceFrame::outbound(9, 2, 4, vec![0; 164]).unwrap();
+        manager.try_send_voice(outbound.clone()).unwrap();
+        assert_eq!(voice.try_recv_outbound(), Some(outbound));
     }
 }

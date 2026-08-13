@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 use crate::decoder::{decode_audio, AudioDecodeError, DecodedAudio, MusicStream};
+use crate::voice::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 
 const SDL_MIXER_MAX_VOLUME: f32 = 128.0;
 const SDL_MIXER_MAX_PANNING: f32 = 255.0;
@@ -62,6 +63,25 @@ const CPAL_XRUN_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 /// later sound that reuses the same numeric slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelId(pub usize, pub u64);
+
+type VoiceStreamId = u64;
+
+/// A conservative upper bound of one second of queued voice. Callers should
+/// normally choose much less so congestion does not turn into audible lag.
+pub const MAX_VOICE_BUFFERED_FRAMES: usize = 50;
+pub const DEFAULT_VOICE_BUFFERED_FRAMES: usize = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceFrameQueueOutcome {
+    Queued,
+    DroppedStale,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceStreamStats {
+    pub queued_frames: usize,
+    pub dropped_stale_frames: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SoundId(u32);
@@ -314,6 +334,47 @@ impl AudioSystem {
     pub fn play_sound(&self, sound: &SoundHandle, looped: bool) -> Result<ChannelId, AudioError> {
         self.ensure_backend_running();
         self.mixer.play_sound(sound.id(), looped)
+    }
+
+    /// Queues one decoded voice frame for `stream_id`, creating the bounded
+    /// source on first use. Full streams discard their oldest frame.
+    pub fn queue_voice_stream(
+        &self,
+        stream_id: u64,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+    ) -> VoiceFrameQueueOutcome {
+        self.ensure_backend_running();
+        self.mixer.queue_voice_stream(stream_id, samples)
+    }
+
+    /// Sets the spatial mix and queues one decoded voice frame atomically,
+    /// creating the bounded source on first use. This prevents a new stream's
+    /// first frame from being mixed at the default volume and pan.
+    pub fn queue_voice_stream_with_mix(
+        &self,
+        stream_id: u64,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+        volume: f32,
+        pan: f32,
+    ) -> VoiceFrameQueueOutcome {
+        self.ensure_backend_running();
+        self.mixer
+            .queue_voice_stream_with_mix(stream_id, samples, volume, pan)
+    }
+
+    /// Updates an existing voice source. Returns false when no frame has been
+    /// queued for this key yet.
+    pub fn update_voice_stream(&self, stream_id: u64, volume: f32, pan: f32) -> bool {
+        self.mixer.update_voice_stream(stream_id, volume, pan)
+    }
+
+    /// Removes a keyed live voice source and all of its buffered audio.
+    pub fn remove_voice_stream(&self, stream_id: u64) -> bool {
+        self.mixer.remove_voice_stream(stream_id)
+    }
+
+    pub fn voice_stream_stats(&self, stream_id: u64) -> VoiceStreamStats {
+        self.mixer.voice_stream_stats(stream_id)
     }
 
     pub fn halt_channel(&self, channel: ChannelId) {
@@ -794,6 +855,7 @@ struct MixerState {
     active_channel_indices: Vec<usize>,
     channel_generations: Vec<u64>,
     active_music: Option<MusicPlayback>,
+    voice_streams: BTreeMap<VoiceStreamId, VoiceStreamPlayback>,
     next_sound_id: u32,
     next_music_id: u32,
     next_inert_channel_generation: u64,
@@ -821,6 +883,32 @@ struct ChannelPlayback {
     pan: f32,
     left_gain: f32,
     right_gain: f32,
+}
+
+#[derive(Debug)]
+struct VoicePcmFrame {
+    samples: Box<[[f32; 2]]>,
+    position: usize,
+}
+
+#[derive(Debug)]
+struct VoiceStreamPlayback {
+    frames: VecDeque<VoicePcmFrame>,
+    capacity_frames: usize,
+    dropped_stale_frames: u64,
+    resampler: VoicePlaybackResampler,
+    volume: f32,
+    pan: f32,
+    left_gain: f32,
+    right_gain: f32,
+}
+
+#[derive(Debug)]
+struct VoicePlaybackResampler {
+    output_sample_rate: u32,
+    previous: Option<[f32; 2]>,
+    current_source_index: u128,
+    next_output_index: u128,
 }
 
 #[derive(Debug)]
@@ -882,6 +970,7 @@ impl AudioMixer {
             active_channel_indices: Vec::new(),
             channel_generations: vec![0; max_channels],
             active_music: None,
+            voice_streams: BTreeMap::new(),
             next_sound_id: 1,
             next_music_id: 1,
             next_inert_channel_generation: 1,
@@ -1017,6 +1106,82 @@ impl AudioMixer {
             .active_channel_indices
             .insert(insertion, channel_index);
         Ok(ChannelId(channel_index, generation))
+    }
+
+    fn queue_voice_stream(
+        &self,
+        id: VoiceStreamId,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+    ) -> VoiceFrameQueueOutcome {
+        if self.inert {
+            return VoiceFrameQueueOutcome::Queued;
+        }
+        let mut state = self.state.lock().unwrap();
+        state
+            .voice_streams
+            .entry(id)
+            .or_insert_with(|| {
+                VoiceStreamPlayback::new(DEFAULT_VOICE_BUFFERED_FRAMES, self.sample_rate)
+            })
+            .push(samples, self.resampling_mode)
+    }
+
+    fn queue_voice_stream_with_mix(
+        &self,
+        id: VoiceStreamId,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+        volume: f32,
+        pan: f32,
+    ) -> VoiceFrameQueueOutcome {
+        if self.inert {
+            return VoiceFrameQueueOutcome::Queued;
+        }
+        let mut state = self.state.lock().unwrap();
+        let stream = state.voice_streams.entry(id).or_insert_with(|| {
+            VoiceStreamPlayback::new(DEFAULT_VOICE_BUFFERED_FRAMES, self.sample_rate)
+        });
+        stream.set_mix(volume, pan);
+        stream.push(samples, self.resampling_mode)
+    }
+
+    fn update_voice_stream(&self, id: VoiceStreamId, volume: f32, pan: f32) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .voice_streams
+            .get_mut(&id)
+            .is_some_and(|stream| {
+                stream.set_mix(volume, pan);
+                true
+            })
+    }
+
+    fn remove_voice_stream(&self, id: VoiceStreamId) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .voice_streams
+            .remove(&id)
+            .is_some()
+    }
+
+    fn voice_stream_stats(&self, id: VoiceStreamId) -> VoiceStreamStats {
+        self.state
+            .lock()
+            .unwrap()
+            .voice_streams
+            .get(&id)
+            .map(VoiceStreamPlayback::stats)
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn test_set_voice_stream_capacity(&self, id: VoiceStreamId, capacity_frames: usize) {
+        assert!((1..=MAX_VOICE_BUFFERED_FRAMES).contains(&capacity_frames));
+        self.state.lock().unwrap().voice_streams.insert(
+            id,
+            VoiceStreamPlayback::new(capacity_frames, self.sample_rate),
+        );
     }
 
     pub fn halt_channel(&self, channel: ChannelId) {
@@ -1237,9 +1402,15 @@ impl AudioMixer {
                 channels,
                 active_channel_indices,
                 active_music,
+                voice_streams,
                 ..
             } = &mut *state;
-            if active_channel_indices.is_empty() && active_music.is_none() {
+            if active_channel_indices.is_empty()
+                && active_music.is_none()
+                && voice_streams
+                    .values()
+                    .all(|stream| stream.frames.is_empty())
+            {
                 return;
             }
             debug_assert!(active_channel_indices
@@ -1288,6 +1459,13 @@ impl AudioMixer {
                         && !finished_channels.contains(&index)
                     {
                         finished_channels.push(index);
+                    }
+                }
+
+                for stream in voice_streams.values_mut() {
+                    if let Some(frame) = stream.next_frame() {
+                        left += frame[0] * stream.left_gain;
+                        right += frame[1] * stream.right_gain;
                     }
                 }
 
@@ -1414,6 +1592,137 @@ impl MusicPlayback {
                 }
             }
         }
+    }
+}
+
+impl VoiceStreamPlayback {
+    fn new(capacity_frames: usize, output_sample_rate: u32) -> Self {
+        Self {
+            frames: VecDeque::with_capacity(capacity_frames),
+            capacity_frames,
+            dropped_stale_frames: 0,
+            resampler: VoicePlaybackResampler::new(output_sample_rate),
+            volume: 1.0,
+            pan: 0.0,
+            left_gain: 1.0,
+            right_gain: 1.0,
+        }
+    }
+
+    fn push(
+        &mut self,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+        resampling_mode: ResamplingMode,
+    ) -> VoiceFrameQueueOutcome {
+        let outcome = if self.frames.len() >= self.capacity_frames {
+            self.frames.pop_front();
+            self.dropped_stale_frames = self.dropped_stale_frames.saturating_add(1);
+            VoiceFrameQueueOutcome::DroppedStale
+        } else {
+            VoiceFrameQueueOutcome::Queued
+        };
+        self.frames.push_back(VoicePcmFrame {
+            samples: self.resampler.push_frame(samples, resampling_mode),
+            position: 0,
+        });
+        outcome
+    }
+
+    fn next_frame(&mut self) -> Option<[f32; 2]> {
+        loop {
+            let front = self.frames.front_mut()?;
+            if front.position >= front.samples.len() {
+                self.frames.pop_front();
+                continue;
+            }
+            let sample = front.samples[front.position];
+            front.position += 1;
+            if front.position == front.samples.len() {
+                self.frames.pop_front();
+            }
+            return Some(sample);
+        }
+    }
+
+    fn recalculate_gains(&mut self) {
+        self.left_gain = self.volume * (1.0 - self.pan.max(0.0));
+        self.right_gain = self.volume * (1.0 + self.pan.min(0.0));
+    }
+
+    fn set_mix(&mut self, volume: f32, pan: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        self.pan = pan.clamp(-1.0, 1.0);
+        self.recalculate_gains();
+    }
+
+    fn stats(&self) -> VoiceStreamStats {
+        VoiceStreamStats {
+            queued_frames: self.frames.len(),
+            dropped_stale_frames: self.dropped_stale_frames,
+        }
+    }
+}
+
+impl VoicePlaybackResampler {
+    fn new(output_sample_rate: u32) -> Self {
+        Self {
+            output_sample_rate: if output_sample_rate == 0 {
+                VOICE_SAMPLE_RATE
+            } else {
+                output_sample_rate
+            },
+            previous: None,
+            current_source_index: 0,
+            next_output_index: 0,
+        }
+    }
+
+    fn push_frame(
+        &mut self,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+        mode: ResamplingMode,
+    ) -> Box<[[f32; 2]]> {
+        match mode {
+            ResamplingMode::Default | ResamplingMode::Linear => self.push_frame_linear(samples),
+        }
+    }
+
+    fn push_frame_linear(&mut self, samples: [i16; VOICE_FRAME_SAMPLES]) -> Box<[[f32; 2]]> {
+        let mut output = Vec::with_capacity(
+            (VOICE_FRAME_SAMPLES as u128 * u128::from(self.output_sample_rate)
+                / u128::from(VOICE_SAMPLE_RATE)) as usize
+                + 1,
+        );
+        for sample in samples {
+            let sample = f32::from(sample) / 32_768.0;
+            let current = [sample, sample];
+            let Some(previous) = self.previous else {
+                output.push(current);
+                self.previous = Some(current);
+                self.next_output_index = 1;
+                continue;
+            };
+
+            self.current_source_index += 1;
+            let interval_start =
+                (self.current_source_index - 1) * u128::from(self.output_sample_rate);
+            let interval_end = self.current_source_index * u128::from(self.output_sample_rate);
+            loop {
+                let output_position = self.next_output_index * u128::from(VOICE_SAMPLE_RATE);
+                if output_position > interval_end {
+                    break;
+                }
+                let fraction =
+                    (output_position - interval_start) as f64 / f64::from(self.output_sample_rate);
+                output.push([
+                    previous[0] + (current[0] - previous[0]) * fraction as f32,
+                    previous[1] + (current[1] - previous[1]) * fraction as f32,
+                ]);
+                self.next_output_index += 1;
+            }
+            self.previous = Some(current);
+        }
+        output.into_boxed_slice()
     }
 }
 
@@ -1835,6 +2144,116 @@ mod tests {
             .sum::<f64>()
             / samples.len() as f64;
         mean_square.sqrt()
+    }
+
+    #[test]
+    fn bounded_voice_stream_drops_the_oldest_frame_instead_of_growing_latency() {
+        let mixer = Arc::new(AudioMixer::new(VOICE_SAMPLE_RATE, 0));
+        let stream_id = 73;
+        mixer.test_set_voice_stream_capacity(stream_id, 2);
+
+        assert_eq!(
+            mixer.queue_voice_stream(stream_id, [1_000; VOICE_FRAME_SAMPLES]),
+            VoiceFrameQueueOutcome::Queued
+        );
+        assert_eq!(
+            mixer.queue_voice_stream(stream_id, [2_000; VOICE_FRAME_SAMPLES]),
+            VoiceFrameQueueOutcome::Queued
+        );
+        assert_eq!(
+            mixer.queue_voice_stream(stream_id, [3_000; VOICE_FRAME_SAMPLES]),
+            VoiceFrameQueueOutcome::DroppedStale
+        );
+        assert_eq!(mixer.voice_stream_stats(stream_id).queued_frames, 2);
+        assert_eq!(mixer.voice_stream_stats(stream_id).dropped_stale_frames, 1);
+
+        let mut first = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut first);
+        assert!((first[0] - 2_000.0 / 32_768.0).abs() < 0.000_1);
+        assert!((first[1] - 2_000.0 / 32_768.0).abs() < 0.000_1);
+
+        let mut second = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut second);
+        assert!((second[0] - 3_000.0 / 32_768.0).abs() < 0.000_1);
+        assert_eq!(mixer.voice_stream_stats(stream_id).queued_frames, 0);
+
+        let mut underrun = vec![1.0_f32; 32];
+        mixer.mix_f32(&mut underrun);
+        assert_eq!(underrun, vec![0.0; 32]);
+    }
+
+    #[test]
+    fn streaming_voice_resampling_preserves_one_second_at_fractional_frame_rate() {
+        let mixer = AudioMixer::new(11_025, 0);
+        let stream_id = 74;
+        mixer.test_set_voice_stream_capacity(stream_id, MAX_VOICE_BUFFERED_FRAMES);
+
+        for _ in 0..50 {
+            assert_eq!(
+                mixer.queue_voice_stream(stream_id, [1_000; VOICE_FRAME_SAMPLES]),
+                VoiceFrameQueueOutcome::Queued
+            );
+        }
+
+        let state = mixer.state.lock().unwrap();
+        let buffered_samples = state.voice_streams[&stream_id]
+            .frames
+            .iter()
+            .map(|frame| frame.samples.len())
+            .sum::<usize>();
+        assert_eq!(buffered_samples, 11_025);
+    }
+
+    #[test]
+    fn streaming_voice_resampling_interpolates_across_frame_boundaries() {
+        let mixer = AudioMixer::new(11_025, 0);
+        let stream_id = 75;
+
+        mixer.queue_voice_stream(stream_id, [0; VOICE_FRAME_SAMPLES]);
+        mixer.queue_voice_stream(stream_id, [i16::MAX; VOICE_FRAME_SAMPLES]);
+
+        let state = mixer.state.lock().unwrap();
+        let stream = &state.voice_streams[&stream_id];
+        assert_eq!(stream.frames[0].samples.len(), 220);
+        let boundary_sample = stream.frames[1].samples[0][0];
+        assert!(
+            (0.27..0.28).contains(&boundary_sample),
+            "boundary interpolation was {boundary_sample}"
+        );
+    }
+
+    #[test]
+    fn keyed_voice_stream_updates_mix_and_removes_buffered_audio() {
+        let mixer = Arc::new(AudioMixer::new(VOICE_SAMPLE_RATE, 0));
+        assert!(!mixer.update_voice_stream(9, 0.5, 1.0));
+        mixer.queue_voice_stream(9, [8_192; VOICE_FRAME_SAMPLES]);
+        assert!(mixer.update_voice_stream(9, 0.5, 1.0));
+
+        let mut output = [0.0_f32; 2];
+        mixer.mix_f32(&mut output);
+        assert_eq!(output[0], 0.0);
+        assert!((output[1] - 0.125).abs() < 0.000_1);
+
+        assert!(mixer.remove_voice_stream(9));
+        assert!(!mixer.remove_voice_stream(9));
+        let mut removed = [1.0_f32; 2];
+        mixer.mix_f32(&mut removed);
+        assert_eq!(removed, [0.0; 2]);
+    }
+
+    #[test]
+    fn first_voice_frame_uses_mix_set_by_atomic_queue() {
+        let mixer = Arc::new(AudioMixer::new(VOICE_SAMPLE_RATE, 0));
+
+        assert_eq!(
+            mixer.queue_voice_stream_with_mix(10, [8_192; VOICE_FRAME_SAMPLES], 0.5, -1.0,),
+            VoiceFrameQueueOutcome::Queued
+        );
+
+        let mut output = [0.0_f32; 2];
+        mixer.mix_f32(&mut output);
+        assert!((output[0] - 0.125).abs() < 0.000_1);
+        assert_eq!(output[1], 0.0);
     }
 
     #[cfg(feature = "cpal")]

@@ -570,6 +570,12 @@ impl ClientRouteSender {
         }
     }
 
+    fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
+        if let Some(udp) = &self.udp {
+            udp.set_voice_receive_cookie(cookie);
+        }
+    }
+
     pub(crate) fn retire(&self) {
         // Cancellation stops the route task, but only Disconnected may expose
         // a fallback: it first removes this route, then closes and drains the
@@ -620,6 +626,7 @@ pub(crate) struct ClientRouteEntry {
     pub(crate) peer_addr: Option<SocketAddr>,
     pub(crate) ping: RoutePingLag,
     pub(crate) outbound: ClientRouteSender,
+    pub(crate) voice_auth: crate::voice::VoiceRouteAuthentication,
 }
 
 pub(crate) enum ClientRouteEvent {
@@ -667,6 +674,7 @@ pub(crate) enum ClientRouteRead {
 }
 
 pub(crate) struct ClientRouteManager {
+    voice_enabled: bool,
     pub(crate) routes: BTreeMap<u32, ClientRouteEntry>,
     pub(crate) event_tx: mpsc::UnboundedSender<ClientRouteEvent>,
     event_rx: mpsc::UnboundedReceiver<ClientRouteEvent>,
@@ -693,6 +701,7 @@ impl ClientRouteManager {
         // src/C4Packet2.cpp:51-73).
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
+            voice_enabled: true,
             routes: BTreeMap::new(),
             event_tx,
             event_rx,
@@ -704,6 +713,19 @@ impl ClientRouteManager {
             control_send_time_dirty: true,
             replay_packets: VecDeque::new(),
         }
+    }
+
+    pub(crate) fn with_voice_enabled(mut self, enabled: bool) -> Self {
+        self.voice_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn voice_enabled(&self) -> bool {
+        self.voice_enabled
+    }
+
+    pub(crate) fn has_pending_input(&self) -> bool {
+        !self.replay_packets.is_empty() || !self.event_rx.is_empty()
     }
 
     pub(crate) fn add_route<S>(
@@ -866,6 +888,12 @@ impl ClientRouteManager {
         let (retire, retire_rx) = watch::channel(false);
         let post_failure = PostFailureBuffer::default();
         let udp_task = udp.clone();
+        let voice_auth = if self.voice_enabled && udp_task.is_some() {
+            crate::voice::VoiceRouteAuthentication::new_udp()
+        } else {
+            crate::voice::VoiceRouteAuthentication::default()
+        };
+        let voice_announcement = voice_auth.announcement();
         let replaced = self.routes.insert(
             local_connection_id,
             ClientRouteEntry {
@@ -881,6 +909,7 @@ impl ClientRouteManager {
                     post_failure,
                     udp,
                 },
+                voice_auth,
             },
         );
         self.control_send_time_dirty = true;
@@ -921,6 +950,17 @@ impl ClientRouteManager {
                 .expect("new client route exists")
                 .outbound
                 .retire();
+        } else if let Some(announcement) = voice_announcement {
+            let route = self
+                .routes
+                .get(&local_connection_id)
+                .expect("new client route exists");
+            if let Some(cookie) = voice_auth.receive_cookie() {
+                route.outbound.set_voice_receive_cookie(cookie);
+            }
+            let _ = route.outbound.send(ClientRouteCommand::Message(
+                ControlMessage::PortCapabilities(announcement),
+            ));
         }
         !peer_was_connected && new_route_wins
     }
@@ -1134,6 +1174,61 @@ impl ClientRouteManager {
             .filter(|route| route.outbound.accepts_post_failure_fifo())
             .map(|route| route.peer_id)
             .collect()
+    }
+
+    pub(crate) fn authenticated_voice_send_routes(
+        &self,
+    ) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceRouteCookie)> {
+        if !self.voice_enabled {
+            return Vec::new();
+        }
+        let mut selected = BTreeSet::new();
+        self.routes
+            .values()
+            .filter_map(|route| {
+                let peer_addr = route.peer_addr?;
+                if !route.voice_auth.is_negotiated() {
+                    return None;
+                }
+                let cookie = route.voice_auth.send_cookie()?;
+                (route.protocol == crate::NetworkProtocol::Udp
+                    && !route.outbound.is_closed()
+                    && selected.insert(route.peer_id))
+                .then_some((
+                    route.peer_id,
+                    crate::canonical_reliable_udp_peer_address(peer_addr),
+                    cookie,
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn authenticated_voice_ingress(
+        &self,
+        source: SocketAddr,
+    ) -> Option<(ClientId, crate::voice::VoiceRouteCookie)> {
+        if !self.voice_enabled {
+            return None;
+        }
+        let source = crate::canonical_reliable_udp_peer_address(source);
+        self.routes.values().find_map(|route| {
+            if !route.voice_auth.is_negotiated() {
+                return None;
+            }
+            let peer = route
+                .peer_addr
+                .map(crate::canonical_reliable_udp_peer_address)?;
+            (route.protocol == crate::NetworkProtocol::Udp
+                && !route.outbound.is_closed()
+                && peer == source)
+                .then(|| {
+                    route
+                        .voice_auth
+                        .receive_cookie()
+                        .map(|cookie| (route.peer_id, cookie))
+                })
+                .flatten()
+        })
     }
 
     #[cfg(test)]
@@ -1520,6 +1615,23 @@ impl ClientRouteManager {
                         .get(&route_id)
                         .expect("checked route still exists")
                         .peer_id;
+                    if let crate::transport::InboundPacket::Message(
+                        ControlMessage::PortCapabilities(capabilities),
+                    ) = &packet
+                    {
+                        if self.voice_enabled
+                            && self
+                                .routes
+                                .get(&route_id)
+                                .is_some_and(|route| route.protocol == crate::NetworkProtocol::Udp)
+                        {
+                            self.routes
+                                .get_mut(&route_id)
+                                .expect("checked UDP route still exists")
+                                .voice_auth
+                                .record_peer_capabilities(*capabilities);
+                        }
+                    }
                     return Ok(ClientRouteRead::Packet {
                         peer_id,
                         packet,

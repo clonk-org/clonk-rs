@@ -4,6 +4,7 @@ use clonk_frontend::startup_options_graphics::{
 };
 use clonk_platform::AppPaths;
 use std::io::ErrorKind;
+use winit::keyboard::KeyCode as VirtualKeyCode;
 
 const DEFAULT_MAX_CHANNELS: usize = 1024;
 const MAX_CHANNELS_LIMIT: usize = 1024;
@@ -24,6 +25,10 @@ pub struct AudioOptions {
     pub mute_sound_command: bool,
     pub sound_volume: f32,
     pub music_volume: f32,
+    /// Port-only, explicit microphone opt-in. LegacyClonk has no voice chat.
+    pub voice_enabled: bool,
+    pub voice_volume: f32,
+    pub voice_push_to_talk: VirtualKeyCode,
 }
 
 impl Default for AudioOptions {
@@ -38,6 +43,9 @@ impl Default for AudioOptions {
             mute_sound_command: false,
             sound_volume: 1.0,
             music_volume: 1.0,
+            voice_enabled: false,
+            voice_volume: 1.0,
+            voice_push_to_talk: VirtualKeyCode::Backquote,
         }
     }
 }
@@ -133,6 +141,26 @@ impl AudioOptions {
             if let Some(value) = parse_native_config_integer(raw) {
                 let clamped = value.clamp(1, MAX_CHANNELS_LIMIT as i32);
                 self.max_channels = clamped as usize;
+            }
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "Enabled") {
+            if let Some(parsed) = parse_bool(raw) {
+                self.voice_enabled = parsed;
+            }
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "Volume") {
+            if let Some(value) = parse_native_config_integer(raw) {
+                self.voice_volume = value.clamp(0, 100) as f32 / 100.0;
+            }
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "PushToTalkKey") {
+            if let Some(key) =
+                parse_native_config_integer(raw).and_then(crate::input::decode_platform_key_code)
+            {
+                self.voice_push_to_talk = key;
             }
         }
     }
@@ -339,6 +367,9 @@ mod tests {
             mute_sound_command: true,
             sound_volume: 0.27,
             music_volume: 0.83,
+            voice_enabled: true,
+            voice_volume: 0.42,
+            voice_push_to_talk: VirtualKeyCode::KeyT,
         };
 
         options.write_startup_sound_config(&mut config);
@@ -363,6 +394,31 @@ mod tests {
             config.get_in(Some("General"), "Unrelated"),
             Some("also-keep-me")
         );
+    }
+
+    #[test]
+    fn voice_options_are_opt_in_and_load_from_the_port_only_section() {
+        let defaults = AudioOptions::default();
+        assert!(!defaults.voice_enabled);
+        assert_eq!(defaults.voice_volume, 1.0);
+        assert_eq!(defaults.voice_push_to_talk, VirtualKeyCode::Backquote);
+
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "Enabled", "true");
+        config.set_in(Some("Voice"), "Volume", "37");
+        config.set_in(
+            Some("Voice"),
+            "PushToTalkKey",
+            crate::input::encode_virtual_key_code(VirtualKeyCode::KeyT)
+                .expect("T has a native key code")
+                .to_string(),
+        );
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+
+        assert!(options.voice_enabled);
+        assert_eq!(options.voice_volume, 0.37);
+        assert_eq!(options.voice_push_to_talk, VirtualKeyCode::KeyT);
     }
 
     #[test]

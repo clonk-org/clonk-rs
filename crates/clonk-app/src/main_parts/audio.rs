@@ -280,6 +280,14 @@ mod window_api_tests {
             !text_input_allowed(altgr),
             "developer-console shortcut filtering remains intentional"
         );
+        assert!(
+            !game_shell_key_event_text_allowed(
+                ElementState::Pressed,
+                ModifiersState::empty(),
+                true,
+            ),
+            "a push-to-talk key consumed by the game must not also enter focused text",
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1605,6 +1613,14 @@ fn game_shell_text_input_allowed(modifiers: ModifiersState) -> bool {
         && (!modifiers.contains(ModifiersState::CONTROL) || modifiers.contains(ModifiersState::ALT))
 }
 
+fn game_shell_key_event_text_allowed(
+    state: ElementState,
+    modifiers: ModifiersState,
+    key_consumed: bool,
+) -> bool {
+    state == ElementState::Pressed && !key_consumed && game_shell_text_input_allowed(modifiers)
+}
+
 fn handle_app_text(app: &mut GameApp, text: &str) -> Result<()> {
     for character in text.chars() {
         app.handle_text_input(character)?;
@@ -1880,6 +1896,7 @@ pub(crate) fn handle_window_event(
                 .context("failed to process keyboard modifiers")?;
         }
         WindowEvent::KeyboardInput { event, .. } => {
+            let mut key_consumed = false;
             if let Some(keycode) = legacy_virtual_key_from_event(&event, app.keyboard_modifiers) {
                 // F11 is an ordinary physical key in C++: `C4KeyboardInput`
                 // maps its name (C4KeyboardInput.cpp:185-197) and
@@ -1888,9 +1905,9 @@ pub(crate) fn handle_window_event(
                 // every other key. Display mode changes only through Options.
                 app.handle_key(keycode, event.state)
                     .context("failed to process key input")?;
+                key_consumed = app.key_event_suppresses_text;
             }
-            if event.state == ElementState::Pressed
-                && game_shell_text_input_allowed(app.keyboard_modifiers)
+            if game_shell_key_event_text_allowed(event.state, app.keyboard_modifiers, key_consumed)
             {
                 if let Some(text) = event.text.as_deref() {
                     handle_app_text(app, text).context("failed to process text input")?;
@@ -2103,7 +2120,8 @@ impl AudioContext {
         let audio_resources_enabled = options.sound_enabled
             || options.music_enabled
             || options.menu_music_enabled
-            || options.menu_sound_enabled;
+            || options.menu_sound_enabled
+            || options.voice_enabled;
         #[cfg(test)]
         let system = if audio_resources_enabled {
             AudioSystem::new_null_with_resampling(options.max_channels, resampling_mode)

@@ -1965,6 +1965,8 @@ fn macos_info_plist() -> String {
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Clonk uses the microphone for push-to-talk proximity voice chat.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>
@@ -3048,6 +3050,16 @@ mod tests {
             macos_nested_binary_names().collect::<Vec<_>>(),
             ["clonk-game", "c4group"]
         );
+    }
+
+    #[test]
+    fn macos_bundle_declares_why_voice_chat_needs_the_microphone() {
+        let plist = macos_info_plist();
+
+        assert!(plist.contains("<key>NSMicrophoneUsageDescription</key>"));
+        assert!(plist.contains(
+            "<string>Clonk uses the microphone for push-to-talk proximity voice chat.</string>"
+        ));
     }
 
     #[test]
