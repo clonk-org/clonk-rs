@@ -4,6 +4,26 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-08-13
+
+### Bug fixes
+
+- Attribute host waits before sizing PreSend (#431)
+- Accept complete control packets on the host (#427)
+
+### Continuous integration
+
+- Isolate merge-queue shards from diagnostics (#430)
+- Pin the NSIS distribution download (#428)
+
+### Documentation
+
+- Retire PORT_STATUS.md into issues and inline its rationales (#416)
+
+### Testing
+
+- Synchronize dual-route reconnect coverage (#429)
+
 ## [0.11.0] - 2026-08-13
 
 ### Bug fixes
