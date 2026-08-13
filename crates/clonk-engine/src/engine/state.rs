@@ -2340,7 +2340,7 @@ impl Engine {
                 context_locals,
                 spawns,
                 next_object_id,
-                other_objects: event_other_objects,
+                other_objects: mut event_other_objects,
                 ..
             } = outcome;
 
@@ -2366,6 +2366,7 @@ impl Engine {
             if let Some(locals) = context_locals {
                 object.state.local_vars = locals.into();
                 state_snapshot = object.script_state_snapshot();
+                world.preview_object_local_vars(object_id, &object.state.local_vars);
             }
 
             if !spawns.is_empty() {
@@ -2373,7 +2374,24 @@ impl Engine {
             }
             let mut active_contents_order = None;
             if !event_other_objects.is_empty() {
-                for nested in &event_other_objects {
+                for nested in &mut event_other_objects {
+                    // A foreign command target may write the affected
+                    // carrier through LocalN. C++ installs that write on the
+                    // one live C4Object before advancing the effect cursor
+                    // (C4Effect.cpp:342-345; C4AulExec.cpp:418-440). Consume
+                    // only this ordered locals channel here; the caller still
+                    // folds every unrelated nested channel after the batch.
+                    if nested.object_id == object_id {
+                        if let Some(local_vars) = nested
+                            .update
+                            .as_mut()
+                            .and_then(|update| update.local_vars.take())
+                        {
+                            object.state.local_vars = local_vars.into();
+                            state_snapshot = object.script_state_snapshot();
+                            world.preview_object_local_vars(object_id, &object.state.local_vars);
+                        }
+                    }
                     if let Some(update) = nested.update.as_ref() {
                         world.preview_object_update(nested.object_id, update);
                     }

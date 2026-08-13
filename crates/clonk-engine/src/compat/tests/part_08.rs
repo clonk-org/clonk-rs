@@ -920,6 +920,91 @@
     }
 
     #[test]
+    fn effect_command_targets_restore_the_live_command_count_before_add_command() {
+        // C4Object::AddCommand counts the linked command list before it
+        // rejects a 36th entry (C4Object.cpp:3904-3913). Object and global
+        // effects both execute with pCommandTarget as the ambient object, so
+        // their copied host scope must begin with that same live count.
+        let command_target = ObjectId::new(7);
+        let mut commands = CommandStack::new();
+        for _ in 0..MAX_COMMAND_STACK {
+            commands
+                .push_back(CommandRequest::new(CommandId::Wait))
+                .expect("the first 35 commands fit");
+        }
+        let world = HostWorldContext::from_objects([
+            fixture_world_object(command_target, "CMND")
+                .with_command_stack(commands.snapshot()),
+        ]);
+        let effect = EffectState::new("Limit")
+            .with_command_target(Some(command_target.as_u64() as i32));
+
+        for global in [false, true] {
+            let object_effects = if global {
+                Vec::new()
+            } else {
+                vec![effect.clone()]
+            };
+            let global_effects = if global {
+                vec![effect.clone()]
+            } else {
+                Vec::new()
+            };
+            let object = HostObjectContext {
+                id: command_target,
+                effects: &object_effects,
+                ..idle_object_context()
+            };
+            let (result, outcome) = with_effect_context_with_state_and_definition(
+                Some(object),
+                Some(DefinitionId::from("CMND")),
+                Some(command_target),
+                &global_effects,
+                world.clone(),
+                8,
+                false,
+                || {
+                    let before = HOST_CONTEXT.with(|cell| {
+                        cell.borrow()
+                            .as_ref()
+                            .and_then(EffectHostContext::object_context)
+                            .map(|scope| scope.command_count)
+                            .unwrap_or_default()
+                    });
+                    let added = add_command(&[Value::String("Wait".into())])?;
+                    let after = HOST_CONTEXT.with(|cell| {
+                        cell.borrow()
+                            .as_ref()
+                            .and_then(EffectHostContext::object_context)
+                            .map(|scope| scope.command_count)
+                            .unwrap_or_default()
+                    });
+                    Ok::<_, RuntimeError>(Value::Array(vec![
+                        Value::Int(before as i32),
+                        added,
+                        Value::Int(after as i32),
+                    ]))
+                },
+            );
+
+            assert_eq!(
+                result.expect("effect command-target host call succeeds"),
+                Value::Array(vec![
+                    Value::Int(MAX_COMMAND_STACK as i32),
+                    Value::Bool(false),
+                    Value::Int(MAX_COMMAND_STACK as i32),
+                ]),
+                "{} effect command target preserves the C++ stack ceiling",
+                if global { "global" } else { "object" }
+            );
+            assert!(
+                outcome.command_operations.is_empty(),
+                "the rejected 36th command emits no mutation"
+            );
+        }
+    }
+
+    #[test]
     fn get_r_projects_raw_rotation_to_the_cpp_signed_range() {
         // FnGetR projects stored r into [-180,180] (C4Script.cpp:1181-1188).
         // SetR stores 350, but scripts observe -10; movement-produced negative

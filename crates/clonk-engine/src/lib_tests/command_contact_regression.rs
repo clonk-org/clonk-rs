@@ -1250,6 +1250,121 @@ fn script_callback_snapshots_share_unchanged_local_variables() {
 }
 
 #[test]
+fn later_foreign_effect_observes_carrier_local_commit_in_same_batch() {
+    // C4Effect::Execute walks the one live chain, and each callback resolves
+    // LocalN against the then-current C4Object locals. A later foreign
+    // command target must therefore see an earlier self-target write
+    // (oracle-src-pinned src/C4Effect.cpp:342-345;
+    // src/C4AulExec.cpp:418-440).
+    let script = r#"#strict
+local value, seen;
+func FxSetTimer() { value = 7; return 0; }
+func FxReadTimer(target) { seen = LocalN("value", target); return 0; }
+"#;
+    let mut definition = Definition::from_script("CALL", "Effect local visibility fixture", script)
+        .expect("definition compiles");
+    definition.set_c4_callback_convention(true);
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let foreign = engine
+        .spawn_object(SpawnConfig::new("CALL"))
+        .expect("foreign command target spawns");
+    let carrier = engine
+        .spawn_object(
+            SpawnConfig::new("CALL")
+                .with_local_vars(HashMap::from([("value".to_string(), Value::Int(0))]))
+                .add_effect(EffectState::new("Set").with_priority(100).with_interval(1))
+                .add_effect(EffectState::new("Read").with_priority(101).with_interval(1)),
+        )
+        .expect("carrier spawns");
+    let carrier_index = engine.find_object_index(carrier).expect("carrier exists");
+    engine.objects[carrier_index].state.effects[0].command_target =
+        Some(i32::try_from(carrier.as_u64()).expect("carrier id fits C4 int"));
+    engine.objects[carrier_index].state.effects[1].command_target =
+        Some(i32::try_from(foreign.as_u64()).expect("foreign id fits C4 int"));
+    let definition_id = engine.objects[carrier_index].definition_id.clone();
+    let events = engine.objects[carrier_index]
+        .state
+        .effects
+        .iter()
+        .cloned()
+        .map(EffectEvent::timer)
+        .collect();
+
+    engine
+        .dispatch_object_effect_events(carrier_index, &definition_id, events)
+        .expect("effect batch succeeds");
+
+    let foreign_index = engine
+        .find_object_index(foreign)
+        .expect("foreign target remains");
+    assert_eq!(
+        engine.objects[foreign_index].state.local_vars.get("seen"),
+        Some(&Value::Int(7))
+    );
+}
+
+#[test]
+fn later_self_effect_observes_foreign_write_to_carrier_in_same_batch() {
+    // C4Effect::Execute walks one live chain, while LocalN writes through the
+    // carrier's one live C4Object before the next callback resolves its locals
+    // (oracle-src-pinned src/C4Effect.cpp:342-345;
+    // src/C4AulExec.cpp:418-440).
+    let script = r#"#strict
+local value, seen;
+func FxWriteTimer(target) { LocalN("value", target) = 7; return 0; }
+func FxReadTimer() { seen = value; return 0; }
+"#;
+    let mut definition =
+        Definition::from_script("CALL", "Effect foreign local write fixture", script)
+            .expect("definition compiles");
+    definition.set_c4_callback_convention(true);
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let foreign = engine
+        .spawn_object(SpawnConfig::new("CALL"))
+        .expect("foreign command target spawns");
+    let carrier = engine
+        .spawn_object(
+            SpawnConfig::new("CALL")
+                .with_local_vars(HashMap::from([("value".to_string(), Value::Int(0))]))
+                .add_effect(
+                    EffectState::new("Write")
+                        .with_priority(100)
+                        .with_interval(1),
+                )
+                .add_effect(EffectState::new("Read").with_priority(101).with_interval(1)),
+        )
+        .expect("carrier spawns");
+    let carrier_index = engine.find_object_index(carrier).expect("carrier exists");
+    engine.objects[carrier_index].state.effects[0].command_target =
+        Some(i32::try_from(foreign.as_u64()).expect("foreign id fits C4 int"));
+    engine.objects[carrier_index].state.effects[1].command_target =
+        Some(i32::try_from(carrier.as_u64()).expect("carrier id fits C4 int"));
+    let definition_id = engine.objects[carrier_index].definition_id.clone();
+    let events = engine.objects[carrier_index]
+        .state
+        .effects
+        .iter()
+        .cloned()
+        .map(EffectEvent::timer)
+        .collect();
+
+    engine
+        .dispatch_object_effect_events(carrier_index, &definition_id, events)
+        .expect("effect batch succeeds");
+
+    assert_eq!(
+        engine.objects[carrier_index].state.local_vars.get("seen"),
+        Some(&Value::Int(7))
+    );
+}
+
+#[test]
 fn action_transitions_reuse_the_definition_action_library() {
     // C4Object::SetActionByName resolves and applies entries through the
     // definition's live ActMap pointer, without copying that table

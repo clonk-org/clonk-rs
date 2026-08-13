@@ -4055,6 +4055,25 @@ impl HostWorldContext {
         }
     }
 
+    /// Carry callback-final object locals into the threaded preview used by
+    /// later callbacks in the same deferred effect batch. C++ mutates the one
+    /// live `C4Object`, so later effect callbacks must observe these writes.
+    pub(crate) fn preview_object_local_vars(
+        &mut self,
+        id: ObjectId,
+        local_vars: &crate::LocalVariables,
+    ) {
+        let _ = self.get(id);
+        let store = Rc::make_mut(self.object_store.get_mut());
+        let Some(object) = store.objects.get_mut(&id) else {
+            return;
+        };
+        let object = Rc::make_mut(object);
+        if let Some(state) = object.state.as_mut() {
+            Rc::make_mut(state).local_vars = local_vars.clone();
+        }
+    }
+
     /// Carry one callback-final raw contents list into the threaded preview
     /// used by a later callback in the same effect batch. C++ mutates these
     /// links synchronously; the copied host world otherwise sees only the

@@ -11353,9 +11353,38 @@ fn dispatch_global_effect_callback(
     let context_this = context_object
         .map(compat::object_reference_value)
         .unwrap_or(Value::Nil);
-    let context_locals = context_object
-        .and_then(|object_id| world.get(object_id))
-        .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
+    // A global effect's affected object stays nil, but Exec still installs
+    // pCommandTarget as `cthr->Obj`; implicit-object natives therefore mutate
+    // and attach to that live object (C4Effect.cpp:345, C4AulExec.cpp:1638-1648).
+    let ambient_object = context_object.and_then(|object_id| world.get_shared(object_id));
+    let ambient_definition_id = ambient_object
+        .as_ref()
+        .map(|object| object.definition_id().to_string());
+    let ambient_state = ambient_object
+        .as_ref()
+        .and_then(|object| object.full_state().cloned());
+    let ambient_metadata = ambient_definition_id
+        .as_deref()
+        .and_then(|id| world.definition_metadata(id));
+    let ambient_action_library = ambient_metadata
+        .map(|metadata| metadata.action_library.clone())
+        .unwrap_or_default();
+    let ambient_ocf_base = ambient_metadata.map_or(0, |metadata| metadata.ocf_base);
+    let ambient_crew_member = ambient_metadata
+        .map(|metadata| metadata.crew_member)
+        .or_else(|| ambient_state.as_deref().map(|state| state.crew_member))
+        .unwrap_or(false);
+    let ambient_definition_physical =
+        ambient_metadata.map_or_else(PhysicalInfo::default, |metadata| metadata.physical);
+    let ambient_rotateable = ambient_metadata.map_or(0, |metadata| metadata.rotateable);
+    let ambient_def_attach_vtx_x = ambient_state
+        .as_deref()
+        .and_then(|state| usize::try_from(state.shape_attach.vtx).ok())
+        .and_then(|vtx| ambient_metadata.and_then(|metadata| metadata.vertices.get(vtx)))
+        .map_or(0, |vertex| vertex.x);
+    let context_locals = ambient_state
+        .as_deref()
+        .map(|state| state.local_vars.clone())
         .unwrap_or_default();
     let context_cells = clonk_script::LocalCells::from_local_vars(&context_locals);
 
@@ -11364,7 +11393,67 @@ fn dispatch_global_effect_callback(
     let guard = enter_random_context(rng);
     let audio_guard = enter_audio_context(audio);
     let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
-        None,
+        context_object.and_then(|object_id| {
+            ambient_state.as_deref().map(|state| {
+                compat::HostObjectContext::with_category(
+                    object_id,
+                    state.container,
+                    state.status,
+                    state.energy,
+                    state.damage,
+                    state.construction,
+                    state.owner,
+                    state.position,
+                    state.velocity,
+                    state.rotation,
+                    &state.effects,
+                    state.action.name.clone(),
+                    state.action.time,
+                    state.action.data,
+                    state.action.phase,
+                    ambient_action_library.clone(),
+                    state.direction,
+                    state.command_direction,
+                    0,
+                    state.action.target,
+                    state.action.target2,
+                    &state.vertices,
+                    state.category,
+                    ambient_ocf_base,
+                    ambient_crew_member,
+                    state.draw_transform,
+                    state.base_graphics.clone(),
+                )
+                .with_action_index(state.action.act_map_index)
+                .with_shape_vertices(&state.shape_vertices)
+                .with_definition_id(ambient_definition_id.as_deref().unwrap_or_default())
+                .with_alive(state.alive)
+                .with_controller(state.controller)
+                .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
+                .with_physicals(
+                    state.info_physical,
+                    state.temporary_physical,
+                    state.physical_changes.clone(),
+                    ambient_definition_physical,
+                )
+                .with_graphics_overlays(state.graphics_overlays.clone())
+                .with_walk_rotation(compat::WalkRotationSeed {
+                    rotateable: ambient_rotateable,
+                    t_attach: state.t_attach,
+                    attach: state.shape_attach,
+                    def_attach_vtx_x: ambient_def_attach_vtx_x,
+                })
+                .with_script_fixed_position(state.script_fixed_position)
+                .with_script_fixed_velocity(state.script_fixed_velocity)
+                .with_script_rotation_velocity(state.script_rotation_velocity)
+                .with_script_fixed_rotation(state.script_fixed_rotation)
+                .with_magic_energy(state.magic_energy)
+                .with_breath(state.breath)
+                .with_need_energy(state.need_energy)
+                .with_ocf(state.ocf)
+            })
+        }),
         callback.definition_context.clone(),
         context_object,
         global_effects,
@@ -11424,6 +11513,9 @@ fn dispatch_global_effect_callback(
     }
     if !physics_delta.is_empty() {
         commands.physics = Some(physics_delta);
+    }
+    if let Some(context_object) = context_object {
+        retarget_effect_outcome_to_ambient_object(&mut commands, context_object);
     }
     let callback_result = callback_result.map(|(value, updated_locals)| {
         if let Some(context_object) = context_object {
