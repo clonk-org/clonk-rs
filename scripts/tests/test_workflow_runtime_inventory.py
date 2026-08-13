@@ -315,40 +315,59 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         self.assertIn("crates/clonk-icon/res/windows/c4x.ico", script)
         self.assertIn('-DICON="$icon"', script)
 
-    def test_windows_installer_toolchain_is_exactly_pinned(self):
+    def test_windows_installer_toolchain_uses_verified_upstream_archive(self):
         scripts = (
             step_script(LANDING_WORKFLOW, "Install NSIS"),
             step_script(
                 RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
             ),
         )
+        url = (
+            "https://downloads.sourceforge.net/project/nsis/"
+            "NSIS%203/3.12/nsis-3.12.zip"
+        )
+        digest = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f"
         for script in scripts:
             with self.subTest(script=script):
-                self.assertIn(
-                    "choco install nsis --version 3.12.0 --yes --no-progress",
-                    script,
-                )
-                self.assertIn('"$nsis_dir/makensis.exe" /VERSION', script)
+                self.assertIn(f"nsis_url='{url}'", script)
+                self.assertIn(f"nsis_sha256='{digest}'", script)
+                self.assertIn("curl -fsSL --retry 5 --retry-all-errors", script)
+                download = '--output "$archive" "$nsis_url"'
+                checksum = 'actual_sha256=$(sha256sum "$archive"'
+                digest_check = 'if [[ "$actual_sha256" != "$nsis_sha256" ]]; then'
+                extraction = 'python3 -m zipfile -e "$archive" "$runner_temp"'
+                extracted_root = 'nsis_dir="$runner_temp/nsis-3.12"'
+                version_check = '"$nsis_dir/makensis.exe" /VERSION'
+                for fragment in (
+                    download,
+                    checksum,
+                    digest_check,
+                    extraction,
+                    extracted_root,
+                    version_check,
+                ):
+                    self.assertIn(fragment, script)
+                positions = [
+                    script.index(fragment)
+                    for fragment in (
+                        download,
+                        checksum,
+                        digest_check,
+                        extraction,
+                        extracted_root,
+                        version_check,
+                    )
+                ]
+                self.assertEqual(positions, sorted(positions))
+                mismatch_branch = script[
+                    script.index(digest_check) : script.index(extraction)
+                ]
+                self.assertIn("exit 1", mismatch_branch)
                 self.assertIn("expected NSIS v3.12", script)
-
-    def test_windows_installer_toolchain_retries_transient_download_failures(self):
-        scripts = (
-            step_script(LANDING_WORKFLOW, "Install NSIS"),
-            step_script(
-                RELEASE_BUILD_WORKFLOW, "Install the Windows installer toolchain"
-            ),
-        )
-        for script in scripts:
-            with self.subTest(script=script):
-                self.assertIn("for attempt in 1 2 3; do", script)
                 self.assertIn(
-                    "if choco install nsis --version 3.12.0 --yes --no-progress; then",
-                    script,
+                    'echo "$(cygpath -w "$nsis_dir")" >> "$GITHUB_PATH"', script
                 )
-                self.assertIn('if [[ "$attempt" -eq 3 ]]; then', script)
-                self.assertIn('sleep "$((attempt * 10))"', script)
-                self.assertNotIn("--ignore-checksums", script)
-                self.assertNotIn("--allow-empty-checksums", script)
+                self.assertNotIn("choco", script.lower())
 
     def test_universal_release_verifies_every_shipped_binary(self):
         script = step_script(
