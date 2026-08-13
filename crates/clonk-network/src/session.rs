@@ -766,6 +766,7 @@ mod tests {
 
         HostState {
             coordinator,
+            pending_complete: BTreeMap::new(),
             backlog: ControlBacklog::new(backlog_limit),
             client_performance: ClientPerformanceStats::new(backlog_limit),
             local_control_backlog: ControlBacklog::new(backlog_limit),
@@ -2456,6 +2457,116 @@ mod tests {
 
         assert!(raw_client_received_control(&mut source, &partial, EVENT_WAIT).await);
         assert_ne!(partial.client_id(), BROADCAST_CLIENT_ID);
+
+        drop(source);
+        host.shutdown().await.test_value();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_accepts_received_complete_controls_in_tick_order_and_retains_them() {
+        // PID_Control accepts and stores a complete C4ClientIDAll frame even
+        // though PackCompleteCtrl left each embedded ByClient unchanged, and
+        // CheckCompleteCtrl consumes that complete frame before partials
+        // (src/C4GameControlNetwork.cpp:449-490,517-529,679-719,741-777).
+        let config = HostConfig {
+            initial_status: NetworkStatus {
+                state: NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            ..HostConfig::default()
+        };
+        let (address, mut host) = start_test_host(config).await;
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        drain_raw_client(&mut source).await;
+        let source_author = i32::try_from(source_id).test_value();
+        let complete = encode_control_packet(&LegacyControlFrame {
+            client_id: BROADCAST_CLIENT_ID,
+            tick: 0,
+            timestamp_ms: 0,
+            controls: vec![
+                EngineControlPacket::PlayerControl(PlayerControlData {
+                    player: 1,
+                    command: 2,
+                    data: 3,
+                    by_client: 0,
+                }),
+                EngineControlPacket::PlayerControl(PlayerControlData {
+                    player: 4,
+                    command: 5,
+                    data: 6,
+                    by_client: source_author,
+                }),
+            ],
+        })
+        .test_value();
+        let future_complete = |command| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: BROADCAST_CLIENT_ID,
+                tick: 1,
+                timestamp_ms: 0,
+                controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+                    player: 4,
+                    command,
+                    data: command,
+                    by_client: source_author,
+                })],
+            })
+            .test_value()
+        };
+        let first_future = future_complete(0x21);
+        let duplicate_future = future_complete(0x22);
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0x11))
+            .await
+            .test_value();
+        source
+            .send_message(ControlMessage::Control(first_future.clone()))
+            .await
+            .test_value();
+        source
+            .send_message(ControlMessage::Control(duplicate_future))
+            .await
+            .test_value();
+        raw_client_ping_barrier(&mut source).await;
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(event, HostEvent::Ready { .. }),
+                "a future complete control became ready across an earlier gap"
+            );
+        }
+        source
+            .send_message(ControlMessage::Control(complete.clone()))
+            .await
+            .test_value();
+        raw_client_ping_barrier(&mut source).await;
+        source
+            .send_message(ControlMessage::Request { from_tick: 0 })
+            .await
+            .test_value();
+
+        assert!(raw_client_received_control(&mut source, &complete, EVENT_WAIT).await);
+        assert!(raw_client_received_control(&mut source, &first_future, EVENT_WAIT).await);
+        assert_eq!(
+            wait_for_host_ready(&mut host_events, EVENT_WAIT).await,
+            complete
+        );
+        assert_eq!(
+            wait_for_host_ready(&mut host_events, EVENT_WAIT).await,
+            first_future,
+            "the first received complete must override partials and duplicates"
+        );
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 2, 0x12))
+            .await
+            .test_value();
+        assert_eq!(
+            wait_for_host_ready(&mut host_events, EVENT_WAIT)
+                .await
+                .tick(),
+            2,
+            "received complete ticks must advance host coordination"
+        );
 
         drop(source);
         host.shutdown().await.test_value();
@@ -8436,6 +8547,34 @@ mod tests {
             .expect_err("queued client may not forge host CID_Set");
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn complete_queued_control_accepts_mixed_embedded_authors() {
+        // PackCompleteCtrl marks the merged frame C4ClientIDAll and appends
+        // each client's controls unchanged (src/C4GameControlNetwork.cpp:741-777).
+        let packet = encode_control_packet(&LegacyControlFrame {
+            client_id: BROADCAST_CLIENT_ID,
+            tick: 12,
+            timestamp_ms: 0,
+            controls: vec![
+                EngineControlPacket::PlayerControl(PlayerControlData {
+                    player: 1,
+                    command: 2,
+                    data: 3,
+                    by_client: 0,
+                }),
+                EngineControlPacket::PlayerControl(PlayerControlData {
+                    player: 4,
+                    command: 5,
+                    data: 6,
+                    by_client: 7,
+                }),
+            ],
+        })
+        .test_value();
+
+        validate_queued_control_authors(&packet).test_value();
     }
 
     #[test]

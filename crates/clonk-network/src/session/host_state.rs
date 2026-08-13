@@ -90,6 +90,8 @@ fn strict_async_control_wait(
 pub(crate) struct HostState {
     pub(crate) config: HostConfig,
     pub(crate) coordinator: ControlCoordinator,
+    /// First received C4ClientIDAll packet for each not-yet-ready tick.
+    pub(crate) pending_complete: BTreeMap<Tick, ControlPacket>,
     pub(crate) backlog: ControlBacklog,
     pub(crate) client_performance: ClientPerformanceStats,
     pub(crate) local_control_backlog: ControlBacklog,
