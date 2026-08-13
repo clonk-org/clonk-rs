@@ -752,6 +752,52 @@ mod tests {
         receiver
     }
 
+    async fn expect_control_wait_attribution_capability<S>(
+        transport: &mut crate::ControlTransport<S>,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        assert!(matches!(
+            transport.read_message().await.test_value(),
+            ControlMessage::PortCapabilities(capabilities)
+                if capabilities.bits() == crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_host_routed_control_announces_wait_attribution_capability_before_the_control() {
+        let mut routes = ClientRouteManager::new();
+        let mut host =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        let first = legacy_packet(7, 73, 0x31);
+
+        routes
+            .send_message(ControlMessage::Control(first.clone()))
+            .await
+            .test_value();
+
+        assert!(matches!(
+            host.try_recv().test_value(),
+            ClientRouteCommand::Message(ControlMessage::PortCapabilities(capabilities))
+                if capabilities.bits() == crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION
+        ));
+        assert!(matches!(
+            host.try_recv().test_value(),
+            ClientRouteCommand::Message(ControlMessage::Control(packet)) if packet == first
+        ));
+
+        let second = legacy_packet(7, 74, 0x32);
+        routes
+            .send_message(ControlMessage::Control(second.clone()))
+            .await
+            .test_value();
+        assert!(matches!(
+            host.try_recv().test_value(),
+            ClientRouteCommand::Message(ControlMessage::Control(packet)) if packet == second
+        ));
+        assert!(host.try_recv().is_err());
+    }
+
     fn host_state_with_test_route(client_id: ClientId, outbound: HostOutboundSender) -> HostState {
         let config = HostConfig::default();
         let backlog_limit = config.backlog_limit;
@@ -801,6 +847,7 @@ mod tests {
             last_chase_target_update: None,
             game_started: false,
             control_mode: config.initial_status.control_mode,
+            control_waiting_clients: BTreeMap::new(),
             straggler_late: Default::default(),
             peer_capabilities: Default::default(),
             async_control_wait: None,
@@ -861,6 +908,51 @@ mod tests {
             )],
         );
         (state, core)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_wait_attribution_precedes_the_host_routed_aggregate() {
+        let client_id = 7;
+        let (outbound, mut outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        state.control_mode = 1;
+        state.coordinator.register_client(client_id).test_value();
+        state
+            .peer_capabilities
+            .record(client_id as i32, crate::PortCapabilities::supported());
+        state
+            .control_waiting_clients
+            .insert(0, BTreeSet::from([client_id]));
+
+        assert!(state
+            .coordinator
+            .ingest(legacy_packet(HOST_CLIENT_ID, 0, 0x31))
+            .test_value()
+            .ready
+            .is_empty());
+        let ready = state
+            .coordinator
+            .ingest(legacy_packet(client_id, 0, 0x32))
+            .test_value()
+            .ready;
+
+        resolve_host_ready(ready, &mut state).await;
+
+        assert!(matches!(
+            outbound_rx.try_recv().test_value(),
+            HostOutboundMessage::Message(ControlMessage::ControlWaitAttribution(
+                crate::ControlWaitAttribution {
+                    tick: 0,
+                    waited_for_recipient: true,
+                    waited_for_other: false,
+                }
+            ))
+        ));
+        assert!(matches!(
+            outbound_rx.try_recv().test_value(),
+            HostOutboundMessage::Message(ControlMessage::Control(packet))
+                if packet.client_id() == BROADCAST_CLIENT_ID && packet.tick() == 0
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3191,6 +3283,7 @@ mod tests {
         let client = ClientHandle {
             command_tx: client_command_tx,
             control_send_time: test_control_send_time_snapshot(),
+            control_wait_attribution: Default::default(),
             event_rx: Some(client_event_rx),
             voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
             voice_event_rx: Some(mpsc::channel(1).1),
@@ -5111,6 +5204,7 @@ mod tests {
         let handle = ClientHandle {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
+            control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
             voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
             voice_event_rx: Some(mpsc::channel(1).1),
@@ -6565,6 +6659,7 @@ mod tests {
         let handle = ClientHandle {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
+            control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
             voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
             voice_event_rx: Some(mpsc::channel(1).1),
@@ -7035,6 +7130,7 @@ mod tests {
         let handle = ClientHandle {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
+            control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
             voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
             voice_event_rx: Some(mpsc::channel(1).1),
@@ -15663,6 +15759,8 @@ mod tests {
             .await
             .test_value();
 
+        expect_control_wait_attribution_capability(&mut host_transport).await;
+
         match host_transport.read_message().await.test_value() {
             ControlMessage::Control(received) => {
                 assert_eq!(received.client_id(), packet.client_id());
@@ -15880,6 +15978,7 @@ mod tests {
             .send(ClientCommand::SubmitControl(local.clone()))
             .await
             .test_value();
+        expect_control_wait_attribution_capability(&mut host_transport).await;
         assert_eq!(
             host_transport.read_message().await.unwrap(),
             ControlMessage::Control(local)
@@ -15933,6 +16032,7 @@ mod tests {
         let handle = ClientHandle {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
+            control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
             voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
             voice_event_rx: Some(mpsc::channel(1).1),
@@ -16963,6 +17063,9 @@ mod tests {
                 .send(ClientCommand::SubmitControl(packet.clone()))
                 .await
                 .test_value();
+            if packet == &local_packets[0] {
+                expect_control_wait_attribution_capability(&mut host_transport).await;
+            }
             assert_eq!(
                 timeout(EVENT_WAIT, host_transport.read_message())
                     .await

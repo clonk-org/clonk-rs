@@ -1659,6 +1659,7 @@ pub enum ClientCommand {
 pub struct ClientHandle {
     pub(crate) command_tx: mpsc::Sender<ClientCommand>,
     pub(crate) control_send_time: ControlSendTimeSnapshot,
+    pub(crate) control_wait_attribution: crate::ControlWaitAttributionSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<ClientEvent>>,
     pub(crate) voice_sender: crate::VoiceSender,
     pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
@@ -1882,6 +1883,11 @@ impl ClientHandle {
     /// preferred route registry.
     pub fn control_send_time_snapshot(&self) -> ControlSendTimeSnapshot {
         self.control_send_time.clone()
+    }
+
+    /// Returns receiver-local host-wait attribution keyed by control tick.
+    pub fn control_wait_attribution_snapshot(&self) -> crate::ControlWaitAttributionSnapshot {
+        self.control_wait_attribution.clone()
     }
 
     pub async fn runtime_client_states(

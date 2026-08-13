@@ -675,6 +675,7 @@ pub(crate) enum ClientRouteRead {
 
 pub(crate) struct ClientRouteManager {
     voice_enabled: bool,
+    control_wait_attribution_announced_to_host: bool,
     pub(crate) routes: BTreeMap<u32, ClientRouteEntry>,
     pub(crate) event_tx: mpsc::UnboundedSender<ClientRouteEvent>,
     event_rx: mpsc::UnboundedReceiver<ClientRouteEvent>,
@@ -702,6 +703,7 @@ impl ClientRouteManager {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
             voice_enabled: true,
+            control_wait_attribution_announced_to_host: false,
             routes: BTreeMap::new(),
             event_tx,
             event_rx,
@@ -1026,6 +1028,18 @@ impl ClientRouteManager {
         &mut self,
         message: ControlMessage,
     ) -> Result<(), TransportError> {
+        if matches!(&message, ControlMessage::Control(_))
+            && !self.control_wait_attribution_announced_to_host
+        {
+            let capabilities = crate::PortCapabilities::from_bits(
+                crate::PortCapabilities::CONTROL_WAIT_ATTRIBUTION,
+            );
+            self.try_send_to(
+                HOST_CLIENT_ID,
+                ControlMessage::PortCapabilities(capabilities),
+            )?;
+            self.control_wait_attribution_announced_to_host = true;
+        }
         self.try_send_to(HOST_CLIENT_ID, message)
     }
 
@@ -1389,6 +1403,9 @@ impl ClientRouteManager {
     }
 
     pub(crate) fn retire_peer(&mut self, peer_id: ClientId) {
+        if peer_id == HOST_CLIENT_ID {
+            self.control_wait_attribution_announced_to_host = false;
+        }
         let route_ids = self
             .routes
             .iter()
@@ -1678,6 +1695,9 @@ impl ClientRouteManager {
                     let Some(route) = self.routes.remove(&route_id) else {
                         continue;
                     };
+                    if route.peer_id == HOST_CLIENT_ID {
+                        self.control_wait_attribution_announced_to_host = false;
+                    }
                     self.control_send_time_dirty = true;
                     for command in route.outbound.retire_and_take_post_failure() {
                         match command {
