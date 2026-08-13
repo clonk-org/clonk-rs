@@ -129,7 +129,7 @@ jobs:
           # Release preparation changes Cargo package versions without changing
           # bitcode. Key the trusted cache by compiler/config/source instead;
           # LLD independently hashes every input before reusing an entry.
-          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', 'third_party/**/*.rs') }}
+          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}
 
       # The earlier cache serves smoke tests and the native packaging tool.
       # Re-enter it after setting target flags so this producer has the same

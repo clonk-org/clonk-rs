@@ -9,7 +9,6 @@ use clonk_frontend::{
 };
 use clonk_graphics::{BitmapFont, GammaRamp, GpuPresentation, GpuScene};
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use pixels::wgpu;
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::Arc;

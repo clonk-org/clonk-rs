@@ -23,7 +23,7 @@ class ImageDependencyContractTests(unittest.TestCase):
             for member in manifest("Cargo.toml")["workspace"]["members"]
         ]
         self.assertIn(
-            pathlib.Path("third_party/pixels/Cargo.toml"), workspace_manifests
+            pathlib.Path("crates/clonk-surface/Cargo.toml"), workspace_manifests
         )
 
         def dependency_versions(cargo_manifest, dependency_name):

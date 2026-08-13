@@ -750,7 +750,7 @@ fn presentation_detail_recovers_only_with_real_headroom() {
 
 #[test]
 fn framebuffer_backends_widen_to_gl_before_giving_up() {
-    use pixels::wgpu::Backends;
+    use wgpu::Backends;
 
     // `Backends::PRIMARY` is VULKAN | METAL | DX12 | BROWSER_WEBGPU — it
     // contains no GL/GLES at all. That is right on desktop (the GL backend
@@ -2763,12 +2763,12 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
     // the app can rebuild Pixels. Other escaping errors remain fatal.
     assert_eq!(
         retained_gpu_present_recovery(
-            &anyhow::Error::new(pixels::Error::Validation).context("retained presentation")
+            &anyhow::Error::new(clonk_surface::SurfaceError::Validation).context("retained presentation")
         ),
         RetainedGpuPresentRecovery::Fatal
     );
     let masked_device_loss = retained_gpu_presentation_error(
-        anyhow::Error::new(pixels::Error::Validation).context("retained presentation"),
+        anyhow::Error::new(clonk_surface::SurfaceError::Validation).context("retained presentation"),
         Err(gpu_renderer::GpuRendererError::DeviceRecreationRequired {
             reason: gpu_renderer::RetainedGpuRecreateReason::DeviceLost,
             detail: "Destroyed".to_owned(),
@@ -2779,7 +2779,7 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
         RetainedGpuPresentRecovery::RebuildDevice,
         "recorded renderer health must override the Pixels error that escaped first"
     );
-    let surface_loss = anyhow::Error::new(pixels::Error::SurfaceLost)
+    let surface_loss = anyhow::Error::new(clonk_surface::SurfaceError::SurfaceLost)
         .context("retained presentation surface was lost");
     assert_eq!(
         retained_gpu_present_recovery(&surface_loss),

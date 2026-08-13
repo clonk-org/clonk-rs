@@ -7,7 +7,7 @@ from _repo import REPOSITORY
 
 NETWORK = REPOSITORY / "crates" / "clonk-network"
 UPDATER = REPOSITORY / "crates" / "clonk-update-net"
-PIXELS = REPOSITORY / "third_party" / "pixels"
+SURFACE = REPOSITORY / "crates" / "clonk-surface"
 HTTP_CLIENT_CONSTRUCTOR = re.compile(
     r"(?<![A-Za-z0-9_:])(?:(?:reqwest::)?"
     r"Client::(?:builder|new|default)\(\)|reqwest::(?:blocking::)?get\()"
@@ -94,9 +94,9 @@ class ReqwestDependencyContractTests(unittest.TestCase):
             ],
         )
 
-    def test_contract_covers_all_31_workspace_members_including_vendored_pixels(self):
+    def test_contract_covers_all_31_workspace_members(self):
         covered_members = set(workspace_members())
-        self.assertEqual((len(covered_members), PIXELS in covered_members), (31, True))
+        self.assertEqual((len(covered_members), SURFACE in covered_members), (31, True))
 
     def test_direct_consumers_use_reqwest_013_with_the_ring_rustls_backend(self):
         expected_features = {

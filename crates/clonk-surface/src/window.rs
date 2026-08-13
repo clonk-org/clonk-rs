@@ -37,18 +37,24 @@ pub enum SurfaceError {
     /// An extent was zero or beyond what the device supports.
     #[error("{0}")]
     Extent(#[from] ExtentError),
-    /// Acquiring the drawable failed in a way the caller must handle.
-    #[error(transparent)]
-    Acquire(#[from] AcquireError),
+    /// The surface is gone and must be rebuilt by its owner, not reconfigured.
+    /// This is the one presentation failure callers can recover from.
+    #[error("the window surface was lost")]
+    SurfaceLost,
+    /// The driver rejected the surface.
+    #[error("the window surface failed validation")]
+    Validation,
     /// The render callback failed.
     #[error("the render callback failed: {0}")]
     Callback(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
-impl SurfaceError {
-    /// Whether the surface must be rebuilt rather than reconfigured.
-    pub const fn is_surface_lost(&self) -> bool {
-        matches!(self, Self::Acquire(AcquireError::SurfaceLost))
+impl From<AcquireError> for SurfaceError {
+    fn from(error: AcquireError) -> Self {
+        match error {
+            AcquireError::SurfaceLost => Self::SurfaceLost,
+            AcquireError::Validation => Self::Validation,
+        }
     }
 }
 

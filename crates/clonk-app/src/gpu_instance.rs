@@ -19,7 +19,6 @@
 //! clones is free — `wgpu::Instance` is a reference-counted handle — and one
 //! instance for every window is what the rest of the ecosystem does anyway.
 
-use pixels::wgpu;
 use std::sync::{Mutex, OnceLock};
 
 /// Look `backends` up, creating its entry once.
@@ -62,7 +61,7 @@ pub(crate) fn retained_instance(backends: wgpu::Backends) -> wgpu::Instance {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     retained_entry(&mut registry, backends, || {
-        pixels::create_instance(backends)
+        clonk_surface::create_instance(backends)
     })
 }
 

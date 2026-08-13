@@ -14,7 +14,7 @@
 
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
 use crate::GameApp;
-use pixels::Pixels;
+use clonk_surface::WindowSurface;
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
@@ -25,8 +25,8 @@ enum ViewportPresentRecovery {
     Report,
 }
 
-fn viewport_present_recovery(error: &pixels::Error) -> ViewportPresentRecovery {
-    if matches!(error, pixels::Error::SurfaceLost) {
+fn viewport_present_recovery(error: &clonk_surface::SurfaceError) -> ViewportPresentRecovery {
+    if matches!(error, clonk_surface::SurfaceError::SurfaceLost) {
         ViewportPresentRecovery::RebuildFramebuffer
     } else {
         ViewportPresentRecovery::Report
@@ -35,7 +35,7 @@ fn viewport_present_recovery(error: &pixels::Error) -> ViewportPresentRecovery {
 
 pub struct ViewportWindowHost {
     pub window: Arc<Window>,
-    pub pixels: Option<Pixels<'static>>,
+    pub pixels: Option<WindowSurface>,
     /// The physical `C4Viewport` identity this window draws.
     pub identity: u64,
     /// `Application.GetScale()` — `Config.Graphics.Scale / 100`
@@ -95,12 +95,7 @@ pub(crate) fn build_viewport_window(
 }
 
 impl ViewportWindowHost {
-    pub fn new(
-        window: Arc<Window>,
-        mut pixels: Pixels<'static>,
-        identity: u64,
-        scale: f32,
-    ) -> Self {
+    pub fn new(window: Arc<Window>, mut pixels: WindowSurface, identity: u64, scale: f32) -> Self {
         let size = window.inner_size();
         let (buffer_width, buffer_height) = logical_view_extent(size.width, size.height, scale);
         let _ = pixels.resize_buffer(buffer_width, buffer_height);
@@ -274,11 +269,11 @@ mod tests {
     #[test]
     fn only_a_lost_viewport_surface_rebuilds_its_framebuffer() {
         assert_eq!(
-            viewport_present_recovery(&pixels::Error::SurfaceLost),
+            viewport_present_recovery(&clonk_surface::SurfaceError::SurfaceLost),
             ViewportPresentRecovery::RebuildFramebuffer
         );
         assert_eq!(
-            viewport_present_recovery(&pixels::Error::Validation),
+            viewport_present_recovery(&clonk_surface::SurfaceError::Validation),
             ViewportPresentRecovery::Report
         );
     }

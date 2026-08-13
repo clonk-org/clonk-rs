@@ -62,7 +62,7 @@ class RandDependencyContractTests(unittest.TestCase):
         }
         self.assertEqual(len(workspace_manifests), 31)
         self.assertIn(
-            pathlib.Path("third_party/pixels/Cargo.toml"), workspace_manifests
+            pathlib.Path("crates/clonk-surface/Cargo.toml"), workspace_manifests
         )
         self.assertEqual(self.dependency_manifest_paths(), workspace_manifests)
 

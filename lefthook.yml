@@ -18,13 +18,8 @@ pre-commit:
     # it fails on drift in files another session left dirty, which just trains
     # everyone to pass --no-verify. Staged files only keeps this honest.
     #
-    # `third_party/` is vendored and is not a workspace member, so
-    # `cargo fmt --all` never sees it and it is not rustfmt-clean. Excluded so
-    # the hook agrees exactly with the CI gate.
     - name: rustfmt-staged
       glob: "*.rs"
-      exclude:
-        - "third_party/**/*.rs"
       run: rustfmt --edition 2021 --check {staged_files}
 
     # `content/` is a pinned, read-only parity submodule and the engine's data
@@ -87,8 +82,7 @@ pre-push:
         base="$(git rev-parse --verify --quiet origin/main || true)"
         [ -n "$base" ] || exit 0
 
-        files="$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.rs' \
-          | grep -vE '^third_party/' || true)"
+        files="$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.rs' || true)"
         [ -n "$files" ] || exit 0
 
         scratch="$(mktemp -d)"

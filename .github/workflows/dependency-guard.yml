@@ -79,14 +79,15 @@ jobs:
       # main-branch job — which the budget has no room for while the queue is
       # the workflow missing its latency target.
 
-      # Pixels is the smallest package that enables wgpu's DX12 allocator.
-      # Cross-check it because incompatible `windows` crate identities compile
-      # on Linux but fail when Direct3D types cross the allocator boundary.
+      # clonk-surface is the smallest package that enables wgpu's DX12
+      # allocator. Cross-check it because incompatible `windows` crate
+      # identities compile on Linux but fail when Direct3D types cross the
+      # allocator boundary.
       - name: Check Windows renderer dependencies
-        run: cargo check --locked --target x86_64-pc-windows-msvc -p pixels
+        run: cargo check --locked --target x86_64-pc-windows-msvc -p clonk-surface
 
-      # Check clonk-platform separately so pixels cannot mask a missing direct
-      # Windows feature through Cargo's feature unification.
+      # Check clonk-platform separately so clonk-surface cannot mask a missing
+      # direct Windows feature through Cargo's feature unification.
       - name: Check Windows platform bindings
         run: cargo check --locked --target x86_64-pc-windows-msvc -p clonk-platform
 

@@ -48,7 +48,7 @@ class LowRiskDependencyContractTests(unittest.TestCase):
             "crates/clonk-script/Cargo.toml",
             "crates/clonk-update-net/Cargo.toml",
             "crates/clonk-update/Cargo.toml",
-            "third_party/pixels/Cargo.toml",
+            "crates/clonk-surface/Cargo.toml",
         }
         actual_manifests = set()
         dependencies_by_manifest = {}

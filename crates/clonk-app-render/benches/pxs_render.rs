@@ -5,7 +5,6 @@ use clonk_frontend::{
 };
 use clonk_graphics::{BitmapFont, GammaRamp, GpuCommand, GpuPresentation, GpuScene};
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use pixels::wgpu;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::hint::black_box;

@@ -28,7 +28,7 @@ use clonk_launcher_ui::{
     ReportSearchHighlight, ReportSearchPreset, ReportSearchState,
 };
 use clonk_platform::AppPaths;
-use pixels::{Pixels, SurfaceTexture};
+use clonk_surface::WindowSurface;
 use rfd::FileDialog;
 use serde::Serialize;
 use winit::application::ApplicationHandler;
@@ -73,9 +73,7 @@ impl LauncherShell {
 
         let size = window.inner_size();
         let (initial_width, initial_height) = enforce_min_size(size);
-        let surface_texture =
-            SurfaceTexture::new(initial_width, initial_height, Arc::clone(&window));
-        let pixels: Pixels<'static> = Pixels::new(initial_width, initial_height, surface_texture)
+        let pixels = build_launcher_framebuffer(&window, initial_width, initial_height)
             .context("failed to create pixel framebuffer")?;
         let app = LauncherApp::new(&window).context("failed to initialise launcher shell")?;
 
@@ -185,7 +183,7 @@ impl ApplicationHandler for LauncherShell {
 
 struct LauncherRuntime {
     window: Arc<Window>,
-    pixels: Option<Pixels<'static>>,
+    pixels: Option<WindowSurface>,
     app: LauncherApp,
     window_focused: bool,
     ime_allowed: bool,
@@ -213,20 +211,55 @@ const fn launcher_present_outcome(render_callback_invoked: bool) -> LauncherPres
     }
 }
 
-fn present_launcher_frame(
-    pixels: &Pixels<'_>,
-) -> std::result::Result<LauncherPresentOutcome, pixels::Error> {
-    let mut render_callback_invoked = false;
-    pixels.render_with(|encoder, surface_view, context| {
-        render_callback_invoked = true;
-        context.scaling_renderer.render(encoder, surface_view);
-        Ok(())
-    })?;
-    Ok(launcher_present_outcome(render_callback_invoked))
+/// The process's `wgpu::Instance`, created once and never dropped.
+///
+/// A `wgpu::Instance` is a `VkInstance`, and destroying one while any surface
+/// created from it is still configured nulls NVIDIA's process-global
+/// libwayland-client dispatch table (clonk-org/clonk-rs#53). The launcher has
+/// only one window, but its surface is rebuilt on every loss, so holding the
+/// instance here keeps those rebuilds from cycling the instance with it.
+fn retained_instance() -> clonk_surface::wgpu::Instance {
+    static INSTANCE: std::sync::OnceLock<clonk_surface::wgpu::Instance> =
+        std::sync::OnceLock::new();
+    INSTANCE
+        .get_or_init(|| {
+            clonk_surface::create_instance(
+                clonk_surface::wgpu::Backends::from_env()
+                    .unwrap_or_else(clonk_surface::wgpu::Backends::all),
+            )
+        })
+        .clone()
 }
 
-fn launcher_present_recovery(error: &pixels::Error) -> LauncherPresentRecovery {
-    if matches!(error, pixels::Error::SurfaceLost) {
+/// Build the launcher's framebuffer at one extent for both buffer and drawable.
+///
+/// Keeping the two equal is what makes the blit one-to-one; a smaller buffer
+/// would be magnified by a whole-pixel factor and letterboxed, and the
+/// launcher's hit-testing assumes neither.
+fn build_launcher_framebuffer(
+    window: &Arc<Window>,
+    width: u32,
+    height: u32,
+) -> std::result::Result<WindowSurface, clonk_surface::SurfaceError> {
+    WindowSurface::build(
+        &retained_instance(),
+        Arc::clone(window),
+        (width, height),
+        (width, height),
+        clonk_surface::wgpu::PresentMode::AutoVsync,
+    )
+}
+
+fn present_launcher_frame(
+    pixels: &WindowSurface,
+) -> std::result::Result<LauncherPresentOutcome, clonk_surface::SurfaceError> {
+    pixels.present_frame().map(|presentation| {
+        launcher_present_outcome(presentation == clonk_surface::Presentation::Presented)
+    })
+}
+
+fn launcher_present_recovery(error: &clonk_surface::SurfaceError) -> LauncherPresentRecovery {
+    if matches!(error, clonk_surface::SurfaceError::SurfaceLost) {
         LauncherPresentRecovery::RebuildFramebuffer
     } else {
         LauncherPresentRecovery::Report
@@ -355,10 +388,18 @@ impl LauncherRuntime {
         let buffer_width = self.app.surface.width().max(1);
         let buffer_height = self.app.surface.height().max(1);
         replace_after_drop(&mut self.pixels, || {
-            let surface_texture =
-                SurfaceTexture::new(surface_width, surface_height, Arc::clone(&self.window));
-            let mut replacement = Pixels::new(buffer_width, buffer_height, surface_texture)
-                .context("failed to rebuild launcher framebuffer")?;
+            // The buffer extent comes from the rasterizer's surface and the
+            // drawable extent from the window, which disagree while a resize is
+            // still unprocessed; both are passed through rather than reconciled
+            // so a rebuild presents exactly what the previous surface would have.
+            let mut replacement = WindowSurface::build(
+                &retained_instance(),
+                Arc::clone(&self.window),
+                (buffer_width, buffer_height),
+                (surface_width, surface_height),
+                clonk_surface::wgpu::PresentMode::AutoVsync,
+            )
+            .context("failed to rebuild launcher framebuffer")?;
             if replacement.frame().len() == prior_frame.len() {
                 replacement.frame_mut().copy_from_slice(&prior_frame);
             }
@@ -837,7 +878,7 @@ impl LauncherApp {
 
     fn handle_window_event(
         &mut self,
-        pixels: &mut Pixels,
+        pixels: &mut WindowSurface,
         event: WindowEvent,
         event_loop: &ActiveEventLoop,
     ) -> Result<()> {
@@ -1157,7 +1198,7 @@ impl LauncherApp {
         }
     }
 
-    fn handle_resize(&mut self, size: PhysicalSize<u32>, pixels: &mut Pixels) -> Result<()> {
+    fn handle_resize(&mut self, size: PhysicalSize<u32>, pixels: &mut WindowSurface) -> Result<()> {
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
@@ -3857,7 +3898,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        static LOCK: OnceLock<Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
@@ -3969,11 +4010,11 @@ mod tests {
     #[test]
     fn only_a_lost_launcher_surface_rebuilds_its_framebuffer() {
         assert_eq!(
-            launcher_present_recovery(&pixels::Error::SurfaceLost),
+            launcher_present_recovery(&clonk_surface::SurfaceError::SurfaceLost),
             LauncherPresentRecovery::RebuildFramebuffer
         );
         assert_eq!(
-            launcher_present_recovery(&pixels::Error::Validation),
+            launcher_present_recovery(&clonk_surface::SurfaceError::Validation),
             LauncherPresentRecovery::Report
         );
     }

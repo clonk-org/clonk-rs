@@ -295,6 +295,7 @@ use clonk_resources::{
     MutableGroupChildMut, MutableGroupEntryKind, ParticleDefinition as ResourceParticleDefinition,
     ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
 };
+use clonk_surface::WindowSurface;
 use control_options::format_key_label;
 use desktop_notification::{DesktopNotification, DesktopNotifier};
 use display_sleep_inhibitor::DisplaySleepInhibitor;
@@ -309,7 +310,6 @@ use offline_savegame::{prepare_offline_savegame_startup, OfflineSavegameStartup}
 use offline_startup::{
     offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
-use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
@@ -1460,9 +1460,7 @@ fn run() -> Result<()> {
                         let Some(pixels) = pixels_slot.as_mut() else {
                             return;
                         };
-                        if pixels.context().texture_extent.width != 1
-                            || pixels.context().texture_extent.height != 1
-                        {
+                        if pixels.buffer_extent().0 != 1 || pixels.buffer_extent().1 != 1 {
                             if let Err(error) = pixels.resize_buffer(1, 1) {
                                 tracing::error!(%error, "failed to enter retained GPU presentation");
                                 event_target.exit();
@@ -1589,8 +1587,8 @@ fn run() -> Result<()> {
                         event_target.exit();
                         return;
                     }
-                    if pixels.context().texture_extent.width != physical_width
-                        || pixels.context().texture_extent.height != physical_height
+                    if pixels.buffer_extent().0 != physical_width
+                        || pixels.buffer_extent().1 != physical_height
                     {
                         if let Err(error) = pixels.resize_buffer(physical_width, physical_height) {
                             tracing::error!(%error, "failed to restore CPU presentation buffer");
