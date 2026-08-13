@@ -195,75 +195,43 @@ class CiLatencyTests(unittest.TestCase):
 
         self.assertNotIn("RUSTUP_AUTO_INSTALL", probe)
 
-    def test_merge_group_rows_preempt_only_rolling_post_merge_work(self):
+    def test_merge_group_rows_share_only_non_cancelling_cache_lanes(self):
         landing = LANDING.read_text(encoding="utf-8")
         main = MAIN.read_text(encoding="utf-8")
-        qualification = QUALIFICATION.read_text(encoding="utf-8")
 
-        claims = {
+        shared_lanes = {
             "linux-landing-cache-rolling": "app 2/12",
-            "main-coverage-app-1-10-rolling": "app 3/12",
-            "main-coverage-app-2-7-rolling": "app 4/12",
-            "main-recording-host-rolling": "app 5/12",
-            "main-coverage-app-3-rolling": "app 6/12",
-            "main-coverage-app-4-9-rolling": "app 7/12",
-            "main-coverage-app-5-rolling": "app 8/12",
-            "main-coverage-app-11-12-rolling": "remaining workspace 1/2",
-            "main-coverage-app-6-8-rolling": "app 9/12",
-            "main-coverage-engine-1-rolling": "app 11/12",
-            "main-coverage-engine-2-rolling": "app 12/12",
-            "main-coverage-remaining-1-rolling": "app netplay 1/2",
-            "main-coverage-remaining-2-rolling": "app netplay 2/2",
-            "main-developer-feedback-rolling": "engine integration 1/2",
-            "main-coverage-engine-and-frontend-units-rolling": "workspace quality",
-            "main-coverage-report-rolling": "engine contracts",
-            "main-coverage-html-rolling": "workspace unit and parity",
             "windows-landing-cache-rolling": "windows-smoke",
         }
-        for group, claimant in claims.items():
+        self.assertEqual(
+            set(re.findall(r"\b[a-z0-9-]+-rolling\b", landing)),
+            set(shared_lanes),
+        )
+        for group, claimant in shared_lanes.items():
             with self.subTest(group=group):
-                self.assertEqual(landing.count(f"'{group}'"), 1)
+                self.assertEqual(landing.count(group), 1)
                 self.assertIn(claimant, landing)
+                producer_group = (
+                    f'group: "{group.removesuffix("rolling")}'
+                    "${{ startsWith(github.event.head_commit.message, "
+                    "'chore: release ') && github.sha || 'rolling' }}\""
+                )
+                self.assertIn(producer_group, main)
 
-        linux_claims = {
-            group: claimant
-            for group, claimant in claims.items()
-            if group != "windows-landing-cache-rolling"
-        }
         linux_job = landing[
             landing.index("  linux:") : landing.index("  windows-smoke:")
         ]
         linux_rows = set(re.findall(r"(?m)^          - name: (.+)$", linux_job))
-        for group, claimant in linux_claims.items():
-            with self.subTest(claimant=claimant):
-                self.assertIn(claimant, linux_rows)
-                self.assertIn(
-                    f"matrix.name == '{claimant}' && '{group}'", landing
-                )
-
-        artifacts = set(
-            re.findall(r"(?m)^            artifact: (.+)$", qualification)
+        self.assertIn("app 2/12", linux_rows)
+        self.assertIn(
+            "matrix.name == 'app 2/12' && 'linux-landing-cache-rolling'",
+            landing,
         )
-        self.assertEqual(
-            {
-                group
-                for group in claims
-                if group.startswith("main-coverage-")
-                and group
-                not in {
-                    "main-coverage-report-rolling",
-                    "main-coverage-html-rolling",
-                }
-            },
-            {f"main-coverage-{artifact}-rolling" for artifact in artifacts},
+        self.assertIn(
+            "github.event_name == 'merge_group' && "
+            "'windows-landing-cache-rolling'",
+            landing,
         )
-        for group in (
-            "linux-landing-cache-rolling",
-            "main-recording-host-rolling",
-            "main-developer-feedback-rolling",
-            "windows-landing-cache-rolling",
-        ):
-            self.assertIn(group.removesuffix("rolling"), main + qualification)
 
         self.assertIn(
             "format('landing-linux-{0}-{1}', github.run_id, matrix.name)",
