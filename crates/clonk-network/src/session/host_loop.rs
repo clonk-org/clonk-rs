@@ -420,6 +420,7 @@ pub(crate) async fn run_host(
     let published_player_sources = config.player_resource_sources.iter().cloned().collect();
     let mut state = HostState {
         coordinator,
+        pending_complete: BTreeMap::new(),
         backlog: ControlBacklog::new(backlog_limit),
         client_performance: ClientPerformanceStats::new(backlog_limit),
         local_control_backlog: ControlBacklog::new(backlog_limit),
@@ -1643,9 +1644,8 @@ async fn force_expired_async_control(state: &mut HostState) {
             *late = late.saturating_add(1);
         }
     }
-    for batch in state.coordinator.force_current_tick() {
-        publish_ready_batch(batch, state).await;
-    }
+    let ready = state.coordinator.force_current_tick();
+    resolve_host_ready(ready, state).await;
 }
 
 async fn update_chase_targets(state: &mut HostState) {

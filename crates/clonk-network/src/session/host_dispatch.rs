@@ -968,11 +968,13 @@ pub(crate) async fn ingest_control(
     if ingress == ControlIngress::Local && state.control_mode == 0 {
         broadcast_control(&packet, state).await;
     }
+    if client_id == BROADCAST_CLIENT_ID {
+        ingest_complete_control(packet, state).await;
+        return;
+    }
     match state.coordinator.ingest(packet) {
         Ok(ControlOutcome { ready, missing, .. }) => {
-            for batch in ready {
-                publish_ready_batch(batch, state).await;
-            }
+            resolve_host_ready(ready, state).await;
             if !missing.is_empty() {
                 schedule_missing(missing, state);
             }
@@ -994,6 +996,17 @@ pub(crate) async fn ingest_control(
                 .await;
         }
     }
+}
+
+async fn ingest_complete_control(packet: ControlPacket, state: &mut HostState) {
+    if packet.tick() < state.coordinator.current_tick() {
+        return;
+    }
+    state
+        .pending_complete
+        .entry(packet.tick())
+        .or_insert(packet);
+    resolve_host_ready(Vec::new(), state).await;
 }
 
 // Borrow the lobby TextWindow's numeric 100/4096 ceilings as conservative
@@ -1041,6 +1054,11 @@ pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<
     let (controls, _) = packet
         .decoded_control_list()
         .map_err(|error| format!("invalid control packet: {error}"))?;
+    // PackCompleteCtrl keeps each contribution's embedded ByClient while the
+    // merged envelope uses C4ClientIDAll (src/C4GameControlNetwork.cpp:741-777).
+    if packet.client_id() == BROADCAST_CLIENT_ID {
+        return Ok(());
+    }
     let expected_author = i32::try_from(packet.client_id()).map_err(|_| {
         format!(
             "queued control packet has unsupported author id {}",
@@ -1200,6 +1218,43 @@ pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState
         .event_tx
         .send(HostEvent::Ready { packet: aggregated })
         .await;
+}
+
+/// Resolve locally completed batches against received C4ClientIDAll packets.
+///
+/// CheckCompleteCtrl always consumes a stored complete packet before packing
+/// the same tick from partial contributions, and walks only contiguous ticks
+/// (src/C4GameControlNetwork.cpp:679-719).
+pub(crate) async fn resolve_host_ready(ready: Vec<ReadyBatch>, state: &mut HostState) {
+    let mut batches = VecDeque::from(ready);
+    loop {
+        while let Some(batch) = batches.pop_front() {
+            let complete = state.pending_complete.remove(&batch.tick());
+            if let Some(packet) = complete {
+                let _ = state.event_tx.send(HostEvent::Ready { packet }).await;
+            } else {
+                publish_ready_batch(batch, state).await;
+            }
+        }
+
+        let tick = state.coordinator.current_tick();
+        let Some(packet) = state.pending_complete.remove(&tick) else {
+            break;
+        };
+        let next_tick = tick.saturating_add(1);
+        if next_tick != tick {
+            batches.extend(state.coordinator.advance_to(next_tick));
+        }
+        let _ = state.event_tx.send(HostEvent::Ready { packet }).await;
+        if next_tick == tick {
+            break;
+        }
+    }
+
+    let current_tick = state.coordinator.current_tick();
+    state
+        .pending_complete
+        .retain(|tick, _| *tick >= current_tick);
 }
 
 async fn broadcast_control(packet: &ControlPacket, state: &mut HostState) {
@@ -1620,9 +1675,7 @@ async fn coordination_unregister(client_id: ClientId, state: &mut HostState) {
         .remove_client(client_id)
         .unwrap_or_default();
     state.scheduler.remove_client(client_id);
-    for batch in ready_batches {
-        publish_ready_batch(batch, state).await;
-    }
+    resolve_host_ready(ready_batches, state).await;
 }
 
 pub(crate) async fn broadcast_status(
