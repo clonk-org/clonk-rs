@@ -13,5 +13,10 @@ pub use wgpu;
 
 mod acquire;
 mod blit;
+mod window;
 
+pub use acquire::AcquireError;
 pub use blit::BlitTransform;
+pub use window::{
+    create_instance, ExtentError, FrameContext, Presentation, SurfaceError, WindowSurface,
+};

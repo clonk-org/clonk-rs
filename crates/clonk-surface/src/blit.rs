@@ -1,4 +1,7 @@
-//! Geometry for blitting the CPU frame buffer onto the drawable.
+//! Blitting the CPU frame buffer onto the drawable: where it lands, and the
+//! pipeline that puts it there.
+
+use wgpu::util::DeviceExt;
 
 /// Where the frame buffer lands on the drawable, and how much of it is covered.
 ///
@@ -9,6 +12,7 @@
 pub struct BlitTransform {
     transform: [f32; 16],
     clip_rect: (u32, u32, u32, u32),
+    buffer: (f32, f32),
 }
 
 impl BlitTransform {
@@ -58,6 +62,7 @@ impl BlitTransform {
         Self {
             transform,
             clip_rect,
+            buffer: (buffer_width, buffer_height),
         }
     }
 
@@ -65,6 +70,216 @@ impl BlitTransform {
     pub const fn clip_rect(&self) -> (u32, u32, u32, u32) {
         self.clip_rect
     }
+
+    /// The shader's uniform block: the 4x4, then the buffer extent and its
+    /// reciprocal.
+    pub fn uniform_bytes(&self) -> [u8; UNIFORM_BYTES] {
+        let mut uniform = [0_u8; UNIFORM_BYTES];
+        let tail = [
+            self.buffer.0,
+            self.buffer.1,
+            1.0 / self.buffer.0,
+            1.0 / self.buffer.1,
+        ];
+        self.transform
+            .iter()
+            .chain(tail.iter())
+            .zip(uniform.chunks_exact_mut(4))
+            .for_each(|(value, slot)| slot.copy_from_slice(&value.to_le_bytes()));
+        uniform
+    }
+}
+
+/// A 4x4 of `f32` followed by the buffer extent and its reciprocal.
+const UNIFORM_BYTES: usize = (16 + 4) * std::mem::size_of::<f32>();
+
+/// The pipeline that puts the CPU frame buffer onto the drawable.
+///
+/// One full-screen triangle sampled with a nearest filter, scissored to the
+/// blit's clip rectangle. Nearest is not a preference: magnifying the software
+/// frame with any interpolation would blur every pixel the rasterizer placed.
+#[derive(Debug)]
+pub(crate) struct Blitter {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
+    uniform: wgpu::Buffer,
+    clip_rect: (u32, u32, u32, u32),
+}
+
+impl Blitter {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        texture: &wgpu::Texture,
+        target_format: wgpu::TextureFormat,
+        transform: BlitTransform,
+    ) -> Self {
+        let module = device.create_shader_module(wgpu::include_wgsl!("../shaders/blit.wgsl"));
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("clonk_surface_blit_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: None,
+        });
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("clonk_surface_blit_uniform"),
+            contents: &transform.uniform_bytes(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("clonk_surface_blit_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("clonk_surface_blit_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clonk_surface_blit_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let bind_group = bind(device, &bind_group_layout, texture, &sampler, &uniform);
+        Self {
+            pipeline,
+            bind_group_layout,
+            bind_group,
+            sampler,
+            uniform,
+            clip_rect: transform.clip_rect(),
+        }
+    }
+
+    /// Point the blit at a new frame-buffer texture after a buffer resize.
+    pub(crate) fn rebind(&mut self, device: &wgpu::Device, texture: &wgpu::Texture) {
+        self.bind_group = bind(
+            device,
+            &self.bind_group_layout,
+            texture,
+            &self.sampler,
+            &self.uniform,
+        );
+    }
+
+    /// Re-aim the blit after either extent changed.
+    pub(crate) fn set_transform(&mut self, queue: &wgpu::Queue, transform: BlitTransform) {
+        queue.write_buffer(&self.uniform, 0, &transform.uniform_bytes());
+        self.clip_rect = transform.clip_rect();
+    }
+
+    pub(crate) fn blit(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clonk_surface_blit_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_scissor_rect(
+            self.clip_rect.0,
+            self.clip_rect.1,
+            self.clip_rect.2,
+            self.clip_rect.3,
+        );
+        pass.draw(0..3, 0..1);
+    }
+}
+
+fn bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    texture: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("clonk_surface_blit_bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 #[cfg(test)]
@@ -123,5 +338,22 @@ mod tests {
         assert_eq!(transform.transform[0], 2.0);
         assert_eq!(transform.transform[5], 1080.0 / 640.0);
         assert_eq!(transform.clip_rect(), (0, 0, 960, 640));
+    }
+
+    // The shader reads one uniform block: the 4x4 followed by the buffer extent
+    // and its reciprocal. Getting the tail wrong samples the wrong texels
+    // without failing anything else, so the layout is pinned byte for byte.
+    #[test]
+    fn the_uniform_block_carries_the_matrix_then_the_buffer_extent_and_its_reciprocal() {
+        let transform = BlitTransform::pixel_perfect((320, 240), (960, 640));
+
+        let uniform = transform.uniform_bytes();
+
+        assert_eq!(uniform.len(), 80, "a 4x4 of f32 followed by four more");
+        assert_eq!(uniform[0..4], (640.0_f32 / 960.0).to_le_bytes());
+        assert_eq!(uniform[64..68], 320.0_f32.to_le_bytes());
+        assert_eq!(uniform[68..72], 240.0_f32.to_le_bytes());
+        assert_eq!(uniform[72..76], (1.0_f32 / 320.0).to_le_bytes());
+        assert_eq!(uniform[76..80], (1.0_f32 / 240.0).to_le_bytes());
     }
 }
