@@ -46,6 +46,23 @@ Options cover controls (four keyboard sets and four gamepad sets), graphics
 (resolution and scaling), and network settings. The in-game menu holds ten
 save-game slots.
 
+### Proximity voice chat
+
+Network games between Clonk Rust clients support push-to-talk proximity voice.
+It is off by default: open **Options → Advanced**, expand **Voice**, and enable
+`Enabled`. Hold the backquote key (`` ` ``) while playing to talk; the
+`PushToTalkKey` and `Volume` values are configurable in the same section. The
+game opens the microphone only while that key is held, and a speaker icon
+appears above the Clonk each participant currently has selected. Change
+`Enabled` before hosting or joining; transport negotiation is fixed for that
+network connection.
+
+Speech fades linearly over 700 landscape pixels. Terrain does not block it, so
+a wall or cave between two Clonks has no effect beyond their distance. Voice
+uses best-effort UDP between peers that positively negotiate support; older
+LegacyClonk clients remain compatible but silent. Voice packets are not
+encrypted, so do not use in-game voice for sensitive conversation.
+
 Tracker music needs the optional libxmp 4 runtime; install it through your
 platform package manager, or point `LC_LIBXMP_LIBRARY` at a compatible library.
 Everything else works without it.

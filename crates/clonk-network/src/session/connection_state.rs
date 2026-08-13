@@ -189,6 +189,12 @@ impl HostOutboundSender {
         self.send_or_retain(HostOutboundMessage::Message(message))
     }
 
+    pub(crate) fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
+        if let Some(udp) = &self.udp {
+            udp.set_voice_receive_cookie(cookie);
+        }
+    }
+
     fn send_or_retain(
         &self,
         message: HostOutboundMessage,
@@ -400,6 +406,7 @@ pub(crate) struct AcceptedConnectionRoute {
     pub(crate) protocol: crate::NetworkProtocol,
     pub(crate) ping: RoutePingLag,
     pub(crate) outbound: HostOutboundSender,
+    pub(crate) voice_auth: crate::voice::VoiceRouteAuthentication,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

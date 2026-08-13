@@ -804,6 +804,11 @@ pub struct GraphicsOverlay<'a> {
     /// player-info/invisibility and hostility policy; the renderer owns the
     /// object-space gates, placement and color (src/C4Object.cpp:2582-2612).
     pub crew_name_labels: Vec<CrewNameOverlay>,
+    /// Process-local voice activity projected onto selected crew objects.
+    /// This is independent of `players`: ordinary owned viewports retain only
+    /// their own [`PlayerOverlay`], while every visible speaking crew member
+    /// needs a world-space indicator.
+    pub speaking: SpeakingOverlay,
     /// `Game.Time` seconds for the upper board clock
     /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
     pub game_time_seconds: u64,
@@ -836,6 +841,14 @@ pub struct CrewNameOverlay {
     pub object_id: ObjectId,
     pub text: String,
     pub visible_to: Vec<i32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpeakingOverlay {
+    pub object_ids: Vec<ObjectId>,
+    /// Complete Graphics.c4g/GUIIcons.png sheet. The renderer extracts the
+    /// classic `Ico_Sound` phase so runtime graphics overloads remain active.
+    pub gui_icons: Option<ImageData>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

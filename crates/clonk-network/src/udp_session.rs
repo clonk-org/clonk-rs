@@ -40,6 +40,8 @@ const TCP_FRAME_HEADER_SIZE: usize = 5;
 const HUB_COMMAND_CAPACITY: usize = 64;
 const INCOMING_PEER_CAPACITY: usize = 32;
 const PUNCHER_EVENT_CAPACITY: usize = 16;
+/// At 50 frames/s, each hub direction queues at most 160 ms of encoded speech.
+const VOICE_MEDIA_CAPACITY: usize = 8;
 const PEER_INBOUND_PACKET_CAPACITY: usize = 64;
 const ABANDONED_PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -99,6 +101,17 @@ enum HubCommand {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReliableUdpVoiceDatagram {
+    pub peer: SocketAddr,
+    pub payload: Vec<u8>,
+}
+
+struct HubVoiceMedia {
+    outgoing: mpsc::Receiver<ReliableUdpVoiceDatagram>,
+    incoming: mpsc::Sender<ReliableUdpVoiceDatagram>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct UdpOutboxRouteId(u64);
 
@@ -109,6 +122,7 @@ struct UdpOutboxRouteState {
     generation: u64,
     packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
     drained: Arc<UdpRouteDrain>,
+    voice_receive_cookie: Option<crate::voice::VoiceRouteCookie>,
 }
 
 #[derive(Clone)]
@@ -226,6 +240,7 @@ impl UdpLogicalOutbox {
                 generation,
                 packet_log,
                 drained,
+                voice_receive_cookie: None,
             },
         );
         debug_assert!(replaced.is_none());
@@ -557,6 +572,37 @@ impl UdpSharedOutbox {
         result
     }
 
+    fn set_voice_receive_cookie(
+        &self,
+        route: UdpOutboxRouteId,
+        cookie: crate::voice::VoiceRouteCookie,
+    ) {
+        if let Some(state) = self
+            .state
+            .lock()
+            .expect("UDP outbox poisoned")
+            .routes
+            .get_mut(&route)
+            .filter(|state| state.accepting)
+        {
+            state.voice_receive_cookie = Some(cookie);
+        }
+    }
+
+    fn voice_receive_cookie(
+        &self,
+        peer: SocketAddr,
+        generation: u64,
+    ) -> Option<crate::voice::VoiceRouteCookie> {
+        self.state
+            .lock()
+            .expect("UDP outbox poisoned")
+            .routes
+            .values()
+            .find(|route| route.accepting && route.peer == peer && route.generation == generation)
+            .and_then(|route| route.voice_receive_cookie)
+    }
+
     fn enqueue_many(
         &self,
         routes: impl IntoIterator<Item = UdpOutboxRouteId>,
@@ -723,6 +769,12 @@ impl ReliableUdpRouteSender {
             .outbox
             .enqueue(self.lease.route, prepared)
             .map_err(|_| message)
+    }
+
+    pub(crate) fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
+        self.lease
+            .outbox
+            .set_voice_receive_cookie(self.lease.route, cookie);
     }
 
     pub(crate) fn try_send_raw(&self, packet: Vec<u8>) -> Result<(), Vec<u8>> {
@@ -1411,9 +1463,19 @@ impl AsyncWrite for ReliableUdpOwnedPeerStream {
 #[derive(Clone, Debug)]
 pub struct ReliableUdpSessionHandle {
     commands: mpsc::Sender<HubCommand>,
+    voice_media: mpsc::Sender<ReliableUdpVoiceDatagram>,
 }
 
 impl ReliableUdpSessionHandle {
+    pub(crate) fn try_send_voice_media(&self, peer: SocketAddr, payload: Vec<u8>) -> bool {
+        self.voice_media
+            .try_send(ReliableUdpVoiceDatagram {
+                peer: canonical_reliable_udp_peer_address(peer),
+                payload,
+            })
+            .is_ok()
+    }
+
     pub async fn init_puncher(&self, address: SocketAddr, role: NetpuncherRole) -> io::Result<()> {
         let (response, completed) = oneshot::channel();
         self.commands
@@ -1510,8 +1572,10 @@ impl ReliableUdpSessionHandle {
 pub struct ReliableUdpSessionHub {
     local_addr: SocketAddr,
     commands: mpsc::Sender<HubCommand>,
+    voice_media: mpsc::Sender<ReliableUdpVoiceDatagram>,
     incoming: mpsc::Receiver<io::Result<ReliableUdpPeerStream>>,
     puncher_events: Option<mpsc::Receiver<NetpuncherIoEvent>>,
+    voice_media_events: Option<mpsc::Receiver<ReliableUdpVoiceDatagram>>,
     task: Option<JoinHandle<io::Result<()>>>,
     shutdown_requested: bool,
 }
@@ -1539,6 +1603,8 @@ impl ReliableUdpSessionHub {
         let (commands, command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
         let (incoming_tx, incoming) = mpsc::channel(INCOMING_PEER_CAPACITY);
         let (puncher_event_tx, puncher_events) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
+        let (voice_media, voice_media_rx) = mpsc::channel(VOICE_MEDIA_CAPACITY);
+        let (voice_media_event_tx, voice_media_events) = mpsc::channel(VOICE_MEDIA_CAPACITY);
         let outbox = Arc::new(UdpSharedOutbox::default());
         let task_commands = commands.clone();
         let task = runtime.spawn(run_hub(
@@ -1547,13 +1613,19 @@ impl ReliableUdpSessionHub {
             command_rx,
             incoming_tx,
             puncher_event_tx,
+            HubVoiceMedia {
+                outgoing: voice_media_rx,
+                incoming: voice_media_event_tx,
+            },
             outbox,
         ));
         Ok(Self {
             local_addr,
             commands,
+            voice_media,
             incoming,
             puncher_events: Some(puncher_events),
+            voice_media_events: Some(voice_media_events),
             task: Some(task),
             shutdown_requested: false,
         })
@@ -1566,6 +1638,7 @@ impl ReliableUdpSessionHub {
     pub fn handle(&self) -> ReliableUdpSessionHandle {
         ReliableUdpSessionHandle {
             commands: self.commands.clone(),
+            voice_media: self.voice_media.clone(),
         }
     }
 
@@ -1591,6 +1664,12 @@ impl ReliableUdpSessionHub {
         self.puncher_events
             .take()
             .expect("puncher event receiver already taken")
+    }
+
+    pub(crate) fn take_voice_media_receiver(&mut self) -> mpsc::Receiver<ReliableUdpVoiceDatagram> {
+        self.voice_media_events
+            .take()
+            .expect("voice media receiver already taken")
     }
 
     pub async fn connect(&self, peer: SocketAddr) -> io::Result<ReliableUdpPeerStream> {
@@ -1673,6 +1752,7 @@ async fn run_hub(
     mut command_rx: mpsc::Receiver<HubCommand>,
     incoming: mpsc::Sender<io::Result<ReliableUdpPeerStream>>,
     puncher_events: mpsc::Sender<NetpuncherIoEvent>,
+    mut voice_media: HubVoiceMedia,
     outbox: Arc<UdpSharedOutbox>,
 ) -> io::Result<()> {
     // Task cancellation and the hub owner's full-command-queue abort path do
@@ -2051,6 +2131,22 @@ async fn run_hub(
                 let result = driver.process_ready(ready).await;
                 match result {
                     Ok(events) => {
+                        if let Some((peer, payload)) = driver.take_voice_media() {
+                            let peer = canonical_reliable_udp_peer_address(peer);
+                            let authenticated = peers
+                                .get(&peer)
+                                .and_then(|connected| {
+                                    outbox.voice_receive_cookie(peer, connected.generation)
+                                })
+                                .is_some_and(|cookie| {
+                                    crate::voice::voice_datagram_has_cookie(&payload, cookie)
+                                });
+                            if authenticated {
+                                let _ = voice_media
+                                    .incoming
+                                    .try_send(ReliableUdpVoiceDatagram { peer, payload });
+                            }
+                        }
                         dispatch_events(
                             &mut driver,
                             events,
@@ -2070,6 +2166,11 @@ async fn run_hub(
                         let _ = incoming.try_send(Err(io::Error::new(error.kind(), message)));
                         return Err(error);
                     }
+                }
+            }
+            voice = voice_media.outgoing.recv(), if crate::voice::voice_media_may_run(!command_rx.is_empty(), false) => {
+                if let Some(voice) = voice {
+                    let _ = driver.try_send_voice_media(voice.peer, &voice.payload);
                 }
             }
             _ = abandoned_peer_maintenance.tick() => {
@@ -3053,6 +3154,63 @@ mod tests {
         assert_eq!(outgoing.peer_addr(), incoming_hub.local_addr());
         assert_eq!(incoming.peer_addr(), outgoing_hub.local_addr());
         (outgoing_hub, incoming_hub, outgoing, incoming)
+    }
+
+    #[tokio::test]
+    async fn hub_voice_lane_is_bounded_and_bypasses_peer_streams() {
+        let (outgoing_hub, mut incoming_hub, _outgoing, incoming) = connected_pair().await;
+        let mut voice_media = incoming_hub.take_voice_media_receiver();
+        let incoming_route = incoming
+            .outbox_registration()
+            .promote(Arc::new(Mutex::new(crate::RecoverablePacketLog::default())))
+            .await
+            .unwrap();
+        let expected = crate::voice::VoiceRouteCookie::from_bytes(
+            [0x11; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+        );
+        let forged = crate::voice::VoiceRouteCookie::from_bytes(
+            [0x22; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+        );
+        incoming_route.set_voice_receive_cookie(expected);
+        let frame = crate::voice::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap();
+        let forged_packet = crate::voice::encode_authenticated_voice_packet(
+            forged,
+            &crate::voice::VoicePacket::Direct(frame.clone()),
+        )
+        .unwrap();
+        let packet = crate::voice::encode_authenticated_voice_packet(
+            expected,
+            &crate::voice::VoicePacket::Direct(frame),
+        )
+        .unwrap();
+
+        assert!(outgoing_hub
+            .handle()
+            .try_send_voice_media(incoming_hub.local_addr(), forged_packet));
+        assert!(timeout(Duration::from_millis(30), voice_media.recv())
+            .await
+            .is_err());
+
+        assert!(outgoing_hub
+            .handle()
+            .try_send_voice_media(incoming_hub.local_addr(), packet.clone()));
+        assert_eq!(
+            timeout(Duration::from_secs(2), voice_media.recv())
+                .await
+                .unwrap(),
+            Some(ReliableUdpVoiceDatagram {
+                peer: outgoing_hub.local_addr(),
+                payload: packet,
+            })
+        );
+    }
+
+    #[test]
+    fn hub_voice_queue_holds_at_most_160_milliseconds() {
+        assert!(
+            VOICE_MEDIA_CAPACITY * usize::from(crate::VOICE_FRAME_DURATION_MS) <= 160,
+            "each bounded hub stage must hold little encoded speech"
+        );
     }
 
     #[tokio::test]

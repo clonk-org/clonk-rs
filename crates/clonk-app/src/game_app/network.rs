@@ -4462,6 +4462,19 @@ impl GameApp {
                         // src/C4Control.cpp:554-565).
                     }
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
+                        if let Ok(client_id) = i32::try_from(client_id) {
+                            let removed = self.voice_chat.forget_client(client_id);
+                            if let Some(audio) = self.audio.as_ref() {
+                                for (speaker_client_id, player_id) in removed {
+                                    audio.system.remove_voice_stream(
+                                        crate::voice_chat::voice_stream_id(
+                                            speaker_client_id,
+                                            player_id,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         self.forget_pending_runtime_join_client(client_id);
                         let abort_countdown_for_disconnected_client =
                             matches!(self.network_mode, Some(NetworkMode::Host(_)))
@@ -5005,6 +5018,7 @@ impl GameApp {
         self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
+        let voice_enabled = self.voice_chat_enabled();
         let spawn = thread::Builder::new()
             .name("lc-prepare-network-host".to_string())
             .spawn(move || {
@@ -5021,8 +5035,12 @@ impl GameApp {
                             ),
                             prepared: Some(prepared),
                         });
-                        NetworkManager::for_mode(mode.clone(), local_owner)
-                            .map(|manager| (mode, manager))
+                        NetworkManager::for_mode_with_voice_enabled(
+                            mode.clone(),
+                            local_owner,
+                            voice_enabled,
+                        )
+                        .map(|manager| (mode, manager))
                     });
                 let _ = sender.send(result);
             });
@@ -5060,6 +5078,7 @@ impl GameApp {
         self.prepare_network_join_game_state();
         self.startup_game_search = None;
         let local_owner = self.local_owner;
+        let voice_enabled = self.voice_chat_enabled();
         let player_name = self.player_name.clone();
         let app_paths = self.app_paths.clone();
         let group_maker = self
@@ -5081,8 +5100,13 @@ impl GameApp {
                 settings.group_maker = group_maker;
             }
             let mode = NetworkMode::Client(settings.clone());
-            NetworkManager::for_client_cancellable(settings, local_owner, cancellation)
-                .map(|manager| (mode, manager))
+            NetworkManager::for_client_cancellable_with_voice_enabled(
+                settings,
+                local_owner,
+                cancellation,
+                voice_enabled,
+            )
+            .map(|manager| (mode, manager))
         });
         match spawn {
             Ok((receiver, attempt)) => {
@@ -5180,10 +5204,16 @@ impl GameApp {
             StartupJoinTarget::Game(settings.game_name.clone())
         };
         let local_owner = self.local_owner;
+        let voice_enabled = self.voice_chat_enabled();
         let spawn = spawn_startup_network_attempt("lc-startup-network", move |cancellation| {
             let mode = NetworkMode::Client(settings.clone());
-            NetworkManager::for_client_cancellable(settings, local_owner, cancellation)
-                .map(|manager| (mode, manager))
+            NetworkManager::for_client_cancellable_with_voice_enabled(
+                settings,
+                local_owner,
+                cancellation,
+                voice_enabled,
+            )
+            .map(|manager| (mode, manager))
         });
         match spawn {
             Ok((receiver, attempt)) => {

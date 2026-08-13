@@ -2,6 +2,146 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
 #[test]
+fn push_to_talk_key_falls_through_outside_a_running_game() {
+    let mut app = new_classic_running_sandbox_app();
+    app.audio.test_mut().options.voice_enabled = true;
+    app.mode = AppMode::Menu;
+
+    assert!(!app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed));
+}
+
+#[test]
+fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
+    use std::cell::RefCell;
+
+    struct TestVoiceSource {
+        frames: RefCell<Vec<clonk_audio::EncodedVoiceFrame>>,
+    }
+
+    impl crate::voice_chat::VoiceFrameSource for TestVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::EncodedVoiceFrame> {
+            std::mem::take(&mut *self.frames.borrow_mut())
+        }
+    }
+
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    let local_player = app.local_owner;
+    app.engine
+        .test_player_mut(local_player)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    let local_cursor = app
+        .engine
+        .player(local_player)
+        .and_then(|player| player.cursor())
+        .test_value();
+
+    let remote_client = 3;
+    let remote_player = 17;
+    app.engine
+        .register_player(PlayerConfig::new(remote_player, "Remote"))
+        .test_value();
+    app.engine
+        .test_player_mut(remote_player)
+        .set_at_client(clonk_engine::PlayerAtClient::new(remote_client));
+    let remote_container = app.engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(remote_player)
+            .with_position(Vector2::new(160, 100)),
+    );
+    let remote_cursor = app.engine.spawn_test_object(
+        SpawnConfig::new("CLNK")
+            .with_owner(remote_player)
+            .with_container(remote_container),
+    );
+    app.engine
+        .test_player_mut(remote_player)
+        .set_cursor(Some(remote_cursor));
+    app.snapshot = app.engine.snapshot();
+    assert_eq!(
+        app.snapshot
+            .object(remote_cursor)
+            .and_then(|object| object.container),
+        Some(remote_container),
+        "the runtime seam exercises a speaking selected crew inside a container",
+    );
+
+    let (manager, _events, mut voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    app.audio.test_mut().options.voice_enabled = true;
+    let captured = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
+        Ok(TestVoiceSource {
+            frames: RefCell::new(vec![captured]),
+        })
+    });
+
+    app.handle_key(VirtualKeyCode::Backquote, ElementState::Pressed)
+        .test_value();
+    assert!(app.voice_chat.capture_active());
+    assert!(app.key_event_suppresses_text);
+    app.update_voice_chat();
+
+    let outbound = voice.try_recv_outbound().test_value();
+    assert_eq!(outbound.player_id, local_player);
+    assert_eq!(outbound.stream_epoch, 1);
+    assert_eq!(outbound.sequence, 0);
+    let local_activity = app.voice_chat.active_speakers(Instant::now());
+    assert!(local_activity.contains(&(local_client, local_player)));
+    assert_eq!(
+        collect_speaking_overlay_objects(&app.snapshot, &local_activity),
+        vec![local_cursor],
+    );
+
+    app.window_active = false;
+    app.handle_focus_lost().test_value();
+    assert!(
+        !app.voice_chat.capture_active(),
+        "focus loss must close an active push-to-talk capture",
+    );
+
+    let inbound = clonk_network::VoiceFrame {
+        client_id: remote_client as u32,
+        player_id: remote_player,
+        stream_epoch: 4,
+        sequence: 0,
+        payload: clonk_audio::encode_voice_frame(&[2_000; clonk_audio::VOICE_FRAME_SAMPLES])
+            .to_vec(),
+    };
+    voice.send_inbound(inbound).test_value();
+    app.update_voice_chat();
+
+    let stream_id = crate::voice_chat::voice_stream_id(remote_client, remote_player);
+    assert_eq!(
+        app.audio.test_ref().system.voice_stream_stats(stream_id),
+        clonk_audio::VoiceStreamStats {
+            queued_frames: 1,
+            dropped_stale_frames: 0,
+        },
+    );
+    let remote_activity = app.voice_chat.active_speakers(Instant::now());
+    assert!(remote_activity.contains(&(remote_client, remote_player)));
+    assert!(
+        collect_speaking_overlay_objects(&app.snapshot, &remote_activity).contains(&remote_cursor)
+    );
+
+    app.audio.test_mut().options.voice_enabled = false;
+    app.update_voice_chat();
+    assert_eq!(
+        app.audio.test_ref().system.voice_stream_stats(stream_id),
+        clonk_audio::VoiceStreamStats::default(),
+        "disabling voice live must remove buffered remote playback",
+    );
+    assert!(
+        !app.voice_chat
+            .active_speakers(Instant::now())
+            .contains(&(remote_client, remote_player)),
+        "disabling voice live must clear remote speaking activity",
+    );
+}
+
+#[test]
 fn direct_runtime_repairs_urls_truncated_by_the_old_rust_parser() {
     // C++ defaults both fields to the complete HTTPS URL
     // (C4Config.h:35-38; C4Config.cpp:545-550). The old Rust parser

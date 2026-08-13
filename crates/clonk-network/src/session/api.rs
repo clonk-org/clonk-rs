@@ -11,6 +11,9 @@ pub(crate) const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5)
 pub(crate) const CONTROL_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const CLIENT_BACKLOG_LIMIT: usize = 256;
 pub(crate) const CLIENT_MESH_PENDING_LIMIT: usize = 64;
+/// At 50 frames/s, no application-facing media stage can queue more than
+/// 160 ms of encoded speech while control traffic preempts it.
+pub(crate) const VOICE_APP_CHANNEL_CAPACITY: usize = 8;
 #[cfg(test)]
 pub(crate) const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
 pub(crate) const HOST_CLIENT_ID: ClientId = 0;
@@ -348,6 +351,9 @@ pub struct HostConfig {
     /// bound host transport. Direct API callers opt in explicitly; the app
     /// applies the stock `Config.Network.EnableUPnP` default.
     pub enable_upnp: bool,
+    /// Enables the negotiated Rust voice-media extension on UDP routes.
+    /// Peers that do not opt in remain compatible with the stock C++ protocol.
+    pub voice_enabled: bool,
     pub initial_join_snapshot: Option<HostJoinSnapshot>,
     /// Resources in C++ publication order. `ResourceCatalog::register`
     /// prepends each entry, reproducing the linked-list discovery order.
@@ -414,6 +420,7 @@ impl Default for HostConfig {
             configured_tcp_port: None,
             configured_udp_port: None,
             enable_upnp: false,
+            voice_enabled: true,
             initial_join_snapshot: Some(synthetic_join_snapshot(local_core, 8)),
             resource_registrations: Vec::new(),
             resource_directory: None,
@@ -459,6 +466,8 @@ pub struct ClientConfig {
     pub mesh_udp_bind_address: Option<SocketAddr>,
     /// Resolved per-family netpuncher endpoints advertised by the host.
     pub mesh_punchers: Vec<ClientMeshPuncherConfig>,
+    /// Enables the negotiated Rust voice-media extension on UDP routes.
+    pub voice_enabled: bool,
 }
 
 impl ClientConfig {
@@ -480,6 +489,7 @@ impl ClientConfig {
             mesh_tcp_bind_address: None,
             mesh_udp_bind_address: None,
             mesh_punchers: Vec::new(),
+            voice_enabled: true,
         }
     }
 
@@ -490,6 +500,11 @@ impl ClientConfig {
 
     pub fn with_compatibility_build(mut self, build: i32) -> Self {
         self.compatibility_build = build;
+        self
+    }
+
+    pub fn with_voice_enabled(mut self, enabled: bool) -> Self {
+        self.voice_enabled = enabled;
         self
     }
 
@@ -909,6 +924,8 @@ pub struct HostHandle {
     pub(crate) command_tx: mpsc::Sender<HostCommand>,
     pub(crate) control_send_time: ControlSendTimeSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<HostEvent>>,
+    pub(crate) voice_sender: crate::VoiceSender,
+    pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
     pub(crate) udp_local_addr: Option<SocketAddr>,
@@ -916,6 +933,35 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
+    /// Queues one media frame without waiting. Congestion drops at this
+    /// bounded application seam instead of delaying lockstep traffic.
+    pub fn try_send_voice(&self, frame: crate::VoiceFrame) -> Result<(), crate::VoiceSendError> {
+        self.voice_sender.try_send(frame)
+    }
+
+    pub fn voice_sender(&self) -> crate::VoiceSender {
+        self.voice_sender.clone()
+    }
+
+    pub fn voice_available(&self) -> bool {
+        self.voice_sender.is_available()
+    }
+
+    /// Polls one authenticated inbound frame without blocking.
+    pub fn poll_voice_frame(&mut self) -> Option<crate::VoiceFrame> {
+        self.voice_event_rx
+            .as_mut()
+            .expect("host voice receiver already taken")
+            .try_recv()
+            .ok()
+    }
+
+    pub fn take_voice_receiver(&mut self) -> mpsc::Receiver<crate::VoiceFrame> {
+        self.voice_event_rx
+            .take()
+            .expect("host voice receiver already taken")
+    }
+
     pub fn udp_local_addr(&self) -> Option<SocketAddr> {
         self.udp_local_addr
     }
@@ -1614,6 +1660,8 @@ pub struct ClientHandle {
     pub(crate) command_tx: mpsc::Sender<ClientCommand>,
     pub(crate) control_send_time: ControlSendTimeSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<ClientEvent>>,
+    pub(crate) voice_sender: crate::VoiceSender,
+    pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
     pub(crate) client_id: ClientId,
@@ -1622,6 +1670,35 @@ pub struct ClientHandle {
 }
 
 impl ClientHandle {
+    /// Queues one media frame without waiting. Congestion drops at this
+    /// bounded application seam instead of delaying lockstep traffic.
+    pub fn try_send_voice(&self, frame: crate::VoiceFrame) -> Result<(), crate::VoiceSendError> {
+        self.voice_sender.try_send(frame)
+    }
+
+    pub fn voice_sender(&self) -> crate::VoiceSender {
+        self.voice_sender.clone()
+    }
+
+    pub fn voice_available(&self) -> bool {
+        self.voice_sender.is_available()
+    }
+
+    /// Polls one authenticated inbound frame without blocking.
+    pub fn poll_voice_frame(&mut self) -> Option<crate::VoiceFrame> {
+        self.voice_event_rx
+            .as_mut()
+            .expect("client voice receiver already taken")
+            .try_recv()
+            .ok()
+    }
+
+    pub fn take_voice_receiver(&mut self) -> mpsc::Receiver<crate::VoiceFrame> {
+        self.voice_event_rx
+            .take()
+            .expect("client voice receiver already taken")
+    }
+
     pub fn io_statistics(&self) -> crate::NetworkIoStatistics {
         self.io_statistics.clone()
     }

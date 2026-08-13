@@ -856,6 +856,7 @@ pub struct ReliableUdpSocketDriver {
     statistics_topology_epoch: u64,
     started_at: Instant,
     receive_buffer: Vec<u8>,
+    pending_voice_media: Option<(SocketAddr, Vec<u8>)>,
     protocol_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
     last_send: Option<ReliableUdpLastSend>,
     socket_writability_established: bool,
@@ -1060,6 +1061,7 @@ impl ReliableUdpSocketDriver {
             statistics_topology_epoch: 0,
             started_at,
             receive_buffer: vec![0; u16::MAX as usize + 1],
+            pending_voice_media: None,
             protocol_timer: None,
             last_send: None,
             socket_writability_established: false,
@@ -1282,6 +1284,43 @@ impl ReliableUdpSocketDriver {
         Ok(self.finish_step(step).await?)
     }
 
+    /// Attempts one raw media datagram without entering reliable ordering,
+    /// retransmission, or recovery storage. A full OS send buffer drops the
+    /// frame and reports `false`; it never stalls the shared socket task.
+    pub(crate) fn try_send_voice_media(
+        &mut self,
+        peer: SocketAddr,
+        payload: &[u8],
+    ) -> io::Result<bool> {
+        if !crate::voice::is_voice_media_datagram(payload)
+            || payload.len() > crate::voice::MAX_VOICE_WIRE_BYTES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid voice media datagram",
+            ));
+        }
+        let peer = canonical_reliable_udp_peer_address(peer);
+        if self.core.peer_status(peer) != Some(ReliableUdpPeerStatus::Working) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!("reliable-UDP peer {peer} is not connected"),
+            ));
+        }
+        let destination = self.socket_destination(peer)?;
+        self.last_send = Some(ReliableUdpLastSend::BestEffort);
+        self.record_peer_output(peer, payload.len());
+        match self.socket.try_send_to(payload, destination) {
+            Ok(length) => Ok(length == payload.len()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn take_voice_media(&mut self) -> Option<(SocketAddr, Vec<u8>)> {
+        self.pending_voice_media.take()
+    }
+
     /// Waits without mutating protocol state. This half of `poll` is safe to
     /// cancel from an outer `select!`: Tokio's UDP receive leaves the datagram
     /// queued unless it completes and this future returns it to the caller.
@@ -1323,11 +1362,32 @@ impl ReliableUdpSocketDriver {
         let received_datagram = matches!(ready, ReliableUdpPollReady::Datagram(_, _));
         let mut step = match ready {
             ReliableUdpPollReady::Datagram(length, source) => {
-                if reliable_udp_peer_input_is_accounted(&self.receive_buffer[..length]) {
-                    self.record_peer_input(source, length);
+                let is_voice_media =
+                    crate::voice::is_voice_media_datagram(&self.receive_buffer[..length]);
+                if is_voice_media {
+                    let step = ReliableUdpStep::default();
+                    if length <= crate::voice::MAX_VOICE_WIRE_BYTES
+                        && self.core.peer_status(source) == Some(ReliableUdpPeerStatus::Working)
+                        && self.punchers.find(source).is_none()
+                    {
+                        let payload = self.receive_buffer[..length].to_vec();
+                        let peer = self
+                            .core
+                            .peer_key(source)
+                            .unwrap_or_else(|| canonical_reliable_udp_peer_address(source));
+                        self.record_peer_input(peer, length);
+                        self.pending_voice_media = Some((peer, payload));
+                    }
+                    step
+                } else {
+                    let accounted =
+                        reliable_udp_peer_input_is_accounted(&self.receive_buffer[..length]);
+                    if accounted {
+                        self.record_peer_input(source, length);
+                    }
+                    self.core
+                        .receive_at(source, &self.receive_buffer[..length], now)
                 }
-                self.core
-                    .receive_at(source, &self.receive_buffer[..length], now)
             }
             ReliableUdpPollReady::Timer => self.core.timer_at(now),
             ReliableUdpPollReady::SocketError(error) => {
@@ -3187,6 +3247,73 @@ mod tests {
         let udp = statistics.protocol_statistics(crate::NetworkProtocol::Udp);
         assert!(udp.input_rate > 0);
         assert!(udp.output_rate > 0);
+    }
+
+    #[tokio::test]
+    async fn voice_media_bypasses_reliable_receive_accounting() {
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+        let mut driver = ReliableUdpSocketDriver::bind(wildcard).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let spy_address = spy.local_addr().unwrap();
+        let driver_address = connect_spy(&mut driver, &spy).await;
+        let voice = crate::voice::encode_voice_packet(&crate::voice::VoicePacket::Direct(
+            crate::voice::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap(),
+        ))
+        .unwrap();
+        let peer_key = driver.core.peer_key(spy_address).unwrap();
+        let receive_packet_number = driver.core.peers[&peer_key]
+            .receive_window
+            .next_expected_packet_number();
+
+        spy.send_to(&voice, driver_address).await.unwrap();
+        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        assert_eq!(driver.take_voice_media(), Some((spy_address, voice)));
+        assert_eq!(
+            driver.core.peers[&peer_key]
+                .receive_window
+                .next_expected_packet_number(),
+            receive_packet_number,
+            "media must not enter the reliable receive window"
+        );
+
+        let mut oversized = vec![0_u8; crate::voice::MAX_VOICE_WIRE_BYTES + 1];
+        oversized[..crate::voice::VOICE_MEDIA_PREFIX.len()]
+            .copy_from_slice(crate::voice::VOICE_MEDIA_PREFIX);
+        spy.send_to(&oversized, driver_address).await.unwrap();
+        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        assert_eq!(driver.take_voice_media(), None);
+    }
+
+    #[tokio::test]
+    async fn voice_media_send_is_one_best_effort_udp_datagram() {
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+        let mut driver = ReliableUdpSocketDriver::bind(wildcard).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let spy_address = spy.local_addr().unwrap();
+        connect_spy(&mut driver, &spy).await;
+        let voice = crate::voice::encode_voice_packet(&crate::voice::VoicePacket::Direct(
+            crate::voice::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap(),
+        ))
+        .unwrap();
+        let reliable_packets = driver.core().outgoing_packet_count(spy_address);
+
+        assert!(driver.try_send_voice_media(spy_address, &voice).unwrap());
+        let mut received = [0_u8; 512];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut received))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&received[..length], voice);
+        assert_eq!(
+            driver.core().outgoing_packet_count(spy_address),
+            reliable_packets,
+            "media must not enter retransmission or postmortem storage"
+        );
     }
 
     #[tokio::test]

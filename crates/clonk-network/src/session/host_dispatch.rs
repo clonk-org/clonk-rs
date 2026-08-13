@@ -25,10 +25,18 @@ pub(crate) async fn handle_client_message(
             state
                 .peer_capabilities
                 .record(client_id as i32, capabilities);
-            if let Some(route) = state.accepted_routes.get(&connection_id) {
-                let _ = route.outbound.try_send(ControlMessage::PortCapabilities(
-                    crate::PortCapabilities::supported(),
-                ));
+            if let Some(route) = state.accepted_routes.get_mut(&connection_id) {
+                if state.config.voice_enabled && route.protocol == crate::NetworkProtocol::Udp {
+                    route.voice_auth.record_peer_capabilities(capabilities);
+                }
+                let announcement = if state.config.voice_enabled {
+                    route.voice_auth.announcement().unwrap_or_default()
+                } else {
+                    crate::PortCapabilities::default()
+                };
+                let _ = route
+                    .outbound
+                    .try_send(ControlMessage::PortCapabilities(announcement));
             }
         }
         // Only the host restarts a session. A client claiming to is either
@@ -594,6 +602,17 @@ pub(crate) async fn handle_client_disconnected(
     if disconnected_route.is_none() {
         return;
     }
+    if disconnected_route
+        .as_ref()
+        .is_some_and(|route| route.protocol == crate::NetworkProtocol::Udp)
+        && !state.accepted_routes.values().any(|route| {
+            route.client_id == client_id && route.protocol == crate::NetworkProtocol::Udp
+        })
+    {
+        state
+            .peer_capabilities
+            .clear(client_id as i32, crate::PortCapabilities::VOICE_CHAT);
+    }
     state.invalidate_control_send_time();
     #[cfg(test)]
     notify_accepted_route_waiters(state);
@@ -646,6 +665,7 @@ pub(crate) async fn handle_client_disconnected(
         protocol: _protocol,
         outbound: _outbound,
         ping: _,
+        voice_auth: _,
     }) = disconnected_route
     {
         debug_assert_eq!(route_client_id, client_id);
@@ -694,6 +714,7 @@ pub(crate) async fn handle_client_disconnected(
         }
         return;
     }
+    state.peer_capabilities.forget(client_id as i32);
     mark_client_removing(client_id, state);
     let disconnected = state.clients.remove(&client_id);
     let removed_logical_client = disconnected.is_some();
@@ -1552,6 +1573,7 @@ async fn apply_host_membership_controls(
 }
 
 async fn close_removed_client_connections(client_id: ClientId, state: &mut HostState) {
+    state.peer_capabilities.forget(client_id as i32);
     let routes = state
         .accepted_routes
         .iter()

@@ -479,6 +479,23 @@ fn sound(config: &Config) -> AdvancedConfigSection {
     )
 }
 
+fn voice(config: &Config) -> AdvancedConfigSection {
+    let section = "Voice";
+    let default_push_to_talk =
+        crate::input::encode_virtual_key_code(winit::keyboard::KeyCode::Backquote)
+            .expect("backquote has a native key code");
+    AdvancedConfigSection::new(
+        section,
+        vec![
+            // Port-only extension: LegacyClonk has no microphone or voice
+            // settings. Keep it separate from the pixel-exact Sound sheet.
+            bool_row(config, section, "Enabled", false),
+            int_row(config, section, "Volume", 100, 0, 100),
+            i32_row(config, section, "PushToTalkKey", default_push_to_talk),
+        ],
+    )
+}
+
 fn network(config: &Config) -> AdvancedConfigSection {
     let section = "Network";
     AdvancedConfigSection::new(
@@ -621,6 +638,7 @@ pub fn sections(config: &Config) -> Vec<AdvancedConfigSection> {
     sections.extend((0..4).map(|index| gamepad(config, index)));
     sections.push(graphics(config));
     sections.push(sound(config));
+    sections.push(voice(config));
     sections.push(network(config));
     sections.extend(simple_sections(config));
     sections
@@ -743,6 +761,32 @@ mod tests {
             controller.value("General", "Version"),
             Some(&AdvancedConfigValue::ReadOnly("999".to_string()))
         );
+    }
+
+    #[test]
+    fn schema_exposes_voice_as_a_port_only_section() {
+        let controller = AdvancedConfigController::new(sections(&Config::new()));
+
+        assert_eq!(
+            controller.value("Voice", "Enabled"),
+            Some(&AdvancedConfigValue::Bool(false))
+        );
+        assert!(matches!(
+            controller.value("Voice", "Volume"),
+            Some(AdvancedConfigValue::Integer {
+                value: 100,
+                min: 0,
+                max: 100,
+            })
+        ));
+        assert!(matches!(
+            controller.value("Voice", "PushToTalkKey"),
+            Some(AdvancedConfigValue::Integer { value, .. })
+                if *value == i128::from(
+                    crate::input::encode_virtual_key_code(winit::keyboard::KeyCode::Backquote)
+                        .expect("backquote has a native key code")
+                )
+        ));
     }
 
     #[test]

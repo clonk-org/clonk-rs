@@ -574,6 +574,7 @@ impl GameApp {
         self.poll_live_masterserver_signup()?;
         self.poll_league_player_auth()?;
         self.process_network_events()?;
+        self.update_voice_chat();
         self.poll_blocking_resource_wait_at(Instant::now())?;
         // C4Network2::Execute probes the runtime status target before
         // Control.Prepare on every attempted frame, including halted frames.

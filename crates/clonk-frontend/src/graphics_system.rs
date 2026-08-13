@@ -660,6 +660,7 @@ pub struct GraphicsSystem {
     /// Per-player HUD state fed by [`Self::update_overlay`].
     pub(crate) hud_players: Vec<PlayerOverlay>,
     crew_name_labels: Vec<CrewNameOverlay>,
+    speaking: SpeakingOverlay,
     /// The two native film-replay gates in `C4Viewport::Draw` and
     /// `C4Viewport::DrawOverlay` (src/C4Viewport.cpp:838-881,1088).
     pub(crate) viewport_overlays_visible: bool,
@@ -836,6 +837,7 @@ impl GraphicsSystem {
             scenario_label_text: scenario_label.to_string(),
             hud_players: Vec::new(),
             crew_name_labels: Vec::new(),
+            speaking: SpeakingOverlay::default(),
             viewport_overlays_visible: true,
             game_time_seconds: 0,
             message_board: MessageBoardOverlay::default(),
@@ -2523,6 +2525,7 @@ impl GraphicsSystem {
     pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) {
         self.hud_players = overlay.players.clone();
         self.crew_name_labels = overlay.crew_name_labels.clone();
+        self.speaking = overlay.speaking.clone();
         self.viewport_overlays_visible = overlay.viewport_overlays_visible;
         self.game_time_seconds = overlay.game_time_seconds;
         self.message_board = overlay.message_board.clone();
@@ -3559,6 +3562,7 @@ impl GraphicsSystem {
                     self.draw_player_cursors(snapshot, player.id, origin_x, origin_y, zoom, gamma);
                 }
             }
+            self.draw_speaking_indicators(snapshot, input.owner, zoom, gamma);
         }
         // C4Viewport disables ClrModMap after world cursors and before the
         // custom parallax GUI/overlay pass.
@@ -9316,6 +9320,115 @@ impl GraphicsSystem {
             * inverse_scale;
         let size = cell as f32 * inverse_scale;
         GuiRect::from_origin_size(GuiPoint::new(x, y), GuiSize::new(size, size))
+    }
+
+    fn draw_speaking_indicators(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        for_player: i32,
+        zoom: f32,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        const GUI_ICON_CELL: i32 = 40;
+        // `C4GUI::Icons::Ico_Sound` (src/C4Gui.h:701).
+        const SOUND_PHASE: i32 = 23;
+        const INDICATOR_SIZE: f32 = 20.0;
+        const HEAD_GAP: f32 = 2.0;
+
+        let Some(gui_icons) = self.speaking.gui_icons.clone() else {
+            return;
+        };
+        let columns = gui_icons.width() as i32 / GUI_ICON_CELL;
+        if columns <= 0 {
+            return;
+        }
+        let source = SourceRect::new(
+            SOUND_PHASE % columns * GUI_ICON_CELL,
+            SOUND_PHASE / columns * GUI_ICON_CELL,
+            GUI_ICON_CELL,
+            GUI_ICON_CELL,
+        );
+        if !Self::source_within_image(&gui_icons, &source) {
+            return;
+        }
+
+        let object_ids = self.speaking.object_ids.clone();
+        for object_id in object_ids {
+            let Some(object) = snapshot.object(object_id) else {
+                continue;
+            };
+            if object.status != ObjectStatus::Normal
+                || object.ocf & clonk_engine::ocf::CREW_MEMBER == 0
+                || !Self::speaking_subject_is_visible(snapshot, object, for_player)
+                || self.object_output_bounds_culled(object)
+            {
+                continue;
+            }
+
+            let (definition_id, graphics_name) = object_base_sprite_request(object);
+            let shape_height = sprite_with_fallback(
+                self.object_sprites.as_ref(),
+                definition_id,
+                graphics_name,
+                &object.definition_id,
+            )
+            .map(|sprite| Self::sprite_def_shape(sprite).height as f32)
+            .unwrap_or(12.0)
+            .max(1.0);
+            let (target_x, target_y) = self.object_target_position(object);
+            let screen_x = (object.position.x as f32 - target_x) * zoom;
+            let screen_y = (object.position.y as f32 - target_y) * zoom;
+            let rect = GuiRect::from_origin_size(
+                GuiPoint::new(
+                    screen_x - INDICATOR_SIZE / 2.0,
+                    screen_y - shape_height * zoom / 2.0 - INDICATOR_SIZE - HEAD_GAP,
+                ),
+                GuiSize::new(INDICATOR_SIZE, INDICATOR_SIZE),
+            );
+            let fog = self.fog_draw_context();
+            draw_image_region(
+                &mut self.surface,
+                &rect,
+                &gui_icons,
+                None,
+                &source,
+                false,
+                None,
+                SpriteBlitState::normal().with_renderer_config(self.advanced_renderer_config),
+                gamma,
+                fog.as_ref(),
+            );
+        }
+    }
+
+    fn speaking_subject_is_visible(
+        snapshot: &SimulationSnapshot,
+        subject: &ObjectSnapshot,
+        for_player: i32,
+    ) -> bool {
+        let mut seen = HashSet::new();
+        let mut object = subject;
+        loop {
+            if object.status != ObjectStatus::Normal
+                || !seen.insert(object.id)
+                || !Self::object_is_visible(
+                    &snapshot.objects,
+                    &snapshot.players,
+                    object,
+                    for_player,
+                    false,
+                )
+            {
+                return false;
+            }
+            let Some(container_id) = object.container else {
+                return true;
+            };
+            let Some(container) = snapshot.object(container_id) else {
+                return false;
+            };
+            object = container;
+        }
     }
 
     /// `C4Game::DrawCursors` (src/C4Game.cpp:1852-1874): while a player's

@@ -1992,6 +1992,30 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
         .point_filtering());
 }
 
+#[test]
+fn runtime_advanced_voice_opt_in_retries_a_missing_audio_context() {
+    let _lock = env_lock().lock();
+    let fixture = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+    fs::write(
+        paths.config_file(),
+        b"[Sound]\nSound=false\nMusic=false\nMenuMusic=false\nMenuSound=false\n[Voice]\nEnabled=true\n",
+    )
+    .test_value();
+
+    let mut app = new_state_only_running_sandbox_app();
+    app.app_paths = Some(paths);
+    app.audio = None;
+    app.synchronize_advanced_options_runtime();
+
+    assert!(
+        app.audio
+            .as_ref()
+            .is_some_and(|audio| audio.options.voice_enabled),
+        "saving Advanced Voice.Enabled must not require an application restart",
+    );
+}
+
 fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
     let file = File::open(path).test_value();
     let decoder = png::Decoder::new(io::BufReader::new(file));
@@ -2493,7 +2517,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     assert_eq!(controller.labels().caption, "Erweiterte Einstellungen");
     assert_eq!(controller.labels().save, "&Speichern");
     assert_eq!(controller.labels().cancel, "Abbrechen");
-    assert_eq!(controller.sections().len(), 16);
+    assert_eq!(controller.sections().len(), 17);
     assert_eq!(
         controller
             .sections()
@@ -2509,6 +2533,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
             "Gamepad3",
             "Graphics",
             "Sound",
+            "Voice",
             "Network",
             "Lobby",
             "IRC",

@@ -37,7 +37,10 @@ pub const PORT_CAPABILITY_VERSION: u16 = 1;
 /// independently, and two builds of the port may support overlapping but
 /// non-identical sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PortCapabilities(u32);
+pub struct PortCapabilities {
+    bits: u32,
+    voice_cookie: Option<crate::voice::VoiceRouteCookie>,
+}
 
 impl PortCapabilities {
     /// Control carried on its own logical channel, so bulk resource fragments
@@ -48,30 +51,44 @@ impl PortCapabilities {
     pub const INBAND_REDUNDANCY: u32 = 1 << 1;
     /// A tick with no input may be omitted rather than sent empty.
     pub const ELIDED_EMPTY_CONTROL: u32 = 1 << 2;
+    /// Best-effort voice media carried outside reliable packet accounting.
+    pub const VOICE_CHAT: u32 = 1 << 3;
 
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
-        // Deliberately empty until each feature actually lands. Announcing a
-        // capability before implementing it would be a promise to a peer that
-        // this build cannot keep.
-        Self(0)
+        Self::from_bits(Self::VOICE_CHAT)
     }
 
     pub fn from_bits(bits: u32) -> Self {
-        Self(bits)
+        Self {
+            bits,
+            voice_cookie: None,
+        }
     }
 
     pub fn bits(self) -> u32 {
-        self.0
+        self.bits
     }
 
     pub fn has(self, capability: u32) -> bool {
-        self.0 & capability == capability
+        self.bits & capability == capability
     }
 
     /// What both ends can do — the only set that may actually be used.
     pub fn agreed_with(self, peer: Self) -> Self {
-        Self(self.0 & peer.0)
+        Self::from_bits(self.bits & peer.bits)
+    }
+
+    pub(crate) fn with_voice_cookie(
+        mut self,
+        voice_cookie: crate::voice::VoiceRouteCookie,
+    ) -> Self {
+        self.voice_cookie = Some(voice_cookie);
+        self
+    }
+
+    pub(crate) fn voice_cookie(self) -> Option<crate::voice::VoiceRouteCookie> {
+        self.voice_cookie
     }
 }
 
@@ -81,6 +98,9 @@ pub fn encode_port_capabilities(capabilities: PortCapabilities) -> Vec<u8> {
     let mut wire = vec![PID_PORT_CAPABILITIES];
     wire.extend_from_slice(&PORT_CAPABILITY_VERSION.to_le_bytes());
     wire.extend_from_slice(&capabilities.bits().to_le_bytes());
+    if let Some(cookie) = capabilities.voice_cookie() {
+        wire.extend_from_slice(&cookie.into_bytes());
+    }
     wire
 }
 
@@ -93,7 +113,11 @@ pub fn decode_port_capabilities(wire: &[u8]) -> Option<PortCapabilities> {
         return None;
     }
     let bits = u32::from_le_bytes(wire.get(3..7)?.try_into().ok()?);
-    Some(PortCapabilities::from_bits(bits))
+    let voice_cookie = wire
+        .get(7..7 + crate::voice::VOICE_ROUTE_COOKIE_BYTES)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(crate::voice::VoiceRouteCookie::from_bytes);
+    Some(PortCapabilities { bits, voice_cookie })
 }
 
 /// What each connected peer announced.
@@ -107,11 +131,18 @@ pub struct PeerCapabilityRegistry {
 
 impl PeerCapabilityRegistry {
     pub fn record(&mut self, client_id: i32, capabilities: PortCapabilities) {
-        self.peers.insert(client_id, capabilities);
+        self.peers
+            .insert(client_id, PortCapabilities::from_bits(capabilities.bits()));
     }
 
     pub fn forget(&mut self, client_id: i32) {
         self.peers.remove(&client_id);
+    }
+
+    pub fn clear(&mut self, client_id: i32, capability: u32) {
+        if let Some(capabilities) = self.peers.get_mut(&client_id) {
+            capabilities.bits &= !capability;
+        }
     }
 
     pub fn of(&self, client_id: i32) -> PortCapabilities {
@@ -236,8 +267,39 @@ mod tests {
         // this build cannot keep, and the peer would encode for it.
         assert_eq!(
             PortCapabilities::supported().bits(),
-            0,
-            "no Tier 2 feature has landed yet"
+            PortCapabilities::VOICE_CHAT,
+            "voice media is the only implemented extension"
+        );
+    }
+
+    #[test]
+    fn this_build_negotiates_voice_chat_only_with_an_announcing_peer() {
+        let mut peers = PeerCapabilityRegistry::default();
+        peers.record(4, PortCapabilities::from_bits(PortCapabilities::VOICE_CHAT));
+
+        assert!(peers.peer_supports(4, PortCapabilities::VOICE_CHAT));
+        assert!(!peers.peer_supports(5, PortCapabilities::VOICE_CHAT));
+
+        peers.clear(4, PortCapabilities::VOICE_CHAT);
+        assert!(!peers.peer_supports(4, PortCapabilities::VOICE_CHAT));
+    }
+
+    #[test]
+    fn capability_announcement_carries_a_route_local_voice_cookie() {
+        let cookie = crate::voice::VoiceRouteCookie::from_bytes(
+            [0x6d; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+        );
+        let announcement = PortCapabilities::supported().with_voice_cookie(cookie);
+        let wire = encode_port_capabilities(announcement);
+
+        assert_eq!(
+            decode_port_capabilities(&wire).and_then(PortCapabilities::voice_cookie),
+            Some(cookie)
+        );
+        assert_eq!(
+            wire.len(),
+            7 + crate::voice::VOICE_ROUTE_COOKIE_BYTES,
+            "the legacy version-and-bit prefix stays byte-compatible"
         );
     }
 }

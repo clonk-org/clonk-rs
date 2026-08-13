@@ -51,6 +51,7 @@ mod udp;
 mod udp_runtime;
 mod udp_session;
 mod upnp;
+mod voice;
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, decode_tcp_sim_open_packet_payload,
@@ -302,6 +303,10 @@ pub use udp_runtime::{
 pub use udp_session::{
     ReliableUdpOwnedPeerStream, ReliableUdpPeerStream, ReliableUdpSessionHandle,
     ReliableUdpSessionHub,
+};
+pub use voice::{
+    VoiceCodecError, VoiceFrame, VoiceSendError, VoiceSender, MAX_VOICE_PAYLOAD_BYTES,
+    VOICE_FRAME_DURATION_MS,
 };
 
 pub type ClientId = u32;
