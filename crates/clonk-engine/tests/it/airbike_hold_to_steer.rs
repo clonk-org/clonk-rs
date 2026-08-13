@@ -15,6 +15,9 @@ const STEERING_APPEND: &str = "EkeAirbikeSteering.c";
 
 /// One whole pixel per frame in `C4Fixed` raw units.
 const FIXED_ONE: i32 = 1 << 16;
+/// `FloatAccel = FIXED100(10)` (oracle C4Movement.cpp:33). `FIXED100` divides
+/// in integer arithmetic, so this is 6553 raw, not 6553.6.
+const FLOAT_ACCEL_RAW: i32 = 10 * FIXED_ONE / 100;
 
 fn join_pilot(engine: &mut Engine, auto_stop: bool) -> i32 {
     engine
@@ -126,6 +129,44 @@ fn seated(engine: &mut Engine, auto_stop: bool) -> Ride {
     Ride { owner, airbike }
 }
 
+/// The port flies the airbike twice as fast as the shipped bike. `Flying()`
+/// floors the Float physical at 400 rather than 200
+/// (Airbike.c4d/Script.c:303-314), and DFA_FLOAT clamps each axis to
+/// `FIXED100(Float)` (oracle C4Object.cpp:5291-5309), so a held direction
+/// accelerates to 4.0 px/frame instead of 2.0. `FloatAccel` is untouched, so
+/// reaching the raised bound takes twice as long.
+#[test]
+fn the_airbike_cruises_at_twice_the_shipped_float_bound() {
+    let prepared = prepare_installed_scenario(SCENARIO, 0);
+    for auto_stop in [false, true] {
+        let mut engine = prepared.instantiate();
+        let ride = seated(&mut engine, auto_stop);
+        assert_eq!(
+            float_physical(&engine, ride.airbike),
+            Some(400),
+            "Flying() holds the raised cruise floor (auto_stop={auto_stop})"
+        );
+
+        engine
+            .player_in_com(ride.owner, COM_LEFT, 0)
+            .expect("the turn reaches the airbike");
+        tick(&mut engine, 39);
+        assert_eq!(
+            raw_velocity(&engine, ride.airbike).0,
+            -39 * FLOAT_ACCEL_RAW,
+            "the ramp is still one FloatAccel step a frame, and 39 of them do \
+             not yet reach the raised bound (auto_stop={auto_stop})"
+        );
+
+        tick(&mut engine, 40);
+        assert_eq!(
+            raw_velocity(&engine, ride.airbike).0,
+            -4 * FIXED_ONE,
+            "the held direction saturates at FIXED100(400) (auto_stop={auto_stop})"
+        );
+    }
+}
+
 /// Releasing the key stops the acceleration and the glide bleeds the momentum
 /// off at exactly the rate `FloatAccel` built it up.
 ///
@@ -142,10 +183,10 @@ fn releasing_the_steering_key_brings_the_airbike_to_a_stop() {
         engine
             .player_in_com(ride.owner, COM_LEFT, 0)
             .expect("the turn reaches the airbike");
-        tick(&mut engine, 40);
+        tick(&mut engine, 41);
         assert_eq!(
             raw_velocity(&engine, ride.airbike).0,
-            -2 * FIXED_ONE,
+            -4 * FIXED_ONE,
             "holding the key still saturates at the Float physical bound \
              (auto_stop={auto_stop})"
         );
@@ -188,11 +229,11 @@ fn holding_two_steering_keys_flies_the_diagonal() {
         "both held keys combine into one diagonal ComDir"
     );
 
-    tick(&mut engine, 40);
+    tick(&mut engine, 41);
     let (x, y) = raw_velocity(&engine, ride.airbike);
     assert_eq!(
         (x, y),
-        (-2 * FIXED_ONE, -2 * FIXED_ONE),
+        (-4 * FIXED_ONE, -4 * FIXED_ONE),
         "both axes accelerate to the Float physical bound"
     );
 
@@ -209,7 +250,7 @@ fn holding_two_steering_keys_flies_the_diagonal() {
     let (x, y) = raw_velocity(&engine, ride.airbike);
     assert_eq!(
         (x, y),
-        (-2 * FIXED_ONE, 0),
+        (-4 * FIXED_ONE, 0),
         "the released axis brakes while the held one holds its bound"
     );
 }
@@ -251,10 +292,10 @@ fn releasing_the_newer_of_two_opposite_keys_keeps_the_older_one_steering() {
             "the key still held goes back to steering (auto_stop={auto_stop})"
         );
 
-        tick(&mut engine, 40);
+        tick(&mut engine, 41);
         assert_eq!(
             raw_velocity(&engine, ride.airbike).0,
-            -2 * FIXED_ONE,
+            -4 * FIXED_ONE,
             "and it drives the bike, rather than the brake stopping it \
              (auto_stop={auto_stop})"
         );
@@ -341,11 +382,11 @@ fn the_hyperfly_boost_is_held_rather_than_latched() {
         "the double tap registers the key it was pressed with"
     );
 
-    // The boosted bound is FIXED100(800) = 8.0 px/frame, so holding pushes the
-    // bike past the ordinary 2.0 the un-boosted physical allows.
-    tick(&mut engine, 40);
+    // The boosted bound is FIXED100(1600) = 16.0 px/frame, so holding pushes
+    // the bike past the 4.0 the un-boosted physical allows.
+    tick(&mut engine, 45);
     assert!(
-        raw_velocity(&engine, ride.airbike).0 < -2 * FIXED_ONE,
+        raw_velocity(&engine, ride.airbike).0 < -4 * FIXED_ONE,
         "the held dash climbs past the ordinary bound: {:?}",
         raw_velocity(&engine, ride.airbike)
     );
@@ -366,7 +407,7 @@ fn the_hyperfly_boost_is_held_rather_than_latched() {
     );
     assert_eq!(
         float_physical(&engine, ride.airbike),
-        Some(200),
+        Some(400),
         "the 4x bound is not left latched on a bike at rest"
     );
 
@@ -377,8 +418,81 @@ fn the_hyperfly_boost_is_held_rather_than_latched() {
     tick(&mut engine, 60);
     assert_eq!(
         raw_velocity(&engine, ride.airbike).1,
-        -2 * FIXED_ONE,
+        -4 * FIXED_ONE,
         "an unboosted climb saturates at the ordinary Float physical bound"
+    );
+}
+
+/// The dash bound doubles along with the cruise bound: the double tap raises
+/// the Float physical to 1600 rather than the shipped 800
+/// (Airbike.c4d/Script.c:33-42), i.e. 16.0 px/frame. The shipped 50-point
+/// decay step is unchanged, so leaving the dash walks the physical back to the
+/// raised 400 floor instead of 200, taking twice as many steps to get there
+/// (Script.c:303-314).
+#[test]
+fn the_hyperfly_dash_doubles_the_shipped_boost_bound() {
+    let mut engine = prepare_installed_scenario(SCENARIO, 0).instantiate();
+    let ride = seated(&mut engine, true);
+
+    engine
+        .player_in_com(ride.owner, COM_LEFT, 0)
+        .expect("the first turn reaches the airbike");
+    engine
+        .player_in_com(ride.owner, COM_LEFT + COM_RELEASE_OFFSET, 0)
+        .expect("releasing the turn key succeeds");
+    engine
+        .player_in_com(ride.owner, COM_LEFT, 0)
+        .expect("the second turn reaches the airbike");
+    assert_eq!(
+        action_name(&engine, ride.airbike),
+        "Hyperfly",
+        "the double tap engages the boost"
+    );
+    assert_eq!(
+        float_physical(&engine, ride.airbike),
+        Some(1600),
+        "the dash raises the Float physical to twice the shipped boost"
+    );
+
+    // One FloatAccel step a frame, so the raised dash bound is 161 frames out
+    // rather than the 81 the shipped 800 needed.
+    // Saturating a 16.0 px/frame dash takes 161 frames and crosses more than
+    // 1200 pixels, while AirbikeFight's landscape is under 400 wide and
+    // `BorderBound=7` parks the bike on the edge long before that. Fly it on
+    // the spot: the teleport writes position only, so the dash keeps
+    // integrating across it.
+    let start = engine
+        .object_snapshot(ride.airbike)
+        .expect("the airbike remains live")
+        .position;
+    for _ in 0..18 {
+        tick(&mut engine, 10);
+        let index = engine
+            .find_object_index(ride.airbike)
+            .expect("the airbike has an index");
+        engine.force_object_position(index, start);
+    }
+    assert_eq!(
+        raw_velocity(&engine, ride.airbike).0,
+        -16 * FIXED_ONE,
+        "the held dash saturates at FIXED100(1600), twice the shipped bound"
+    );
+
+    // Letting go returns the bike to Fly, whose StartCall fires at once and
+    // then once per Delay=3 frames, stepping the physical down by 50.
+    engine
+        .player_in_com(ride.owner, COM_LEFT + COM_RELEASE_OFFSET, 0)
+        .expect("releasing the turn key succeeds");
+    assert_eq!(
+        float_physical(&engine, ride.airbike),
+        Some(1550),
+        "leaving the dash takes the first decay step immediately"
+    );
+    tick(&mut engine, 23 * 3);
+    assert_eq!(
+        float_physical(&engine, ride.airbike),
+        Some(400),
+        "the decay stops at the raised cruise floor, not the shipped 200"
     );
 }
 
@@ -470,10 +584,10 @@ fn the_gped_remote_control_still_flies_the_airbike() {
         CommandDirection::Left,
         "the remote control still steers the airbike"
     );
-    tick(&mut engine, 40);
+    tick(&mut engine, 48);
     assert_eq!(
         raw_velocity(&engine, airbike).0,
-        -2 * FIXED_ONE,
+        -4 * FIXED_ONE,
         "a remote-controlled airbike still reaches its Float physical bound"
     );
 
@@ -491,7 +605,7 @@ fn the_gped_remote_control_still_flies_the_airbike() {
     tick(&mut engine, 40);
     assert_eq!(
         raw_velocity(&engine, airbike).0,
-        -2 * FIXED_ONE,
+        -4 * FIXED_ONE,
         "the remote-control path stays on the shipped latched physics"
     );
 }

@@ -4071,12 +4071,14 @@ an ordered-map model gap.
   the last step. That magnitude is deliberate: braking then costs exactly what
   acceleration cost, the symmetry DFA_WALK already has in C++
   (`if ((xdir > -WalkAccel) && (xdir < +WalkAccel)) xdir = 0;`,
-  src/C4Object.cpp:4796). Terminal speed and the Float physical stay the
-  engine's, including the Hyperfly ladder, which keeps its shipped shape and
-  simply becomes hold-to-dash — letting go of the last held direction ends the
-  dash, so the 800 physical decays back down the `Flying()` ladder instead of
-  staying latched on a bike the brake has already stopped. Only the Fly-family
-  actions are reset by a turn, so a burst survives steering.
+  src/C4Object.cpp:4796). Terminal speed stays the engine's clamp on the Float
+  physical, and the Hyperfly ladder keeps its shipped shape and simply becomes
+  hold-to-dash — letting go of the last held direction ends the dash, so the
+  boosted physical decays back down the `Flying()` ladder instead of staying
+  latched on a bike the brake has already stopped. (The two values on that
+  ladder are themselves raised by the entry below; this entry does not move
+  them.) Only the Fly-family actions are reset by a turn, so a burst survives
+  steering.
   Hold-to-steer needs releases, and only a human pilot produces them. The GPED
   remote control steers by calling these very handlers
   (`target -> ControlLeft(this())`, GPED.c4d/Script.c:15-73) — it is itself the
@@ -4108,8 +4110,9 @@ an ordered-map model gap.
   maps that double press to the airbike's ordinary `ControlDown` only while the
   pilot is seated; the same shipped `Stuck() || GBackSolid(0, 11)` predicate and
   dismount body still decide the result, and off-bike double-Down is unchanged.
-  Also unchanged: `FloatAccel`, the Float physical and its Hyperfly ladder, the
-  ActMap, the weapon modes, `Hit`/`Damage`, and the GPED remote-control path.
+  Also unchanged by this entry: `FloatAccel`, the two values on the Float
+  physical's Hyperfly ladder (raised separately, below), the ActMap, the weapon
+  modes, `Hit`/`Damage`, and the GPED remote-control path.
   This cannot desync two clonk-rs peers: no `Random()` draw is added or
   reordered and every write is to synchronized object state from synchronized
   control input. It does diverge from a LegacyClonk peer and from replays
@@ -4124,6 +4127,53 @@ an ordered-map model gap.
   and
   `the_shipped_dismount_and_abandoned_physics_are_unchanged`. The oracle-exact
   chain keeps its own coverage in
+  `crates/clonk-engine/tests/it/airbike_pilot_control.rs`, which runs the same
+  scenario with this append removed.
+
+- **The Eke Reloaded airbike accelerates to twice the shipped top speed**
+  (`planet/System.c4g/EkeAirbikeSteering.c`: `AirbikeCruiseFloat`,
+  `AirbikeDashFloat`, `Flying`, `AirbikeDashApply`; C++
+  `C4Object::ExecAction`'s DFA_FLOAT arm, LegacyClonk 7d43b47
+  src/C4Object.cpp:5291-5309, and
+  `EkeReloaded.c4d/Weapons.c4d/Airbike.c4d/Script.c:33-42,55-64,303-314`).
+  Approved 2026-08-12, requested from play: the shipped bike cruises at the
+  same 2.0 px/frame bound its pilot walks under, so crossing an Eke map is slow
+  unless the dash is burned. A content-level departure, not a port fix.
+  The airbike is `Procedure=FLOAT` and its script never writes velocity, so its
+  maximum speed is entirely `FIXED100(Float)`: `Flying()` floors the Float
+  physical at 200 (2.0 px/frame) and a `[Left]`/`[Right]` double tap trades it
+  up to 800 (8.0) for the Hyperfly dash. The append doubles both flight bounds
+  — 400 (4.0) and 1600 (16.0). `FloatAccel` is the engine's and is untouched,
+  so the ramp to each bound doubles in length (cruise 20 → 40 frames) and the
+  bike keeps its momentum-heavy feel rather than becoming twitchy.
+  `Flying()` still runs the shipped body first — it calls `PilotLost()`, which
+  the abandoned-bike path depends on — and the append lifts the result to the
+  raised floor afterwards, which costs one extra `SetPhysical` per StartCall
+  while the bike is already at cruise. The shipped 50-point decay step is
+  unchanged, so leaving the dash now takes 24 StartCalls (72 frames) to fall
+  back to cruise instead of 12. The dash raise reads the action back rather
+  than duplicating the shipped refusals — the shipped handlers decline the
+  boost when the bike faces the other way or sits in liquid, so only an engaged
+  `Hyperfly` receives the 1600.
+  Unlike the hold-to-steer entry above, this is deliberately **not** gated on
+  `GetID(clonk) == SF5B`: hold-to-steer needs releases only a human pilot
+  emits, but a speed bound is a property of the vehicle, so the GPED
+  remote-control path gets the raised bounds too.
+  Unchanged: `FloatAccel`, `Diving()`'s 100 underwater clamp, the
+  `SetPhysical("Float", 0, 2)` dismount and `Entrance` park, the ActMap, the
+  weapon modes, `Hit`/`Damage`. Two consequences are worth naming. `Hit()`
+  explodes the bike above `Abs(GetXDir()) >= 70`, i.e. 7.0 px/frame
+  (Script.c:465-466): cruise at 4.0 still cannot reach it, so ramming remains a
+  dash maneuver, but a 16.0 dash overshoots the threshold far more easily. And
+  the glide brake is one `FloatAccel` step a frame by design, so stopping from
+  a saturated dash takes about 160 frames where it used to take 80.
+  This cannot desync two clonk-rs peers: no `Random()` draw is added or
+  reordered and every write is to synchronized object state from synchronized
+  control input. It does diverge from a LegacyClonk peer and from replays
+  recorded against one.
+  Pinned by `the_airbike_cruises_at_twice_the_shipped_float_bound` (both
+  control styles) and `the_hyperfly_dash_doubles_the_shipped_boost_bound`. The
+  shipped 200/800 ladder keeps its oracle-exact coverage in
   `crates/clonk-engine/tests/it/airbike_pilot_control.rs`, which runs the same
   scenario with this append removed.
 

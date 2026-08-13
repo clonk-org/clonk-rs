@@ -80,15 +80,17 @@ fn airbike_dismount_parks_the_bike_dead_still() {
         .map(|object| object.id)
         .expect("InitializeClonk creates one airbike per player");
 
-    // Fly left until the bike sits on its `[Physical] Float=200` bound —
-    // FIXED100(200) = 2.0 px/frame (oracle C4Object.cpp:5293,5306-5307).
+    // Fly left until the bike sits on its Float physical bound — the port
+    // floors that at 400 rather than the shipped 200
+    // (planet/System.c4g/EkeAirbikeSteering.c), so FIXED100(400) = 4.0
+    // px/frame (oracle C4Object.cpp:5293,5306-5307).
     engine
         .player_in_com(owner, COM_LEFT, 0)
         .expect("the turn reaches the airbike");
-    tick(&mut engine, 30);
+    tick(&mut engine, 45);
     assert_eq!(
         raw_velocity(&engine, airbike).0,
-        -2 * FIXED_ONE,
+        -4 * FIXED_ONE,
         "the airbike reaches its Float physical bound before the dismount"
     );
 
