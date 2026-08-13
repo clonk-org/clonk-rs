@@ -11,6 +11,7 @@
 
 pub use wgpu;
 
+mod acquire;
 mod blit;
 
 pub use blit::BlitTransform;
