@@ -3607,6 +3607,7 @@ impl EffectHostContext {
                 scope
                     .live_commands
                     .restore_from_snapshot(&world_object.command_stack);
+                scope.command_count = scope.live_commands.len();
                 if let Some(state) = world_object.full_state() {
                     scope.current_mobile = state.mobile;
                     scope.current_t_attach = state.t_attach;

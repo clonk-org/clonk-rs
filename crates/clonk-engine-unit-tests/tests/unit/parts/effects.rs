@@ -1865,6 +1865,101 @@ func FxForeignGlobalAfterErrorTimer(target, number, time)
 }
 
 #[test]
+fn global_effect_error_preserves_pre_error_side_effects() {
+    // The global list follows the same non-transactional Execute path
+    // (C4Effect.cpp:319-362): its nil carrier does not change the live
+    // command target or make the fail-safe catch roll back earlier writes
+    // (C4AulExec.cpp:1318-1342,1638-1648). This pins the direct SetPosition,
+    // EffectVar, Random, and Sound effects documented at
+    // C4Script.cpp:463-477,5571-5580,3355-3365,2297-2326 and
+    // C4Random.h:29-38,58-84.
+    let script = r#"#strict 2
+local marker;
+
+func ArmGlobalError()
+{
+    var no_target;
+    AddEffect("GlobalErrorCommit", no_target, 100, 1, this());
+    return true;
+}
+func FxGlobalErrorCommitTimer(target, number, time)
+{
+    marker = 51;
+    SetPosition(31, 37);
+    EffectVar(0, target, number) = 88;
+    EffectVar(1, target, number) = Random(113);
+    Sound("GlobalBeforeError");
+    NoSuchFunctionAnywhere();
+    return 0;
+}
+"#;
+    let mut definition = Definition::from_script("FXGC", "Global effect error commit", script)
+        .expect("definition compiles");
+    definition.set_c4_callback_convention(true);
+
+    let mut engine = Engine::with_seed(17);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let command_target = engine
+        .spawn_object(SpawnConfig::new("FXGC"))
+        .expect("command target spawns");
+    let target_index = engine
+        .find_object_index(command_target)
+        .expect("command target exists");
+    engine
+        .call_object_function(target_index, "ArmGlobalError", Vec::new())
+        .expect("global effect arms");
+
+    let count_before = engine.rng.count;
+    let mut expected_rng = engine.rng.clone();
+    let expected_draw = expected_rng.random(113);
+    let presentation = engine
+        .tick_with_presentation()
+        .expect("fail-safe global timer continues");
+
+    let target_index = engine
+        .find_object_index(command_target)
+        .expect("command target remains");
+    let target = &engine.objects[target_index];
+    assert_eq!(target.state.local_vars.get("marker"), Some(&Value::Int(51)));
+    let effect = engine
+        .global_effects()
+        .iter()
+        .find(|effect| effect.name == "GlobalErrorCommit")
+        .expect("erroring global effect remains installed");
+    assert_eq!(
+        (effect.var(0), effect.var(1)),
+        (EffectVarValue::Int(88), EffectVarValue::Int(expected_draw))
+    );
+    assert_eq!(engine.rng.count, count_before + 1, "the draw count commits");
+    assert_eq!(
+        engine.rng, expected_rng,
+        "the synchronized RNG state commits"
+    );
+    assert_eq!(
+        (
+            target.state.position,
+            target.fixed_position,
+            presentation.audio,
+        ),
+        (
+            Vector2::new(31, 37),
+            FixedVec2::new(itofix(31), itofix(37)),
+            vec![AudioCommand::PlaySound {
+                name: "GlobalBeforeError".to_string(),
+                target: Some(command_target),
+                volume: 100,
+                looped: false,
+                multiple: false,
+                custom_falloff: None,
+            }],
+        ),
+        "the nil carrier does not detach command-target position or sound writes"
+    );
+}
+
+#[test]
 fn global_effect_timer_runs_without_any_registered_definition() {
     let mut engine = Engine::with_seed(13);
     assert_eq!(

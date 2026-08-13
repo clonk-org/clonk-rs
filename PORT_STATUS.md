@@ -595,20 +595,22 @@ smaller: `Engine::definitions` via `active_solid_mask_indices` 2.0%,
 
   `parity verify` covers none of it: the golden has no `global func`.
 
-- Open: **A `Game.pGlobalEffects` callback still runs with no ambient object
-  even when the effect has a command target.** Object effects now execute on
-  their command target, so `cthr->Obj` — the fallback every implicit-object
-  native uses — is that object (`C4Effect.cpp:129,282,345,392,434`;
-  `C4AulExec.cpp:1638-1648`). `dispatch_global_effect_callback`
-  (`crates/clonk-engine/src/lib.rs`) still passes `None` for the host object
-  context, so `AddEffect("X", 0, prio, iv, this)` reaches a global effect whose
-  `Fx*` callbacks see `this()` but resolve bare `GetAlive`/`GetAction`/`GetX`
-  against nothing. Closing it needs the object-scope builder that
-  `Definition::dispatch_effect_callback_with_parameter_conversion_policy` owns
-  to become reachable without a `Definition` receiver — the global dispatch
-  deliberately has none, because C++ runs System/scenario callbacks in a game
-  with no loaded definitions. `parity verify` does not cover it: the golden has
-  no global effect with a command target.
+- Closed: **A `Game.pGlobalEffects` callback with a live command target now
+  installs that object as its ambient host scope while keeping the affected
+  carrier argument nil.** This matches `pFn->Exec(pCommandTarget, ...)`:
+  `cthr->Obj` — the fallback used by implicit-object natives — is the command
+  target for both object and global effects (`C4Effect.cpp:129,282,345,392,434`;
+  `C4AulExec.cpp:1638-1648`). Global callbacks therefore attach sound and fold
+  object mutations such as `SetPosition` onto that target. Materializing either
+  effect path also restores the target's live command count from its command
+  stack, retaining `C4Object::AddCommand`'s 35-entry ceiling
+  (`C4Object.cpp:3904-3913`). Pinned by
+  `global_effect_error_preserves_pre_error_side_effects` and
+  `effect_command_targets_restore_the_live_command_count_before_add_command`.
+  This closes ambient-object selection and its ordinary object outcome only;
+  it does not claim broader callback-session or outcome-channel parity.
+  `parity verify` does not cover it: the golden has no global effect with a
+  command target.
 
 - Open: **An omitted `content/` entry cannot yet be classified as release-owned
   or user-added.** Component archives are complete snapshots, but installed
