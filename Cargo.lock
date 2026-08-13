@@ -1137,6 +1137,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clonk-surface"
+version = "0.10.1"
+dependencies = [
+ "bytemuck",
+ "thiserror 2.0.19",
+ "tracing",
+ "wgpu",
+]
+
+[[package]]
 name = "clonk-update"
 version = "0.10.1"
 dependencies = [
