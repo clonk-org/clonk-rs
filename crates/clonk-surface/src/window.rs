@@ -151,23 +151,7 @@ impl WindowSurface {
         W: wgpu::WindowHandle + raw_window_handle::HasDisplayHandle + 'static,
     {
         let surface = instance.create_surface(window)?;
-        // `WGPU_ADAPTER_NAME` picks an adapter by name when it is set; without
-        // it fall back to the ordinary request, which honours
-        // `WGPU_POWER_PREF`.
-        let adapter = match wgpu::util::initialize_adapter_from_env(instance, Some(&surface)).await
-        {
-            Ok(adapter) => Ok(adapter),
-            Err(_) => {
-                instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        compatible_surface: Some(&surface),
-                        force_fallback_adapter: false,
-                        power_preference: wgpu::PowerPreference::from_env().unwrap_or_default(),
-                    })
-                    .await
-            }
-        }
-        .map_err(|_| SurfaceError::AdapterNotFound)?;
+        let adapter = adapter_for(instance, &surface).await?;
 
         // Ask for everything the adapter offers: the renderer reads
         // `max_texture_dimension_2d` back off the device to decide whether a
@@ -381,6 +365,60 @@ impl WindowSurface {
     }
 }
 
+/// The index of the first adapter whose name satisfies a `WGPU_ADAPTER_NAME`
+/// request, matched case-insensitively as a substring.
+fn adapter_matching_name(adapter_names: &[impl AsRef<str>], desired: &str) -> Option<usize> {
+    let desired = desired.to_lowercase();
+    adapter_names
+        .iter()
+        .position(|name| name.as_ref().to_lowercase().contains(&desired))
+}
+
+/// Pick the adapter to present through.
+///
+/// `WGPU_ADAPTER_NAME` selects one by name when it is set. wgpu's own
+/// `initialize_adapter_from_env` panics when that name matches nothing
+/// (wgpu-29.0.4 src/util/init.rs:44); a panic here would escape the caller's
+/// backend-widening loop and unwind through a winit callback, so an unmatched
+/// name is logged and falls through to the ordinary request instead.
+async fn adapter_for(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+) -> Result<wgpu::Adapter, SurfaceError> {
+    if let Some(desired) = std::env::var("WGPU_ADAPTER_NAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+    {
+        let mut compatible = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .await
+            .into_iter()
+            .filter(|adapter| adapter.is_surface_supported(surface))
+            .collect::<Vec<_>>();
+        let names = compatible
+            .iter()
+            .map(|adapter| adapter.get_info().name)
+            .collect::<Vec<_>>();
+        match adapter_matching_name(&names, &desired) {
+            Some(index) => return Ok(compatible.swap_remove(index)),
+            None => tracing::warn!(
+                %desired,
+                available = ?names,
+                "WGPU_ADAPTER_NAME matched no adapter for this surface; requesting the default"
+            ),
+        }
+    }
+
+    instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+            power_preference: wgpu::PowerPreference::from_env().unwrap_or_default(),
+        })
+        .await
+        .map_err(|_| SurfaceError::AdapterNotFound)
+}
+
 const fn buffer_len(extent: (u32, u32)) -> usize {
     (extent.0 * extent.1 * BUFFER_BYTES_PER_PIXEL) as usize
 }
@@ -417,6 +455,30 @@ mod tests {
     fn a_zero_extent_is_rejected_before_it_reaches_the_device() {
         assert_eq!(check_extent(0, 480, 8192), Err(ExtentError::Width(0)));
         assert_eq!(check_extent(640, 0, 8192), Err(ExtentError::Height(0)));
+    }
+
+    // `WGPU_ADAPTER_NAME` is a substring match, case-insensitively, against the
+    // adapter's reported name — the same rule wgpu's own helper applies.
+    #[test]
+    fn an_adapter_is_selected_by_a_case_insensitive_substring_of_its_name() {
+        let adapters = ["Intel(R) UHD Graphics 630", "NVIDIA GeForce RTX 4090"];
+
+        assert_eq!(adapter_matching_name(&adapters, "nvidia"), Some(1));
+        assert_eq!(adapter_matching_name(&adapters, "UHD"), Some(0));
+        assert_eq!(adapter_matching_name(&adapters, "geforce rtx"), Some(1));
+    }
+
+    // wgpu's `initialize_adapter_from_env` *panics* here (wgpu-29.0.4
+    // src/util/init.rs:44). A panic out of surface construction escapes the
+    // backend-widening loop that is supposed to try the next backend set, and
+    // unwinds through a winit callback — which aborts on macOS. Reporting no
+    // match lets the caller fall back to an ordinary adapter request instead.
+    #[test]
+    fn an_adapter_name_matching_nothing_reports_no_match_rather_than_panicking() {
+        let adapters = ["Intel(R) UHD Graphics 630"];
+
+        assert_eq!(adapter_matching_name(&adapters, "nvidia"), None);
+        assert_eq!(adapter_matching_name(&[] as &[&str], "nvidia"), None);
     }
 
     // The renderer sizes presentation against the device limit, so an extent
