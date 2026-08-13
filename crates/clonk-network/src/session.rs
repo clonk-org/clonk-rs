@@ -5770,6 +5770,11 @@ mod tests {
             .iter()
             .map(|(connection_id, _, _)| *connection_id)
             .collect::<BTreeSet<_>>();
+        // Host acceptance can precede the client's HandleConnRe equivalent.
+        // Wait until both host routes are locally usable before testing
+        // RemoveConn fallback (oracle-src-pinned src/C4Network2.cpp:1472-1498;
+        // src/C4Network2Client.cpp:90-124).
+        wait_for_client_host_protocols(&client, route_lifecycle_wait).await;
         cut_first.send(()).test_value();
         // C4Network2IO reports a disconnect only after the socket has closed,
         // then C4Network2 removes that route before recovery can reconnect it
@@ -5825,11 +5830,33 @@ mod tests {
             .map(|(connection_id, _, _)| *connection_id)
             .collect::<BTreeSet<_>>();
         assert_ne!(reconnected_ids, initial_ids);
+        wait_for_client_host_protocols(&client, route_lifecycle_wait).await;
 
         client.shutdown().await.test_value();
         host.shutdown().await.test_value();
         proxy.abort();
         let _ = proxy.await;
+    }
+
+    async fn wait_for_client_host_protocols(client: &ClientHandle, deadline: Duration) {
+        timeout(deadline, async {
+            loop {
+                let routes = client.runtime_connections().await.test_value();
+                let has_host_protocol = |protocol| {
+                    routes.iter().any(|route| {
+                        route.client_id == HOST_CLIENT_ID && route.protocol == protocol
+                    })
+                };
+                if has_host_protocol(crate::NetworkProtocol::Tcp)
+                    && has_host_protocol(crate::NetworkProtocol::Udp)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client did not install both accepted host routes");
     }
 
     #[tokio::test(flavor = "multi_thread")]
