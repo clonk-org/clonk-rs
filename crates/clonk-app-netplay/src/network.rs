@@ -1231,6 +1231,15 @@ struct ClientStatusState {
     awaiting_commit: Option<NetworkStatus>,
 }
 
+/// The single `C4Network2::Status` a client node holds, split into the request
+/// it still owes a `PID_StatusAck` for and the status whose acknowledgement is
+/// already on the wire (`src/C4Network2.cpp:1501-1511,2017-2060`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ClientStatusView {
+    pub requested: Option<NetworkStatus>,
+    pub awaiting_commit: Option<NetworkStatus>,
+}
+
 fn same_client_status_barrier(left: NetworkStatus, right: NetworkStatus) -> bool {
     left.state == right.state && left.target_tick == right.target_tick
 }
@@ -4818,6 +4827,19 @@ impl NetworkManager {
             })
     }
 
+    /// What this client node still owes the host, so a caller tracking its own
+    /// reach target can keep that target identical to the status the network
+    /// layer will accept an acknowledgement for. Empty for a host.
+    pub fn client_status_view(&self) -> ClientStatusView {
+        if self.role != NetworkRole::Client {
+            return ClientStatusView::default();
+        }
+        ClientStatusView {
+            requested: self.client_status.requested,
+            awaiting_commit: self.client_status.awaiting_commit,
+        }
+    }
+
     pub fn acknowledge_requested_status_at_frame(
         &mut self,
         current_control_tick: i32,
@@ -5144,6 +5166,14 @@ impl NetworkManager {
             .league_runtime_available
             .store(true, Ordering::Release);
         (manager, events, commands)
+    }
+
+    /// Record a host status request the way `poll_events` would, without
+    /// handing the caller the event. This is how a test reproduces a
+    /// `PID_Status` the network layer holds but the app never applied.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_receive_client_status_request(&mut self, status: NetworkStatus) -> bool {
+        self.client_status.receive_request(status)
     }
 }
 

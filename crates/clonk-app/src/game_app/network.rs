@@ -2162,14 +2162,21 @@ impl GameApp {
     }
 
     fn arm_runtime_network_status_barrier(&mut self, status: clonk_network::NetworkStatus) -> bool {
-        if self.mode != AppMode::Running
-            || self.network.is_none()
-            || status.target_tick < 0
+        if self.mode != AppMode::Running || self.network.is_none() {
+            return false;
+        }
+        if status.target_tick < 0
             || !matches!(
                 status.state,
                 clonk_network::NETWORK_STATE_GO | clonk_network::NETWORK_STATE_PAUSE
             )
         {
+            // HandleStatus installs every received status and clears
+            // fStatusReached, so a status with no runtime reach condition — a
+            // lobby or init status — supersedes the pending barrier instead of
+            // leaving a target no node still waits for behind
+            // (src/C4Network2.cpp:1501-1511,2017-2041).
+            self.runtime_network_status_barrier = None;
             return false;
         }
         self.runtime_network_control_mode = Some(status.control_mode);
@@ -2188,7 +2195,7 @@ impl GameApp {
         // observable for Go requested from a committed Pause: current-tick
         // packets received while stopped are not promoted before the node
         // reaches and acknowledges the Go barrier.
-        if self.check_runtime_network_status_reached() == RuntimeStatusReachOutcome::NotReached {
+        if self.probe_runtime_network_status_reach() == RuntimeStatusReachOutcome::NotReached {
             if let Some(network) = self.network.as_ref() {
                 network.reset_client_performance();
             }
@@ -2218,6 +2225,64 @@ impl GameApp {
     }
 
     pub(crate) fn check_runtime_network_status_reached(&mut self) -> RuntimeStatusReachOutcome {
+        self.adopt_client_runtime_network_status();
+        self.probe_runtime_network_status_reach()
+    }
+
+    /// Keep a client's barrier equal to the one status its network layer holds.
+    ///
+    /// C++ keeps a single `C4Network2::Status` plus two flags: HandleStatus
+    /// replaces it for every received `PID_Status` and CheckStatusReached
+    /// acknowledges *that* value, so the tick a client waits for and the status
+    /// it acknowledges cannot disagree (src/C4Network2.cpp:1501-1511,
+    /// 2017-2060). This port splits the two — the barrier here, the pending
+    /// request in the network worker — so a status the app never applied leaves
+    /// the client acknowledging a barrier the network layer has already
+    /// replaced. Nothing recovers from that: control stays stopped at a target
+    /// nobody will commit, and every frame reports the rejected arrival
+    /// (clonk-org/clonk-rs#308). Re-project before probing instead.
+    fn adopt_client_runtime_network_status(&mut self) {
+        if self.mode != AppMode::Running
+            || self.runtime_network_role() != RuntimeNetworkRole::Client
+        {
+            return;
+        }
+        let Some(view) = self
+            .network
+            .as_ref()
+            .map(NetworkManager::client_status_view)
+        else {
+            return;
+        };
+        let active = self.runtime_network_status_barrier;
+        let differs = |status: clonk_network::NetworkStatus| {
+            !active
+                .is_some_and(|pending| same_runtime_network_status_barrier(pending.status, status))
+        };
+        match (view.requested, view.awaiting_commit) {
+            (Some(requested), _) if differs(requested) => {
+                self.runtime_network_status_barrier = None;
+                self.arm_runtime_network_status_barrier(requested);
+            }
+            (None, Some(awaiting)) if active.is_some() && differs(awaiting) => {
+                // The acknowledgement for this status is already on the wire.
+                // OnStatusReached has stopped control, and only the host's
+                // commit resumes it.
+                self.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+                    status: awaiting,
+                    local_reached: true,
+                    actual_control_tick: Some(awaiting.target_tick),
+                });
+                self.network_control_running = false;
+            }
+            (None, None) if active.is_some_and(|pending| !pending.local_reached) => {
+                self.runtime_network_status_barrier = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn probe_runtime_network_status_reach(&mut self) -> RuntimeStatusReachOutcome {
         let Some(pending) = self
             .runtime_network_status_barrier
             .filter(|pending| !pending.local_reached)

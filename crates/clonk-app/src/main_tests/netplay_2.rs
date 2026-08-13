@@ -4770,6 +4770,175 @@ fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
 }
 
 #[test]
+fn a_status_without_a_runtime_reach_condition_supersedes_the_pending_barrier() {
+    // HandleStatus installs every received status and clears fStatusReached,
+    // so a lobby status the client can never reach still replaces a pending
+    // Pause barrier rather than leaving the client to acknowledge a barrier
+    // its network layer has already dropped (src/C4Network2.cpp:1501-1511,
+    // 2017-2041; clonk-org/clonk-rs#308).
+    let mut app = new_running_sandbox_app();
+    let (events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+    let pause = clonk_network::NetworkStatus {
+        state: clonk_network::NETWORK_STATE_PAUSE,
+        control_mode: 1,
+        target_tick: 2,
+    };
+    events
+        .send(NetworkEvent::StatusRequested(pause))
+        .test_value();
+    app.test_network_events();
+    assert_eq!(
+        app.runtime_network_status_barrier
+            .map(|pending| pending.status),
+        Some(pause)
+    );
+
+    let lobby = clonk_network::NetworkStatus {
+        state: clonk_network::NETWORK_STATE_LOBBY,
+        control_mode: 1,
+        target_tick: -1,
+    };
+    events
+        .send(NetworkEvent::StatusRequested(lobby))
+        .test_value();
+    app.test_network_events();
+    assert_eq!(app.runtime_network_status_barrier, None);
+
+    for _ in 0..4 {
+        assert_eq!(
+            app.check_runtime_network_status_reached(),
+            RuntimeStatusReachOutcome::NotReached
+        );
+    }
+    assert!(commands.take_runtime_status_commands().is_empty());
+}
+
+#[test]
+fn runtime_client_adopts_a_recorded_status_its_barrier_never_applied() {
+    // A client's reach target and the status it acknowledges are one
+    // C4Network2::Status value, so a PID_Status the app did not apply -- one it
+    // could not arm, or one lost with the tail of an aborted event batch --
+    // still becomes the barrier instead of wedging the game on an
+    // acknowledgement the network layer rejects every frame
+    // (src/C4Network2.cpp:1501-1511; clonk-org/clonk-rs#308).
+    let mut app = new_running_sandbox_app();
+    let (events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+    let pause = clonk_network::NetworkStatus {
+        state: clonk_network::NETWORK_STATE_PAUSE,
+        control_mode: 1,
+        target_tick: 2,
+    };
+    events
+        .send(NetworkEvent::StatusRequested(pause))
+        .test_value();
+    app.test_network_events();
+
+    let retargeted = clonk_network::NetworkStatus {
+        target_tick: 4,
+        ..pause
+    };
+    app.network
+        .as_mut()
+        .test_value()
+        .test_receive_client_status_request(retargeted);
+
+    assert_eq!(
+        app.check_runtime_network_status_reached(),
+        RuntimeStatusReachOutcome::NotReached
+    );
+    assert_eq!(
+        app.runtime_network_status_barrier
+            .map(|pending| pending.status),
+        Some(retargeted)
+    );
+    assert!(
+        app.network_control_running,
+        "the adopted target is still ahead"
+    );
+    assert!(commands.take_framed_status_acknowledgements().is_empty());
+
+    for _ in 0..4 {
+        queue_empty_ready_tick(&app, &events);
+        app.test_update();
+        app.test_update();
+    }
+    // The reach probe runs before the frame it observes is stepped, so the
+    // cadence boundary at the adopted target is tested on the next pass.
+    app.test_update();
+    assert_eq!(
+        (app.engine.frame(), app.expected_network_control_tick()),
+        (8, 4)
+    );
+    assert!(!app.network_control_running);
+    assert_eq!(
+        commands.take_framed_status_acknowledgements(),
+        vec![(retargeted, 8)]
+    );
+    app.test_update();
+    app.sec1_timer().test_value();
+    assert!(
+        commands.take_framed_status_acknowledgements().is_empty(),
+        "the adopted barrier is acknowledged once"
+    );
+}
+
+#[test]
+fn runtime_client_barrier_follows_an_acknowledgement_already_on_the_wire() {
+    // OnStatusReached stops control and the client then waits for the host's
+    // PID_StatusAck for the exact status it acknowledged, so a barrier that
+    // lost track of that status adopts it instead of blocking the commit
+    // (src/C4Network2.cpp:2017-2060,1513-1550; clonk-org/clonk-rs#308).
+    let mut app = new_running_sandbox_app();
+    let (events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+    let pause = clonk_network::NetworkStatus {
+        state: clonk_network::NETWORK_STATE_PAUSE,
+        control_mode: 1,
+        target_tick: 0,
+    };
+    events
+        .send(NetworkEvent::StatusRequested(pause))
+        .test_value();
+    app.test_network_events();
+    app.test_update();
+    assert_eq!(
+        commands.take_framed_status_acknowledgements(),
+        vec![(pause, 0)]
+    );
+
+    // Only the barrier forgets the acknowledged status; the network layer still
+    // awaits its commit.
+    app.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+        status: clonk_network::NetworkStatus {
+            target_tick: 6,
+            ..pause
+        },
+        local_reached: false,
+        actual_control_tick: None,
+    });
+
+    assert_eq!(
+        app.check_runtime_network_status_reached(),
+        RuntimeStatusReachOutcome::NotReached
+    );
+    assert_eq!(
+        app.runtime_network_status_barrier,
+        Some(RuntimeNetworkStatusBarrier {
+            status: pause,
+            local_reached: true,
+            actual_control_tick: Some(0),
+        })
+    );
+    assert!(!app.network_control_running);
+    assert!(commands.take_framed_status_acknowledgements().is_empty());
+
+    events
+        .send(NetworkEvent::StatusCommitted(pause))
+        .test_value();
+    app.test_network_events();
+    assert_eq!(app.runtime_network_status_barrier, None);
+}
+
+#[test]
 fn runtime_host_commit_executes_sync_at_the_actual_overshoot_tick() {
     let mut app = new_running_sandbox_app();
     let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
