@@ -36,8 +36,9 @@ Normal graphical presentation is retained and GPU-composed:
 5. Fragment or monitor gamma is applied in the C++-selected location. The final
    composition is then presented, or copied for screenshots/save thumbnails.
 
-`pixels` is deliberately kept at a 1x1 logical buffer during retained
-presentation so it cannot upload a full software frame before `render_with`.
+The window surface's CPU frame buffer is deliberately kept at 1x1 during
+retained presentation so it cannot upload a full software frame before
+`render_with`.
 Menu, loading, running, and graphical console modes all enter the retained
 capture path. A render error is recovered or reported; it does not silently
 switch the current frame to software composition.
@@ -135,18 +136,21 @@ bytes, bounded to 16,384 entries/128 MiB, so repeatedly derived carets, game-ove
 facets, refresh phases, inventory chrome, glyphs, and inline images retain one
 GPU identity instead of forcing uploads every frame.
 
-The locally patched `pixels` 0.17.2 owns bounded transient surface recovery
-(`third_party/pixels/src/lib.rs`). `Lost` returns a typed `SurfaceLost` error so
-each window owner can reconstruct `Pixels`; `Outdated` reconfigures and retries
-once before skipping the frame; and `Suboptimal` reconfigures once before using
-the still-valid acquired frame if it remains suboptimal. `Timeout` and
-`Occluded` also return success without invoking the render callback. This bounds
-the upstream retry loop tracked by parasyte/pixels#460. `clonk-app` records
-whether the callback ran, reports a skipped presentation when it did not, and
+`clonk-surface` owns bounded transient surface recovery
+(`crates/clonk-surface/src/acquire.rs`). `Lost` returns a typed `SurfaceLost`
+error so each window owner can reconstruct its `WindowSurface`; `Outdated`
+reconfigures and retries once before skipping the frame; and `Suboptimal`
+reconfigures once before using the still-valid acquired frame if it remains
+suboptimal. `Timeout` and `Occluded` also return success without invoking the
+render callback. Acquisition is bounded rather than looping, because a surface
+that stays unusable would otherwise trap the event-loop callback before it can
+process the resize that would fix it — the defect upstream `pixels` still
+carries as parasyte/pixels#460. `render_with` reports whether a drawable was
+acquired, so `clonk-app` reports a skipped presentation when none was, and
 leaves screenshots and save-thumbnail requests queued for the next drawable
 frame.
 
-Every `SurfaceLost` owner moves its old `Pixels` value out of an explicit slot
+Every `SurfaceLost` owner moves its old `WindowSurface` value out of an explicit slot
 and drops it before the replacement builder runs. Dropping wgpu's surface
 synchronously unconfigures the old swapchain, so Vulkan and DX12 never see two
 configured swapchains for one native window. A successful rebuild may request
@@ -162,8 +166,8 @@ renderer converts that notification into a typed recreation request. The app
 checks renderer health before presentation, after a successful return, and
 when an error or panic escapes (`present_retained_gpu_frame`,
 `crates/clonk-app/src/main_parts/audio.rs`). Device loss recorded at any of
-those checkpoints takes precedence over a generic `pixels::Error::Validation`
-or panic; `clonk-app` rebuilds `Pixels`, then calls
+those checkpoints takes precedence over a generic `SurfaceError::Validation`
+or panic; `clonk-app` rebuilds the `WindowSurface`, then calls
 `RetainedGpuRenderer::recreate` with the replacement device, queue, and surface
 format. A narrowly recognized device-loss panic from submission or readback
 remains a compatibility fallback for backends that fail before dispatching the
@@ -298,9 +302,9 @@ the re-pinned Dragon Rock hashes embed them end to end).
   replacement-device recreation, wgpu 29 callback and uncaptured-error
   classification, recognized compatibility-panic conversion, and the app's
   presentation-recovery policy test cover the deterministic portions; the
-  vendored Pixels tests pin bounded `Lost`, `Outdated`, and `Suboptimal`
-  acquisition behavior. Live device-loss recovery still needs platform smoke
-  tests.
+  `clonk-surface` acquisition tests pin bounded `Lost`, `Outdated`, and
+  `Suboptimal` behavior over every status, including the frame-carrying ones.
+  Live device-loss recovery still needs platform smoke tests.
 - New draw code must not read the destination CPU pixels during active capture.
   It must emit a blend command, use an isolated CPU scratch resource before
   capture, or return a typed parity error. Tests that only inspect a completed

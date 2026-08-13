@@ -18,13 +18,12 @@ use clonk_graphics::{
     GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuSpriteQuad,
     GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
 };
-use pixels::wgpu;
-use pixels::wgpu::util::DeviceExt;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{mpsc, Arc, Mutex};
 use thiserror::Error;
+use wgpu::util::DeviceExt;
 
 const PACKED_VERTEX_FLOATS: usize = 18;
 const PACKED_VERTEX_STRIDE: u64 = (PACKED_VERTEX_FLOATS * std::mem::size_of::<f32>()) as u64;

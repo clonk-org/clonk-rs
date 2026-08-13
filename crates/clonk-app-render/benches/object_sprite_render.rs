@@ -5,7 +5,6 @@ use clonk_graphics::{
     GpuVertex,
 };
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use pixels::wgpu;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;

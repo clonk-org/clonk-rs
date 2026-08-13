@@ -121,7 +121,7 @@ class ZipDependencyContractTests(unittest.TestCase):
         packages = workspace_packages()
         manifests = {relative_manifest_path(package) for package in packages}
         self.assertEqual(len(manifests), len(packages))
-        self.assertIn(pathlib.Path("third_party/pixels/Cargo.toml"), manifests)
+        self.assertIn(pathlib.Path("crates/clonk-surface/Cargo.toml"), manifests)
 
         zip_dependency = (
             "^8.1",

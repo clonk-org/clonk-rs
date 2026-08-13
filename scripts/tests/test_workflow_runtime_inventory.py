@@ -228,8 +228,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         production_key = (
             "clonk-msvc-thinlto-v2-windows-x64-rustc-1.97.1-llvm-22.1.6-${{ "
             "hashFiles('rust-toolchain.toml', '.cargo/config.toml', "
-            "'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs', "
-            "'third_party/**/*.rs') }}"
+            "'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}"
         )
         self.assertNotIn("clonk-msvc-thinlto", landing)
         for workflow in (main, release_prebuild):

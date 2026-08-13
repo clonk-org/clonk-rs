@@ -69,18 +69,14 @@ impl<F> DeferredRetainedFramePreparation<F> {
     }
 }
 
-/// Present Pixels' ordinary CPU buffer while retaining whether a surface frame
-/// was actually available.
+/// Present the ordinary CPU buffer while retaining whether a surface frame was
+/// actually available.
 pub(crate) fn present_pixels_frame(
-    pixels: &Pixels<'_>,
-) -> std::result::Result<RetainedGpuPresentOutcome, pixels::Error> {
-    let mut render_callback_invoked = false;
-    pixels.render_with(|encoder, surface_view, context| {
-        render_callback_invoked = true;
-        context.scaling_renderer.render(encoder, surface_view);
-        Ok(())
-    })?;
-    Ok(retained_gpu_present_outcome(render_callback_invoked))
+    pixels: &WindowSurface,
+) -> std::result::Result<RetainedGpuPresentOutcome, clonk_surface::SurfaceError> {
+    pixels.present_frame().map(|presentation| {
+        retained_gpu_present_outcome(presentation == clonk_surface::Presentation::Presented)
+    })
 }
 
 pub(crate) fn replace_after_drop<T, E>(
@@ -609,8 +605,8 @@ pub(crate) fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGp
     }
     if error.chain().any(|cause| {
         matches!(
-            cause.downcast_ref::<pixels::Error>(),
-            Some(pixels::Error::SurfaceLost)
+            cause.downcast_ref::<clonk_surface::SurfaceError>(),
+            Some(clonk_surface::SurfaceError::SurfaceLost)
         )
     }) {
         return RetainedGpuPresentRecovery::RebuildDevice;
@@ -643,15 +639,10 @@ pub(crate) fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGp
 /// An explicit `WGPU_BACKEND` is an operator instruction: honour it exactly
 /// and never widen past it.
 pub(crate) fn framebuffer_backend_attempts(
-    requested: Option<pixels::wgpu::Backends>,
-) -> Vec<pixels::wgpu::Backends> {
+    requested: Option<wgpu::Backends>,
+) -> Vec<wgpu::Backends> {
     requested.map_or_else(
-        || {
-            vec![
-                pixels::wgpu::Backends::PRIMARY,
-                pixels::wgpu::Backends::all(),
-            ]
-        },
+        || vec![wgpu::Backends::PRIMARY, wgpu::Backends::all()],
         |backends| vec![backends],
     )
 }
@@ -666,24 +657,26 @@ pub(crate) fn framebuffer_backend_attempts(
 pub(crate) fn build_framebuffer(
     window: &Arc<Window>,
     size: PhysicalSize<u32>,
-) -> Result<Pixels<'static>> {
-    let attempts = framebuffer_backend_attempts(pixels::wgpu::Backends::from_env());
+) -> Result<WindowSurface> {
+    let attempts = framebuffer_backend_attempts(wgpu::Backends::from_env());
     let mut last_error = None;
     for backends in attempts {
-        let surface = SurfaceTexture::new(size.width, size.height, Arc::clone(window));
-        match PixelsBuilder::new(size.width, size.height, surface)
-            // Every window shares the process's instance for this backend set.
-            // Building one per window meant closing a window destroyed a
-            // `VkInstance`, which is what took the console down in
-            // clonk-org/clonk-rs#53 — see `crate::gpu_instance`.
-            .instance(crate::gpu_instance::retained_instance(backends))
+        // Every window shares the process's instance for this backend set.
+        // Building one per window meant closing a window destroyed a
+        // `VkInstance`, which is what took the console down in
+        // clonk-org/clonk-rs#53 — see `crate::gpu_instance`.
+        let instance = crate::gpu_instance::retained_instance(backends);
+        match WindowSurface::build(
+            &instance,
+            Arc::clone(window),
+            (size.width, size.height),
+            (size.width, size.height),
             // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
             // a swap interval. Do not make drawable acquisition serialize the
             // independently scheduled simulation and graphics timers behind an
             // implicit FIFO-vsync wait that the C++ application does not request.
-            .enable_vsync(false)
-            .build()
-        {
+            wgpu::PresentMode::AutoNoVsync,
+        ) {
             Ok(pixels) => return Ok(pixels),
             Err(error) => {
                 tracing::warn!(?backends, %error, "no usable GPU adapter for these backends");
@@ -704,15 +697,15 @@ pub(crate) fn build_framebuffer(
 
 pub(crate) fn rebuild_retained_gpu_device(
     window: &Arc<Window>,
-    pixels: &mut Option<Pixels<'static>>,
+    pixels: &mut Option<WindowSurface>,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<()> {
     let size = enforce_min_size(window.inner_size());
     let previous = pixels
         .as_ref()
         .context("presentation framebuffer is unavailable")?;
-    let previous_width = previous.context().texture_extent.width;
-    let previous_height = previous.context().texture_extent.height;
+    let previous_width = previous.buffer_extent().0;
+    let previous_height = previous.buffer_extent().1;
     let previous_frame = previous.frame().to_vec();
     replace_after_drop(pixels, || {
         let mut replacement =
@@ -737,7 +730,7 @@ pub(crate) fn rebuild_retained_gpu_device(
 
 pub(crate) fn present_retained_gpu_frame(
     app: &mut GameApp,
-    pixels: &Pixels<'_>,
+    pixels: &WindowSurface,
     presenter: &clonk_scaling::FramePresenter,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<RetainedGpuPresentOutcome> {
@@ -786,11 +779,11 @@ pub(crate) fn present_retained_gpu_frame(
                     .collect::<Vec<_>>();
                 if request_native_save_readback {
                     previous_native_readback =
-                        renderer.readback_last_presentation(&context.device, encoder)?;
+                        renderer.readback_last_presentation(context.device, encoder)?;
                 }
                 readback = renderer.render_layers(
-                    &context.device,
-                    &context.queue,
+                    context.device,
+                    context.queue,
                     encoder,
                     surface_view,
                     &layers,
@@ -810,7 +803,10 @@ pub(crate) fn present_retained_gpu_frame(
         return Err(error);
     }
     match submission {
-        Ok(Ok(())) => renderer
+        // The presentation outcome is read off `frame_preparation` instead:
+        // it records whether the callback ran, which is the same signal and is
+        // already threaded through the readback arms below.
+        Ok(Ok(_presentation)) => renderer
             .check_health()
             .context("retained GPU device failed while submitting a frame")?,
         Ok(Err(error)) => {
@@ -1648,7 +1644,7 @@ fn handle_developer_console_text(
 fn handle_developer_console_window_event(
     window: &Window,
     app: &mut GameApp,
-    pixels: &mut Pixels<'static>,
+    pixels: &mut WindowSurface,
     presenter: &mut clonk_scaling::FramePresenter,
     event: WindowEvent,
     event_loop: &winit::event_loop::ActiveEventLoop,
@@ -1817,7 +1813,7 @@ fn handle_developer_console_window_event(
 pub(crate) fn handle_window_event(
     window: &Window,
     app: &mut GameApp,
-    pixels: &mut Pixels<'static>,
+    pixels: &mut WindowSurface,
     presenter: &mut clonk_scaling::FramePresenter,
     display_options: &mut DisplayOptions,
     event: WindowEvent,

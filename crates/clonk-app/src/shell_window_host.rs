@@ -17,14 +17,14 @@
 use crate::developer_windows::{DeveloperWindowHost, DeveloperWindowPresenter};
 use crate::{present_retained_gpu_frame, GameApp, SurfaceRebuildState};
 use clonk_app_render::gpu_renderer::RetainedGpuRenderer;
-use pixels::Pixels;
+use clonk_surface::WindowSurface;
 use std::sync::Arc;
 use winit::window::Window;
 
 /// The console shell's window and everything bound to its surface.
 pub struct ShellWindowHost {
     pub window: Arc<Window>,
-    pub pixels: Option<Pixels<'static>>,
+    pub pixels: Option<WindowSurface>,
     pub presenter: clonk_scaling::FramePresenter,
     /// Built from `pixels`' device/queue/format, so it is part of this surface.
     pub renderer: RetainedGpuRenderer,
@@ -36,7 +36,7 @@ pub struct ShellWindowHost {
 impl ShellWindowHost {
     pub fn new(
         window: Arc<Window>,
-        pixels: Pixels<'static>,
+        pixels: WindowSurface,
         presenter: clonk_scaling::FramePresenter,
         renderer: RetainedGpuRenderer,
     ) -> Self {

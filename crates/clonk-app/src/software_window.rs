@@ -13,7 +13,7 @@
 //! than being written twice.
 
 use crate::developer_windows::DeveloperWindowHost;
-use pixels::Pixels;
+use clonk_surface::WindowSurface;
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
@@ -21,7 +21,7 @@ use winit::window::Window;
 /// One software-drawn developer window.
 pub struct SoftwareWindow {
     pub window: Arc<Window>,
-    pub pixels: Option<Pixels<'static>>,
+    pub pixels: Option<WindowSurface>,
     /// The last window-local pointer position. winit reports motion and button
     /// state in separate events, and every hit test needs both.
     pub(crate) last_pointer: (i32, i32),
@@ -37,7 +37,7 @@ pub struct SoftwareWindow {
 pub(crate) enum SoftwarePresent {
     Presented,
     Skipped,
-    /// `pixels::Error::SurfaceLost`. The window has already been hidden.
+    /// `clonk_surface::SurfaceError::SurfaceLost`. The window has already been hidden.
     SurfaceLost,
 }
 
@@ -75,7 +75,7 @@ pub(crate) fn build_software_window(
 }
 
 impl SoftwareWindow {
-    pub fn new(window: Arc<Window>, pixels: Pixels<'static>, width: u32, height: u32) -> Self {
+    pub fn new(window: Arc<Window>, pixels: WindowSurface, width: u32, height: u32) -> Self {
         Self {
             window,
             pixels: Some(pixels),
@@ -134,7 +134,7 @@ impl SoftwareWindow {
             Ok(crate::main_audio::RetainedGpuPresentOutcome::Skipped) => {
                 Ok(SoftwarePresent::Skipped)
             }
-            Err(pixels::Error::SurfaceLost) => {
+            Err(clonk_surface::SurfaceError::SurfaceLost) => {
                 let _ = self.surface_rebuild.note_loss();
                 self.set_visible(false);
                 Ok(SoftwarePresent::SurfaceLost)

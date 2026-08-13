@@ -54,7 +54,9 @@ class DesktopDependencyContractTests(unittest.TestCase):
         )
         lockfile = tomllib.loads((REPOSITORY / "Cargo.lock").read_text(encoding="utf-8"))
 
-        self.assertNotIn("block", workspace["patch"]["crates-io"])
+        # The workspace patches nothing at all now that the vendored `pixels`
+        # fork is gone, so the table itself is absent rather than empty.
+        self.assertNotIn("block", workspace.get("patch", {}).get("crates-io", {}))
         self.assertFalse((REPOSITORY / "third_party" / "block").exists())
         self.assertNotIn("block", {package["name"] for package in lockfile["package"]})
 

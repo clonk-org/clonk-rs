@@ -89,7 +89,7 @@ jobs:
           - name: remaining workspace 1/2
             artifact: remaining-1
             apt: mesa-vulkan-drivers
-            command: cargo llvm-cov --no-report nextest -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p pixels --no-fail-fast --locked
+            command: cargo llvm-cov --no-report nextest -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
           - name: remaining workspace 2/2
             artifact: remaining-2
             apt: libasound2-dev libxmp4

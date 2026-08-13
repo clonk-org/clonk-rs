@@ -580,7 +580,8 @@ class CiLatencyTests(unittest.TestCase):
         workflow = DEPENDENCY_GUARD.read_text(encoding="utf-8")
         self.assertIn("targets: x86_64-pc-windows-msvc", workflow)
         self.assertIn(
-            "cargo check --locked --target x86_64-pc-windows-msvc -p pixels",
+            "cargo check --locked --target x86_64-pc-windows-msvc "
+            "-p clonk-surface",
             workflow,
         )
         self.assertIn(
