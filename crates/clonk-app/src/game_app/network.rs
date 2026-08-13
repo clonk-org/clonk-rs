@@ -2188,7 +2188,7 @@ impl GameApp {
         // observable for Go requested from a committed Pause: current-tick
         // packets received while stopped are not promoted before the node
         // reaches and acknowledges the Go barrier.
-        if self.check_runtime_network_status_reached() == RuntimeStatusReachOutcome::NotReached {
+        if self.probe_runtime_network_status_reach() == RuntimeStatusReachOutcome::NotReached {
             if let Some(network) = self.network.as_ref() {
                 network.reset_client_performance();
             }
@@ -2218,6 +2218,10 @@ impl GameApp {
     }
 
     pub(crate) fn check_runtime_network_status_reached(&mut self) -> RuntimeStatusReachOutcome {
+        self.probe_runtime_network_status_reach()
+    }
+
+    fn probe_runtime_network_status_reach(&mut self) -> RuntimeStatusReachOutcome {
         let Some(pending) = self
             .runtime_network_status_barrier
             .filter(|pending| !pending.local_reached)
