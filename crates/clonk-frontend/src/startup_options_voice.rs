@@ -18,7 +18,18 @@
 //!
 //! Where the slack is smaller than one titled group box -- 640x480 leaves 50px
 //! -- the group is omitted entirely rather than drawn over C++'s controls, and
-//! the Advanced Settings editor remains the way to reach the `Voice` keys.
+//! the Advanced Settings editor remains the way to reach the `Voice` keys. That
+//! is also why `ActivationThreshold` and `ActivationHangover` are not here:
+//! they are set-once tuning, and a third row costs ~41px, which 800x600's 91px
+//! of slack cannot pay.
+//!
+//! **Toggling these controls cannot strand an open microphone.** The Options
+//! dialog is a startup surface -- every `open_options_menu` caller is a
+//! `StartupDialog::Options` path -- so `GameApp::mode` is never
+//! `AppMode::Running` while it is shown. `update_voice_chat` early-returns
+//! (and clears any capture) on that condition, and `handle_voice_key` gates
+//! `start_capture` on it twice, so neither `Voice.Enabled` nor
+//! `Voice.ActivationMode` can be changed here while a capture is live.
 
 use crate::classic_gui::IntRect;
 use crate::startup_options_dlg::Aligner;
@@ -33,6 +44,8 @@ pub struct VoiceGroupMetrics {
     /// `GetStandardCheckBoxSize` width for the enable label: text + box + 4
     /// (`C4GuiCheckBox.cpp:151-162`).
     pub enable_check_width: i32,
+    /// The same, for the voice-activation label.
+    pub activation_check_width: i32,
     /// Measured width of the "Push to talk:" label.
     pub push_to_talk_label_width: i32,
     /// Measured width of the "Voice volume:" label.
@@ -43,7 +56,11 @@ pub struct VoiceGroupMetrics {
     pub title_line_height: i32,
 }
 
-/// Screen-coordinate geometry for the voice group and its five controls.
+/// Screen-coordinate geometry for the voice group and its six controls.
+///
+/// The two rows pair an opt-in with the setting it governs: row 0 is the
+/// microphone opt-in and the key that opens it, row 1 the activation mode that
+/// can replace that key and the playback volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoiceGroupLayout {
     pub group: IntRect,
@@ -52,7 +69,10 @@ pub struct VoiceGroupLayout {
     /// Row 0, right: "Push to talk:" and the key button it labels.
     pub push_to_talk_label: IntRect,
     pub push_to_talk_button: IntRect,
-    /// Row 1: "Voice volume:" and the horizontal `ScrollBar` beside it.
+    /// Row 1, left: `Config.Voice.ActivationMode` as a checkbox -- unchecked is
+    /// `PushToTalk`, the default, and checked is `VoiceActivated`.
+    pub activation_check: IntRect,
+    /// Row 1, right: "Voice volume:" and the horizontal `ScrollBar` beside it.
     pub volume_label: IntRect,
     pub volume_slider: IntRect,
 }
@@ -151,18 +171,27 @@ impl VoiceGroupLayout {
         let push_to_talk_label =
             top_row.get_from_right(metrics.push_to_talk_label_width, metrics.row_height);
 
-        // Row 1: the heading from the left, the bar filling what is left. The
-        // C++ Volume group stacks its heading above its bar because it has a
-        // whole grid row per slider; one row means an inline heading instead.
+        // Row 1: the activation mode under the opt-in it belongs to, then the
+        // volume heading and the bar filling what is left. The C++ Volume group
+        // stacks its heading above its bar because it has a whole grid row per
+        // slider; one row means an inline heading instead.
+        // Row 1 mirrors row 0's shape: an opt-in from the left, then the pair
+        // from the right, so the bar lines up under the key button and the two
+        // halves cannot collide as their labels grow in translation.
         let mut volume_row = Aligner::new(row(1), 1, 0);
-        let volume_label = volume_row.get_from_left(metrics.volume_label_width, metrics.row_height);
-        let volume_slider = volume_row.get_centered(volume_row.inner_width(), SLIDER_HEIGHT);
+        let activation_check =
+            volume_row.get_from_left(metrics.activation_check_width, metrics.row_height);
+        let slider_width = volume_row.inner_width() * 2 / 5;
+        let volume_slider = volume_row.get_from_right(slider_width, SLIDER_HEIGHT);
+        let volume_label =
+            volume_row.get_from_right(metrics.volume_label_width, metrics.row_height);
 
         Some(Self {
             group,
             enabled_check,
             push_to_talk_label,
             push_to_talk_button,
+            activation_check,
             volume_label,
             volume_slider,
         })

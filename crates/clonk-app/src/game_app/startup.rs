@@ -838,6 +838,33 @@ impl GameApp {
         Ok(())
     }
 
+    /// `Config.Voice.ActivationMode` from the port-only Audio-sheet checkbox
+    /// (clonk-org/clonk-rs#422): checked is `VoiceActivated`, unchecked the
+    /// default `PushToTalk`.
+    ///
+    /// The mode never opens a microphone by itself -- `Voice.Enabled` remains
+    /// the single opt-in, and this sheet is a startup surface, so no capture
+    /// can be running while it is toggled.
+    pub(crate) fn set_startup_voice_activation_mode(
+        &mut self,
+        voice_activated: bool,
+    ) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup voice-activation option",
+                },
+            ))
+        })?;
+        use crate::settings::VoiceActivationMode;
+        audio.options.voice_activation_mode = if voice_activated {
+            VoiceActivationMode::VoiceActivated
+        } else {
+            VoiceActivationMode::PushToTalk
+        };
+        Ok(())
+    }
+
     /// `Config.Voice.Volume` from the port-only Audio-sheet bar. The positional
     /// mix multiplies this in every frame, so it is live immediately.
     pub(crate) fn set_startup_voice_volume(&mut self, value: i32) -> Result<(), EngineError> {

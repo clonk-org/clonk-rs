@@ -318,6 +318,17 @@ impl AudioOptions {
         if let Some(encoded) = crate::input::encode_virtual_key_code(self.voice_push_to_talk) {
             config.set_in(section, "PushToTalkKey", encoded.to_string());
         }
+        // The canonical token, never a display string: `parse` is
+        // case-sensitive and falls back to push-to-talk, so a localized label
+        // written here would silently revert the player's choice.
+        config.set_in(
+            section,
+            "ActivationMode",
+            match self.voice_activation_mode {
+                VoiceActivationMode::PushToTalk => VoiceActivationMode::PUSH_TO_TALK,
+                VoiceActivationMode::VoiceActivated => VoiceActivationMode::VOICE_ACTIVATED,
+            },
+        );
     }
 }
 
@@ -513,13 +524,14 @@ mod tests {
     /// reaches `[Sound]`, whose keys all have a C4Config counterpart
     /// (clonk-org/clonk-rs#452).
     #[test]
-    fn audio_options_write_only_the_three_port_only_voice_keys() {
+    fn audio_options_write_only_the_port_only_voice_keys() {
         let mut config = Config::new();
         config.set_in(Some("Voice"), "VendorExtension", "keep-me");
         let options = AudioOptions {
             voice_enabled: true,
             voice_volume: 0.42,
             voice_push_to_talk: VirtualKeyCode::KeyT,
+            voice_activation_mode: VoiceActivationMode::VoiceActivated,
             ..AudioOptions::default()
         };
 
@@ -535,9 +547,18 @@ mod tests {
             Some(expected_key.as_str())
         );
         assert_eq!(
+            config.get_in(Some("Voice"), "ActivationMode"),
+            Some(VoiceActivationMode::VOICE_ACTIVATED),
+            "the canonical token, never a display string",
+        );
+        assert_eq!(
             config.get_in(Some("Voice"), "VendorExtension"),
             Some("keep-me")
         );
+        // The tuning values stay in the Advanced editor: the Audio sheet has
+        // no room for them and they are set-once, not a choice.
+        assert_eq!(config.get_in(Some("Voice"), "ActivationThreshold"), None);
+        assert_eq!(config.get_in(Some("Voice"), "ActivationHangover"), None);
         assert_eq!(
             config.get_in(Some("Sound"), "Sound"),
             None,
@@ -550,6 +571,10 @@ mod tests {
         assert!(reloaded.voice_enabled);
         assert_eq!(reloaded.voice_volume, 0.42);
         assert_eq!(reloaded.voice_push_to_talk, VirtualKeyCode::KeyT);
+        assert_eq!(
+            reloaded.voice_activation_mode,
+            VoiceActivationMode::VoiceActivated
+        );
     }
 
     #[test]

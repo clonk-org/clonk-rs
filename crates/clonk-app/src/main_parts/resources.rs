@@ -3308,11 +3308,14 @@ pub(crate) fn load_options_sound_state(
         audio.options.music_volume_percent() as u8,
         audio.options.sound_volume_percent() as u8,
     )
-    // Port-only voice row (clonk-org/clonk-rs#452).
+    // Port-only voice rows (clonk-org/clonk-rs#452, clonk-org/clonk-rs#422).
     .with_voice(
         audio.options.voice_enabled,
         audio.options.voice_volume_percent() as u8,
         crate::control_options::format_key_label(audio.options.voice_push_to_talk),
+    )
+    .with_voice_activated(
+        audio.options.voice_activation_mode == crate::settings::VoiceActivationMode::VoiceActivated,
     )
 }
 

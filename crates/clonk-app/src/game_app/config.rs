@@ -991,6 +991,9 @@ impl GameApp {
                         SoundCheckboxId::VoiceEnabled => {
                             self.set_startup_voice_enabled(checked)?;
                         }
+                        SoundCheckboxId::VoiceActivated => {
+                            self.set_startup_voice_activation_mode(checked)?;
+                        }
                     },
                     SoundSheetAction::VolumeChanged { id, value } => match id {
                         SoundVolumeId::Music => {
@@ -1890,6 +1893,7 @@ impl GameApp {
             // voice-chat strings at all (clonk-org/clonk-rs#452).
             voice_chat: text("IDS_CTL_VOICECHAT", "Voice chat"),
             voice_enabled: text("IDS_CTL_VOICEENABLED", "Enable voice chat"),
+            voice_activated: text("IDS_CTL_VOICEACTIVATED", "Voice activated"),
             voice_volume: text("IDS_CTL_VOICEVOLUME", "Voice volume"),
             voice_push_to_talk: text("IDS_CTL_VOICEPUSHTOTALK", "Push to talk"),
             display_mode: text("IDS_CTL_DISPLAYMODE", "Display mode"),

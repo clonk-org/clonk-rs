@@ -3088,8 +3088,12 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     app.open_options_menu();
     let gui = app.assets.clonk_fonts.as_deref().test_value();
     let book = app.assets.options_book_fonts.as_deref().test_value();
-    let checkbox = clonk_frontend::startup_options_dlg::options_dlg_layout(1280, 720, gui, book)
-        .timestamps_check;
+    let options_layout =
+        clonk_frontend::startup_options_dlg::options_dlg_layout(1280, 720, gui, book);
+    let checkbox = options_layout.timestamps_check;
+    // The port-only voice-activation checkbox, clicked further down through the
+    // same real pointer path (clonk-org/clonk-rs#422).
+    let activation_check = options_layout.sound.voice.test_value().activation_check;
     let point = PhysicalPosition::new(
         f64::from(checkbox.x + checkbox.h / 2),
         f64::from(checkbox.y + checkbox.h / 2),
@@ -3149,6 +3153,25 @@ fn options_dialog_saves_log_timestamps_when_closed() {
         dialog.network_mut().nick = "Same Name".to_string();
         dialog.network_mut().hide_no_official_league_notice = true;
     }
+    app.startup_options_dialog
+        .as_mut()
+        .test_value()
+        .restore_sheet(clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(activation_check.x + activation_check.h / 2),
+        f64::from(activation_check.y + activation_check.h / 2),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    assert_eq!(
+        app.audio
+            .as_ref()
+            .expect("test audio")
+            .options
+            .voice_activation_mode,
+        crate::settings::VoiceActivationMode::VoiceActivated,
+    );
+
     app.bindings
         .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::KeyZ);
     app.gamepad_bindings
@@ -3173,6 +3196,15 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     assert_eq!(
         config.get_in(Some("Sound"), "VendorExtension"),
         Some("keep-me")
+    );
+    // The port-only rows land in their own section, and the activation mode is
+    // persisted as the canonical token `VoiceActivationMode::parse` accepts --
+    // a localized label here would silently read back as push-to-talk.
+    assert_eq!(config.get_in(Some("Voice"), "Enabled"), Some("false"));
+    assert_eq!(config.get_in(Some("Voice"), "Volume"), Some("100"));
+    assert_eq!(
+        config.get_in(Some("Voice"), "ActivationMode"),
+        Some(crate::settings::VoiceActivationMode::VOICE_ACTIVATED)
     );
     assert_eq!(
         config.get_in(Some("Graphics"), "DisplayMode"),
