@@ -460,8 +460,8 @@ impl AudioSystem {
     }
 
     /// See [`AudioMixer::voice_echo_reference`]. Asking for it is what starts
-    /// the mixer publishing what it plays, so only a capture that intends to
-    /// cancel an echo should.
+    /// the mixer publishing what it plays, so only a microphone capture that
+    /// could come to cancel an echo should.
     pub fn voice_echo_reference(&self) -> VoiceEchoReference {
         self.mixer.voice_echo_reference()
     }

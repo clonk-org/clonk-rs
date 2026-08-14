@@ -98,9 +98,10 @@ const ECHO_RESIDUAL_SMOOTHING: f32 = 0.5;
 pub(crate) struct EchoCanceller {
     reader: Option<EchoReferenceReader>,
     weights: Box<[f32]>,
-    /// The tap window for the oldest sample of a frame, followed by the frame
-    /// itself: `history[offset..offset + ECHO_TAIL_SAMPLES]` is what the filter
-    /// sees for sample `offset`.
+    /// The far end from one tail before this frame up to its end, so that
+    /// `history[offset + 1..offset + 1 + ECHO_TAIL_SAMPLES]` is the tap window
+    /// for sample `offset` — oldest first, ending on the far-end sample that
+    /// shares its instant.
     history: Box<[f32]>,
     far: [f32; VOICE_FRAME_SAMPLES],
     /// Loudest far-end sample still inside the tap window, for the double-talk

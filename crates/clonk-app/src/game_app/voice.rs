@@ -24,13 +24,15 @@ impl GameApp {
             .and_then(|audio| audio.options.voice_activation())
     }
 
-    /// What the mixer is playing, for the echo canceller to subtract. Asking
-    /// for it is what makes the mixer publish it at all, so a player who has
-    /// switched echo cancellation off never starts it.
+    /// What the mixer is playing, for the echo canceller to subtract. Every
+    /// capture is handed it, whether or not echo cancellation is on at the
+    /// time: the reference can only be bound while the microphone is opening,
+    /// and withholding it would make this the one stage a player could not
+    /// switch on mid-call. What it costs a capture that never uses it is one
+    /// downmix per output frame.
     fn voice_echo_reference(&self) -> Option<clonk_audio::VoiceEchoReference> {
         self.audio
             .as_ref()
-            .filter(|audio| audio.options.voice_echo_cancellation)
             .map(|audio| audio.system.voice_echo_reference())
     }
 

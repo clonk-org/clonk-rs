@@ -686,7 +686,10 @@ mod tests {
         let peak = frame
             .iter()
             .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-        assert!(peak <= 1.0, "a full-scale sample was amplified to {peak}");
+        assert!(
+            peak <= GAIN_PEAK_CEILING,
+            "a full-scale sample left the stage at {peak}, above the headroom the encoder is left",
+        );
     }
 
     #[test]
@@ -718,6 +721,62 @@ mod tests {
             frame_level(&sent) > 0.6,
             "the frame itself was amplified to {}",
             frame_level(&sent),
+        );
+    }
+
+    #[test]
+    fn the_echo_stage_cancels_only_while_its_own_switch_is_on() {
+        use crate::voice_echo::VoiceEchoTap;
+
+        let switches = VoiceProcessingSwitches::new(VoiceProcessingConfig {
+            echo_cancellation: true,
+            ..VoiceProcessingConfig::DISABLED
+        });
+        let mut tap = VoiceEchoTap::new(16_000);
+        let mut processing = VoiceProcessing::new(switches.clone(), Some(tap.reference()));
+        let mut signal = TestSignal(31);
+        let delay = 500;
+        let mut played = vec![0.0; delay + VOICE_FRAME_SAMPLES];
+        let mut heard = Vec::new();
+        let mut sent = Vec::new();
+
+        // The same room the canceller's own tests use: the microphone hears
+        // half of what the speakers played, 500 samples ago.
+        let mut speak =
+            |processing: &mut VoiceProcessing, played: &mut Vec<f32>, signal: &mut TestSignal| {
+                let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+                for sample in frame.iter_mut() {
+                    *sample = signal.next() * 0.3;
+                    tap.push_output_frame(*sample, *sample);
+                }
+                played.extend_from_slice(&frame);
+                let mut microphone = [0.0; VOICE_FRAME_SAMPLES];
+                for (offset, sample) in microphone.iter_mut().enumerate() {
+                    *sample = 0.5 * played[played.len() - VOICE_FRAME_SAMPLES + offset - delay];
+                }
+                let raw = microphone;
+                processing.process(&mut microphone);
+                (raw, microphone)
+            };
+
+        for index in 0..400 {
+            let (raw, processed) = speak(&mut processing, &mut played, &mut signal);
+            if index >= 390 {
+                heard.extend_from_slice(&raw);
+                sent.extend_from_slice(&processed);
+            }
+        }
+        assert!(
+            rms(&sent) < rms(&heard) * 0.1,
+            "with the switch on the chain cancels the echo",
+        );
+
+        switches.set(VoiceProcessingConfig::DISABLED);
+        let (raw, processed) = speak(&mut processing, &mut played, &mut signal);
+
+        assert_eq!(
+            processed, raw,
+            "with it off the chain hands the microphone through untouched",
         );
     }
 

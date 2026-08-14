@@ -563,7 +563,7 @@ fn capture_processing_follows_the_settings_without_reopening_the_microphone() {
 }
 
 #[test]
-fn only_a_capture_that_cancels_echo_asks_the_mixer_for_a_reference() {
+fn every_capture_carries_the_reference_echo_cancellation_can_be_switched_on_with() {
     struct SilentVoiceSource;
 
     impl crate::voice_chat::VoiceFrameSource for SilentVoiceSource {
@@ -587,6 +587,7 @@ fn only_a_capture_that_cancels_echo_asks_the_mixer_for_a_reference() {
     let options = &mut app.audio.test_mut().options;
     options.voice_enabled = true;
     options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    // Switched off at the moment the microphone opens, and switched on later.
     options.voice_echo_cancellation = false;
     app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
         observed.set(Some(options.echo_reference.is_some()));
@@ -594,22 +595,13 @@ fn only_a_capture_that_cancels_echo_asks_the_mixer_for_a_reference() {
     });
 
     app.update_voice_chat();
+
     assert_eq!(
         referenced.get(),
-        Some(false),
-        "nothing asks the mixer to publish what it plays until something cancels it",
+        Some(true),
+        "the reference is bound while the microphone opens and can never be added later, so a \
+         capture that starts with echo cancellation off still has to carry it",
     );
-
-    // Close that capture, turn echo cancellation on, and open another.
-    app.audio.test_mut().options.voice_activation_mode =
-        crate::settings::VoiceActivationMode::PushToTalk;
-    app.update_voice_chat();
-    let options = &mut app.audio.test_mut().options;
-    options.voice_echo_cancellation = true;
-    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
-    app.update_voice_chat();
-
-    assert_eq!(referenced.get(), Some(true));
 }
 
 #[test]
