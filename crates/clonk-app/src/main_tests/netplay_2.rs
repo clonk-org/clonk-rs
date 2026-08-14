@@ -14513,6 +14513,72 @@ fn save_to_slot_writes_native_c4group_savegame() {
 }
 
 #[test]
+fn native_save_rejects_a_joined_player_without_a_runtime_section() {
+    // C4PlayerList::Remove marks the retained info removed before deleting the
+    // live player. SetAsRestoreInfos therefore cannot emit an IsJoined row
+    // without C4Game emitting its Player<ID> section
+    // (src/C4PlayerList.cpp:219-247; src/C4PlayerInfo.cpp:1637-1665;
+    // src/C4Game.cpp:1987-1994).
+    let fixture = tempdir();
+    let scenario_path = fixture.path().join("Source.c4s");
+    install_record_test_definitions(fixture.path());
+    fs::create_dir_all(&scenario_path).test_value();
+    fs::write(
+        scenario_path.join("Scenario.txt"),
+        b"[Head]\nTitle=Source scenario\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+    )
+    .test_value();
+    let frontend = FrontendScenario {
+        identifier: "Source.c4s".to_string(),
+        title: "Source scenario".to_string(),
+        path: Some(scenario_path.clone()),
+        source_paths: vec![scenario_path.clone()],
+        ..FrontendScenario::fallback()
+    };
+    let scenario_data =
+        Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
+            .test_value();
+    let mut app = new_state_only_running_sandbox_app();
+    app.active_scenario = Some(frontend.clone());
+    app.prepare_recording_for(&frontend, &scenario_data, None, None, None)
+        .test_value();
+    let mut landscape = clonk_engine::Landscape::flat(1, 1);
+    assert!(landscape.set_mode(clonk_engine::LANDSCAPE_MODE_EXACT));
+    landscape.set_pixel_grid(clonk_engine::landscape::PixelGrid::new(
+        1,
+        1,
+        vec![0],
+        vec![0; 256],
+        vec![None; 256],
+        vec![None; 256],
+    ));
+    app.engine.set_landscape(landscape);
+    app.control_player_infos.apply(netplay_player_info_data(
+        3,
+        vec![clonk_engine::ControlPlayerInfoEntry {
+            id: 313,
+            flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+            game_number: 2,
+            name: LegacyCString::from_bytes(b"Departed".to_vec()).unwrap(),
+            ..Default::default()
+        }],
+    ));
+    let destination = fixture.path().join("Broken.c4s");
+
+    let error = app
+        .save_native_c4_game(ConsoleSaveKind::Savegame, Some(&destination), false, None)
+        .expect_err("a mismatched live save must fail closed");
+
+    assert!(
+        error.to_string().contains(
+            "exact save has joined SavePlayerInfos IDs without matching Game.txt Player<ID> sections: 313"
+        ),
+        "{error:#}"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
 fn network_cleanup_records_cpp_network_error_bytes_before_clearing() {
     // OnClientDisconnect evaluates the localized host-loss message before
     // C4Network2::Clear invokes ChangeToLocal. RoundResults keeps the

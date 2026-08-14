@@ -1608,6 +1608,12 @@ impl GameApp {
             self.network.is_some(),
             clonk_engine::LiveC4SavePolicy::Record.player_policy(),
         );
+        restore_plan
+            .validate_for_live_save(
+                clonk_engine::LiveC4SavePolicy::Record,
+                self.engine.players().map(|player| player.player_info_id()),
+            )
+            .map_err(|error| error.to_string())?;
         let parameter_bytes = match clonk_network::serialize_initial_network_parameters(
             &parameters,
             &seed.scenario_defaults,

@@ -6704,6 +6704,12 @@ impl GameApp {
             &parameters.clients.clients,
             &parameters.player_infos,
         );
+        restore_plan
+            .validate_for_live_save(
+                clonk_engine::LiveC4SavePolicy::RuntimeNetwork,
+                self.engine.players().map(|player| player.player_info_id()),
+            )
+            .map_err(|error| error.to_string())?;
         // C4GameSave owns this temporary list only for SavePlayerInfos.txt and
         // embedded player groups. SendJoinData still copies the unchanged
         // Game.Parameters.RestorePlayerInfos into the packet.
