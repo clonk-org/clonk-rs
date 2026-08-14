@@ -113,7 +113,8 @@ fn benchmark_device() -> (tokio::runtime::Runtime, wgpu::Device, wgpu::Queue) {
         .enable_all()
         .build()
         .expect("build benchmark runtime");
-    let instance = wgpu::Instance::default();
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = runtime
         .block_on(async {
             let primary = instance
@@ -136,6 +137,7 @@ fn benchmark_device() -> (tokio::runtime::Runtime, wgpu::Device, wgpu::Queue) {
             }
         })
         .expect("particle benchmark requires a wgpu adapter");
+    println!("particle benchmark adapter: {:?}", adapter.get_info());
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("lc_particle_benchmark_device"),
         required_features: wgpu::Features::empty(),

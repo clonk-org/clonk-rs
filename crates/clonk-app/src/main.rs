@@ -118,6 +118,8 @@ mod main_app_state;
 mod main_assets;
 #[path = "main_parts/audio.rs"]
 mod main_audio;
+#[path = "main_parts/gpu_profile.rs"]
+mod main_gpu_profile;
 #[path = "main_parts/render_io.rs"]
 mod main_render_io;
 #[path = "main_parts/resources.rs"]
@@ -126,6 +128,7 @@ mod main_resources;
 pub(crate) use main_app_state::*;
 pub(crate) use main_assets::*;
 pub(crate) use main_audio::*;
+pub(crate) use main_gpu_profile::*;
 pub(crate) use main_render_io::*;
 pub(crate) use main_resources::*;
 
@@ -1325,14 +1328,40 @@ fn run() -> Result<()> {
                     let benchmark_now = Instant::now();
                     let benchmark_runtime_ready =
                         presentation_benchmark_runtime_readiness.ready(app.mode);
-                    if let Some(report) = presentation_benchmark.as_mut().and_then(|benchmark| {
-                        benchmark.poll_with_runtime_stippel_census(
-                            benchmark_runtime_ready,
-                            benchmark_now,
-                            app.engine.frame(),
-                            || runtime_stippel_object_count(&app.snapshot),
-                        )
-                    }) {
+                    if let Some(mut report) =
+                        presentation_benchmark.as_mut().and_then(|benchmark| {
+                            benchmark.poll_with_runtime_stippel_census(
+                                benchmark_runtime_ready,
+                                benchmark_now,
+                                app.engine.frame(),
+                                || runtime_stippel_object_count(&app.snapshot),
+                            )
+                        })
+                    {
+                        let profile_line = pixels_slot
+                            .as_ref()
+                            .context("presentation benchmark ended without a drawable surface")
+                            .and_then(|pixels| {
+                                finish_retained_gpu_profile_artifact(
+                                    &mut report,
+                                    pixels,
+                                    retained_gpu_renderer,
+                                    app.graphics.advanced_renderer_config(),
+                                    presenter.presentation_geometry(),
+                                )
+                            });
+                        let profile_line = match profile_line {
+                            Ok(profile_line) => profile_line,
+                            Err(error) => {
+                                eprintln!(
+                                    "LC_APP_PRESENTATION_BENCHMARK result=fail error={error:#}"
+                                );
+                                event_handler_exit_code.store(2, AtomicOrdering::Relaxed);
+                                event_target.exit();
+                                return;
+                            }
+                        };
+                        println!("{profile_line}");
                         finish_app_presentation_benchmark(
                             event_target,
                             &event_handler_exit_code,
@@ -1512,13 +1541,13 @@ fn run() -> Result<()> {
                                 return;
                             }
                         }
-                        let fallback_to_cpu = match present_retained_gpu_frame(
+                        let fallback_to_cpu = match present_retained_gpu_frame_profiled(
                             &mut app,
                             pixels,
                             presenter,
                             retained_gpu_renderer,
                         ) {
-                            Ok(RetainedGpuPresentOutcome::Presented) => {
+                            Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
                                 if app.mode == AppMode::Running && !app.console_mode {
                                     app.finish_rendered_object_audibility_pass();
@@ -1541,16 +1570,21 @@ fn run() -> Result<()> {
                                 app.presentation_detail = presentation_detail.detail();
                                 if let Some(benchmark) = presentation_benchmark.as_mut() {
                                     let completed_at = Instant::now();
-                                    benchmark.record_successful_presentation(
+                                    benchmark.record_successful_retained_gpu_presentation(
                                         completed_at,
                                         graphics_duration,
                                         true,
-                                        PresentationPath::RetainedGpu,
+                                        profile,
                                     );
+                                }
+                                let timestamp_frames = retained_gpu_renderer
+                                    .take_completed_timestamp_frames(pixels.device());
+                                if let Some(benchmark) = presentation_benchmark.as_mut() {
+                                    benchmark.record_gpu_timestamp_frames(timestamp_frames);
                                 }
                                 false
                             }
-                            Ok(RetainedGpuPresentOutcome::Skipped) => {
+                            Ok(RetainedGpuProfiledOutcome::Skipped) => {
                                 // Pixels could not acquire a visible surface frame.
                                 // The attempt consumed this graphics opportunity;
                                 // retry on the normal refresh schedule without

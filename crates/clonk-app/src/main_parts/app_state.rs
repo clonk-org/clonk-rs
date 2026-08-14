@@ -3408,7 +3408,7 @@ impl PresentationStats {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct PresentationBenchmarkMeasurement {
     started: Option<Instant>,
     simulation_frame: u64,
@@ -3421,6 +3421,8 @@ struct PresentationBenchmarkMeasurement {
     graphics_total: Duration,
     graphics_max: Duration,
     graphics_samples: Vec<Duration>,
+    retained_gpu_profiles: Vec<ReconciledRetainedGpuFrameProfile>,
+    gpu_timestamp_frames: Vec<gpu_renderer::GpuTimestampFrame>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3440,6 +3442,8 @@ pub(crate) struct PresentationBenchmarkReport {
     pub(crate) graphics_p95: Duration,
     pub(crate) graphics_p99: Duration,
     pub(crate) graphics_samples: Vec<Duration>,
+    pub(crate) retained_gpu_profiles: Vec<ReconciledRetainedGpuFrameProfile>,
+    pub(crate) gpu_timestamp_frames: Vec<gpu_renderer::GpuTimestampFrame>,
 }
 
 impl PresentationBenchmarkReport {
@@ -3477,7 +3481,7 @@ pub(crate) enum PresentationPath {
     Cpu,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PresentationBenchmark {
     window: Duration,
     warmup_started: Option<Instant>,
@@ -3569,6 +3573,8 @@ impl PresentationBenchmark {
             )
         };
         let graphics_samples = std::mem::take(&mut self.measurement.graphics_samples);
+        let retained_gpu_profiles = std::mem::take(&mut self.measurement.retained_gpu_profiles);
+        let gpu_timestamp_frames = std::mem::take(&mut self.measurement.gpu_timestamp_frames);
         let (graphics_p50, graphics_p95, graphics_p99) =
             graphics_pass_percentiles(&graphics_samples);
         Some(PresentationBenchmarkReport {
@@ -3587,6 +3593,8 @@ impl PresentationBenchmark {
             graphics_p95,
             graphics_p99,
             graphics_samples,
+            retained_gpu_profiles,
+            gpu_timestamp_frames,
         })
     }
 
@@ -3603,6 +3611,39 @@ impl PresentationBenchmark {
         refreshed: bool,
         path: PresentationPath,
     ) {
+        self.record_successful_presentation_with_profile(
+            now,
+            graphics_duration,
+            refreshed,
+            path,
+            None,
+        );
+    }
+
+    pub(crate) fn record_successful_retained_gpu_presentation(
+        &mut self,
+        now: Instant,
+        graphics_duration: Duration,
+        refreshed: bool,
+        profile: RetainedGpuFrameProfile,
+    ) {
+        self.record_successful_presentation_with_profile(
+            now,
+            graphics_duration,
+            refreshed,
+            PresentationPath::RetainedGpu,
+            Some(profile),
+        );
+    }
+
+    fn record_successful_presentation_with_profile(
+        &mut self,
+        now: Instant,
+        graphics_duration: Duration,
+        refreshed: bool,
+        path: PresentationPath,
+        retained_gpu_profile: Option<RetainedGpuFrameProfile>,
+    ) {
         if self.finished {
             return;
         }
@@ -3617,6 +3658,11 @@ impl PresentationBenchmark {
             PresentationPath::RetainedGpu => {
                 self.measurement.retained_gpu_submissions =
                     self.measurement.retained_gpu_submissions.saturating_add(1);
+                if let Some(profile) = retained_gpu_profile {
+                    self.measurement
+                        .retained_gpu_profiles
+                        .push(profile.reconcile(graphics_duration));
+                }
             }
             PresentationPath::Cpu => {
                 self.measurement.cpu_submissions =
@@ -3641,6 +3687,16 @@ impl PresentationBenchmark {
         }
         self.measurement.automatic_graphics_skips =
             self.measurement.automatic_graphics_skips.saturating_add(1);
+    }
+
+    pub(crate) fn record_gpu_timestamp_frames(
+        &mut self,
+        frames: Vec<gpu_renderer::GpuTimestampFrame>,
+    ) {
+        if self.finished || self.measurement.started.is_none() {
+            return;
+        }
+        self.measurement.gpu_timestamp_frames.extend(frames);
     }
 }
 

@@ -22,6 +22,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -1099,6 +1100,10 @@ pub enum GpuRendererError {
     ReadbackMap(String),
     #[error("GPU readback polling failed: {0}")]
     ReadbackPoll(String),
+    #[error("GPU timestamp readback polling failed: {0}")]
+    TimestampPoll(String),
+    #[error("GPU timestamp drain completed with {pending} pending frame(s)")]
+    TimestampDrainIncomplete { pending: usize },
     #[error("retained GPU device recreation required after {reason:?}: {detail}")]
     DeviceRecreationRequired {
         reason: RetainedGpuRecreateReason,
@@ -1133,22 +1138,464 @@ impl RetainedGpuTextureKind {
     }
 }
 
+/// CPU wall-clock intervals inside one retained-renderer invocation.
+///
+/// These are host-side stages, not GPU execution time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuRendererCpuStages {
+    pub validation: Duration,
+    pub texture_synchronization: Duration,
+    pub stream_packing_upload: Duration,
+    pub command_encoding: Duration,
+}
+
+impl GpuRendererCpuStages {
+    pub fn total(self) -> Duration {
+        self.validation
+            .saturating_add(self.texture_synchronization)
+            .saturating_add(self.stream_packing_upload)
+            .saturating_add(self.command_encoding)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuTimestampPass {
+    ShaderLandscape,
+    Scene,
+    MonitorGamma,
+    Presentation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GpuTimestampQueryPair {
+    pass: GpuTimestampPass,
+    begin: u32,
+    end: u32,
+}
+
+impl GpuTimestampQueryPair {
+    const fn new(pass: GpuTimestampPass, begin: u32, end: u32) -> Self {
+        Self { pass, begin, end }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuTimestampSample {
+    pub pass: GpuTimestampPass,
+    pub begin_tick: u64,
+    pub end_tick: u64,
+    /// `None` whenever raw timing evidence is not safe to interpret.
+    pub duration_ns: Option<f64>,
+    pub validity: GpuTimestampSampleValidity,
+}
+
+/// Machine-readable disposition for a raw timestamp pair.
+///
+/// Invalid samples remain in the completed frame so benchmark artifacts retain
+/// the device evidence, but consumers must reject every value except `Valid`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuTimestampSampleValidity {
+    Valid,
+    InvalidPeriod,
+    CounterRollover,
+    InvalidDuration,
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum GpuTimestampDecodeError {
+    #[error("GPU timestamp query index {index} is absent from {available} values")]
+    MissingQuery { index: u32, available: usize },
+}
+
+fn decode_timestamp_frame(
+    period_ns: f32,
+    pairs: &[GpuTimestampQueryPair],
+    ticks: &[u64],
+) -> Result<Vec<GpuTimestampSample>, GpuTimestampDecodeError> {
+    pairs
+        .iter()
+        .map(|pair| {
+            let begin = ticks.get(pair.begin as usize).copied().ok_or(
+                GpuTimestampDecodeError::MissingQuery {
+                    index: pair.begin,
+                    available: ticks.len(),
+                },
+            )?;
+            let end = ticks.get(pair.end as usize).copied().ok_or(
+                GpuTimestampDecodeError::MissingQuery {
+                    index: pair.end,
+                    available: ticks.len(),
+                },
+            )?;
+            let (validity, duration_ns) = if !period_ns.is_finite() || period_ns <= 0.0 {
+                (GpuTimestampSampleValidity::InvalidPeriod, None)
+            } else if let Some(elapsed) = end.checked_sub(begin) {
+                let duration_ns = elapsed as f64 * f64::from(period_ns);
+                if duration_ns.is_finite() {
+                    (GpuTimestampSampleValidity::Valid, Some(duration_ns))
+                } else {
+                    (GpuTimestampSampleValidity::InvalidDuration, None)
+                }
+            } else {
+                (GpuTimestampSampleValidity::CounterRollover, None)
+            };
+            Ok(GpuTimestampSample {
+                pass: pair.pass,
+                begin_tick: begin,
+                end_tick: end,
+                duration_ns,
+                validity,
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuTimestampFrame {
+    pub frame_id: u64,
+    pub renderer_generation: u64,
+    pub timestamp_period_ns: f32,
+    pub passes: Vec<GpuTimestampSample>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuTimestampTelemetry {
+    pub dropped_frames: u64,
+    pub readback_errors: u64,
+    pub device_discontinuities: u64,
+}
+
+const GPU_TIMESTAMP_QUERY_COUNT: u32 = 8;
+const GPU_TIMESTAMP_SLOT_COUNT: usize = 8;
+const GPU_TIMESTAMP_BUFFER_SIZE: u64 = GPU_TIMESTAMP_QUERY_COUNT as u64 * 8;
+const GPU_TIMESTAMP_COMPLETED_HISTORY_LIMIT: usize = 1_024;
+const GPU_TIMESTAMP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn timestamp_drain_poll_type() -> wgpu::PollType {
+    wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(GPU_TIMESTAMP_DRAIN_TIMEOUT),
+    }
+}
+
+struct GpuTimestampSlot {
+    query_set: wgpu::QuerySet,
+    resolve_buffer: wgpu::Buffer,
+    staging_buffer: wgpu::Buffer,
+    ready: Arc<Mutex<Option<Result<(), String>>>>,
+    in_flight: bool,
+    frame_id: u64,
+    renderer_generation: u64,
+    timestamp_period_ns: f32,
+    pairs: Vec<GpuTimestampQueryPair>,
+    used_queries: u32,
+}
+
+struct ActiveGpuTimestampFrame {
+    slot: usize,
+    query_set: wgpu::QuerySet,
+    resolve_buffer: wgpu::Buffer,
+    staging_buffer: wgpu::Buffer,
+    ready: Arc<Mutex<Option<Result<(), String>>>>,
+    frame_id: u64,
+    renderer_generation: u64,
+    timestamp_period_ns: f32,
+    pairs: Vec<GpuTimestampQueryPair>,
+    next_query: u32,
+}
+
+impl ActiveGpuTimestampFrame {
+    fn reserve(&mut self, pass: GpuTimestampPass) -> GpuTimestampQueryPair {
+        debug_assert!(self.next_query + 1 < GPU_TIMESTAMP_QUERY_COUNT);
+        let pair = GpuTimestampQueryPair::new(pass, self.next_query, self.next_query + 1);
+        self.next_query += 2;
+        self.pairs.push(pair);
+        pair
+    }
+
+    fn timestamp_writes(&self, pair: GpuTimestampQueryPair) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(pair.begin),
+            end_of_pass_write_index: Some(pair.end),
+        }
+    }
+}
+
+struct GpuTimestampProfiler {
+    slots: Vec<GpuTimestampSlot>,
+}
+
+struct GpuTimestampHistory {
+    next_frame_id: u64,
+    completed: Vec<GpuTimestampFrame>,
+    telemetry: GpuTimestampTelemetry,
+}
+
+impl Default for GpuTimestampHistory {
+    fn default() -> Self {
+        Self {
+            next_frame_id: 1,
+            completed: Vec::new(),
+            telemetry: GpuTimestampTelemetry::default(),
+        }
+    }
+}
+
+impl GpuTimestampHistory {
+    fn push_completed(&mut self, frame: GpuTimestampFrame) {
+        if self.completed.len() >= GPU_TIMESTAMP_COMPLETED_HISTORY_LIMIT {
+            let overflow = self
+                .completed
+                .len()
+                .saturating_add(1)
+                .saturating_sub(GPU_TIMESTAMP_COMPLETED_HISTORY_LIMIT);
+            self.completed.drain(..overflow);
+            self.telemetry.dropped_frames = self
+                .telemetry
+                .dropped_frames
+                .saturating_add(overflow as u64);
+        }
+        self.completed.push(frame);
+    }
+}
+
+impl GpuTimestampProfiler {
+    fn new(device: &wgpu::Device) -> Option<Self> {
+        device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| Self {
+                slots: (0..GPU_TIMESTAMP_SLOT_COUNT)
+                    .map(|slot| {
+                        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+                            label: Some("lc_gpu_timestamp_queries"),
+                            ty: wgpu::QueryType::Timestamp,
+                            count: GPU_TIMESTAMP_QUERY_COUNT,
+                        });
+                        let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("lc_gpu_timestamp_resolve"),
+                            size: GPU_TIMESTAMP_BUFFER_SIZE,
+                            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                            mapped_at_creation: false,
+                        });
+                        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("lc_gpu_timestamp_readback"),
+                            size: GPU_TIMESTAMP_BUFFER_SIZE,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        });
+                        GpuTimestampSlot {
+                            query_set,
+                            resolve_buffer,
+                            staging_buffer,
+                            ready: Arc::new(Mutex::new(None)),
+                            in_flight: false,
+                            frame_id: slot as u64,
+                            renderer_generation: 0,
+                            timestamp_period_ns: 0.0,
+                            pairs: Vec::with_capacity(4),
+                            used_queries: 0,
+                        }
+                    })
+                    .collect(),
+            })
+    }
+
+    fn lock_ready(
+        ready: &Mutex<Option<Result<(), String>>>,
+    ) -> std::sync::MutexGuard<'_, Option<Result<(), String>>> {
+        ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn collect_mapped(&mut self, history: &mut GpuTimestampHistory) {
+        for slot in &mut self.slots {
+            if !slot.in_flight {
+                continue;
+            }
+            let Some(mapped) = Self::lock_ready(&slot.ready).take() else {
+                continue;
+            };
+            if mapped.is_err() {
+                history.telemetry.readback_errors =
+                    history.telemetry.readback_errors.saturating_add(1);
+                slot.in_flight = false;
+                continue;
+            }
+            let byte_len = u64::from(slot.used_queries) * 8;
+            let mapped = slot.staging_buffer.slice(0..byte_len).get_mapped_range();
+            let ticks = mapped
+                .chunks_exact(8)
+                .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("eight-byte timestamp")))
+                .collect::<Vec<_>>();
+            drop(mapped);
+            slot.staging_buffer.unmap();
+            match decode_timestamp_frame(slot.timestamp_period_ns, &slot.pairs, &ticks) {
+                Ok(passes) => {
+                    if passes
+                        .iter()
+                        .any(|sample| sample.validity != GpuTimestampSampleValidity::Valid)
+                    {
+                        history.telemetry.readback_errors =
+                            history.telemetry.readback_errors.saturating_add(1);
+                    }
+                    history.push_completed(GpuTimestampFrame {
+                        frame_id: slot.frame_id,
+                        renderer_generation: slot.renderer_generation,
+                        timestamp_period_ns: slot.timestamp_period_ns,
+                        passes,
+                    });
+                }
+                Err(_) => {
+                    history.telemetry.readback_errors =
+                        history.telemetry.readback_errors.saturating_add(1);
+                }
+            }
+            slot.in_flight = false;
+        }
+    }
+
+    fn collect_ready(&mut self, device: &wgpu::Device, history: &mut GpuTimestampHistory) {
+        let _ = device.poll(wgpu::PollType::Poll);
+        self.collect_mapped(history);
+    }
+
+    fn begin_frame(
+        &mut self,
+        device: &wgpu::Device,
+        renderer_generation: u64,
+        timestamp_period_ns: f32,
+        history: &mut GpuTimestampHistory,
+    ) -> Option<ActiveGpuTimestampFrame> {
+        self.collect_ready(device, history);
+        let Some((slot_index, slot)) = self
+            .slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| !slot.in_flight)
+        else {
+            history.telemetry.dropped_frames = history.telemetry.dropped_frames.saturating_add(1);
+            return None;
+        };
+        let frame_id = history.next_frame_id;
+        history.next_frame_id = history.next_frame_id.wrapping_add(1).max(1);
+        *Self::lock_ready(&slot.ready) = None;
+        Some(ActiveGpuTimestampFrame {
+            slot: slot_index,
+            query_set: slot.query_set.clone(),
+            resolve_buffer: slot.resolve_buffer.clone(),
+            staging_buffer: slot.staging_buffer.clone(),
+            ready: Arc::clone(&slot.ready),
+            frame_id,
+            renderer_generation,
+            timestamp_period_ns,
+            pairs: Vec::with_capacity(4),
+            next_query: 0,
+        })
+    }
+
+    fn finish_frame(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        active: ActiveGpuTimestampFrame,
+    ) {
+        if active.next_query == 0 {
+            return;
+        }
+        let byte_len = u64::from(active.next_query) * 8;
+        encoder.resolve_query_set(
+            &active.query_set,
+            0..active.next_query,
+            &active.resolve_buffer,
+            0,
+        );
+        encoder.copy_buffer_to_buffer(
+            &active.resolve_buffer,
+            0,
+            &active.staging_buffer,
+            0,
+            byte_len,
+        );
+        let ready = Arc::clone(&active.ready);
+        encoder.map_buffer_on_submit(
+            &active.staging_buffer,
+            wgpu::MapMode::Read,
+            0..byte_len,
+            move |result| {
+                *Self::lock_ready(&ready) = Some(result.map_err(|error| error.to_string()));
+            },
+        );
+        let slot = &mut self.slots[active.slot];
+        slot.in_flight = true;
+        slot.frame_id = active.frame_id;
+        slot.renderer_generation = active.renderer_generation;
+        slot.timestamp_period_ns = active.timestamp_period_ns;
+        slot.pairs = active.pairs;
+        slot.used_queries = active.next_query;
+    }
+
+    fn collect_completed(&mut self, device: &wgpu::Device, history: &mut GpuTimestampHistory) {
+        self.collect_ready(device, history);
+    }
+
+    fn pending_frames(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.in_flight).count()
+    }
+
+    fn drain(
+        &mut self,
+        device: &wgpu::Device,
+        history: &mut GpuTimestampHistory,
+    ) -> Result<(), GpuRendererError> {
+        device
+            .poll(timestamp_drain_poll_type())
+            .map_err(|error| GpuRendererError::TimestampPoll(error.to_string()))?;
+        self.collect_mapped(history);
+        let pending = self.pending_frames();
+        if pending != 0 {
+            return Err(GpuRendererError::TimestampDrainIncomplete { pending });
+        }
+        Ok(())
+    }
+}
+
 /// Per-frame evidence that source retention and dirty updates are working.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GpuRendererStats {
+    pub cpu_stages: GpuRendererCpuStages,
+    pub timestamp_frame_id: Option<u64>,
     pub resident_source_textures: usize,
     pub created_source_textures: usize,
+    pub full_upload_calls: usize,
     pub full_upload_bytes: u64,
+    pub dirty_upload_calls: usize,
     pub dirty_upload_bytes: u64,
-    /// Painter-ordered scene draws, excluding fixed post-processing and presentation passes.
+    /// Compatible painter-ordered resource runs, excluding fixed post-processing and presentation passes.
     pub draw_calls: usize,
+    pub quad_draw_calls: usize,
+    pub sprite_draw_calls: usize,
+    pub object_sprite_draw_calls: usize,
+    pub landscape_draw_calls: usize,
+    pub shader_landscape_draw_calls: usize,
+    pub solid_draw_calls: usize,
+    pub solid_rect_draw_calls: usize,
+    pub monitor_gamma_draw_calls: usize,
+    pub presentation_draw_calls: usize,
     /// All GPU draw calls, including monitor-gamma and final presentation passes.
     pub total_draw_calls: usize,
+    pub compatible_resource_runs: usize,
+    /// Packed vertices shared by landscape quads and generic solid triangles.
+    pub generic_vertices: usize,
+    pub generic_vertex_upload_bytes: usize,
     pub quad_instances: usize,
+    pub sprite_instances: usize,
     pub object_sprite_instances: usize,
     /// Physical point and line-fragment rectangles uploaded as compact instances.
     pub solid_rect_instances: usize,
     pub quad_instance_upload_bytes: usize,
+    pub sprite_instance_upload_bytes: usize,
     pub object_sprite_upload_bytes: usize,
     pub solid_rect_upload_bytes: usize,
     pub composition_recreated: bool,
@@ -1342,6 +1789,86 @@ struct BuiltDrawStream {
     calls: Vec<DrawCall>,
 }
 
+impl GpuRendererStats {
+    /// True when every retained draw is classified exactly once and the
+    /// classified scene/fixed passes reconcile with the submitted total.
+    pub fn has_exact_draw_call_counts(self) -> bool {
+        let classified_scene = self
+            .quad_draw_calls
+            .saturating_add(self.sprite_draw_calls)
+            .saturating_add(self.object_sprite_draw_calls)
+            .saturating_add(self.landscape_draw_calls)
+            .saturating_add(self.solid_draw_calls)
+            .saturating_add(self.solid_rect_draw_calls);
+        let classified_total = self
+            .draw_calls
+            .saturating_add(self.shader_landscape_draw_calls)
+            .saturating_add(self.monitor_gamma_draw_calls)
+            .saturating_add(self.presentation_draw_calls);
+        classified_scene == self.draw_calls
+            && self.compatible_resource_runs == self.draw_calls
+            && classified_total == self.total_draw_calls
+    }
+
+    fn record_full_texture_upload(&mut self, upload: TextureUploadStats) {
+        self.full_upload_calls = self.full_upload_calls.saturating_add(upload.calls);
+        self.full_upload_bytes = self.full_upload_bytes.saturating_add(upload.bytes);
+    }
+
+    fn record_dirty_texture_upload(&mut self, bytes: u64) {
+        self.dirty_upload_calls = self.dirty_upload_calls.saturating_add(1);
+        self.dirty_upload_bytes = self.dirty_upload_bytes.saturating_add(bytes);
+    }
+
+    fn record_draw_stream(&mut self, stream: &BuiltDrawStream) {
+        self.generic_vertices = stream.vertices.len();
+        self.generic_vertex_upload_bytes = stream.vertices.len() * PACKED_VERTEX_STRIDE as usize;
+        self.quad_instances = stream.quad_instances.len();
+        self.quad_instance_upload_bytes =
+            stream.quad_instances.len() * PACKED_QUAD_INSTANCE_STRIDE as usize;
+        self.sprite_instances = stream.sprite_instances.len();
+        self.sprite_instance_upload_bytes =
+            stream.sprite_instances.len() * PACKED_SPRITE_INSTANCE_STRIDE as usize;
+        self.object_sprite_instances = stream.object_sprite_instances.len();
+        self.object_sprite_upload_bytes =
+            stream.object_sprite_instances.len() * PACKED_OBJECT_SPRITE_INSTANCE_STRIDE as usize;
+        self.solid_rect_instances = stream.solid_rect_instances.len();
+        self.solid_rect_upload_bytes =
+            stream.solid_rect_instances.len() * PACKED_SOLID_RECT_INSTANCE_STRIDE as usize;
+        self.draw_calls = stream.calls.len();
+        self.compatible_resource_runs = stream.calls.len();
+        for call in &stream.calls {
+            let count = match call.kind {
+                DrawKind::Quad(_) => &mut self.quad_draw_calls,
+                DrawKind::Sprite(_) => &mut self.sprite_draw_calls,
+                DrawKind::ObjectSprite(_) => &mut self.object_sprite_draw_calls,
+                DrawKind::Landscape(_) => &mut self.landscape_draw_calls,
+                DrawKind::Solid { .. } => &mut self.solid_draw_calls,
+                DrawKind::SolidRect { .. } => &mut self.solid_rect_draw_calls,
+            };
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TextureUploadStats {
+    calls: usize,
+    bytes: u64,
+}
+
+impl TextureUploadStats {
+    fn record(&mut self, bytes: usize) {
+        self.calls = self.calls.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes as u64);
+    }
+
+    fn add(&mut self, other: Self) {
+        self.calls = self.calls.saturating_add(other.calls);
+        self.bytes = self.bytes.saturating_add(other.bytes);
+    }
+}
+
 impl DrawCall {
     fn push_compatible_quad(calls: &mut Vec<Self>, batch_start: usize, call: Self) {
         let compatible = (calls.len() > batch_start)
@@ -1512,6 +2039,8 @@ pub struct RetainedGpuRenderer {
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
     last_presented_monitor_gamma: Option<bool>,
+    timestamp_profiler: Option<GpuTimestampProfiler>,
+    timestamp_history: GpuTimestampHistory,
     last_stats: GpuRendererStats,
     /// Once a scene needs a source texture larger than this device supports,
     /// presentation stays on the CPU reference path until the device is
@@ -1981,6 +2510,8 @@ impl RetainedGpuRenderer {
             draw_call_scratch: Vec::new(),
             composition: None,
             last_presented_monitor_gamma: None,
+            timestamp_profiler: GpuTimestampProfiler::new(device),
+            timestamp_history: GpuTimestampHistory::default(),
             last_stats: GpuRendererStats::default(),
             cpu_presentation_required: false,
         }
@@ -2001,6 +2532,18 @@ impl RetainedGpuRenderer {
         surface_format: wgpu::TextureFormat,
     ) -> u64 {
         let generation = self.generation.wrapping_add(1).max(1);
+        if let Some(profiler) = self.timestamp_profiler.as_mut() {
+            // A device-idle callback may already have mapped its old-device
+            // buffer. Harvest that sample without polling the replacement
+            // device before the old query objects are dropped.
+            profiler.collect_mapped(&mut self.timestamp_history);
+            self.timestamp_history.telemetry.dropped_frames = self
+                .timestamp_history
+                .telemetry
+                .dropped_frames
+                .saturating_add(profiler.pending_frames() as u64);
+        }
+        let mut timestamp_history = std::mem::take(&mut self.timestamp_history);
         // `build` starts every presentation flag at its C++-exact default, so
         // the configured opt-ins have to be carried over explicitly. The
         // renderer is a local in `main` that GameApp never holds, so nothing
@@ -2012,6 +2555,11 @@ impl RetainedGpuRenderer {
             self.landscape_detail,
         );
         *self = Self::build(device, queue, surface_format, generation);
+        timestamp_history.telemetry.device_discontinuities = timestamp_history
+            .telemetry
+            .device_discontinuities
+            .saturating_add(1);
+        self.timestamp_history = timestamp_history;
         self.mipmaps = carried.0;
         self.smooth_landscape = carried.1;
         self.shader_landscape = carried.2;
@@ -2065,6 +2613,56 @@ impl RetainedGpuRenderer {
 
     pub fn last_stats(&self) -> GpuRendererStats {
         self.last_stats
+    }
+
+    pub fn timestamp_queries_enabled(&self) -> bool {
+        self.timestamp_profiler.is_some()
+    }
+
+    pub fn timestamp_telemetry(&self) -> GpuTimestampTelemetry {
+        self.timestamp_history.telemetry
+    }
+
+    pub fn take_completed_timestamp_frames(
+        &mut self,
+        device: &wgpu::Device,
+    ) -> Vec<GpuTimestampFrame> {
+        if let Some(profiler) = self.timestamp_profiler.as_mut() {
+            profiler.collect_completed(device, &mut self.timestamp_history);
+        }
+        std::mem::take(&mut self.timestamp_history.completed)
+    }
+
+    /// Wait for all submitted timestamp readbacks and return every completed
+    /// raw frame. This is an explicit benchmark-boundary operation; normal
+    /// frame rendering and [`Self::take_completed_timestamp_frames`] only poll.
+    pub fn drain_timestamp_frames(
+        &mut self,
+        device: &wgpu::Device,
+    ) -> Result<Vec<GpuTimestampFrame>, GpuRendererError> {
+        if let Some(profiler) = self.timestamp_profiler.as_mut() {
+            profiler.drain(device, &mut self.timestamp_history)?;
+        }
+        Ok(std::mem::take(&mut self.timestamp_history.completed))
+    }
+
+    fn commit_timestamp_frame(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        active: Option<ActiveGpuTimestampFrame>,
+    ) -> Result<(), GpuRendererError> {
+        // The asynchronous health callbacks may fire while passes are being
+        // encoded. Do the final fallible health check before marking a slot as
+        // in flight: an error tells the caller to discard this encoder, and the
+        // uncommitted slot can then be reused safely on a healthy device.
+        self.check_health()?;
+        if let Some(active) = active {
+            self.timestamp_profiler
+                .as_mut()
+                .expect("active timestamps require a profiler")
+                .finish_frame(encoder, active);
+        }
+        Ok(())
     }
 
     /// True after this device has rejected a retained source or shader texture
@@ -2128,6 +2726,8 @@ impl RetainedGpuRenderer {
         layers: &[GpuSceneLayer<'_>],
         request_readback: bool,
     ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
+        self.last_stats = GpuRendererStats::default();
+        let validation_started = Instant::now();
         self.check_health()?;
         let base = layers.first().ok_or(GpuRendererError::NoSceneLayers)?;
         let resources = validate_layers(layers)?;
@@ -2152,12 +2752,54 @@ impl RetainedGpuRenderer {
             return Err(error);
         }
         let scene = base.scene;
-        self.last_stats = GpuRendererStats::default();
+        let texture_sync_started = Instant::now();
+        self.last_stats.cpu_stages.validation =
+            texture_sync_started.duration_since(validation_started);
         self.texture_epoch = self.texture_epoch.wrapping_add(1).max(1);
         self.sync_gamma(queue, scene);
         self.sync_textures(device, queue, &resources)?;
-        self.compose_shader_landscape(device, queue, encoder)?;
+        let texture_sync_finished = Instant::now();
+        self.last_stats.cpu_stages.texture_synchronization =
+            texture_sync_finished.duration_since(texture_sync_started);
+        let shader_landscape_draw_calls =
+            usize::from(self.shader_landscape && self.pending_shader_landscape.is_some());
+        let timestamp_queries_enabled = self.timestamp_profiler.is_some();
+        let mut timestamp_frame = match self.timestamp_profiler.as_mut() {
+            Some(profiler) => profiler.begin_frame(
+                device,
+                self.generation,
+                queue.get_timestamp_period(),
+                &mut self.timestamp_history,
+            ),
+            None => None,
+        };
+        self.last_stats.timestamp_frame_id =
+            timestamp_frame.as_ref().map(|timestamp| timestamp.frame_id);
+        let shader_timestamp_pair = (shader_landscape_draw_calls != 0)
+            .then(|| {
+                timestamp_frame
+                    .as_mut()
+                    .map(|timestamp| timestamp.reserve(GpuTimestampPass::ShaderLandscape))
+            })
+            .flatten();
+        let shader_timestamp_writes = shader_timestamp_pair.map(|pair| {
+            timestamp_frame
+                .as_ref()
+                .expect("timestamp pair has an active frame")
+                .timestamp_writes(pair)
+        });
+        let command_encoding_started = if timestamp_queries_enabled {
+            Instant::now()
+        } else {
+            texture_sync_finished
+        };
+        self.compose_shader_landscape(device, queue, encoder, shader_timestamp_writes)?;
+        self.last_stats.shader_landscape_draw_calls = shader_landscape_draw_calls;
 
+        let stream_started = Instant::now();
+        let shader_encoding = stream_started.duration_since(command_encoding_started);
+        let draw_stream = self.build_layered_draw_stream(layers)?;
+        self.last_stats.record_draw_stream(&draw_stream);
         let BuiltDrawStream {
             vertices,
             quad_instances,
@@ -2165,7 +2807,7 @@ impl RetainedGpuRenderer {
             object_sprite_instances,
             solid_rect_instances,
             calls,
-        } = self.build_layered_draw_stream(layers)?;
+        } = draw_stream;
         let vertex_bytes = packed_vertex_bytes(&vertices);
         let quad_instance_bytes = packed_quad_instance_bytes(&quad_instances);
         let sprite_instance_bytes = packed_sprite_instance_bytes(&sprite_instances);
@@ -2222,20 +2864,29 @@ impl RetainedGpuRenderer {
                 solid_rect_instance_bytes,
             );
         }
-        self.last_stats.draw_calls = calls.len();
-        self.last_stats.total_draw_calls =
-            calls.len() + 1 + usize::from(scene.gamma_mode.monitor_postpass());
-        self.last_stats.quad_instances = quad_instances.len();
-        self.last_stats.object_sprite_instances = object_sprite_instances.len();
-        self.last_stats.quad_instance_upload_bytes = quad_instance_bytes.len();
-        self.last_stats.object_sprite_upload_bytes = object_sprite_instance_bytes.len();
-        self.last_stats.solid_rect_instances = solid_rect_instances.len();
-        self.last_stats.solid_rect_upload_bytes = solid_rect_instance_bytes.len();
+        self.last_stats.monitor_gamma_draw_calls = usize::from(scene.gamma_mode.monitor_postpass());
+        self.last_stats.presentation_draw_calls = 1;
+        self.last_stats.total_draw_calls = calls.len()
+            + shader_landscape_draw_calls
+            + self.last_stats.monitor_gamma_draw_calls
+            + self.last_stats.presentation_draw_calls;
         self.last_stats.resident_source_textures = self.textures.len();
+        let encoding_resumed = Instant::now();
+        self.last_stats.cpu_stages.stream_packing_upload =
+            encoding_resumed.duration_since(stream_started);
 
         self.ensure_composition(device, base.presentation.physical_extent);
         let composition = self.composition.as_ref().expect("composition was created");
         let clear = scene.clear;
+        let scene_timestamp_pair = timestamp_frame
+            .as_mut()
+            .map(|timestamp| timestamp.reserve(GpuTimestampPass::Scene));
+        let scene_timestamp_writes = scene_timestamp_pair.map(|pair| {
+            timestamp_frame
+                .as_ref()
+                .expect("timestamp pair has an active frame")
+                .timestamp_writes(pair)
+        });
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &composition.view,
@@ -2255,7 +2906,7 @@ impl RetainedGpuRenderer {
                 label: Some("lc_gpu_scene_pass"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: scene_timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2266,6 +2917,15 @@ impl RetainedGpuRenderer {
         }
 
         if scene.gamma_mode.monitor_postpass() {
+            let gamma_timestamp_pair = timestamp_frame
+                .as_mut()
+                .map(|timestamp| timestamp.reserve(GpuTimestampPass::MonitorGamma));
+            let gamma_timestamp_writes = gamma_timestamp_pair.map(|pair| {
+                timestamp_frame
+                    .as_ref()
+                    .expect("timestamp pair has an active frame")
+                    .timestamp_writes(pair)
+            });
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &composition.gamma_resolved_view,
                 depth_slice: None,
@@ -2279,7 +2939,7 @@ impl RetainedGpuRenderer {
                 label: Some("lc_gpu_monitor_gamma_pass"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: gamma_timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2302,6 +2962,15 @@ impl RetainedGpuRenderer {
             .then(|| encode_readback(device, encoder, presented_texture, composition.extent))
             .transpose()?;
 
+        let present_timestamp_pair = timestamp_frame
+            .as_mut()
+            .map(|timestamp| timestamp.reserve(GpuTimestampPass::Presentation));
+        let present_timestamp_writes = present_timestamp_pair.map(|pair| {
+            timestamp_frame
+                .as_ref()
+                .expect("timestamp pair has an active frame")
+                .timestamp_writes(pair)
+        });
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: surface_view,
@@ -2316,7 +2985,7 @@ impl RetainedGpuRenderer {
                 label: Some("lc_gpu_present_pass"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: present_timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2325,13 +2994,18 @@ impl RetainedGpuRenderer {
             pass.draw(0..3, 0..1);
         }
 
+        self.commit_timestamp_frame(encoder, timestamp_frame)?;
+
+        let encoding_finished = Instant::now();
+        self.last_stats.cpu_stages.command_encoding =
+            shader_encoding.saturating_add(encoding_finished.duration_since(encoding_resumed));
+
         self.vertex_scratch = vertices;
         self.quad_instance_scratch = quad_instances;
         self.sprite_instance_scratch = sprite_instances;
         self.object_sprite_instance_scratch = object_sprite_instances;
         self.solid_rect_instance_scratch = solid_rect_instances;
         self.draw_call_scratch = calls;
-        self.check_health()?;
         Ok(readback)
     }
 
@@ -2446,6 +3120,7 @@ impl RetainedGpuRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> Result<(), GpuRendererError> {
         // Always take the plan: a frame that does not compose must not leave a
         // stale landscape queued for the next one.
@@ -2497,7 +3172,7 @@ impl RetainedGpuRenderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        composer.compose_into(device, queue, encoder, &view, inputs)?;
+        composer.compose_into_profiled(device, queue, encoder, &view, inputs, timestamp_writes)?;
 
         let byte_len = u64::from(extent[0]) * u64::from(extent[1]) * 4;
         self.textures.insert(
@@ -2545,12 +3220,9 @@ impl RetainedGpuRenderer {
             });
             if recreate {
                 let texture = create_source_texture(device, resource, self.mipmaps);
-                upload_full(queue, &texture, resource);
+                let upload = upload_full(queue, &texture, resource);
                 self.last_stats.created_source_textures += 1;
-                self.last_stats.full_upload_bytes = self
-                    .last_stats
-                    .full_upload_bytes
-                    .saturating_add(resource.pixels.len() as u64);
+                self.last_stats.record_full_texture_upload(upload);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 self.textures.insert(
                     resource.id,
@@ -2584,11 +3256,8 @@ impl RetainedGpuRenderer {
                     // or more produced revisions (including time spent in
                     // another application mode), replace the GPU contents
                     // rather than applying a delta to stale texels.
-                    upload_full(queue, &cached._texture, resource);
-                    self.last_stats.full_upload_bytes = self
-                        .last_stats
-                        .full_upload_bytes
-                        .saturating_add(resource.pixels.len() as u64);
+                    let upload = upload_full(queue, &cached._texture, resource);
+                    self.last_stats.record_full_texture_upload(upload);
                 }
                 TextureUploadPlan::Dirty => {
                     for &rect in &resource.dirty {
@@ -2599,8 +3268,7 @@ impl RetainedGpuRenderer {
                         let bytes = u64::from(rect.width)
                             .saturating_mul(u64::from(rect.height))
                             .saturating_mul(resource.format.bytes_per_pixel() as u64);
-                        self.last_stats.dirty_upload_bytes =
-                            self.last_stats.dirty_upload_bytes.saturating_add(bytes);
+                        self.last_stats.record_dirty_texture_upload(bytes);
                     }
                 }
             }
@@ -5029,7 +5697,12 @@ fn texture_format(format: GpuTextureFormat) -> wgpu::TextureFormat {
     }
 }
 
-fn upload_full(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &GpuTextureResource) {
+fn upload_full(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    resource: &GpuTextureResource,
+) -> TextureUploadStats {
+    let mut stats = TextureUploadStats::default();
     let bytes_per_row = resource.extent[0] * resource.format.bytes_per_pixel() as u32;
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -5050,12 +5723,19 @@ fn upload_full(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &GpuTextu
             depth_or_array_layers: 1,
         },
     );
+    stats.record(resource.pixels.len());
     if texture.mip_level_count() > 1 {
-        upload_mip_chain(queue, texture, resource);
+        stats.add(upload_mip_chain(queue, texture, resource));
     }
+    stats
 }
 
-fn upload_mip_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &GpuTextureResource) {
+fn upload_mip_chain(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    resource: &GpuTextureResource,
+) -> TextureUploadStats {
+    let mut stats = TextureUploadStats::default();
     let bytes = resource.format.bytes_per_pixel() as u32;
     for (level, (extent, pixels)) in
         generate_mip_chain(&resource.pixels, resource.extent, resource.format)
@@ -5081,7 +5761,9 @@ fn upload_mip_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, resource: &Gpu
                 depth_or_array_layers: 1,
             },
         );
+        stats.record(pixels.len());
     }
+    stats
 }
 
 fn upload_dirty(
@@ -5924,6 +6606,18 @@ impl ShaderLandscapeComposer {
         target: &wgpu::TextureView,
         inputs: ShaderLandscapeInputs<'_>,
     ) -> Result<(), GpuRendererError> {
+        self.compose_into_profiled(device, queue, encoder, target, inputs, None)
+    }
+
+    fn compose_into_profiled(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        inputs: ShaderLandscapeInputs<'_>,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) -> Result<(), GpuRendererError> {
         inputs.validate()?;
         let pixels = inputs.extent[0] as usize * inputs.extent[1] as usize;
         let (_index, index_view) = uint_plane(
@@ -6021,7 +6715,7 @@ impl ShaderLandscapeComposer {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -6119,6 +6813,459 @@ mod tests {
     };
     use clonk_gui::{ImageData, Rect as GuiRect};
     use std::sync::Arc;
+
+    #[test]
+    fn renderer_cpu_stage_total_reconciles_named_intervals() {
+        let stages = GpuRendererCpuStages {
+            validation: std::time::Duration::from_nanos(1),
+            texture_synchronization: std::time::Duration::from_nanos(2),
+            stream_packing_upload: std::time::Duration::from_nanos(3),
+            command_encoding: std::time::Duration::from_nanos(4),
+        };
+
+        assert_eq!(stages.total(), std::time::Duration::from_nanos(10));
+    }
+
+    #[test]
+    fn timestamp_ticks_are_labeled_and_scaled_by_queue_period() {
+        let pairs = [
+            GpuTimestampQueryPair::new(GpuTimestampPass::Scene, 0, 1),
+            GpuTimestampQueryPair::new(GpuTimestampPass::Presentation, 2, 3),
+        ];
+
+        let samples = decode_timestamp_frame(2.5, &pairs, &[10, 14, 20, 23])
+            .expect("valid timestamp fixture");
+
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].pass, GpuTimestampPass::Scene);
+        assert_eq!(samples[0].begin_tick, 10);
+        assert_eq!(samples[0].end_tick, 14);
+        assert_eq!(samples[0].validity, GpuTimestampSampleValidity::Valid);
+        assert_eq!(samples[0].duration_ns, Some(10.0));
+        assert_eq!(samples[1].pass, GpuTimestampPass::Presentation);
+        assert_eq!(samples[1].duration_ns, Some(7.5));
+    }
+
+    #[test]
+    fn timestamp_decoder_preserves_absent_optional_passes() {
+        let pairs = [
+            GpuTimestampQueryPair::new(GpuTimestampPass::Scene, 0, 1),
+            GpuTimestampQueryPair::new(GpuTimestampPass::Presentation, 2, 3),
+        ];
+
+        let samples =
+            decode_timestamp_frame(1.0, &pairs, &[1, 2, 3, 4]).expect("valid timestamp fixture");
+
+        assert_eq!(
+            samples.iter().map(|sample| sample.pass).collect::<Vec<_>>(),
+            vec![GpuTimestampPass::Scene, GpuTimestampPass::Presentation]
+        );
+    }
+
+    #[test]
+    fn timestamp_decoder_preserves_raw_ticks_and_marks_invalid_samples() {
+        let pairs = [GpuTimestampQueryPair::new(GpuTimestampPass::Scene, 0, 1)];
+
+        let invalid_period = decode_timestamp_frame(0.0, &pairs, &[1, 2])
+            .expect("raw queries remain structurally decodable");
+        assert_eq!(
+            invalid_period[0].validity,
+            GpuTimestampSampleValidity::InvalidPeriod
+        );
+        assert_eq!(invalid_period[0].duration_ns, None);
+        assert_eq!(
+            (invalid_period[0].begin_tick, invalid_period[0].end_tick),
+            (1, 2)
+        );
+
+        let rollover = decode_timestamp_frame(1.0, &pairs, &[2, 1])
+            .expect("timestamp rollover preserves the raw query pair");
+        assert_eq!(
+            rollover[0].validity,
+            GpuTimestampSampleValidity::CounterRollover
+        );
+        assert_eq!(rollover[0].duration_ns, None);
+        assert_eq!((rollover[0].begin_tick, rollover[0].end_tick), (2, 1));
+    }
+
+    #[test]
+    fn timestamp_history_drops_oldest_frames_at_its_bound() {
+        let mut history = GpuTimestampHistory::default();
+        for frame_id in 1..=(GPU_TIMESTAMP_COMPLETED_HISTORY_LIMIT as u64 + 1) {
+            history.push_completed(GpuTimestampFrame {
+                frame_id,
+                renderer_generation: 1,
+                timestamp_period_ns: 1.0,
+                passes: Vec::new(),
+            });
+        }
+
+        assert_eq!(
+            history.completed.len(),
+            GPU_TIMESTAMP_COMPLETED_HISTORY_LIMIT
+        );
+        assert_eq!(history.completed[0].frame_id, 2);
+        assert_eq!(history.telemetry.dropped_frames, 1);
+    }
+
+    #[test]
+    fn timestamp_boundary_drain_has_a_finite_wait_budget() {
+        assert!(matches!(
+            timestamp_drain_poll_type(),
+            wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(timeout),
+            } if timeout == GPU_TIMESTAMP_DRAIN_TIMEOUT
+        ));
+    }
+
+    #[test]
+    fn timestamp_query_profiles_optional_passes_in_encoding_order_when_supported() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for timestamp adapter discovery");
+        let instance = test_wgpu_instance();
+        let Some((adapter, device, queue)) = request_test_device_with_features(
+            &runtime,
+            &instance,
+            "lc_gpu_timestamp_test_device",
+            true,
+            wgpu::Features::TIMESTAMP_QUERY,
+        ) else {
+            eprintln!("no timestamp-capable wgpu adapter; skipping timestamp query smoke");
+            return;
+        };
+        if !adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            eprintln!("adapter lacks timestamp queries; skipping timestamp query smoke");
+            return;
+        }
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_timestamp_test_target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let base = GpuTextureId::fresh();
+        let mut scene = test_scene(
+            [1, 1],
+            Color::transparent(),
+            vec![GpuTextureResource::immutable_rgba(
+                base,
+                1,
+                1,
+                Arc::from([0_u8; 4]),
+            )],
+            Vec::new(),
+        );
+        scene.gamma_mode = GpuGammaMode::Monitor;
+        let mut renderer = test_renderer(&device, &queue);
+        renderer.set_shader_landscape(true);
+        renderer.set_pending_shader_landscape(Some((
+            base,
+            clonk_graphics::ShaderLandscapePlan {
+                extent: [1, 1],
+                index_plane: vec![0],
+                shading_plane: None,
+                atlas: vec![0; 4],
+                atlas_extent: [1, 1],
+                slots: Vec::new(),
+            },
+        )));
+        assert!(renderer.timestamp_queries_enabled());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_timestamp_test_encoder"),
+        });
+
+        renderer
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                &scene,
+                &GpuPresentation::identity(1, 1),
+                false,
+            )
+            .expect("encode timestamped retained frame");
+        queue.submit(Some(encoder.finish()));
+        let frames = renderer
+            .drain_timestamp_frames(&device)
+            .expect("drain timestamp query readback");
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0]
+                .passes
+                .iter()
+                .map(|sample| sample.pass)
+                .collect::<Vec<_>>(),
+            vec![
+                GpuTimestampPass::ShaderLandscape,
+                GpuTimestampPass::Scene,
+                GpuTimestampPass::MonitorGamma,
+                GpuTimestampPass::Presentation,
+            ]
+        );
+        assert!(frames[0].passes.iter().all(|sample| match sample.validity {
+            GpuTimestampSampleValidity::Valid => sample.duration_ns.is_some(),
+            GpuTimestampSampleValidity::InvalidPeriod
+            | GpuTimestampSampleValidity::CounterRollover
+            | GpuTimestampSampleValidity::InvalidDuration => sample.duration_ns.is_none(),
+        }));
+        assert_eq!(renderer.last_stats().shader_landscape_draw_calls, 1);
+        assert_eq!(renderer.last_stats().monitor_gamma_draw_calls, 1);
+        assert_eq!(renderer.last_stats().presentation_draw_calls, 1);
+        assert!(renderer.last_stats().has_exact_draw_call_counts());
+        let invalid_frame = frames[0]
+            .passes
+            .iter()
+            .any(|sample| sample.validity != GpuTimestampSampleValidity::Valid);
+        assert_eq!(
+            renderer.timestamp_telemetry(),
+            GpuTimestampTelemetry {
+                readback_errors: u64::from(invalid_frame),
+                ..GpuTimestampTelemetry::default()
+            }
+        );
+    }
+
+    #[test]
+    fn timestamp_samples_survive_recreation_and_boundary_drain() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for timestamp adapter discovery");
+        let instance = test_wgpu_instance();
+        let Some((adapter, device, queue)) = request_test_device_with_features(
+            &runtime,
+            &instance,
+            "lc_gpu_timestamp_recreate_test_device",
+            true,
+            wgpu::Features::TIMESTAMP_QUERY,
+        ) else {
+            eprintln!("no timestamp-capable wgpu adapter; skipping timestamp recreation smoke");
+            return;
+        };
+        if !adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            eprintln!("adapter lacks timestamp queries; skipping timestamp recreation smoke");
+            return;
+        }
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_timestamp_recreate_test_target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene = test_scene([1, 1], Color::transparent(), Vec::new(), Vec::new());
+        let mut renderer = test_renderer(&device, &queue);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_timestamp_before_recreate_encoder"),
+        });
+        renderer
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                &scene,
+                &GpuPresentation::identity(1, 1),
+                false,
+            )
+            .expect("encode timestamped frame before recreation");
+        queue.submit(Some(encoder.finish()));
+        renderer
+            .timestamp_profiler
+            .as_mut()
+            .expect("timestamp profiler")
+            .drain(&device, &mut renderer.timestamp_history)
+            .expect("drain old-generation timestamp query readback");
+        assert_eq!(renderer.timestamp_history.completed.len(), 1);
+
+        assert_eq!(
+            renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm),
+            2
+        );
+        let carried = renderer.take_completed_timestamp_frames(&device);
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].frame_id, 1);
+        assert_eq!(carried[0].renderer_generation, 1);
+        assert_eq!(renderer.timestamp_telemetry().device_discontinuities, 1);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_timestamp_after_recreate_encoder"),
+        });
+        renderer
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                &scene,
+                &GpuPresentation::identity(1, 1),
+                false,
+            )
+            .expect("encode timestamped frame after recreation");
+        queue.submit(Some(encoder.finish()));
+
+        let drained = renderer
+            .drain_timestamp_frames(&device)
+            .expect("drain timestamp frames at benchmark boundary");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].frame_id, 2);
+        assert_eq!(drained[0].renderer_generation, 2);
+    }
+
+    #[test]
+    fn renderer_recreation_records_a_discontinuity_without_timestamp_queries() {
+        let Some((_runtime, _instance, _adapter, device, queue)) =
+            test_wgpu_device("lc_gpu_unprofiled_recreate_test_device", true)
+        else {
+            eprintln!("no wgpu adapter; skipping unprofiled recreation smoke");
+            return;
+        };
+        let mut renderer = test_renderer(&device, &queue);
+        assert!(!renderer.timestamp_queries_enabled());
+
+        assert_eq!(
+            renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm),
+            2
+        );
+
+        assert_eq!(renderer.timestamp_telemetry().device_discontinuities, 1);
+    }
+
+    #[test]
+    fn timestamp_recreation_counts_unresolved_old_frames_as_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for timestamp adapter discovery");
+        let instance = test_wgpu_instance();
+        let Some((_adapter, device, queue)) = request_test_device_with_features(
+            &runtime,
+            &instance,
+            "lc_gpu_timestamp_pending_recreate_test_device",
+            true,
+            wgpu::Features::TIMESTAMP_QUERY,
+        ) else {
+            eprintln!("no timestamp-capable wgpu adapter; skipping pending recreation smoke");
+            return;
+        };
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lc_gpu_timestamp_pending_recreate_target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let scene = test_scene([1, 1], Color::transparent(), Vec::new(), Vec::new());
+        let mut renderer = test_renderer(&device, &queue);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_timestamp_pending_recreate_encoder"),
+        });
+
+        renderer
+            .render(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                &scene,
+                &GpuPresentation::identity(1, 1),
+                false,
+            )
+            .expect("encode timestamp frame without submitting it");
+        drop(encoder);
+        renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+
+        assert_eq!(renderer.timestamp_telemetry().dropped_frames, 1);
+        assert_eq!(renderer.timestamp_telemetry().device_discontinuities, 1);
+    }
+
+    #[test]
+    fn timestamp_frame_aborts_before_commit_when_health_turns_fatal() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for timestamp adapter discovery");
+        let instance = test_wgpu_instance();
+        let Some((_adapter, device, queue)) = request_test_device_with_features(
+            &runtime,
+            &instance,
+            "lc_gpu_timestamp_abort_test_device",
+            true,
+            wgpu::Features::TIMESTAMP_QUERY,
+        ) else {
+            eprintln!("no timestamp-capable wgpu adapter; skipping timestamp abort smoke");
+            return;
+        };
+        let mut renderer = test_renderer(&device, &queue);
+        let mut active = renderer
+            .timestamp_profiler
+            .as_mut()
+            .expect("timestamp profiler")
+            .begin_frame(
+                &device,
+                renderer.generation,
+                queue.get_timestamp_period(),
+                &mut renderer.timestamp_history,
+            )
+            .expect("reserve timestamp slot");
+        active.reserve(GpuTimestampPass::Scene);
+        record_renderer_health(
+            &renderer.health.state,
+            RetainedGpuRendererHealth::Fatal {
+                reason: RetainedGpuFatalReason::Internal,
+                detail: "test fault after encoding".to_owned(),
+            },
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_timestamp_abort_test_encoder"),
+        });
+
+        assert!(matches!(
+            renderer.commit_timestamp_frame(&mut encoder, Some(active)),
+            Err(GpuRendererError::DeviceFatal {
+                reason: RetainedGpuFatalReason::Internal,
+                ..
+            })
+        ));
+        assert_eq!(
+            renderer
+                .timestamp_profiler
+                .as_ref()
+                .expect("timestamp profiler")
+                .pending_frames(),
+            0
+        );
+    }
 
     #[test]
     fn source_texture_limit_rejects_oversized_landscape_before_gpu_work() {
@@ -6280,6 +7427,209 @@ mod tests {
             .flat_map(|value| (value as f32).to_ne_bytes())
             .collect::<Vec<_>>();
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn generic_vertex_stream_stats_report_count_and_bytes() {
+        let vertex = PackedVertex {
+            clip: [0.0; 4],
+            uv: [0.0; 2],
+            data0: [0.0; 4],
+            data1: [0.0; 4],
+            data2: [0.0; 4],
+        };
+        let stream = BuiltDrawStream {
+            vertices: vec![vertex; 2],
+            quad_instances: Vec::new(),
+            sprite_instances: Vec::new(),
+            object_sprite_instances: Vec::new(),
+            solid_rect_instances: Vec::new(),
+            calls: Vec::new(),
+        };
+        let mut stats = GpuRendererStats::default();
+
+        stats.record_draw_stream(&stream);
+
+        assert_eq!(stats.generic_vertices, 2);
+        assert_eq!(stats.generic_vertex_upload_bytes, 2 * 18 * 4);
+    }
+
+    #[test]
+    fn draw_stream_stats_cover_every_instance_upload_stream() {
+        let stream = BuiltDrawStream {
+            vertices: Vec::new(),
+            quad_instances: vec![PackedQuadInstance {
+                clip: [[0.0; 4]; 4],
+                uv: [[0.0; 4]; 2],
+                modulation: [[0.0; 4]; 4],
+                sample_tile: [[0.0; 4]; 4],
+                flags: [0.0; 2],
+            }],
+            sprite_instances: vec![PackedSpriteInstance {
+                clip_rect: [0.0; 4],
+                uv_rect: [0.0; 4],
+                modulation: 0,
+                flags: 0,
+            }],
+            object_sprite_instances: vec![PackedObjectSpriteInstance {
+                clip: [[0.0; 3]; 4],
+                uv_rect: [0.0; 4],
+                modulation: [0; 4],
+                sample_tile_size: 0.0,
+                flags: 0,
+            }],
+            solid_rect_instances: vec![PackedSolidRectInstance {
+                clip_rect: [0.0; 4],
+                color: [0.0; 4],
+                flags: 0,
+            }],
+            calls: Vec::new(),
+        };
+        let mut stats = GpuRendererStats::default();
+
+        stats.record_draw_stream(&stream);
+
+        assert_eq!(stats.quad_instances, 1);
+        assert_eq!(
+            stats.quad_instance_upload_bytes,
+            PACKED_QUAD_INSTANCE_STRIDE as usize
+        );
+        assert_eq!(stats.sprite_instances, 1);
+        assert_eq!(
+            stats.sprite_instance_upload_bytes,
+            PACKED_SPRITE_INSTANCE_STRIDE as usize
+        );
+        assert_eq!(stats.object_sprite_instances, 1);
+        assert_eq!(
+            stats.object_sprite_upload_bytes,
+            PACKED_OBJECT_SPRITE_INSTANCE_STRIDE as usize
+        );
+        assert_eq!(stats.solid_rect_instances, 1);
+        assert_eq!(
+            stats.solid_rect_upload_bytes,
+            PACKED_SOLID_RECT_INSTANCE_STRIDE as usize
+        );
+    }
+
+    #[test]
+    fn draw_stream_stats_count_every_retained_draw_kind() {
+        let texture = GpuTextureId::fresh();
+        let quad = QuadBindingKey {
+            texture,
+            sampler: sampler_key(GpuSampler::Nearest),
+        };
+        let landscape = LandscapeBindingKey {
+            base: texture,
+            mask: None,
+            liquid: None,
+        };
+        let call = |kind| DrawCall {
+            vertices: 0..1,
+            scissor: Scissor {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            blend: GpuBlend::Normal,
+            kind,
+        };
+        let stream = BuiltDrawStream {
+            vertices: Vec::new(),
+            quad_instances: Vec::new(),
+            sprite_instances: Vec::new(),
+            object_sprite_instances: Vec::new(),
+            solid_rect_instances: Vec::new(),
+            calls: vec![
+                call(DrawKind::Quad(quad)),
+                call(DrawKind::Sprite(quad)),
+                call(DrawKind::ObjectSprite(quad)),
+                call(DrawKind::Landscape(landscape)),
+                call(DrawKind::Solid {
+                    alpha_mode: GpuSolidAlphaMode::SourceOver,
+                }),
+                call(DrawKind::SolidRect {
+                    alpha_mode: GpuSolidAlphaMode::SourceOver,
+                }),
+            ],
+        };
+        let mut stats = GpuRendererStats::default();
+
+        stats.record_draw_stream(&stream);
+
+        assert_eq!(stats.draw_calls, 6);
+        assert_eq!(stats.compatible_resource_runs, 6);
+        assert_eq!(stats.quad_draw_calls, 1);
+        assert_eq!(stats.sprite_draw_calls, 1);
+        assert_eq!(stats.object_sprite_draw_calls, 1);
+        assert_eq!(stats.landscape_draw_calls, 1);
+        assert_eq!(stats.solid_draw_calls, 1);
+        assert_eq!(stats.solid_rect_draw_calls, 1);
+    }
+
+    #[test]
+    fn draw_call_stats_reconcile_every_scene_and_fixed_pass() {
+        let stats = GpuRendererStats {
+            draw_calls: 6,
+            quad_draw_calls: 1,
+            sprite_draw_calls: 1,
+            object_sprite_draw_calls: 1,
+            landscape_draw_calls: 1,
+            shader_landscape_draw_calls: 1,
+            solid_draw_calls: 1,
+            solid_rect_draw_calls: 1,
+            monitor_gamma_draw_calls: 1,
+            presentation_draw_calls: 1,
+            total_draw_calls: 9,
+            compatible_resource_runs: 6,
+            ..GpuRendererStats::default()
+        };
+
+        assert!(stats.has_exact_draw_call_counts());
+
+        let mut missing_fixed_pass = stats;
+        missing_fixed_pass.presentation_draw_calls = 0;
+        assert!(!missing_fixed_pass.has_exact_draw_call_counts());
+    }
+
+    #[test]
+    fn texture_upload_stats_count_every_written_region() {
+        let mut stats = GpuRendererStats::default();
+
+        stats.record_full_texture_upload(TextureUploadStats {
+            calls: 1,
+            bytes: 16,
+        });
+        stats.record_dirty_texture_upload(4);
+        stats.record_dirty_texture_upload(8);
+
+        assert_eq!(stats.full_upload_calls, 1);
+        assert_eq!(stats.full_upload_bytes, 16);
+        assert_eq!(stats.dirty_upload_calls, 2);
+        assert_eq!(stats.dirty_upload_bytes, 12);
+    }
+
+    #[test]
+    fn mipmapped_full_upload_stats_count_every_queue_write() {
+        let Some((_runtime, device, queue)) = shader_landscape_test_device() else {
+            eprintln!("no wgpu adapter; skipping mip upload stats test");
+            return;
+        };
+        let resource = GpuTextureResource {
+            id: GpuTextureId::fresh(),
+            extent: [4, 4],
+            revision: 0,
+            base_revision: None,
+            format: GpuTextureFormat::Rgba8,
+            pixels: Arc::from(vec![0; 4 * 4 * 4].into_boxed_slice()),
+            dirty: Vec::new(),
+        };
+        let texture = create_source_texture(&device, &resource, true);
+
+        let upload = upload_full(&queue, &texture, &resource);
+
+        assert_eq!(upload.calls, 3, "base, 2x2, and 1x1 are three writes");
+        assert_eq!(upload.bytes, 64 + 16 + 4);
     }
 
     #[test]
@@ -8676,6 +10026,22 @@ mod tests {
         label: &'static str,
         allow_fallback: bool,
     ) -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+        request_test_device_with_features(
+            runtime,
+            instance,
+            label,
+            allow_fallback,
+            wgpu::Features::empty(),
+        )
+    }
+
+    fn request_test_device_with_features(
+        runtime: &tokio::runtime::Runtime,
+        instance: &wgpu::Instance,
+        label: &'static str,
+        allow_fallback: bool,
+        required_features: wgpu::Features,
+    ) -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
         let adapter = runtime
             .block_on(async {
                 let primary = instance
@@ -8698,9 +10064,12 @@ mod tests {
                 }
             })
             .ok()?;
+        if !adapter.features().contains(required_features) {
+            return None;
+        }
         let descriptor = wgpu::DeviceDescriptor {
             label: Some(label),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
             ..Default::default()
         };
@@ -9291,7 +10660,9 @@ mod tests {
             "initial retained GPU frame must match the local CPU oracle"
         );
         assert_eq!(renderer.last_stats().created_source_textures, 10);
+        assert_eq!(renderer.last_stats().full_upload_calls, 10);
         assert_eq!(renderer.last_stats().full_upload_bytes, 46);
+        assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
         assert_eq!(
@@ -9320,6 +10691,9 @@ mod tests {
             renderer.last_stats().draw_calls + 2,
             "raw draw evidence includes monitor-gamma and presentation passes",
         );
+        assert_eq!(renderer.last_stats().monitor_gamma_draw_calls, 1);
+        assert_eq!(renderer.last_stats().presentation_draw_calls, 1);
+        assert!(renderer.last_stats().has_exact_draw_call_counts());
         assert_eq!(
             readback_last_presentation(&renderer, &device, &queue),
             monitor,
@@ -9340,10 +10714,14 @@ mod tests {
             10,
             "temporarily hidden C4Surface textures stay resident"
         );
+        assert_eq!(renderer.last_stats().full_upload_calls, 0);
+        assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         let visible_again = render_identity_readback(&mut renderer, &device, &queue, &scene);
         assert_eq!(visible_again.rgba, initial.rgba);
         assert_eq!(renderer.last_stats().created_source_textures, 0);
+        assert_eq!(renderer.last_stats().full_upload_calls, 0);
         assert_eq!(renderer.last_stats().full_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
 
         let scaled = render_readback(
             &mut renderer,
@@ -9804,7 +11182,9 @@ mod tests {
             "physical resize must preserve scene coordinates and content"
         );
         assert_eq!(renderer.last_stats().created_source_textures, 0);
+        assert_eq!(renderer.last_stats().full_upload_calls, 0);
         assert_eq!(renderer.last_stats().full_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
         assert_eq!(
@@ -9831,7 +11211,9 @@ mod tests {
             "one dirty texel must update every use without a full upload"
         );
         assert_eq!(renderer.last_stats().created_source_textures, 0);
+        assert_eq!(renderer.last_stats().full_upload_calls, 0);
         assert_eq!(renderer.last_stats().full_upload_bytes, 0);
+        assert_eq!(renderer.last_stats().dirty_upload_calls, 1);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 4);
         assert!(!renderer.last_stats().composition_recreated);
 
@@ -9868,7 +11250,9 @@ mod tests {
             "device recreation must regenerate every retained source from complete backing"
         );
         assert_eq!(renderer.last_stats().created_source_textures, 10);
+        assert_eq!(renderer.last_stats().full_upload_calls, 10);
         assert_eq!(renderer.last_stats().full_upload_bytes, 46);
+        assert_eq!(renderer.last_stats().dirty_upload_calls, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
         let validation = runtime.block_on(replacement_validation_scope.pop());

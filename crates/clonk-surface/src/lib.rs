@@ -18,5 +18,6 @@ mod window;
 pub use acquire::AcquireError;
 pub use blit::BlitTransform;
 pub use window::{
-    create_instance, ExtentError, FrameContext, Presentation, SurfaceError, WindowSurface,
+    create_instance, ExtentError, FrameContext, Presentation, ProfiledPresentation, SurfaceError,
+    TimestampQueryStatus, WindowSurface, WindowSurfaceBuildOptions, WindowSurfaceCpuStages,
 };

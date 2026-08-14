@@ -1053,12 +1053,65 @@ struct SolidRunCapacityHint {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GpuSolidRunCapacityHints(Vec<SolidRunCapacityHint>);
 
+/// Why one retained sprite entered the generic quad/chunk capture path.
+///
+/// Reasons are non-exclusive: one sprite can increment several counters while
+/// the total fallback count still advances exactly once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuSpriteFallbackReasons {
+    pub spatial_fog: bool,
+    pub precomputed_fog_modulation: bool,
+    pub texture_indent: bool,
+    pub owner_mask: bool,
+    pub physical_texture_tiles: bool,
+}
+
+/// Low-overhead structural evidence gathered while a retained scene is built.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuSceneCaptureStats {
+    pub generic_sprite_fallbacks: usize,
+    pub spatial_fog_fallbacks: usize,
+    pub precomputed_fog_modulation_fallbacks: usize,
+    pub texture_indent_fallbacks: usize,
+    pub owner_mask_fallbacks: usize,
+    pub physical_texture_tile_fallbacks: usize,
+    /// Generic quad chunks produced by spatial fog expansion.
+    pub fog_expanded_chunks: usize,
+}
+
+impl GpuSceneCaptureStats {
+    pub fn merge(&mut self, other: Self) {
+        self.generic_sprite_fallbacks = self
+            .generic_sprite_fallbacks
+            .saturating_add(other.generic_sprite_fallbacks);
+        self.spatial_fog_fallbacks = self
+            .spatial_fog_fallbacks
+            .saturating_add(other.spatial_fog_fallbacks);
+        self.precomputed_fog_modulation_fallbacks = self
+            .precomputed_fog_modulation_fallbacks
+            .saturating_add(other.precomputed_fog_modulation_fallbacks);
+        self.texture_indent_fallbacks = self
+            .texture_indent_fallbacks
+            .saturating_add(other.texture_indent_fallbacks);
+        self.owner_mask_fallbacks = self
+            .owner_mask_fallbacks
+            .saturating_add(other.owner_mask_fallbacks);
+        self.physical_texture_tile_fallbacks = self
+            .physical_texture_tile_fallbacks
+            .saturating_add(other.physical_texture_tile_fallbacks);
+        self.fog_expanded_chunks = self
+            .fog_expanded_chunks
+            .saturating_add(other.fog_expanded_chunks);
+    }
+}
+
 /// Mutable command sink carried by recording surfaces and flattened when a
 /// CPU scratch surface is presented into its parent.
 #[derive(Clone, Debug, Default)]
 pub struct GpuSceneRecorder {
     textures: HashMap<GpuTextureId, GpuTextureResource>,
     commands: Vec<GpuCommand>,
+    capture_stats: GpuSceneCaptureStats,
     object_run_capacity_hints: GpuObjectRunCapacityHints,
     next_object_run_hint: usize,
     solid_run_capacity_hints: GpuSolidRunCapacityHints,
@@ -1075,6 +1128,7 @@ impl GpuSceneRecorder {
         Self {
             textures: HashMap::with_capacity(texture_capacity),
             commands: Vec::with_capacity(command_capacity),
+            capture_stats: GpuSceneCaptureStats::default(),
             object_run_capacity_hints,
             next_object_run_hint: 0,
             solid_run_capacity_hints,
@@ -1088,6 +1142,45 @@ impl GpuSceneRecorder {
 
     pub(crate) fn texture_count(&self) -> usize {
         self.textures.len()
+    }
+
+    pub const fn capture_stats(&self) -> GpuSceneCaptureStats {
+        self.capture_stats
+    }
+
+    pub fn record_gpu_sprite_fallback(
+        &mut self,
+        reasons: GpuSpriteFallbackReasons,
+        fog_expanded_chunks: usize,
+    ) {
+        self.capture_stats.generic_sprite_fallbacks = self
+            .capture_stats
+            .generic_sprite_fallbacks
+            .saturating_add(1);
+        self.capture_stats.spatial_fog_fallbacks = self
+            .capture_stats
+            .spatial_fog_fallbacks
+            .saturating_add(usize::from(reasons.spatial_fog));
+        self.capture_stats.precomputed_fog_modulation_fallbacks = self
+            .capture_stats
+            .precomputed_fog_modulation_fallbacks
+            .saturating_add(usize::from(reasons.precomputed_fog_modulation));
+        self.capture_stats.texture_indent_fallbacks = self
+            .capture_stats
+            .texture_indent_fallbacks
+            .saturating_add(usize::from(reasons.texture_indent));
+        self.capture_stats.owner_mask_fallbacks = self
+            .capture_stats
+            .owner_mask_fallbacks
+            .saturating_add(usize::from(reasons.owner_mask));
+        self.capture_stats.physical_texture_tile_fallbacks = self
+            .capture_stats
+            .physical_texture_tile_fallbacks
+            .saturating_add(usize::from(reasons.physical_texture_tiles));
+        self.capture_stats.fog_expanded_chunks = self
+            .capture_stats
+            .fog_expanded_chunks
+            .saturating_add(fog_expanded_chunks);
     }
 
     pub(crate) fn retain_object_run_capacities(&mut self) {
@@ -1541,6 +1634,7 @@ impl GpuSceneRecorder {
         child_bounds: Rect,
         destination_clip: Option<Rect>,
     ) {
+        self.capture_stats.merge(child.capture_stats);
         for (_, resource) in child.textures.drain() {
             self.add_texture(resource);
         }
@@ -1622,6 +1716,33 @@ impl GpuSceneRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appended_child_scene_accumulates_gpu_sprite_fallback_stats() {
+        let mut child = GpuSceneRecorder::default();
+        child.record_gpu_sprite_fallback(
+            GpuSpriteFallbackReasons {
+                spatial_fog: true,
+                owner_mask: true,
+                ..GpuSpriteFallbackReasons::default()
+            },
+            3,
+        );
+        let mut parent = GpuSceneRecorder::default();
+
+        parent.append_translated(child, 0, 0, Rect::new(0, 0, 1, 1), None);
+
+        assert_eq!(
+            parent.capture_stats(),
+            GpuSceneCaptureStats {
+                generic_sprite_fallbacks: 1,
+                spatial_fog_fallbacks: 1,
+                owner_mask_fallbacks: 1,
+                fog_expanded_chunks: 3,
+                ..GpuSceneCaptureStats::default()
+            }
+        );
+    }
 
     fn normalized_packed(packed: u32) -> [f32; 4] {
         packed_c4_to_normalized(packed)
