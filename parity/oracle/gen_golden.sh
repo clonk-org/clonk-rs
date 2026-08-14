@@ -6,7 +6,8 @@
 # production script-host helper (src/C4ScriptKiller.h), coarse landscape
 # traversal (src/C4LandscapePath.h), FnEval/DirectExec context selection
 # (src/C4Script.cpp, src/C4AulExec.cpp), action-direction decisions
-# (src/C4ActionDirection.h), and active solid-mask bitmap sampling
+# (src/C4ActionDirection.h), mechanically extracted DFA_PUSH/PULL/FIGHT
+# direction blocks, and active solid-mask bitmap sampling
 # (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and landscape
 # BlastFree methods, and the bottom/top/side-flight C4Object::ContactAction
 # arms. The Rust side
@@ -339,6 +340,49 @@ awk '
   p { print }
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/contact_action_flight_stuck.inc"
+
+# Lift the exact direction-decision blocks from DFA_PUSH, DFA_PULL, and
+# DFA_FIGHT. The focused scaffold supplies only their already-computed raw
+# xdir/target positions and records SetDir calls; sign/position tests and
+# their independent-if ordering remain production C4Object.cpp text.
+awk '
+  /^void C4Object::ExecAction\(\)/ { in_exec = 1 }
+  in_exec && /^}$/ { exit 1 }
+  in_exec && /^[[:space:]]*case DFA_/ {
+    if (in_push && $0 !~ /case DFA_PUSH:/) exit 1
+    if ($0 ~ /case DFA_PUSH:/) in_push = 1
+  }
+  in_push && /^[[:space:]]*\/\/ Phase by XDir$/ { p = 1 }
+  p { print }
+  p && /if \(xdir > 0\).*SetDir\(DIR_Right\)/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_push_direction.inc"
+
+awk '
+  /^void C4Object::ExecAction\(\)/ { in_exec = 1 }
+  in_exec && /^}$/ { exit 1 }
+  in_exec && /^[[:space:]]*case DFA_/ {
+    if (in_pull && $0 !~ /case DFA_PULL:/) exit 1
+    if ($0 ~ /case DFA_PULL:/) in_pull = 1
+  }
+  in_pull && /^[[:space:]]*\/\/ Phase by XDir$/ { p = 1 }
+  p { print }
+  p && /if \(xdir > 0\).*SetDir\(DIR_Right\)/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_pull_direction.inc"
+
+awk '
+  /^void C4Object::ExecAction\(\)/ { in_exec = 1 }
+  in_exec && /^}$/ { exit 1 }
+  in_exec && /^[[:space:]]*case DFA_/ {
+    if (in_fight && $0 !~ /case DFA_FIGHT:/) exit 1
+    if ($0 ~ /case DFA_FIGHT:/) in_fight = 1
+  }
+  in_fight && /^[[:space:]]*\/\/ Direction$/ { p = 1 }
+  p { print }
+  p && /if \(Action.Target->x < x\) SetDir\(DIR_Left\)/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_fight_direction.inc"
 
 for helper_spec in "Walk walk" "Kneel kneel" "Flat flat" "Tumble tumble" "Scale scale" "Hangle hangle"; do
   set -- $helper_spec

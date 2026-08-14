@@ -1737,6 +1737,7 @@ fn push_pull_fixture() -> (Engine, ObjectId, ObjectId) {
         "Push".to_string(),
         ActionSpec::default()
             .with_procedure("push")
+            .with_directions(2)
             .with_delay(13)
             .with_length(20)
             .with_next("Push"),
@@ -1745,6 +1746,7 @@ fn push_pull_fixture() -> (Engine, ObjectId, ObjectId) {
         "Pull".to_string(),
         ActionSpec::default()
             .with_procedure("pull")
+            .with_directions(2)
             .with_delay(13)
             .with_length(20)
             .with_next("Pull"),

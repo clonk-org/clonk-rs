@@ -26,6 +26,8 @@
 //     `C4Landscape::_PathFree`; the oracle feeds it real PixCnt-style inputs.
 //   * `C4ActionDirection.h` is the production raw-xdir direction decision used
 //     by `C4Object::ExecAction` and `C4Object::SetDir`.
+//   * The DFA_PUSH, DFA_PULL, and DFA_FIGHT direction blocks are mechanically
+//     extracted from `C4Object::ExecAction` to pin their procedure placement.
 //   * `C4ActionCallbacks.h` is the production synchronous callback sequence
 //     used by `C4Object::SetAction`.
 //   * `C4SolidMaskBitmap.h` is the production active-graphics bitmap selection
@@ -2142,6 +2144,108 @@ static void printActionDirectionCase()
            actionPhaseDelay, fixXAfterSetDir, fixX.val);
 }
 
+// --- DFA_PUSH/PULL/FIGHT direction blocks: exact production text -----------
+// gen_golden.sh lifts these blocks from C4Object::ExecAction. The scaffold
+// supplies the already-computed raw xdir or target position and records the
+// observable SetDir calls without restating the branch conditions.
+namespace exec_action_direction_oracle
+{
+struct TargetState
+{
+    int32_t x{};
+};
+
+struct Actor
+{
+    struct ActionState
+    {
+        TargetState *Target{};
+        int32_t Dir{DIR_Left};
+    } Action;
+
+    C4Fixed xdir{Fix0};
+    int32_t x{};
+    int32_t iPhaseAdvance{1};
+    int32_t SetDirCalls{};
+    bool RunsTurnAction{};
+    int32_t TurnStartDir{-1};
+
+    void SetDir(int32_t direction)
+    {
+        ++SetDirCalls;
+        if (C4ActionDirection::RunsTurnAction(Action.Dir, direction, true))
+        {
+            RunsTurnAction = true;
+            TurnStartDir = Action.Dir;
+        }
+        Action.Dir = direction;
+    }
+
+    void RunPush()
+    {
+#include "object_push_direction.inc"
+    }
+
+    void RunPull()
+    {
+#include "object_pull_direction.inc"
+    }
+
+    void RunFight()
+    {
+#include "object_fight_direction.inc"
+    }
+};
+
+static void printRow(const char *name, const Actor &actor, int32_t actorX,
+                     int32_t targetX, int32_t initialDirection)
+{
+    printf("{\"name\":\"%s\",\"xdir_raw\":%d,\"xdir_pixel\":%d,"
+           "\"actor_x\":%d,\"target_x\":%d,\"initial_direction\":%d,"
+           "\"set_dir_calls\":%d,"
+           "\"runs_turn_action\":%d,\"turn_start_dir\":%d,"
+           "\"direction\":%d}",
+           name, actor.xdir.val, fixtoi(actor.xdir), actorX, targetX,
+           initialDirection, actor.SetDirCalls, actor.RunsTurnAction ? 1 : 0,
+           actor.TurnStartDir, actor.Action.Dir);
+}
+
+static void printCases()
+{
+    printf("\"action_push_pull_fight_direction\":[");
+
+    Actor push;
+    push.xdir.val = 1;
+    push.RunPush();
+    printRow("push_positive_subpixel", push, 0, 10, DIR_Left);
+
+    Actor pull;
+    pull.xdir.val = 1;
+    pull.RunPull();
+    printf(",");
+    printRow("pull_positive_subpixel", pull, 20, 0, DIR_Left);
+
+    TargetState rightTarget{10};
+    Actor fightRight;
+    fightRight.xdir.val = -61790;
+    fightRight.Action.Target = &rightTarget;
+    fightRight.RunFight();
+    printf(",");
+    printRow("fight_target_right_negative_velocity", fightRight, 0, 10, DIR_Left);
+
+    TargetState equalTarget{0};
+    Actor fightEqual;
+    fightEqual.xdir.val = -61790;
+    fightEqual.Action.Target = &equalTarget;
+    fightEqual.Action.Dir = DIR_Right;
+    fightEqual.RunFight();
+    printf(",");
+    printRow("fight_equal_x_negative_velocity", fightEqual, 0, 0, DIR_Right);
+
+    printf("]");
+}
+} // namespace exec_action_direction_oracle
+
 static void printSwimActionDirectionCase()
 {
     // Minimized from Goldrush frame 219, FISH #1343. COMD_Left applies one
@@ -3060,6 +3164,11 @@ int main()
     // 13. DFA_SWIM raw-xdir SetDir/TurnAction ordering. The input is the
     //     minimized Goldrush frame-219 FISH divergence.
     printSwimActionDirectionCase();
+    printf(",\n");
+
+    // 13b. Exact DFA_PUSH/PULL raw-xdir SetDir blocks and DFA_FIGHT's
+    //      target-relative, equal-x-zero-call direction block.
+    exec_action_direction_oracle::printCases();
     printf(",\n");
 
     // 14. C4Object::SetAction callback order/count. The first case is the
