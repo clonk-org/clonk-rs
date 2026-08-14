@@ -20,6 +20,16 @@ const IMA_CODE_BYTES: usize = (VOICE_FRAME_SAMPLES - 1).div_ceil(2);
 pub const VOICE_ENCODED_FRAME_BYTES: usize = IMA_HEADER_BYTES + IMA_CODE_BYTES;
 pub type EncodedVoiceFrame = [u8; VOICE_ENCODED_FRAME_BYTES];
 
+/// One captured frame together with how loud it was. The level is measured on
+/// the PCM the encoder consumed, so a voice-activation gate never has to decode
+/// a frame back just to decide whether to transmit it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VoiceInputFrame {
+    pub payload: EncodedVoiceFrame,
+    /// See [`voice_activation_level`].
+    pub level: f32,
+}
+
 /// At most 160 ms of captured audio can wait for the app. The CPAL callback
 /// uses `try_send`, so a stalled consumer can never stall the device thread.
 pub const VOICE_CAPTURE_QUEUE_FRAMES: usize = 8;
@@ -72,7 +82,7 @@ pub enum VoiceCaptureError {
 pub struct VoiceCapture {
     #[cfg(feature = "cpal")]
     _stream: cpal::Stream,
-    frames: Receiver<EncodedVoiceFrame>,
+    frames: Receiver<VoiceInputFrame>,
     dropped_frames: Arc<AtomicU64>,
 }
 
@@ -91,7 +101,7 @@ impl VoiceCapture {
     }
 
     /// Drains every complete frame currently available without waiting.
-    pub fn drain_frames(&self) -> Vec<EncodedVoiceFrame> {
+    pub fn drain_frames(&self) -> Vec<VoiceInputFrame> {
         self.frames.try_iter().collect()
     }
 
@@ -223,7 +233,7 @@ fn validate_capture_config(sample_rate: u32, channels: u16) -> Result<(), VoiceC
 fn build_voice_input_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    sender: SyncSender<EncodedVoiceFrame>,
+    sender: SyncSender<VoiceInputFrame>,
     dropped_frames: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, VoiceCaptureError>
 where
@@ -289,7 +299,7 @@ struct VoiceCaptureProcessor {
     resampler: StreamingVoiceResampler,
     samples: [i16; VOICE_FRAME_SAMPLES],
     sample_count: usize,
-    sender: SyncSender<EncodedVoiceFrame>,
+    sender: SyncSender<VoiceInputFrame>,
     dropped_frames: Arc<AtomicU64>,
 }
 
@@ -298,7 +308,7 @@ impl VoiceCaptureProcessor {
     fn new(
         sample_rate: u32,
         channels: u16,
-        sender: SyncSender<EncodedVoiceFrame>,
+        sender: SyncSender<VoiceInputFrame>,
         dropped_frames: Arc<AtomicU64>,
     ) -> Result<Self, VoiceCaptureError> {
         validate_capture_config(sample_rate, channels)?;
@@ -331,9 +341,12 @@ impl VoiceCaptureProcessor {
                 samples[*sample_count] = voice_f32_to_i16(sample);
                 *sample_count += 1;
                 if *sample_count == VOICE_FRAME_SAMPLES {
-                    let encoded = encode_voice_frame(samples);
+                    let captured = VoiceInputFrame {
+                        payload: encode_voice_frame(samples),
+                        level: voice_activation_level(samples),
+                    };
                     if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
-                        sender.try_send(encoded)
+                        sender.try_send(captured)
                     {
                         dropped_frames.fetch_add(1, Ordering::Relaxed);
                     }
@@ -388,6 +401,29 @@ fn voice_f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32_768.0)
         .round()
         .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+}
+
+/// Quietest RMS a frame can report before its activation level clamps to zero.
+/// Linear amplitude would crowd every useful voice-activation threshold into the
+/// bottom few percent of its range, so the level is linear in decibels instead.
+const VOICE_ACTIVATION_FLOOR_DBFS: f64 = -60.0;
+
+/// How loud one captured frame is, as `0.0..=1.0` linear in dBFS over
+/// [`VOICE_ACTIVATION_FLOOR_DBFS`]`..=0`: `0.0` is silence (or anything at or
+/// below the floor) and `1.0` is full scale. This is a presentation and
+/// voice-activation measurement only — it never reaches the simulation.
+pub fn voice_activation_level(samples: &[i16; VOICE_FRAME_SAMPLES]) -> f32 {
+    let mean_square = samples
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum::<f64>()
+        / VOICE_FRAME_SAMPLES as f64;
+    let rms = mean_square.sqrt() / 32_768.0;
+    if rms <= 0.0 {
+        return 0.0;
+    }
+    let dbfs = 20.0 * rms.log10();
+    (1.0 - dbfs / VOICE_ACTIVATION_FLOOR_DBFS).clamp(0.0, 1.0) as f32
 }
 
 /// Encodes one complete voice frame as self-contained IMA ADPCM.
@@ -514,6 +550,37 @@ mod tests {
     use std::sync::{mpsc, Arc};
 
     #[test]
+    fn activation_level_spans_the_sixty_decibel_window_above_silence() {
+        assert_eq!(voice_activation_level(&[0; VOICE_FRAME_SAMPLES]), 0.0);
+
+        let mut full_scale = [0; VOICE_FRAME_SAMPLES];
+        for (index, sample) in full_scale.iter_mut().enumerate() {
+            *sample = if index.is_multiple_of(2) {
+                i16::MAX
+            } else {
+                i16::MIN + 1
+            };
+        }
+        assert!(
+            voice_activation_level(&full_scale) > 0.999,
+            "a full-scale signal sits at the top of the window",
+        );
+
+        // 328/32768 is -39.99 dBFS, which is 20.01 dB above the -60 dBFS floor.
+        let level = voice_activation_level(&[328; VOICE_FRAME_SAMPLES]);
+        assert!(
+            (level - 0.3335).abs() < 0.001,
+            "-40 dBFS should land a third of the way up, got {level}",
+        );
+
+        assert_eq!(
+            voice_activation_level(&[16; VOICE_FRAME_SAMPLES]),
+            0.0,
+            "anything at or below the -60 dBFS floor clamps to zero",
+        );
+    }
+
+    #[test]
     fn capture_processor_downmixes_and_stream_resamples_across_callbacks() {
         let (sender, receiver) = mpsc::sync_channel(2);
         let dropped = Arc::new(AtomicU64::new(0));
@@ -526,7 +593,8 @@ mod tests {
         processor.process_interleaved(&stereo[734..]);
 
         let frame = receiver.try_recv().expect("one 20 ms frame");
-        let decoded = decode_voice_frame(&frame).expect("captured frame should be canonical");
+        let decoded =
+            decode_voice_frame(&frame.payload).expect("captured frame should be canonical");
         assert!(decoded.iter().all(|sample| sample.abs_diff(2_000) <= 1));
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         assert!(receiver.try_recv().is_err());
@@ -543,6 +611,29 @@ mod tests {
 
         assert_eq!(receiver.try_iter().count(), 1);
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn captured_frames_carry_the_input_level_the_gate_needs() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut processor = VoiceCaptureProcessor::new(16_000, 1, sender, dropped)
+            .expect("16 kHz mono capture should be supported");
+
+        processor.process_interleaved(&[0.0_f32; VOICE_FRAME_SAMPLES]);
+        processor.process_interleaved(&[0.25_f32; VOICE_FRAME_SAMPLES]);
+
+        let silent = receiver
+            .try_recv()
+            .expect("a silent frame is still captured");
+        assert_eq!(silent.level, 0.0);
+        let loud = receiver.try_recv().expect("a loud frame");
+        assert!(
+            (loud.level - 0.799).abs() < 0.01,
+            "a quarter of full scale is -12 dBFS, got {}",
+            loud.level,
+        );
+        assert!(decode_voice_frame(&loud.payload).is_ok());
     }
 
     #[test]

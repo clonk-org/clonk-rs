@@ -31,7 +31,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use clonk_audio::{decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError};
+use clonk_audio::{
+    decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceInputFrame,
+};
 use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 
 pub(crate) const SPEAKING_HANGOVER: Duration = Duration::from_millis(250);
@@ -101,11 +103,11 @@ pub(crate) struct AcceptedRemoteVoiceFrame {
 }
 
 pub(crate) trait VoiceFrameSource {
-    fn drain_frames(&self) -> Vec<EncodedVoiceFrame>;
+    fn drain_frames(&self) -> Vec<VoiceInputFrame>;
 }
 
 impl VoiceFrameSource for VoiceCapture {
-    fn drain_frames(&self) -> Vec<EncodedVoiceFrame> {
+    fn drain_frames(&self) -> Vec<VoiceInputFrame> {
         self.drain_frames()
     }
 }
@@ -199,13 +201,13 @@ impl VoiceChatState {
         capture
             .drain_frames()
             .into_iter()
-            .map(|payload| {
+            .map(|frame| {
                 let sequence = self.next_sequence;
                 self.next_sequence = self.next_sequence.wrapping_add(1);
                 CapturedVoiceFrame {
                     stream_epoch,
                     sequence,
-                    payload,
+                    payload: frame.payload,
                 }
             })
             .collect()
@@ -466,19 +468,22 @@ mod tests {
     }
 
     struct TestVoiceSource {
-        frames: RefCell<Vec<EncodedVoiceFrame>>,
+        frames: RefCell<Vec<VoiceInputFrame>>,
     }
 
     impl TestVoiceSource {
-        fn with_frame(frame: EncodedVoiceFrame) -> Self {
+        fn with_frame(payload: EncodedVoiceFrame) -> Self {
             Self {
-                frames: RefCell::new(vec![frame]),
+                frames: RefCell::new(vec![VoiceInputFrame {
+                    payload,
+                    level: 1.0,
+                }]),
             }
         }
     }
 
     impl VoiceFrameSource for TestVoiceSource {
-        fn drain_frames(&self) -> Vec<EncodedVoiceFrame> {
+        fn drain_frames(&self) -> Vec<VoiceInputFrame> {
             std::mem::take(&mut *self.frames.borrow_mut())
         }
     }

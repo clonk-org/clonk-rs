@@ -15,11 +15,11 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     use std::cell::RefCell;
 
     struct TestVoiceSource {
-        frames: RefCell<Vec<clonk_audio::EncodedVoiceFrame>>,
+        frames: RefCell<Vec<clonk_audio::VoiceInputFrame>>,
     }
 
     impl crate::voice_chat::VoiceFrameSource for TestVoiceSource {
-        fn drain_frames(&self) -> Vec<clonk_audio::EncodedVoiceFrame> {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
             std::mem::take(&mut *self.frames.borrow_mut())
         }
     }
@@ -70,7 +70,10 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
     app.network = Some(manager);
     app.audio.test_mut().options.voice_enabled = true;
-    let captured = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
+    let captured = clonk_audio::VoiceInputFrame {
+        payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]),
+        level: 1.0,
+    };
     app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
         Ok(TestVoiceSource {
             frames: RefCell::new(vec![captured]),
