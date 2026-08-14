@@ -4100,6 +4100,16 @@ fn push_procedure_without_target_resets_to_default() {
     assert_eq!(object.action.name, "Idle");
     assert_eq!(object.velocity, Vector2::ZERO);
     assert_eq!(object.command_direction, CommandDirection::Stop);
+    let index = engine.test_object_index(id);
+    assert_eq!(
+        engine.objects[index].state.t_attach & CNAT_BOTTOM,
+        0,
+        "a native Push early return must not latch CNAT_Bottom"
+    );
+    assert_eq!(
+        engine.objects[index].frame_t_attach,
+        engine.objects[index].state.t_attach
+    );
 }
 
 #[test]
@@ -4439,6 +4449,289 @@ fn push_runs_an_active_targets_turn_action_once() {
     );
 }
 
+fn spawn_grounded_procedure_turn_actor(
+    engine: &mut Engine,
+    definition_id: &str,
+    action_name: &str,
+    procedure: &str,
+    target: Option<ObjectId>,
+    facing: Direction,
+) -> ObjectId {
+    let script = r#"#strict
+local turn_starts, turn_walked;
+protected func TurnStart()
+{
+    turn_starts = turn_starts + 1;
+    turn_walked = AdjustWalkRotation(20, 20, 100);
+    return 1;
+}
+"#;
+    let mut actor = test_definition(definition_id, definition_id, script);
+    actor.set_c4_callback_convention(true);
+    actor.set_rotateable(1);
+    actor.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+    actor.set_physical(PhysicalInfo {
+        walk: 35_000,
+        push: 45_000,
+        ..PhysicalInfo::default()
+    });
+    actor.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([
+            ("Idle".to_string(), ActionSpec::default()),
+            (
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("WALK"),
+            ),
+            (
+                action_name.to_string(),
+                ActionSpec::default()
+                    .with_procedure(procedure)
+                    .with_directions(2)
+                    .with_turn_action("Turn"),
+            ),
+            (
+                "Turn".to_string(),
+                ActionSpec::default()
+                    .with_directions(2)
+                    .with_start_call("TurnStart"),
+            ),
+        ]),
+    );
+    engine.register_test_definition(actor);
+
+    let mut action = ActionState::new(action_name);
+    action.target = target;
+    engine.spawn_test_object(
+        SpawnConfig::new(definition_id)
+            .with_category(CATEGORY_OBJECT)
+            .with_position(Vector2::ZERO)
+            .with_action(action)
+            .with_direction(facing)
+            .with_command_direction(CommandDirection::Right)
+            .with_loaded(true),
+    )
+}
+
+fn arm_valid_shape_attach(engine: &mut Engine, id: ObjectId) {
+    let idx = engine.test_object_index(id);
+    engine.objects[idx].state.shape_attach = ShapeAttachRecord {
+        mat_valid: true,
+        mat_vehicle: false,
+        x: 0,
+        y: 0,
+        vtx: 0,
+    };
+}
+
+#[test]
+fn push_turn_action_sees_no_bottom_attach() {
+    // C4Object.cpp:5106-5112: DFA_PUSH calls SetDir, then ORs CNAT_Bottom.
+    // AdjustWalkRotation from TurnAction must therefore return false.
+    let mut engine = push_containment_engine(true, false);
+    let target_id = engine.spawn_test_object(
+        SpawnConfig::new("PCTG")
+            .with_category(CATEGORY_VEHICLE)
+            .with_position(Vector2::new(10, 0))
+            .with_loaded(true),
+    );
+    let pusher_id = spawn_grounded_procedure_turn_actor(
+        &mut engine,
+        "PTAT",
+        "Push",
+        "PUSH",
+        Some(target_id),
+        Direction::Left,
+    );
+    arm_valid_shape_attach(&mut engine, pusher_id);
+    let pusher_idx = engine.test_object_index(pusher_id);
+
+    engine.apply_physics_at_index(pusher_idx).test_value();
+
+    let pusher_idx = engine.test_object_index(pusher_id);
+    assert_eq!(
+        engine.objects[pusher_idx]
+            .state
+            .local_vars
+            .get("turn_starts"),
+        Some(&Value::Int(1)),
+        "Push SetDir must fire TurnAction"
+    );
+    assert_eq!(
+        engine.objects[pusher_idx]
+            .state
+            .local_vars
+            .get("turn_walked"),
+        Some(&Value::Bool(false)),
+        "TurnAction Start must see Action.t_attach without CNAT_Bottom"
+    );
+    assert_eq!(
+        engine.objects[pusher_idx].state.t_attach & CNAT_BOTTOM,
+        CNAT_BOTTOM,
+        "successful Push still grounds after SetDir"
+    );
+    assert_eq!(
+        engine.objects[pusher_idx].frame_t_attach,
+        engine.objects[pusher_idx].state.t_attach
+    );
+}
+
+#[test]
+fn pull_turn_action_sees_no_bottom_attach() {
+    // C4Object.cpp:5189-5196: DFA_PULL calls SetDir, then ORs CNAT_Bottom.
+    let mut engine = pull_failure_engine();
+    let target_id = engine.spawn_test_object(
+        SpawnConfig::new("L73W")
+            .with_category(CATEGORY_VEHICLE)
+            .with_position(Vector2::new(10, 0))
+            .with_loaded(true),
+    );
+    let puller_id = spawn_grounded_procedure_turn_actor(
+        &mut engine,
+        "PLAT",
+        "Pull",
+        "PULL",
+        Some(target_id),
+        Direction::Left,
+    );
+    arm_valid_shape_attach(&mut engine, puller_id);
+    let puller_idx = engine.test_object_index(puller_id);
+
+    engine.apply_physics_at_index(puller_idx).test_value();
+
+    let puller_idx = engine.test_object_index(puller_id);
+    assert_eq!(
+        engine.objects[puller_idx]
+            .state
+            .local_vars
+            .get("turn_starts"),
+        Some(&Value::Int(1)),
+        "Pull SetDir must fire TurnAction"
+    );
+    assert_eq!(
+        engine.objects[puller_idx]
+            .state
+            .local_vars
+            .get("turn_walked"),
+        Some(&Value::Bool(false)),
+        "TurnAction Start must see Action.t_attach without CNAT_Bottom"
+    );
+    assert_eq!(
+        engine.objects[puller_idx].state.t_attach & CNAT_BOTTOM,
+        CNAT_BOTTOM,
+        "successful Pull still grounds after SetDir"
+    );
+    assert_eq!(
+        engine.objects[puller_idx].frame_t_attach,
+        engine.objects[puller_idx].state.t_attach
+    );
+}
+
+#[test]
+fn fight_turn_action_sees_no_bottom_attach() {
+    // C4Object.cpp:5241-5259: DFA_FIGHT faces the target, then approaches,
+    // then distance-checks, and only then ORs CNAT_Bottom.
+    let mut engine = fight_failure_engine();
+    let target_id = engine.spawn_test_object(
+        SpawnConfig::new("L73O")
+            .with_category(CATEGORY_OBJECT)
+            .with_position(Vector2::new(8, 0))
+            .with_action(ActionState::new("Fight"))
+            .with_loaded(true),
+    );
+    let fighter_id = spawn_grounded_procedure_turn_actor(
+        &mut engine,
+        "FTAT",
+        "Fight",
+        "FIGHT",
+        Some(target_id),
+        Direction::Left,
+    );
+    arm_valid_shape_attach(&mut engine, fighter_id);
+    let fighter_idx = engine.test_object_index(fighter_id);
+
+    engine.apply_physics_at_index(fighter_idx).test_value();
+
+    let fighter_idx = engine.test_object_index(fighter_id);
+    assert_eq!(
+        engine.objects[fighter_idx]
+            .state
+            .local_vars
+            .get("turn_starts"),
+        Some(&Value::Int(1)),
+        "Fight SetDir must fire TurnAction"
+    );
+    assert_eq!(
+        engine.objects[fighter_idx]
+            .state
+            .local_vars
+            .get("turn_walked"),
+        Some(&Value::Bool(false)),
+        "TurnAction Start must see Action.t_attach without CNAT_Bottom"
+    );
+    assert_eq!(
+        engine.objects[fighter_idx].state.t_attach & CNAT_BOTTOM,
+        CNAT_BOTTOM,
+        "in-range Fight still grounds after the distance check"
+    );
+    assert_eq!(
+        engine.objects[fighter_idx].frame_t_attach,
+        engine.objects[fighter_idx].state.t_attach
+    );
+}
+
+#[test]
+fn out_of_range_fight_never_attaches_bottom() {
+    // C4Object.cpp:5244-5257: the distance return happens before the
+    // CNAT_Bottom write, so an out-of-range Fight keeps the pre-procedure bits.
+    let mut engine = fight_failure_engine();
+    let target_id = engine.spawn_test_object(
+        SpawnConfig::new("L73O")
+            .with_category(CATEGORY_OBJECT)
+            .with_position(Vector2::new(40, 0))
+            .with_action(ActionState::new("Fight"))
+            .with_loaded(true),
+    );
+    let fighter_id = spawn_grounded_procedure_turn_actor(
+        &mut engine,
+        "FTAR",
+        "Fight",
+        "FIGHT",
+        Some(target_id),
+        Direction::Left,
+    );
+    arm_valid_shape_attach(&mut engine, fighter_id);
+    let fighter_idx = engine.test_object_index(fighter_id);
+
+    engine.apply_physics_at_index(fighter_idx).test_value();
+
+    let fighter_idx = engine.test_object_index(fighter_id);
+    assert_eq!(
+        engine.objects[fighter_idx]
+            .state
+            .local_vars
+            .get("turn_starts"),
+        Some(&Value::Int(1)),
+        "out-of-range Fight still faces the target through SetDir"
+    );
+    assert_eq!(
+        engine.objects[fighter_idx]
+            .state
+            .local_vars
+            .get("turn_walked"),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        engine.objects[fighter_idx].state.t_attach & CNAT_BOTTOM,
+        0,
+        "native early return must not latch CNAT_Bottom"
+    );
+    assert_eq!(
+        engine.objects[fighter_idx].frame_t_attach,
+        engine.objects[fighter_idx].state.t_attach
+    );
+}
+
 #[test]
 fn push_inside_action_target_stops_before_force_and_controller_transfer() {
     // DFA_PUSH checks no target first, then whether the PUSHER is inside
@@ -4506,6 +4799,11 @@ fn push_inside_action_target_stops_before_force_and_controller_transfer() {
     let target_idx = engine.test_object_index(target_id);
     assert_eq!(engine.objects[target_idx].fixed_velocity.x.val(), 12_345);
     assert_eq!(engine.objects[target_idx].state.controller, 3);
+    assert_eq!(
+        pusher.state.t_attach & CNAT_BOTTOM,
+        0,
+        "inside-target Push returns before the CNAT_Bottom write"
+    );
 }
 
 #[test]
@@ -5342,6 +5640,12 @@ fn assert_l073_fighter_stands(engine: &Engine, fighter: ObjectId, label: &str) {
         vec!["MoveTo".to_string()],
         "FIGHT failure must not add PULL's delayed Wait: {label}"
     );
+    assert_eq!(
+        object.state.t_attach & CNAT_BOTTOM,
+        0,
+        "a native Fight early return must not latch CNAT_Bottom: {label}"
+    );
+    assert_eq!(object.frame_t_attach, object.state.t_attach, "{label}");
 }
 
 #[test]
