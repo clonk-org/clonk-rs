@@ -3,6 +3,12 @@
 // instead of one per file. Nextest runs each #[test] in a separate process.
 // Explicitly batched real-scenario subcases share immutable preparation within
 // one process, but every subcase instantiates a fresh Engine.
+
+// Match the shipped app's allocator: route tests exercise the same
+// allocation-heavy script/snapshot paths without changing simulation state.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod support;
 
 #[cfg(all(

@@ -1894,30 +1894,32 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
     // the live color but preserves OriginalColor (pristine 9ffa0a5d
     // src/C4GameParameters.cpp:403-410; src/C4Network2.cpp:249-250;
     // src/C4Network2Players.cpp:189-205; src/C4Teams.cpp:53-81,446-539).
-    let repository = repository_root();
-    let content = repository.join("content");
-    let planet = repository.join("planet");
-    let scenario_path = content.join("Knights.c4f/Regicide.c4s");
-    let definition_resource_paths = vec![
-        content.join("Objects.c4d"),
-        content.join("Knights.c4d"),
-        content.join("Knights.c4f"),
-    ];
-    let effective_definition_modules = vec!["Objects.c4d".to_owned(), "Knights.c4d".to_owned()];
+    let fixture = minimal_install(None);
+    // Team parsing and assignment depend on the shipped Teams.txt, not on
+    // compressing the unrelated Objects/Knights definition trees.
+    fs::copy(
+        repository_root().join("content/Knights.c4f/Regicide.c4s/Teams.txt"),
+        fixture.scenario_path.join("Teams.txt"),
+    )
+    .unwrap();
+    let definition_resource_paths = vec![fixture.install_roots[0].join("Defs.c4d")];
+    let effective_definition_modules = vec!["Defs.c4d".to_owned()];
     let definition_resources = freeze_host_definition_resource_sources(
         &definition_resource_paths,
-        &scenario_path,
+        &fixture.scenario_path,
         &effective_definition_modules,
         false,
-        &content,
+        &fixture.install_roots[0],
         "",
     )
     .unwrap();
-    let definition_executable_path = format!("{}{}", content.display(), std::path::MAIN_SEPARATOR);
-    let install_roots = vec![content, planet];
+    let definition_executable_path = format!(
+        "{}{}",
+        fixture.install_roots[0].display(),
+        std::path::MAIN_SEPARATOR
+    );
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
-    let network = tempfile::tempdir().unwrap();
     let player_directory = tempfile::tempdir().unwrap();
     let player_path = player_directory.path().join("Alice.c4p");
     fs::create_dir_all(&player_path).unwrap();
@@ -1934,8 +1936,8 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
 
     let prepared = prepare_host_bootstrap_with_team_assignment_oracle(
         PreparedHostBootstrapSpec {
-            scenario_path: &scenario_path,
-            install_roots: &install_roots,
+            scenario_path: &fixture.scenario_path,
+            install_roots: &fixture.install_roots,
             definition_resources: &definition_resources,
             effective_definition_modules: &effective_definition_modules,
             initial_definition_modules: &[],
@@ -1945,7 +1947,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
             definition_path: "",
             languages: &languages,
             language_packs: &language_packs,
-            network_directory: network.path(),
+            network_directory: fixture.network.path(),
             network_work_path: "Network",
             start_unix_seconds: 1_720_000_122,
             random_seed_unix_seconds: 1_720_000_123,
