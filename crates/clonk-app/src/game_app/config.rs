@@ -930,7 +930,7 @@ impl GameApp {
                     if sheet == OptionsSheet::Sound && self.audio.is_none() {
                         return Err(classic_parity_engine_error(report_classic_parity_boundary(
                             ClassicParityBoundary::RuntimeAudioSystem {
-                                action: "the startup Options Sound sheet",
+                                action: "the startup Options Audio sheet",
                             },
                         )));
                     }
@@ -988,6 +988,9 @@ impl GameApp {
                         SoundCheckboxId::GameSoundEffects => {
                             self.set_startup_game_sound_option(checked)?;
                         }
+                        SoundCheckboxId::VoiceEnabled => {
+                            self.set_startup_voice_enabled(checked)?;
+                        }
                     },
                     SoundSheetAction::VolumeChanged { id, value } => match id {
                         SoundVolumeId::Music => {
@@ -996,8 +999,14 @@ impl GameApp {
                         SoundVolumeId::SoundEffects => {
                             self.set_startup_sound_volume(i32::from(value))?;
                         }
+                        SoundVolumeId::Voice => {
+                            self.set_startup_voice_volume(i32::from(value))?;
+                        }
                     },
                 },
+                OptionsDlgAction::BeginVoicePushToTalkCapture => {
+                    self.open_options_voice_capture()?;
+                }
                 OptionsDlgAction::Graphics(action) => match action {
                     GraphicsSheetAction::OpenDisplayModeCombo => {
                         self.open_options_display_mode_combo()?;
@@ -1575,6 +1584,73 @@ impl GameApp {
         )
     }
 
+    /// The port-only push-to-talk capture modal (clonk-org/clonk-rs#452). It is
+    /// the classic `IDS_MSG_DEFINEKEY` dialog with a port-only prompt, so a
+    /// player rebinding voice sees the same flow as rebinding a crew control.
+    fn open_options_voice_capture(&mut self) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::new(
+                self.runtime_resource_text(
+                    "IDS_MSG_PRESSVOICEKEY",
+                    "Press the key to hold down while speaking.",
+                ),
+                self.runtime_resource_text("IDS_MSG_DEFINEKEY", "Assign key"),
+                clonk_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                clonk_frontend::message_dialog::MessageDialogIcon::Standard(24),
+                clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::OptionsVoicePushToTalkCapture,
+        )
+    }
+
+    /// The key that modal captures. It mirrors
+    /// [`Self::handle_options_control_capture_key`]: modified chords are
+    /// rejected, the press is consumed either way, and only a key the config
+    /// can round-trip is accepted.
+    pub(crate) fn handle_options_voice_capture_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        let capturing = self.message_dialogs.last().is_some_and(|pending| {
+            matches!(
+                pending.continuation,
+                MessageDialogContinuation::OptionsVoicePushToTalkCapture
+            )
+        });
+        if !capturing {
+            return Ok(false);
+        }
+        match state {
+            ElementState::Released => {
+                self.message_dialog_consumed_keys.remove(&key);
+                return Ok(true);
+            }
+            ElementState::Pressed => {
+                self.message_dialog_consumed_keys.insert(key);
+            }
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            return Ok(true);
+        }
+        if crate::input::encode_virtual_key_code(key).is_none() {
+            tracing::warn!(?key, "ignoring voice capture for an unpersistable key");
+            return Ok(true);
+        }
+        if let Some(audio) = self.audio.as_mut() {
+            audio.options.voice_push_to_talk = key;
+        }
+        let label = format_key_label(key);
+        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+            dialog.set_voice_push_to_talk_label(label);
+        }
+        self.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)?;
+        Ok(true)
+    }
+
     fn reset_options_control_bindings(
         &mut self,
         device: clonk_frontend::startup_options_controls::ControlDevice,
@@ -1810,6 +1886,12 @@ impl GameApp {
             no_language_info: text("IDS_CTL_NOLANGINFO", "Language pack not available."),
             music: text("IDS_CTL_MUSIC", "Music"),
             sound_effects: text("IDS_CTL_SOUNDFX", "Sound effects"),
+            // Port-only ids shipped in `planet/System.c4g`; C++ has no
+            // voice-chat strings at all (clonk-org/clonk-rs#452).
+            voice_chat: text("IDS_CTL_VOICECHAT", "Voice chat"),
+            voice_enabled: text("IDS_CTL_VOICEENABLED", "Enable voice chat"),
+            voice_volume: text("IDS_CTL_VOICEVOLUME", "Voice volume"),
+            voice_push_to_talk: text("IDS_CTL_VOICEPUSHTOTALK", "Push to talk"),
             display_mode: text("IDS_CTL_DISPLAYMODE", "Display mode"),
             graphics_scale: text("IDS_CTL_GRAPHICSSCALE", "Scale"),
             effects_low: text("IDS_CTL_SMOKELOW", "Low"),

@@ -4876,6 +4876,8 @@ pub(crate) enum MessageDialogContinuation {
     /// this build cannot install in place.
     UpdateNotice,
     OptionsControlCapture(clonk_frontend::startup_options_controls::ControlCaptureTarget),
+    /// The port-only push-to-talk key capture (clonk-org/clonk-rs#452).
+    OptionsVoicePushToTalkCapture,
     OptionsAlternateServerNotice,
     OptionsResetConfiguration,
     OptionsAdvancedWarning,

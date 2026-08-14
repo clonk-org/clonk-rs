@@ -488,7 +488,14 @@ fn voice(config: &Config) -> AdvancedConfigSection {
         section,
         vec![
             // Port-only extension: LegacyClonk has no microphone or voice
-            // settings. Keep it separate from the pixel-exact Sound sheet.
+            // settings, so this section has no C4Config counterpart.
+            //
+            // These three are also on the Options dialog's Audio sheet
+            // (clonk-org/clonk-rs#452), in a group placed in the vertical slack
+            // C++'s own grid leaves unused. They stay here as well because the
+            // Audio group is omitted where that slack is too small -- 640x480
+            // leaves 50px -- and because this editor is the only surface for
+            // the remaining Voice keys.
             bool_row(config, section, "Enabled", false),
             int_row(config, section, "Volume", 100, 0, 100),
             i32_row(config, section, "PushToTalkKey", default_push_to_talk),
