@@ -456,6 +456,12 @@ pub(crate) fn foreign_local_cell_hook(
     })
 }
 
+/// The VM's Local/LocalN/SetLocal arrow fast paths bypass the ordinary method
+/// dispatcher, so they ask the same host-world liveness question explicitly.
+pub(crate) fn arrow_object_target_available_by_id(target: u64) -> bool {
+    arrow_object_target_available(ObjectId::new(target))
+}
+
 /// AB_CALLGLOBAL temporarily runs with `cthr->Obj = cthr->Def = nullptr`
 /// while retaining the suspended caller frame. The VM brackets the dynamic
 /// extent with this hook after evaluating its arguments.
@@ -597,6 +603,9 @@ pub(crate) fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeErro
             target_value.type_name()
         )));
     };
+    if !arrow_object_target_available(target) {
+        return Err(RuntimeError::new("Object call: target is zero!"));
+    }
     // `obj->ID::Func(...)`: C++ validates ID::Func at parse time, but
     // AB_CALLNS is ignored by the executor (C4AulExec.cpp:1212-1214).
     // Preserve the validation, then let the paired AB_CALL re-resolve Func
@@ -707,6 +716,9 @@ pub(crate) fn arrow_method_ref_args_dispatch(
             target_value.type_name()
         )));
     };
+    if !arrow_object_target_available(target) {
+        return Err(RuntimeError::new("Object call: target is zero!"));
+    }
     // `obj->ID::Func(...)`: AB_CALLNS only validates, AB_CALL re-resolves.
     let name = match name.split_once("::") {
         Some((namespace, function)) => {
@@ -785,6 +797,9 @@ pub(crate) fn arrow_method_reference_dispatch(
             target_value.type_name()
         )));
     };
+    if !arrow_object_target_available(target) {
+        return Err(RuntimeError::new("Object call: target is zero!"));
+    }
     if let Some((namespace, function)) = name.split_once("::") {
         let script = HOST_CONTEXT.with(|cell| {
             cell.borrow()
@@ -820,6 +835,21 @@ pub(crate) fn arrow_method_reference_dispatch(
             "Object call: No function \"{name}\" in object {target}!"
         ))),
     }
+}
+
+/// A stale Rust object handle must not be translated into FindSameNameFunc's
+/// missing-function result. C++ could only reach AB_CALL with either a live
+/// object pointer or a freshly minted pointer to the still-active callback
+/// scope; every older C4Value was zeroed by AssignRemoval first
+/// (C4AulExec.cpp:1216-1279; C4Object.cpp:312).
+fn arrow_object_target_available(target: ObjectId) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().is_none_or(|context| {
+            context.object_status_present(target)
+                || context.removed_object_references.contains(&target)
+                    && context.object_scope(target).is_some()
+        })
+    })
 }
 
 /// Runs `function` on a script host with NO object context (Obj=nullptr,
@@ -5705,23 +5735,33 @@ impl EffectHostContext {
             self.audio.detach_object_sounds(target, position);
         }
         self.removed_object_references.insert(target);
-        let removed = &self.removed_object_references;
-
-        for cells in self.session_local_cells.values() {
-            for (name, mut value) in cells.snapshot() {
-                clear_removed_object_references(&mut value, removed);
-                *cells.cell(&name).borrow_mut() = value;
-            }
+        let mut reference_sweep = clonk_script::ObjectReferenceSweep::active(target.as_u64());
+        // Bring untouched persistent holders into this callback's ordinary
+        // nested-outcome pipeline before clearing their locals/effect vars.
+        self.clear_object_action_and_command_pointers(target);
+        for id in self.world.object_script_value_referrer_ids(target) {
+            self.ensure_object_scope(id);
+        }
+        if let Some(scope) = self.object.as_mut() {
+            scope.effects.clear_object_references(&mut reference_sweep);
+        }
+        if let Some(scope) = self.global.as_mut() {
+            scope.clear_object_references(&mut reference_sweep);
+        }
+        for scope in self.dormant_scopes.iter_mut().flatten() {
+            scope.effects.clear_object_references(&mut reference_sweep);
+        }
+        for state in self.nested_objects.values_mut() {
+            state
+                .scope
+                .effects
+                .clear_object_references(&mut reference_sweep);
         }
         for state in self.nested_objects.values_mut() {
             for value in state.local_vars.values_mut() {
-                clear_removed_object_references(value, removed);
+                reference_sweep.clear_value(value);
             }
         }
-        for cell in self.foreign_local_cells.values() {
-            clear_removed_object_references(&mut cell.borrow_mut(), removed);
-        }
-        self.clear_object_action_and_command_pointers(target);
         // Game.ClearPointers removes every transfer zone owned by the
         // object before AssignRemoval returns. Mutate this callback's world
         // immediately for later same-VM-call GetPath/ExecuteCommand reads,
@@ -5808,12 +5848,6 @@ impl EffectHostContext {
         linked
     }
 
-    fn clear_removed_references_in_locals(&self, locals: &mut HashMap<String, Value>) {
-        for value in locals.values_mut() {
-            clear_removed_object_references(value, &self.removed_object_references);
-        }
-    }
-
     /// The live cell for a FOREIGN object's named local (cross-object
     /// LocalN). Seeded from the freshest known value: an accumulated
     /// nested-call state first, the world snapshot otherwise.
@@ -5827,7 +5861,7 @@ impl EffectHostContext {
         if let Some(cell) = self.foreign_local_cells.get(&(target, name.to_string())) {
             return cell.clone();
         }
-        let mut seed = self
+        let seed = self
             .nested_objects
             .get(&target)
             .and_then(|state| state.local_vars.get(name).cloned())
@@ -5837,7 +5871,6 @@ impl EffectHostContext {
                     .and_then(|locals| locals.get(name).cloned())
             })
             .unwrap_or(Value::Nil);
-        clear_removed_object_references(&mut seed, &self.removed_object_references);
         let cell = clonk_script::value_cell(seed);
         self.foreign_local_cells
             .insert((target, name.to_string()), cell.clone());
@@ -5934,7 +5967,6 @@ impl EffectHostContext {
         // Earlier cross-object LocalN writes are part of the target's
         // current state.
         self.overlay_foreign_cells(target, &mut snapshot_locals);
-        self.clear_removed_references_in_locals(&mut snapshot_locals);
         if self.object.as_ref().map(ObjectScopeContext::id) == Some(target) {
             return Some(NestedCallPrep {
                 script,
@@ -5961,7 +5993,6 @@ impl EffectHostContext {
             None => self.nested_scope_for(world_object.as_ref()?)?,
         };
         self.overlay_foreign_cells(target, &mut local_vars);
-        self.clear_removed_references_in_locals(&mut local_vars);
         self.dormant_scopes.push(self.object.take());
         self.object = Some(scope);
         Some(NestedCallPrep {
@@ -6079,8 +6110,7 @@ impl EffectHostContext {
         // nested scopes carry the snapshot mask like outer scopes do, not
         // the preview-grade recompute.
         scope.cached_ocf = Some(state.ocf);
-        let mut local_vars = state.local_vars.snapshot();
-        self.clear_removed_references_in_locals(&mut local_vars);
+        let local_vars = state.local_vars.snapshot();
         Some((scope, local_vars))
     }
 
@@ -6091,9 +6121,8 @@ impl EffectHostContext {
         &mut self,
         target: ObjectId,
         origin: NestedScopeOrigin,
-        mut local_vars: HashMap<String, Value>,
+        local_vars: HashMap<String, Value>,
     ) {
-        self.clear_removed_references_in_locals(&mut local_vars);
         // The call's writes become visible to later cross-object LocalN
         // reads on the same target.
         self.sync_foreign_cells(target, &local_vars);
@@ -7542,7 +7571,6 @@ impl EffectHostContext {
             if let Some(cells) = cell_locals.remove(&id) {
                 local_vars.extend(cells);
             }
-            self.clear_removed_references_in_locals(&mut local_vars);
             scope.finalize_persisted_ocf();
             let command_operations = scope.final_command_operations();
             let mut update = scope.pending_update;
@@ -7575,7 +7603,6 @@ impl EffectHostContext {
                 .and_then(|object| object.full_state().map(|state| state.local_vars.snapshot()))
                 .unwrap_or_default();
             local_vars.extend(cells);
-            self.clear_removed_references_in_locals(&mut local_vars);
             let update = ObjectUpdate {
                 local_vars: Some(local_vars),
                 ..ObjectUpdate::default()
@@ -7742,6 +7769,16 @@ impl EffectScopeContext {
 
     pub(crate) fn snapshot(&self) -> Vec<EffectState> {
         self.effects.clone()
+    }
+
+    fn clear_object_references(&mut self, sweep: &mut clonk_script::ObjectReferenceSweep) {
+        let mut updates = Vec::new();
+        for effect in &mut self.effects {
+            if effect.clear_object_reference(sweep) {
+                updates.push(EffectCommand::update(effect.clone()));
+            }
+        }
+        self.commands.extend(updates);
     }
 
     // iIntervall/iTime stored verbatim (C4Effect.cpp:66-67).

@@ -8,7 +8,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use clonk_script::{value_cell, Engine, RuntimeError, Script, Value, ValueCell};
+use clonk_script::{
+    clear_active_object_references, value_cell, Engine, RuntimeError, Script, Value, ValueCell,
+};
 
 type CellTable = Rc<RefCell<HashMap<(u64, String), ValueCell>>>;
 
@@ -105,6 +107,54 @@ fn arrow_form_setlocal_writes_the_target_without_world_method_dispatch() {
             .get(&(7, "__local_13".to_string()))
             .map(|cell| cell.borrow().clone()),
         Some(Value::Int(42))
+    );
+}
+
+#[test]
+fn arrow_setlocal_clears_an_earlier_value_and_evaluates_surplus_operands() {
+    // Parse_Params retains every argument C4Value while evaluating later
+    // operands. AssignRemoval therefore clears Victim before FnSetLocal runs,
+    // and the surplus Mark expression still executes before the three-slot
+    // native frame is balanced (C4AulParse.cpp:3238-3243;
+    // C4Object.cpp:312; C4Script.cpp:3408-3414).
+    let (mut engine, cells) = engine_with_numbered_local_hook();
+    let marks = Arc::new(AtomicUsize::new(0));
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Victim", |_| Ok(Value::Object(8)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(8);
+        Ok(Value::Nil)
+    });
+    {
+        let marks = Arc::clone(&marks);
+        engine.register_host_function("Mark", move |_| {
+            marks.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Nil)
+        });
+    }
+    engine.add_script(
+        Script::compile(
+            r#"#strict 3
+                public func Probe() {
+                    Target()->SetLocal(0, Victim(), Clear(), Mark());
+                    return Local(0, Target());
+                }
+            "#,
+        )
+        .expect("compiles"),
+    );
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("SetLocal runs"),
+        Value::Nil
+    );
+    assert_eq!(marks.load(Ordering::SeqCst), 1, "surplus operand ran");
+    assert_eq!(
+        cells
+            .borrow()
+            .get(&(7, "__local_0".to_string()))
+            .map(|cell| cell.borrow().clone()),
+        Some(Value::Nil)
     );
 }
 

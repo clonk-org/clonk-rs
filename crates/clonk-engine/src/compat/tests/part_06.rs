@@ -1421,12 +1421,7 @@
 
         assert_eq!(
             result,
-            Value::Array(vec![
-                object_reference_value(removed),
-                Value::Nil,
-                object_reference_value(removed),
-                Value::Nil,
-            ])
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Nil])
         );
         assert!(outcome.destroy_object);
         assert!(matches!(
@@ -2308,4 +2303,3 @@
         });
         result.test_value();
     }
-

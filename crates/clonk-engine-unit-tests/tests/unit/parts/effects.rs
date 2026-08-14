@@ -95,6 +95,117 @@ fn effects_object_config(definition: &str) -> SpawnConfig {
     SpawnConfig::new(definition).with_category(CATEGORY_OBJECT)
 }
 
+#[test]
+fn removal_clears_a_preexisting_nested_effect_variable_before_returning() {
+    // EffectVars are persistent C4Values. An object nested below a map and an
+    // array is on the removed object's FirstRef chain and becomes nil before
+    // RemoveObject returns (C4Value.cpp:78-99; C4Object.cpp:312).
+    let carrier_script = r#"#strict 3
+        local stored_effect;
+
+        public func Arm(object target) {
+            stored_effect = AddEffect("Stored", this(), 100, 0, this());
+            EffectVar(0, this(), stored_effect) = { inner = [target] };
+            return true;
+        }
+
+        public func RemoveThenRead(object target) {
+            RemoveObject(target);
+            return EffectVar(0, this(), stored_effect).inner[0];
+        }
+        "#;
+    let mut engine = effects_engine(7, effects_definition("CARR", "Carrier", carrier_script));
+    engine.register_test_definition(simple_definition("TRGT"));
+    let carrier = engine.spawn_test_object(SpawnConfig::new("CARR"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+
+    call_effects_object(
+        &mut engine,
+        carrier,
+        "Arm",
+        vec![object_reference_value(target)],
+    );
+    assert_eq!(
+        call_effects_object(
+            &mut engine,
+            carrier,
+            "RemoveThenRead",
+            vec![object_reference_value(target)],
+        ),
+        Value::Nil
+    );
+    let carrier_index = engine.test_object_index(carrier);
+    assert_eq!(
+        engine.objects[carrier_index].state.effects[0].var(0),
+        EffectVarValue::Proplist(clonk_script::ValueMap::from([(
+            "inner",
+            Value::Array(vec![Value::Nil])
+        )]))
+    );
+}
+
+#[test]
+fn removal_clears_an_untouched_objects_nested_local_and_effect_variable() {
+    // AssignRemoval walks C4Values owned by every object, not only the active
+    // callback object. A dormant holder's local and EffectVar therefore clear
+    // before a nested read can observe them (C4Value.cpp:78-99;
+    // C4Object.cpp:312).
+    let holder_script = r#"#strict 3
+        local stored, stored_effect;
+
+        public func Arm(object target) {
+            stored = { inner = [target] };
+            stored_effect = AddEffect("Stored", this(), 100, 0, this());
+            EffectVar(0, this(), stored_effect) = [{ inner = target }];
+            return true;
+        }
+
+        public func Read() {
+            return [stored.inner[0], EffectVar(0, this(), stored_effect)[0].inner];
+        }
+        "#;
+    let remover_script = r#"#strict 3
+        public func RemoveThenRead(object target, object holder) {
+            RemoveObject(target);
+            return holder->Read();
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("HOLD", "Holder", holder_script);
+    engine.register_test_script_definition("RMVR", "Remover", remover_script);
+    engine.register_test_definition(simple_definition("TRGT"));
+    let holder = engine.spawn_test_object(SpawnConfig::new("HOLD"));
+    let remover = engine.spawn_test_object(SpawnConfig::new("RMVR"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+
+    engine
+        .call_object_function(
+            engine.test_object_index(holder),
+            "Arm",
+            vec![object_reference_value(target)],
+        )
+        .expect("persistent holder values are armed");
+    assert_eq!(
+        engine
+            .call_object_function(
+                engine.test_object_index(remover),
+                "RemoveThenRead",
+                vec![
+                    object_reference_value(target),
+                    object_reference_value(holder),
+                ],
+            )
+            .expect("untouched holder reference sweep completes"),
+        Value::Array(vec![Value::Nil, Value::Nil])
+    );
+    assert_eq!(
+        engine
+            .call_object_function(engine.test_object_index(holder), "Read", Vec::new())
+            .expect("cleared holder values persist after the removal outcome folds"),
+        Value::Array(vec![Value::Nil, Value::Nil])
+    );
+}
+
 fn effects_contained_config(definition: &str, container: ObjectId) -> SpawnConfig {
     effects_object_config(definition).with_container(container)
 }

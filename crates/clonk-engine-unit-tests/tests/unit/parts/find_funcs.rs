@@ -2336,6 +2336,210 @@ fn arrow_calls_resolve_on_the_target_object_like_cpp() {
 }
 
 #[test]
+fn removing_an_arrow_target_reports_zero_instead_of_a_missing_engine_function() {
+    // The parameter C4Value predates AssignRemoval and is nil by the time the
+    // following AB_CALL runs. It therefore fails at the target-zero check,
+    // before FindSameNameFunc could misreport GetID as missing
+    // (C4Object.cpp:312; C4AulExec.cpp:1216-1226).
+    let caller_script = r#"#strict 3
+        public func RemoveThenCall(object target) {
+            RemoveObject(target);
+            return target->GetID();
+        }
+        "#;
+
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 3\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let caller_index = engine.test_object_index(caller);
+
+    let error = engine
+        .call_object_function(
+            caller_index,
+            "RemoveThenCall",
+            vec![object_reference_value(target)],
+        )
+        .expect_err("the pre-removal parameter is zero before arrow dispatch");
+    let EngineError::Script { source, .. } = error else {
+        panic!("stale arrow returned a non-script error: {error:?}");
+    };
+    let message = source.to_string();
+    assert!(
+        message.contains("Object call: target is zero!"),
+        "{message}"
+    );
+    assert!(!message.contains("No function \"GetID\""), "{message}");
+}
+
+#[test]
+fn removal_during_arrow_arguments_clears_the_pending_receiver() {
+    // AB_CALL retains the receiver below its argument slots. AssignRemoval
+    // clears that receiver while the argument runs, so dispatch observes zero
+    // even though the removed object's callback scope is still active
+    // (C4AulExec.cpp:1216-1226; C4Object.cpp:312).
+    let caller_script = r#"#strict 3
+        public func RemoveThenNil(object target) {
+            RemoveObject(target);
+            return;
+        }
+        public func CallWhileRemoving(object target) {
+            return target->GetID(RemoveThenNil(target));
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 3\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+
+    let error = engine
+        .call_object_function(
+            engine.test_object_index(caller),
+            "CallWhileRemoving",
+            vec![object_reference_value(target)],
+        )
+        .expect_err("the pre-argument receiver is zero before dispatch");
+    let EngineError::Script { source, .. } = error else {
+        panic!("removed receiver returned a non-script error: {error:?}");
+    };
+    assert!(
+        source.to_string().contains("Object call: target is zero!"),
+        "{source}"
+    );
+}
+
+#[test]
+fn a_deleted_rust_object_handle_is_classified_as_zero_not_a_missing_function() {
+    // Rust embedding boundaries can materialize an ObjectId after its world
+    // snapshot has reached Deleted. This state has no native C4Value analogue,
+    // but it must preserve AB_CALL's target-zero classification instead of
+    // falling through to a misleading missing-function error.
+    let caller_script = r#"#strict 3
+        public func Kill(object target) { return RemoveObject(target); }
+        public func CallStale(object target) { return target->GetID(); }
+        public func CallStaleAfterMaterializing(object target) {
+            GetMagicEnergy(target);
+            return target->GetID();
+        }
+        public func ReadStaleNamedLocal(object target) { return target->LocalN("stored"); }
+        public func ReadStaleNumberedLocal(object target) { return target->Local(0); }
+        public func WriteStaleNumberedLocal(object target) { return target->SetLocal(0, 7); }
+        public func WriteStaleNamedLocalByReference(object target) {
+            target->LocalN("stored") = 9;
+            return true;
+        }
+        public func WriteStaleNumberedLocalByReference(object target) {
+            target->Local(0) = 9;
+            return true;
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 3\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let caller_index = engine.test_object_index(caller);
+
+    engine
+        .call_object_function(caller_index, "Kill", vec![object_reference_value(target)])
+        .expect("target removal completes");
+    for function in [
+        "CallStale",
+        "CallStaleAfterMaterializing",
+        "ReadStaleNamedLocal",
+        "ReadStaleNumberedLocal",
+        "WriteStaleNumberedLocal",
+        "WriteStaleNamedLocalByReference",
+        "WriteStaleNumberedLocalByReference",
+    ] {
+        let error = engine
+            .call_object_function(caller_index, function, vec![object_reference_value(target)])
+            .expect_err("a deleted raw handle is not a callable object target");
+        let EngineError::Script { source, .. } = error else {
+            panic!("stale arrow returned a non-script error: {error:?}");
+        };
+        let message = source.to_string();
+        assert!(
+            message.contains("Object call: target is zero!"),
+            "{message}"
+        );
+        assert!(!message.contains("No function"), "{message}");
+    }
+}
+
+#[test]
+fn fresh_self_reference_after_removal_stays_callable_in_its_callback() {
+    // Fn_this constructs a new C4Value after AssignRemoval's instantaneous
+    // sweep, and AB_CALL accepts that pointer while the callback scope still
+    // exists (C4Script.cpp:220-223; C4Value.cpp:78-99;
+    // C4Object.cpp:312; C4AulExec.cpp:1224-1237).
+    let script = r#"#strict 3
+        public func RemoveThenIdentify() {
+            RemoveObject(this());
+            return this()->GetID();
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", script);
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                engine.test_object_index(caller),
+                "RemoveThenIdentify",
+                Vec::new(),
+            )
+            .expect("fresh self remains callable until the callback ends"),
+        Value::C4Id("CALL".to_string())
+    );
+}
+
+#[test]
+fn removal_clears_preexisting_nested_named_and_numbered_globals() {
+    // Named statics and numbered globals are persistent C4Values owned by the
+    // script engine. Object leaves inside their maps and arrays join the same
+    // FirstRef sweep (C4Aul.h:549-560; C4Value.cpp:78-99;
+    // C4Object.cpp:312).
+    let script = r#"#strict 3
+        static named;
+
+        public func Arm(object target) {
+            SetGlobal(7, [{ inner = target }]);
+            named = { inner = [target] };
+            return true;
+        }
+
+        public func RemoveThenRead(object target) {
+            RemoveObject(target);
+            return [Global(7)[0].inner, named.inner[0]];
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 3\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let caller_index = engine.test_object_index(caller);
+
+    engine
+        .call_object_function(caller_index, "Arm", vec![object_reference_value(target)])
+        .expect("persistent globals are armed");
+    assert_eq!(
+        engine
+            .call_object_function(
+                caller_index,
+                "RemoveThenRead",
+                vec![object_reference_value(target)],
+            )
+            .expect("global reference sweep completes"),
+        Value::Array(vec![Value::Nil, Value::Nil])
+    );
+}
+
+#[test]
 fn arrow_reference_return_assigns_the_target_objects_local() {
     // Kingdoms' THRN line 195 uses this exact C4Aul sequence:
     // `pReviveObject->SacrificeMade()=1`. AB_CALL installs the target

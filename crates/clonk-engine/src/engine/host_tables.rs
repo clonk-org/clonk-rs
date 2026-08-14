@@ -552,6 +552,41 @@ impl Engine {
         result
     }
 
+    /// Select paused-engine objects whose persistent C4Values name `target`.
+    /// Kept separate from ClearPointers because inactive objects retain
+    /// ordinary script references.
+    unsafe fn lazy_host_world_script_value_referrers(
+        source: *const (),
+        target: ObjectId,
+        excluded: &HashSet<usize>,
+    ) -> Vec<(usize, ObjectId)> {
+        let engine = source.cast::<Self>();
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let mut result = Vec::new();
+        for index in 0..objects.len() {
+            if excluded.contains(&index) {
+                continue;
+            }
+            // SAFETY: skipped indices are the only entries that may be
+            // exclusively borrowed by the callback wrapper.
+            let object = unsafe { &*objects.as_ptr().add(index) };
+            let references_target = object
+                .state
+                .local_vars
+                .values()
+                .any(|value| value.contains_object_reference(target.as_u64()))
+                || object
+                    .state
+                    .effects
+                    .iter()
+                    .any(|effect| effect.contains_object_reference(target.as_u64()));
+            if references_target {
+                result.push((index, object.id));
+            }
+        }
+        result
+    }
+
     /// Project one C4Player into callback-local state on its first value
     /// query. Numeric validity and indexed order are seeded separately, so
     /// callbacks that do not inspect player data clone none of it.
@@ -911,6 +946,7 @@ impl Engine {
                 Self::lazy_host_world_landscape,
             )
             .with_pointer_referrers(Self::lazy_host_world_pointer_referrers)
+            .with_script_value_referrers(Self::lazy_host_world_script_value_referrers)
             // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
             // execution. APIs such as FindBase walk the forward list, but
             // most callbacks never inspect it, so snapshot it on first use.

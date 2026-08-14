@@ -122,6 +122,23 @@ impl EffectState {
             .unwrap_or_else(EffectVarValue::default)
     }
 
+    pub(crate) fn clear_object_reference(
+        &mut self,
+        sweep: &mut clonk_script::ObjectReferenceSweep,
+    ) -> bool {
+        let mut changed = false;
+        for value in &mut self.vars {
+            changed |= value.clear_object_reference(sweep);
+        }
+        changed
+    }
+
+    pub(crate) fn contains_object_reference(&self, object_id: u64) -> bool {
+        self.vars
+            .iter()
+            .any(|value| value.contains_object_reference(object_id))
+    }
+
     pub fn vars(&self) -> &[EffectVarValue] {
         &self.vars
     }
@@ -162,6 +179,70 @@ impl EffectState {
                     ) => false,
                     _ => false,
                 })
+    }
+}
+
+impl EffectVarValue {
+    fn contains_object_reference(&self, object_id: u64) -> bool {
+        match self {
+            Self::Object(id) => *id == object_id,
+            Self::Array(values) => values
+                .iter()
+                .any(|value| value.contains_object_reference(object_id)),
+            Self::Proplist(map) => map.contains_object_reference(object_id),
+            _ => false,
+        }
+    }
+
+    fn clear_object_reference(&mut self, sweep: &mut clonk_script::ObjectReferenceSweep) -> bool {
+        match self {
+            Self::Array(values) => {
+                let mut changed = false;
+                for value in values {
+                    changed |= value.clear_object_reference(sweep);
+                }
+                changed
+            }
+            Self::Proplist(map) => sweep.clear_map(map),
+            _ => {
+                let mut value = effect_var_value_to_script(std::mem::take(self));
+                let changed = sweep.clear_value(&mut value);
+                *self = script_value_to_effect_var(value);
+                changed
+            }
+        }
+    }
+}
+
+fn effect_var_value_to_script(value: EffectVarValue) -> Value {
+    match value {
+        EffectVarValue::Int(value) => Value::Int(value),
+        EffectVarValue::Bool(value) => Value::Bool(value),
+        EffectVarValue::RawBool(value) => Value::from_c4_bool_data_raw(value),
+        EffectVarValue::String(value) => Value::String(value),
+        EffectVarValue::C4Id(value) => Value::C4Id(value),
+        EffectVarValue::Object(value) => Value::Object(value),
+        EffectVarValue::Array(values) => {
+            Value::Array(values.into_iter().map(effect_var_value_to_script).collect())
+        }
+        EffectVarValue::Proplist(value) => Value::Proplist(value),
+        EffectVarValue::Nil => Value::Nil,
+    }
+}
+
+fn script_value_to_effect_var(value: Value) -> EffectVarValue {
+    match value {
+        Value::Int(value) => EffectVarValue::Int(value),
+        Value::Bool(value) => EffectVarValue::Bool(value),
+        Value::RawBool(value) => EffectVarValue::RawBool(value),
+        Value::String(value) => EffectVarValue::String(value),
+        Value::C4Id(value) => EffectVarValue::C4Id(value),
+        Value::Object(value) => EffectVarValue::Object(value),
+        Value::Array(values) => {
+            EffectVarValue::Array(values.into_iter().map(script_value_to_effect_var).collect())
+        }
+        Value::Proplist(value) => EffectVarValue::Proplist(value),
+        Value::Nil => EffectVarValue::Nil,
     }
 }
 

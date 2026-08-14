@@ -1838,6 +1838,8 @@ pub(crate) struct LazyHostWorldProvider {
     objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
     pointer_referrers:
         Option<unsafe fn(*const (), ObjectId, &HashSet<usize>) -> Vec<(usize, ObjectId)>>,
+    script_value_referrers:
+        Option<unsafe fn(*const (), ObjectId, &HashSet<usize>) -> Vec<(usize, ObjectId)>>,
     player: Option<unsafe fn(*const (), i32) -> Option<PlayerState>>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
     master_order: Option<
@@ -1889,6 +1891,7 @@ impl LazyHostWorldProvider {
             object,
             objects,
             pointer_referrers: None,
+            script_value_referrers: None,
             player: None,
             landscape,
             master_order: None,
@@ -1918,6 +1921,25 @@ impl LazyHostWorldProvider {
         ) -> Vec<(usize, ObjectId)>,
     ) -> Self {
         self.pointer_referrers = Some(pointer_referrers);
+        self
+    }
+
+    /// Supply a scalar-only scan for objects whose persistent locals or
+    /// EffectVars contain one object reference. This is separate from native
+    /// pointer referrers because StatusDeactivate clears only the latter.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`].
+    pub(crate) unsafe fn with_script_value_referrers(
+        mut self,
+        script_value_referrers: unsafe fn(
+            *const (),
+            ObjectId,
+            &HashSet<usize>,
+        ) -> Vec<(usize, ObjectId)>,
+    ) -> Self {
+        self.script_value_referrers = Some(script_value_referrers);
         self
     }
 
@@ -2048,6 +2070,16 @@ impl LazyHostWorldProvider {
         // SAFETY: see `object`; this reads only callback-entry scalar fields
         // and skips every callback-local/exclusively borrowed entry.
         Some(unsafe { (self.pointer_referrers?)(self.source, target, excluded) })
+    }
+
+    fn script_value_referrers(
+        self,
+        target: ObjectId,
+        excluded: &HashSet<usize>,
+    ) -> Option<Vec<(usize, ObjectId)>> {
+        // SAFETY: see `object`; this reads only callback-entry script values
+        // and skips every callback-local/exclusively borrowed entry.
+        Some(unsafe { (self.script_value_referrers?)(self.source, target, excluded) })
     }
 
     fn player(self, id: i32) -> Option<PlayerState> {
@@ -4145,6 +4177,34 @@ impl HostWorldContext {
         drop(store);
 
         let Some(mut source_candidates) = provider.pointer_referrers(target, &excluded) else {
+            return self.object_ids();
+        };
+        candidates.append(&mut source_candidates);
+        candidates.sort_unstable_by_key(|(index, _)| *index);
+        candidates.dedup_by_key(|(_, id)| *id);
+        candidates.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Storage-order candidates whose persistent script values may name the
+    /// removed target. Unlike native pointer candidates, these are queried
+    /// only by AssignRemoval's C4Value sweep.
+    pub(crate) fn object_script_value_referrer_ids(&self, target: ObjectId) -> Vec<ObjectId> {
+        let Some(provider) = self.lazy_world else {
+            return self.object_ids();
+        };
+        let store = self.object_store.borrow();
+        if store.complete {
+            return store.order.clone();
+        }
+        let excluded = store.indices.values().copied().collect::<HashSet<_>>();
+        let mut candidates = store
+            .order
+            .iter()
+            .filter_map(|id| store.indices.get(id).copied().map(|index| (index, *id)))
+            .collect::<Vec<_>>();
+        drop(store);
+
+        let Some(mut source_candidates) = provider.script_value_referrers(target, &excluded) else {
             return self.object_ids();
         };
         candidates.append(&mut source_candidates);

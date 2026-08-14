@@ -90,6 +90,18 @@ thread_local! {
     /// selected native declares fewer. A cross-host dispatch consumes this
     /// one-shot override at the actual callee boundary.
     static CALL_PARAMETER_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Live C4Value cells in every suspended C4Aul frame. AssignRemoval
+    /// synchronously clears the equivalent intrusive C++ reference list
+    /// (C4Object.cpp:312).
+    static ACTIVE_OBJECT_REFERENCE_CELLS: RefCell<Vec<Vec<Weak<RefCell<Value>>>>> = const {
+        RefCell::new(Vec::new())
+    };
+    /// Ordered AssignRemoval events observed during the current re-entrant VM
+    /// execution. Plain Rust temporaries that cannot be registered as cells
+    /// replay only events occurring after they were evaluated.
+    static ACTIVE_OBJECT_REFERENCE_SWEEPS: RefCell<Vec<u64>> = const {
+        RefCell::new(Vec::new())
+    };
     #[cfg(test)]
     static CALL_ARG_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
@@ -380,7 +392,87 @@ struct FrameLocals {
 type FrameLocalMap = Rc<FrameLocals>;
 
 pub fn value_cell(value: Value) -> ValueCell {
-    Rc::new(RefCell::new(value))
+    let cell = Rc::new(RefCell::new(value));
+    ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
+        // A cell created by a nested call can escape into a persistent global
+        // table. Register it with the outermost frame, which spans the whole
+        // re-entrant execution and is the last frame to leave.
+        if let Some(frame) = frames.borrow_mut().first_mut() {
+            frame.push(Rc::downgrade(&cell));
+        }
+    });
+    cell
+}
+
+/// Clear one object's references from every active C4Aul value cell, like
+/// AssignRemoval's `while (FirstRef) FirstRef->Set0()` (C4Object.cpp:312).
+#[doc(hidden)]
+pub fn clear_active_object_references(object_id: u64) {
+    let _sweep = ObjectReferenceSweep::active(object_id);
+}
+
+/// One instantaneous AssignRemoval reference sweep. The engine extends the
+/// same sweep to persistent object locals and EffectVars before returning to
+/// script.
+#[doc(hidden)]
+pub struct ObjectReferenceSweep {
+    object_id: u64,
+}
+
+impl ObjectReferenceSweep {
+    #[doc(hidden)]
+    pub fn active(object_id: u64) -> Self {
+        let mut sweep = Self { object_id };
+        ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
+            let frames = frames.borrow();
+            let mut seen = std::collections::HashSet::new();
+            for weak in frames.iter().flat_map(|frame| frame.iter()) {
+                let Some(cell) = weak.upgrade() else {
+                    continue;
+                };
+                if seen.insert(Rc::as_ptr(&cell)) {
+                    sweep.clear_value(&mut cell.borrow_mut());
+                }
+            }
+        });
+        ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().push(object_id));
+        sweep
+    }
+
+    #[doc(hidden)]
+    pub fn clear_value(&mut self, value: &mut Value) -> bool {
+        value.clear_object_reference(self.object_id)
+    }
+
+    #[doc(hidden)]
+    pub fn clear_map(&mut self, map: &mut ValueMap) -> bool {
+        let mut value = Value::Proplist(std::mem::take(map));
+        let changed = self.clear_value(&mut value);
+        let Value::Proplist(cleared) = value else {
+            unreachable!("a reference-swept map remains a map");
+        };
+        *map = cleared;
+        changed
+    }
+}
+
+fn object_reference_sweep_cursor() -> usize {
+    ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow().len())
+}
+
+fn clear_value_for_object_reference_sweeps(value: &mut Value, cursor: usize) {
+    ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| {
+        for object_id in sweeps.borrow().iter().skip(cursor).copied() {
+            value.clear_object_reference(object_id);
+        }
+    });
+}
+
+fn object_target_id(value: &Value) -> Option<u64> {
+    match value {
+        Value::Object(id) if *id != 0 => Some(*id),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1518,6 +1610,10 @@ impl TrackedValue {
             self.set_copy()
         }
     }
+
+    fn clear_object_reference_sweeps(&mut self, cursor: usize) {
+        clear_value_for_object_reference_sweeps(&mut self.value, cursor);
+    }
 }
 
 fn c4_set_copy_is_zero_id(value: &Value) -> bool {
@@ -1639,6 +1735,20 @@ impl Binding {
         Self::tracked(TrackedValue::runtime(value))
     }
 
+    fn collect_object_reference_cells(&self, cells: &mut Vec<ValueCell>) {
+        match self {
+            Self::Direct { value, .. } => cells.push(value.clone()),
+            Self::Inline(inline) => {
+                if let Some((value, _)) = inline.promoted.get() {
+                    cells.push(value.clone());
+                } else if inline.initial.value.contains_any_object_reference() {
+                    cells.push(inline.cells().0.clone());
+                }
+            }
+            Self::Reference(reference) => reference.collect_object_reference_cells(cells),
+        }
+    }
+
     fn tracked(tracked: TrackedValue) -> Self {
         #[cfg(test)]
         DIRECT_BINDING_ALLOCATIONS.with(|count| count.set(count.get() + 1));
@@ -1758,6 +1868,14 @@ impl ValueReference {
 }
 
 impl LValueRef {
+    fn collect_object_reference_cells(&self, cells: &mut Vec<ValueCell>) {
+        match self {
+            Self::Cell { value, .. } => cells.push(value.clone()),
+            Self::Path { root, .. } => cells.push(root.clone()),
+            Self::HostPath { .. } => {}
+        }
+    }
+
     pub(crate) fn cell(value: ValueCell) -> Self {
         let identity = TrackedValue::runtime_identity(&value.borrow());
         Self::Cell {
@@ -2187,6 +2305,36 @@ impl LValueRef {
         appended.prepare_legacy_path_step()?;
         appended.prepare_legacy_host_path_step()?;
         Ok(appended)
+    }
+}
+
+struct ActiveObjectReferenceCellsGuard {
+    outermost: bool,
+}
+
+impl ActiveObjectReferenceCellsGuard {
+    fn enter(cells: Vec<ValueCell>) -> Self {
+        let outermost = ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
+            let mut frames = frames.borrow_mut();
+            let outermost = frames.is_empty();
+            frames.push(cells.iter().map(Rc::downgrade).collect());
+            outermost
+        });
+        if outermost {
+            ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().clear());
+        }
+        Self { outermost }
+    }
+}
+
+impl Drop for ActiveObjectReferenceCellsGuard {
+    fn drop(&mut self) {
+        ACTIVE_OBJECT_REFERENCE_CELLS.with(|frames| {
+            frames.borrow_mut().pop();
+        });
+        if self.outermost {
+            ACTIVE_OBJECT_REFERENCE_SWEEPS.with(|sweeps| sweeps.borrow_mut().clear());
+        }
     }
 }
 
@@ -2864,6 +3012,12 @@ impl CallArg {
         self.read_tracked().map(|tracked| tracked.value)
     }
 
+    fn clear_object_reference_sweeps(&mut self, cursor: usize) {
+        if let Self::Value(tracked) = self {
+            clear_value_for_object_reference_sweeps(&mut tracked.value, cursor);
+        }
+    }
+
     fn into_value(self) -> Result<Value, RuntimeError> {
         match self {
             CallArg::Value(tracked) => Ok(tracked.value),
@@ -3281,6 +3435,9 @@ pub struct Vm<'a> {
     globals_consts: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
+    /// Embedding-world receiver check used before every nonzero Object
+    /// reaches AB_CALL or one of its Local* fast paths.
+    object_target_availability_probe: Option<&'a crate::engine::ObjectTargetAvailabilityProbe>,
     string_registrations: Option<&'a crate::engine::StringRegistrationLedger>,
     /// Fallback literal interning for direct VM fixtures without a Script
     /// engine's shared C4StringTable.
@@ -3322,6 +3479,12 @@ impl<'a> ScriptFunctionTarget<'a> {
 }
 
 impl<'a> Vm<'a> {
+    fn object_target_available(&self, target: &Value) -> bool {
+        object_target_id(target)
+            .zip(self.object_target_availability_probe)
+            .is_none_or(|(target, probe)| probe(target))
+    }
+
     pub(crate) fn new(
         functions: &'a FxHashMap<String, Function>,
         host_functions: &'a FxHashMap<String, RegisteredHostFunction>,
@@ -3358,6 +3521,7 @@ impl<'a> Vm<'a> {
             globals_numbered: None,
             globals_consts: None,
             local_cell_hook: None,
+            object_target_availability_probe: None,
             string_registrations: None,
             literal_strings: Rc::new(RefCell::new(HashMap::new())),
             cell_identities: RefCell::new(HashMap::new()),
@@ -3528,6 +3692,14 @@ impl<'a> Vm<'a> {
 
     pub fn with_local_cell_hook(mut self, hook: Option<&'a crate::engine::LocalCellHook>) -> Self {
         self.local_cell_hook = hook;
+        self
+    }
+
+    pub fn with_object_target_availability_probe(
+        mut self,
+        probe: Option<&'a crate::engine::ObjectTargetAvailabilityProbe>,
+    ) -> Self {
+        self.object_target_availability_probe = probe;
         self
     }
 
@@ -4074,6 +4246,8 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
+        let _object_reference_cells =
+            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
         let value = self.evaluate(&expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
@@ -4119,6 +4293,8 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
+        let _object_reference_cells =
+            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
         let value = self.evaluate(&expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
@@ -4156,6 +4332,8 @@ impl<'a> Vm<'a> {
                 env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
             }
         }
+        let _object_reference_cells =
+            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
         let value = self.evaluate(&expr, &mut env, depth)?;
         diagnostic.returned(&value);
         Ok(value)
@@ -4445,6 +4623,7 @@ impl<'a> Vm<'a> {
             string_registrations: self.string_registrations,
             literal_strings: self.literal_strings.clone(),
             local_cell_hook: self.local_cell_hook,
+            object_target_availability_probe: self.object_target_availability_probe,
             cell_identities: RefCell::new(HashMap::new()),
             constant_identities: RefCell::new(HashMap::new()),
         }
@@ -4816,6 +4995,8 @@ impl<'a> Vm<'a> {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
+        let _object_reference_cells =
+            ActiveObjectReferenceCellsGuard::enter(env.object_reference_cells(self));
 
         let result = if let Some(compiled) = compiled {
             match compiled.execute(self, &env, depth)? {
@@ -6398,7 +6579,12 @@ impl<'a> Vm<'a> {
                 let mut values = Vec::with_capacity(elements.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for element in elements {
-                    values.push(c4_set_copy_value(self.evaluate(element, env, depth)?));
+                    let sweep_cursor = object_reference_sweep_cursor();
+                    let value = c4_set_copy_value(self.evaluate(element, env, depth)?);
+                    for retained in &mut values {
+                        clear_value_for_object_reference_sweeps(retained, sweep_cursor);
+                    }
+                    values.push(value);
                     value_stack.grow(1)?;
                 }
                 Ok(Value::Array(values))
@@ -6530,10 +6716,15 @@ impl<'a> Vm<'a> {
                 }
             },
             Expr::Array(elements) => {
-                let mut tracked = Vec::with_capacity(elements.len());
+                let mut tracked: Vec<TrackedValue> = Vec::with_capacity(elements.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for element in elements {
-                    tracked.push(self.evaluate_tracked(element, env, depth)?.set_copy());
+                    let sweep_cursor = object_reference_sweep_cursor();
+                    let value = self.evaluate_tracked(element, env, depth)?.set_copy();
+                    for retained in &mut tracked {
+                        retained.clear_object_reference_sweeps(sweep_cursor);
+                    }
+                    tracked.push(value);
                     value_stack.grow(1)?;
                 }
                 Ok(TrackedValue::array(tracked))
@@ -6645,19 +6836,6 @@ impl<'a> Vm<'a> {
                 if let Expr::Property(base, name) = callee.as_ref() {
                     let target = self.evaluate(base, env, depth + 1)?;
                     let _target_slot = ValueStackReservation::reserve(1)?;
-                    if matches!(&target, Value::Object(id) if *id != 0)
-                        && name == "SetLocal"
-                        && !self.functions.contains_key(name)
-                        && !self.has_host_function(name)
-                    {
-                        return self.set_local_tracked(
-                            args,
-                            Some(target),
-                            env,
-                            depth + 1,
-                            MAX_CALL_PARAMETERS,
-                        );
-                    }
                     return self
                         .invoke_property_call_with_target(
                             target,
@@ -8150,6 +8328,7 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
+        let target_sweep_cursor = object_reference_sweep_cursor();
         if failsafe && !self.direct_call_function_known(name) {
             // GetFirstFunc failed during C++ parsing, so no AB_CALLFS exists:
             // Parse_Params(0) still evaluates every explicit argument after
@@ -8188,6 +8367,12 @@ impl<'a> Vm<'a> {
         {
             let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
             let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if matches!(target, Value::Nil | Value::Object(0))
+                || !self.object_target_available(&target)
+            {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
             let local_name = match evaluated_args[0].read()? {
                 Value::String(local_name) => local_name,
                 other => {
@@ -8214,6 +8399,12 @@ impl<'a> Vm<'a> {
         {
             let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
             let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if matches!(target, Value::Nil | Value::Object(0))
+                || !self.object_target_available(&target)
+            {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
             let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
             if index < 0 {
                 return Ok(Value::Nil);
@@ -8231,9 +8422,43 @@ impl<'a> Vm<'a> {
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
-            return self
-                .set_local_tracked(args, Some(target), env, depth + 1, MAX_CALL_PARAMETERS)
-                .map(|tracked| tracked.value);
+            let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
+            let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if matches!(target, Value::Nil | Value::Object(0))
+                || !self.object_target_available(&target)
+            {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
+            let index = Self::slot_index_from_value(
+                "SetLocal()",
+                evaluated_args
+                    .first()
+                    .map(CallArg::read)
+                    .transpose()?
+                    .unwrap_or(Value::Nil),
+            )?;
+            let value = evaluated_args
+                .get(1)
+                .map(CallArg::read_tracked)
+                .transpose()?
+                .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
+            let explicit_target = evaluated_args.get(2).map(CallArg::read).transpose()?;
+            let target = explicit_target
+                .filter(|value| {
+                    !matches!(
+                        value,
+                        Value::Nil
+                            | Value::Int(0)
+                            | Value::Bool(false)
+                            | Value::RawBool(0)
+                            | Value::Object(0)
+                    )
+                })
+                .unwrap_or(target);
+            self.tracked_cell(self.numbered_local_cell(env, index, Some(target)))
+                .write_tracked(value.clone())?;
+            return Ok(value.value);
         }
         if matches!(
             &target,
@@ -8258,6 +8483,12 @@ impl<'a> Vm<'a> {
                     Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
                 }
                 let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+                clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+                if matches!(target, Value::Nil | Value::Object(0))
+                    || !self.object_target_available(&target)
+                {
+                    return Err(RuntimeError::new("Object call: target is zero!"));
+                }
                 let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                 dispatch_args.push(target.clone());
                 dispatch_args.push(Value::String(name.to_string().into()));
@@ -8308,7 +8539,15 @@ impl<'a> Vm<'a> {
                 // Self-target (or a bare engine without a world): resolve in
                 // the executing context — FindSameNameFunc with
                 // pDestDef == own def is the plain own->global->host chain.
-                self.invoke_property_call_local(name, args, failsafe, forward_rest, env, depth)
+                self.invoke_property_call_local(
+                    name,
+                    args,
+                    failsafe,
+                    forward_rest,
+                    env,
+                    depth,
+                    Some((&mut target, target_sweep_cursor)),
+                )
             }
             other => {
                 if self.method_dispatch.is_some() {
@@ -8322,12 +8561,21 @@ impl<'a> Vm<'a> {
                 } else {
                     // Bare scripting engines have no object world: keep the
                     // legacy resolve-by-name behavior for their tests.
-                    self.invoke_property_call_local(name, args, failsafe, forward_rest, env, depth)
+                    self.invoke_property_call_local(
+                        name,
+                        args,
+                        failsafe,
+                        forward_rest,
+                        env,
+                        depth,
+                        None,
+                    )
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn invoke_property_call_local(
         &self,
         name: &str,
@@ -8336,6 +8584,7 @@ impl<'a> Vm<'a> {
         forward_rest: bool,
         env: &mut Environment,
         depth: usize,
+        retained_target: Option<(&mut Value, usize)>,
     ) -> Result<Value, RuntimeError> {
         let function = self.own_or_global_script_function(name);
         if failsafe
@@ -8350,12 +8599,28 @@ impl<'a> Vm<'a> {
             // are on the stack before AB_CALLFS pops them, C4AulExec.cpp:
             // 1262-1267), the result is nil.
             let _ = self.build_call_args(Some(name), function, args, env, depth + 1)?;
+            if let Some((target, cursor)) = retained_target {
+                clear_value_for_object_reference_sweeps(target, cursor);
+                if matches!(target, Value::Nil | Value::Object(0))
+                    || !self.object_target_available(target)
+                {
+                    return Err(RuntimeError::new("Object call: target is zero!"));
+                }
+            }
             return Ok(Value::Nil);
         }
         let mut evaluated_args =
             self.build_call_args(Some(name), function, args, env, depth + 1)?;
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
+        }
+        if let Some((target, cursor)) = retained_target {
+            clear_value_for_object_reference_sweeps(target, cursor);
+            if matches!(target, Value::Nil | Value::Object(0))
+                || !self.object_target_available(target)
+            {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
         }
         let _parameter_override = CallParameterOverrideGuard::enter(MAX_CALL_PARAMETERS);
         self.invoke_value_with_reserved_result(
@@ -8378,6 +8643,7 @@ impl<'a> Vm<'a> {
         let mut evaluated_args = CallArgs::with_capacity(args.len());
         let mut value_stack = ValueStackReservation::empty();
         for (index, arg) in args.iter().enumerate() {
+            let sweep_cursor = object_reference_sweep_cursor();
             // `anyfunctakesref` (C4AulParse.cpp:2318-2331) unions the resolved
             // callee with every other engine function of that name, so a slot
             // stays a reference even when THIS host's same-named function
@@ -8427,6 +8693,9 @@ impl<'a> Vm<'a> {
                     let _pin_creation = LegacyPathPinCreationGuard::enter();
                     self.evaluate_reference_or_value(arg, env, depth)?
                 };
+                for retained in &mut evaluated_args {
+                    retained.clear_object_reference_sweeps(sweep_cursor);
+                }
                 evaluated_args.push(match argument {
                     ReturnValue::Reference(reference) => CallArg::Reference(reference),
                     ReturnValue::Value(value) => CallArg::Value(value),
@@ -8439,13 +8708,20 @@ impl<'a> Vm<'a> {
                     let _pin_creation = LegacyPathPinCreationGuard::enter();
                     self.evaluate_reference_or_value(arg, env, depth)?
                 };
+                for retained in &mut evaluated_args {
+                    retained.clear_object_reference_sweeps(sweep_cursor);
+                }
                 evaluated_args.push(match argument {
                     ReturnValue::Reference(reference) => CallArg::Reference(reference),
                     ReturnValue::Value(value) => CallArg::Value(value),
                 });
                 value_stack.grow(1)?;
             } else {
-                evaluated_args.push(CallArg::Value(self.evaluate_tracked(arg, env, depth)?));
+                let argument = self.evaluate_tracked(arg, env, depth)?;
+                for retained in &mut evaluated_args {
+                    retained.clear_object_reference_sweeps(sweep_cursor);
+                }
+                evaluated_args.push(CallArg::Value(argument));
                 value_stack.grow(1)?;
             }
         }
@@ -9244,10 +9520,17 @@ impl<'a> Vm<'a> {
         RuntimeError,
     > {
         if is_arrow {
-            let target = self.evaluate(object, env, depth + 1)?;
+            let mut target = self.evaluate(object, env, depth + 1)?;
+            let target_sweep_cursor = object_reference_sweep_cursor();
             let target_slot = ValueStackReservation::reserve(1)?;
             let evaluated_args = self.build_call_args(name, function, args, env, depth + 1)?;
             let parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if matches!(target, Value::Nil | Value::Object(0))
+                || !self.object_target_available(&target)
+            {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
             return Ok((target, evaluated_args, target_slot, parameter_slots));
         }
 
@@ -11277,6 +11560,7 @@ impl CompiledFunction {
                     #[cfg(test)]
                     record_call_arg_heap_spill(arguments.spilled());
                     let target = call_targets[*site];
+                    let sweep_cursor = object_reference_sweep_cursor();
                     let value = match target {
                         CompiledCallTarget::Host(target) => {
                             TrackedValue::runtime(vm.invoke_resolved_host_value(
@@ -11301,6 +11585,9 @@ impl CompiledFunction {
                             vm.compiled_named_value(name, env)?
                         }
                     };
+                    for retained in &mut stack {
+                        retained.clear_object_reference_sweeps(sweep_cursor);
+                    }
                     vm.register_runtime_value(&value.value);
                     stack.push(value);
                 }
@@ -11590,6 +11877,36 @@ impl Environment {
             origin_strict_level: self.strict_level,
             temporary_script: self.temporary_script,
         }
+    }
+
+    fn object_reference_cells(&self, vm: &Vm<'_>) -> Vec<ValueCell> {
+        let mut cells = Vec::new();
+        for binding in &self.call_args {
+            binding.collect_object_reference_cells(&mut cells);
+        }
+        for binding in self.frame_locals.function_vars.borrow().values() {
+            binding.collect_object_reference_cells(&mut cells);
+        }
+        for scope in &self.scopes {
+            for binding in scope.values() {
+                binding.collect_object_reference_cells(&mut cells);
+            }
+        }
+        for (_, binding) in &self.named_parameters {
+            binding.collect_object_reference_cells(&mut cells);
+        }
+        cells.extend(self.object_state.named_locals.borrow().values().cloned());
+        cells.extend(self.object_state.local_slots.borrow().values().cloned());
+        if let Some(globals) = vm.globals_named {
+            cells.extend(globals.borrow().values().cloned());
+        }
+        if let Some(globals) = vm.globals_numbered {
+            cells.extend(globals.borrow().values().cloned());
+        }
+        if let Some(globals) = vm.globals_consts {
+            cells.extend(globals.borrow().values().cloned());
+        }
+        cells
     }
 
     fn define_object_local(&mut self, name: &str, identity: RawIdentityCell) {

@@ -17,9 +17,9 @@ pub use crate::engine::{
     register_global_declarations, register_global_declarations_with_strings,
     register_loaded_c4_string, resolve_c4_string, save_current_c4_string_enumeration,
     DirectCallFunctionProbe, Engine, GlobalSlots, GlobalVariables, HostRegistrationSnapshot,
-    MethodRefArgsDispatch, MethodReferenceDispatch, ReferenceParameterProbe, Script,
-    ScriptFunctionResolution, ScriptFunctionScope, StaticConstLinkError, StringRegistrationLedger,
-    StringRegistrations, UnresolvedInherited,
+    MethodRefArgsDispatch, MethodReferenceDispatch, ObjectTargetAvailabilityProbe,
+    ReferenceParameterProbe, Script, ScriptFunctionResolution, ScriptFunctionScope,
+    StaticConstLinkError, StringRegistrationLedger, StringRegistrations, UnresolvedInherited,
 };
 pub use crate::error::{ParseError, RuntimeCallFrame, RuntimeError, ScriptError};
 pub use crate::value::{
@@ -31,9 +31,10 @@ pub use crate::value::{
 pub use crate::vm::{
     active_direct_exec_diagnostic_frames, caller_host_identity, caller_is_temporary_script,
     caller_origin_strictness, caller_strictness, caller_uses_engine_scope, caller_var_slots,
-    data_string, start_call_trace, start_script_profiler, stop_script_profiler, value_cell,
-    with_diagnostic_object_formatter, CallerVarSlots, HostCallArg, HostCallerStrictness,
-    LocalCells, ScriptHostIdentity, ScriptProfileEntry, ValueCell, ValueReference,
+    clear_active_object_references, data_string, start_call_trace, start_script_profiler,
+    stop_script_profiler, value_cell, with_diagnostic_object_formatter, CallerVarSlots,
+    HostCallArg, HostCallerStrictness, LocalCells, ObjectReferenceSweep, ScriptHostIdentity,
+    ScriptProfileEntry, ValueCell, ValueReference,
 };
 
 mod value;

@@ -916,6 +916,42 @@ impl ValueMap {
         }
         Arc::make_mut(&mut self.0).entries.shift_remove(key)
     }
+
+    /// Whether this map contains an object reference at any nesting depth.
+    #[doc(hidden)]
+    pub fn contains_object_reference(&self, object_id: u64) -> bool {
+        self.0.entries.iter().any(|(key, value)| {
+            key.contains_object_reference(object_id) || value.contains_object_reference(object_id)
+        })
+    }
+
+    fn clear_object_references_matching(&mut self, removed: &impl Fn(u64) -> bool) -> bool {
+        if !self.0.entries.iter().any(|(key, value)| {
+            key.contains_object_reference_matching(removed)
+                || value.contains_object_reference_matching(removed)
+        }) {
+            return false;
+        }
+
+        // This models the visible C4Value tree needed by AssignRemoval. Exact
+        // C4ValueHash bucket, alias, and recycled-slot behavior is tracked in
+        // clonk-org/clonk-rs#433.
+        let storage = Arc::make_mut(&mut self.0);
+        let entries = std::mem::take(&mut storage.entries);
+        let mut rebuilt = IndexMap::with_capacity(entries.len());
+
+        for (mut key, mut value) in entries {
+            let direct_key = matches!(&key, Value::Object(id) if removed(*id));
+            let direct_value = matches!(&value, Value::Object(id) if removed(*id));
+            key.clear_object_references_matching(removed);
+            value.clear_object_references_matching(removed);
+            if !(direct_key || direct_value) {
+                rebuilt.insert(key, value);
+            }
+        }
+        storage.entries = rebuilt;
+        true
+    }
 }
 
 impl<K> Extend<(K, Value)> for ValueMap
@@ -1127,6 +1163,78 @@ impl From<&str> for Value {
 }
 
 impl Value {
+    /// Whether this value contains an object reference at any nesting depth.
+    #[doc(hidden)]
+    pub fn contains_object_reference(&self, object_id: u64) -> bool {
+        self.contains_object_reference_matching(&|id| id == object_id)
+    }
+
+    fn contains_object_reference_matching(&self, removed: &impl Fn(u64) -> bool) -> bool {
+        match self {
+            Self::Object(id) => removed(*id),
+            Self::Array(values) => values
+                .iter()
+                .any(|value| value.contains_object_reference_matching(removed)),
+            Self::Proplist(entries) => entries.0.entries.iter().any(|(key, value)| {
+                key.contains_object_reference_matching(removed)
+                    || value.contains_object_reference_matching(removed)
+            }),
+            Self::Int(_)
+            | Self::Bool(_)
+            | Self::RawBool(_)
+            | Self::String(_)
+            | Self::C4Id(_)
+            | Self::Nil => false,
+        }
+    }
+
+    pub(crate) fn contains_any_object_reference(&self) -> bool {
+        match self {
+            Self::Object(id) => *id != 0,
+            Self::Array(values) => values.iter().any(Self::contains_any_object_reference),
+            Self::Proplist(entries) => entries.0.entries.iter().any(|(key, value)| {
+                key.contains_any_object_reference() || value.contains_any_object_reference()
+            }),
+            Self::Int(_)
+            | Self::Bool(_)
+            | Self::RawBool(_)
+            | Self::String(_)
+            | Self::C4Id(_)
+            | Self::Nil => false,
+        }
+    }
+
+    /// Clear one object reference recursively, like AssignRemoval's C4Value
+    /// FirstRef sweep (C4Object.cpp:312).
+    #[doc(hidden)]
+    pub fn clear_object_reference(&mut self, object_id: u64) -> bool {
+        self.clear_object_references_matching(&|id| id == object_id)
+    }
+
+    fn clear_object_references_matching(&mut self, removed: &impl Fn(u64) -> bool) -> bool {
+        match self {
+            Self::Object(id) if removed(*id) => {
+                *self = Self::Nil;
+                true
+            }
+            Self::Array(values) => {
+                let mut changed = false;
+                for value in values {
+                    changed |= value.clear_object_references_matching(removed);
+                }
+                changed
+            }
+            Self::Proplist(entries) => entries.clear_object_references_matching(removed),
+            Self::Int(_)
+            | Self::Bool(_)
+            | Self::RawBool(_)
+            | Self::String(_)
+            | Self::C4Id(_)
+            | Self::Object(_)
+            | Self::Nil => false,
+        }
+    }
+
     /// Build a C4V_Bool from its raw `Data.Int` representation, retaining
     /// noncanonical payloads while keeping 0 and 1 on the existing Bool API.
     pub fn from_c4_bool_raw(raw: i32) -> Self {
