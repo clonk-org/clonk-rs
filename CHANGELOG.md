@@ -4,6 +4,35 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-08-14
+
+### Bug fixes
+
+- Correct the false port-only packet-ID rationale in capabilities.rs (#458)
+
+### Continuous integration
+
+- Run workspace quality checks on pull requests (#451)
+
+### Features
+
+- Encrypt the voice media lane under a per-route key exchange (#465)
+- Add echo, noise and gain processing to voice capture (#466)
+- Buffer and conceal remote voice playback (#460)
+- Give the voice mix headroom for multiple simultaneous speakers (#459)
+- Put voice activation on the Options Audio sheet (#456)
+- Expose voice chat settings on the Options Audio sheet (#454)
+- Add voice activation as an alternative to push-to-talk (#453)
+
+### Performance
+
+- Measure retained renderer stages (#455)
+
+### Testing
+
+- Record Gold Rush parity through frame 15000 (#450)
+- Gate headed GPU surface teardown (#449)
+
 ## [0.11.2] - 2026-08-14
 
 ### Bug fixes
