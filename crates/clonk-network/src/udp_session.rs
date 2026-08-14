@@ -3165,13 +3165,19 @@ mod tests {
             .promote(Arc::new(Mutex::new(crate::RecoverablePacketLog::default())))
             .await
             .unwrap();
-        let expected = crate::voice::VoiceRouteCookie::from_bytes(
-            [0x11; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+        let expected = crate::voice::VoiceMediaCipher::from_parts(
+            crate::voice::VoiceRouteCookie::from_bytes(
+                [0x11; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+            ),
+            [0x33; crate::voice::VOICE_MEDIA_KEY_BYTES],
         );
-        let forged = crate::voice::VoiceRouteCookie::from_bytes(
-            [0x22; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+        let forged = crate::voice::VoiceMediaCipher::from_parts(
+            crate::voice::VoiceRouteCookie::from_bytes(
+                [0x22; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+            ),
+            [0x44; crate::voice::VOICE_MEDIA_KEY_BYTES],
         );
-        incoming_route.set_voice_receive_cookie(expected);
+        incoming_route.set_voice_receive_cookie(expected.cookie());
         let frame = crate::voice::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap();
         let forged_packet = crate::voice::encode_authenticated_voice_packet(
             forged,

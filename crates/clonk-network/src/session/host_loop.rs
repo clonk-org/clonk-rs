@@ -87,7 +87,7 @@ async fn next_host_voice_media(
 
 fn host_voice_routes(
     state: &HostState,
-) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceRouteCookie)> {
+) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceMediaCipher)> {
     if !state.config.voice_enabled {
         return Vec::new();
     }
@@ -99,12 +99,12 @@ fn host_voice_routes(
             if !route.voice_auth.is_negotiated() {
                 return None;
             }
-            let cookie = route.voice_auth.send_cookie()?;
+            let cipher = route.voice_auth.send_cipher()?;
             (route.protocol == crate::NetworkProtocol::Udp && selected.insert(route.client_id))
                 .then_some((
                     route.client_id,
                     crate::canonical_reliable_udp_peer_address(route.peer_addr),
-                    cookie,
+                    cipher,
                 ))
         })
         .collect()
@@ -113,7 +113,7 @@ fn host_voice_routes(
 fn host_voice_ingress(
     state: &HostState,
     source: SocketAddr,
-) -> Option<(ClientId, crate::voice::VoiceRouteCookie)> {
+) -> Option<(ClientId, crate::voice::VoiceMediaCipher)> {
     if !state.config.voice_enabled {
         return None;
     }
@@ -127,8 +127,8 @@ fn host_voice_ingress(
             .then(|| {
                 route
                     .voice_auth
-                    .receive_cookie()
-                    .map(|cookie| (route.client_id, cookie))
+                    .receive_cipher()
+                    .map(|cipher| (route.client_id, cipher))
             })
             .flatten()
     })
@@ -143,9 +143,9 @@ fn send_host_voice_frame(
         return;
     };
     let frame = frame.with_authenticated_source(HOST_CLIENT_ID);
-    for (_, peer, cookie) in host_voice_routes(state) {
+    for (_, peer, cipher) in host_voice_routes(state) {
         if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
-            cookie,
+            cipher,
             &crate::voice::VoicePacket::Relayed(frame.clone()),
         ) {
             let _ = udp_handle.try_send_voice_media(peer, wire);
@@ -160,12 +160,12 @@ fn handle_host_voice_media(
     state: &HostState,
     limiter: &mut crate::voice::VoiceIngressLimiter,
 ) {
-    let Some((source_client_id, receive_cookie)) = host_voice_ingress(state, media.peer) else {
+    let Some((source_client_id, receive_cipher)) = host_voice_ingress(state, media.peer) else {
         return;
     };
     let Some(packet) = crate::voice::admit_voice_ingress(
         &media.payload,
-        receive_cookie,
+        receive_cipher,
         source_client_id,
         limiter,
         Instant::now(),
@@ -181,10 +181,10 @@ fn handle_host_voice_media(
     let Some(udp_handle) = udp_handle else {
         return;
     };
-    for (client_id, peer, cookie) in host_voice_routes(state) {
+    for (client_id, peer, cipher) in host_voice_routes(state) {
         if crate::voice::host_relay_selects(client_id, source_client_id, &direct_recipients) {
             if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
-                cookie,
+                cipher,
                 &crate::voice::VoicePacket::Relayed(frame.clone()),
             ) {
                 let _ = udp_handle.try_send_voice_media(peer, wire);

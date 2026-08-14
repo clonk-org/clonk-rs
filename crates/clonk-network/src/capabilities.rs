@@ -49,6 +49,7 @@ pub const PORT_CAPABILITY_VERSION: u16 = 1;
 pub struct PortCapabilities {
     bits: u32,
     voice_cookie: Option<crate::voice::VoiceRouteCookie>,
+    voice_public_key: Option<[u8; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES]>,
 }
 
 impl PortCapabilities {
@@ -75,6 +76,7 @@ impl PortCapabilities {
         Self {
             bits,
             voice_cookie: None,
+            voice_public_key: None,
         }
     }
 
@@ -102,7 +104,26 @@ impl PortCapabilities {
     pub(crate) fn voice_cookie(self) -> Option<crate::voice::VoiceRouteCookie> {
         self.voice_cookie
     }
+
+    pub(crate) fn with_voice_public_key(
+        mut self,
+        voice_public_key: [u8; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES],
+    ) -> Self {
+        self.voice_public_key = Some(voice_public_key);
+        self
+    }
+
+    pub(crate) fn voice_public_key(
+        self,
+    ) -> Option<[u8; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES]> {
+        self.voice_public_key
+    }
 }
+
+/// Where the media lane's per-route key exchange rides. It follows the cookie
+/// so the version-and-bit prefix every earlier build parses stays byte-exact.
+const VOICE_COOKIE_OFFSET: usize = 7;
+const VOICE_PUBLIC_KEY_OFFSET: usize = VOICE_COOKIE_OFFSET + crate::voice::VOICE_ROUTE_COOKIE_BYTES;
 
 /// Encodes the announcement. Body is the vocabulary version then the bitset,
 /// both little-endian, so an older peer can read the version and stop.
@@ -113,6 +134,14 @@ pub fn encode_port_capabilities(capabilities: PortCapabilities) -> Vec<u8> {
     if let Some(cookie) = capabilities.voice_cookie() {
         wire.extend_from_slice(&cookie.into_bytes());
     }
+    // Only ever alongside the cookie: the media lane needs both halves, and a
+    // key without the cookie that labels its direction cannot derive anything.
+    if let Some((_, public_key)) = capabilities
+        .voice_cookie()
+        .zip(capabilities.voice_public_key())
+    {
+        wire.extend_from_slice(&public_key);
+    }
     wire
 }
 
@@ -121,15 +150,25 @@ pub fn encode_port_capabilities(capabilities: PortCapabilities) -> Vec<u8> {
 /// A future vocabulary version is read for its bits anyway: unknown bits are
 /// capabilities this build does not have, and `agreed_with` masks them off.
 pub fn decode_port_capabilities(wire: &[u8]) -> Option<PortCapabilities> {
-    if wire.first().copied()? != PID_PORT_CAPABILITIES || wire.len() < 7 {
+    if wire.first().copied()? != PID_PORT_CAPABILITIES || wire.len() < VOICE_COOKIE_OFFSET {
         return None;
     }
-    let bits = u32::from_le_bytes(wire.get(3..7)?.try_into().ok()?);
+    let bits = u32::from_le_bytes(wire.get(3..VOICE_COOKIE_OFFSET)?.try_into().ok()?);
     let voice_cookie = wire
-        .get(7..7 + crate::voice::VOICE_ROUTE_COOKIE_BYTES)
+        .get(VOICE_COOKIE_OFFSET..VOICE_PUBLIC_KEY_OFFSET)
         .and_then(|bytes| bytes.try_into().ok())
         .map(crate::voice::VoiceRouteCookie::from_bytes);
-    Some(PortCapabilities { bits, voice_cookie })
+    let voice_public_key = wire
+        .get(
+            VOICE_PUBLIC_KEY_OFFSET
+                ..VOICE_PUBLIC_KEY_OFFSET + crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES,
+        )
+        .and_then(|bytes| bytes.try_into().ok());
+    Some(PortCapabilities {
+        bits,
+        voice_cookie,
+        voice_public_key,
+    })
 }
 
 /// What each connected peer announced.
@@ -325,5 +364,59 @@ mod tests {
             7 + crate::voice::VOICE_ROUTE_COOKIE_BYTES,
             "the legacy version-and-bit prefix stays byte-compatible"
         );
+    }
+
+    #[test]
+    fn capability_announcement_carries_the_media_lane_key_exchange() {
+        let cookie = crate::voice::VoiceRouteCookie::from_bytes(
+            [0x6d; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+        );
+        let public_key = [0x2f; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES];
+        let announcement = PortCapabilities::supported()
+            .with_voice_cookie(cookie)
+            .with_voice_public_key(public_key);
+        let wire = encode_port_capabilities(announcement);
+
+        assert_eq!(decode_port_capabilities(&wire), Some(announcement));
+        assert_eq!(
+            wire.len(),
+            7 + crate::voice::VOICE_ROUTE_COOKIE_BYTES
+                + crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES,
+            "the exchange follows the cookie, leaving every earlier field in place"
+        );
+        assert_eq!(
+            &wire[..7 + crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+            &encode_port_capabilities(PortCapabilities::supported().with_voice_cookie(cookie))[..],
+            "a build that stops after the cookie reads the same bytes it always did"
+        );
+    }
+
+    #[test]
+    fn a_key_exchange_without_its_cookie_is_not_announced() {
+        // The media key schedule labels each direction by the receiving side's
+        // cookie, so a key with no cookie beside it can derive nothing and
+        // would only invite a peer to try.
+        let announcement = PortCapabilities::supported()
+            .with_voice_public_key([0x2f; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES]);
+
+        assert_eq!(encode_port_capabilities(announcement).len(), 7);
+    }
+
+    #[test]
+    fn the_peer_registry_keeps_bits_and_never_route_key_material() {
+        // Registry entries are session-wide and outlive the route the cookie
+        // and exchange belong to; only the bitset is meaningful beyond it.
+        let announced = PortCapabilities::supported()
+            .with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(
+                [0x6d; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+            ))
+            .with_voice_public_key([0x2f; crate::voice::VOICE_KEY_AGREEMENT_PUBLIC_BYTES]);
+        let mut registry = PeerCapabilityRegistry::default();
+
+        registry.record(7, announced);
+
+        assert_eq!(registry.of(7), PortCapabilities::supported());
+        assert_eq!(registry.of(7).voice_cookie(), None);
+        assert_eq!(registry.of(7).voice_public_key(), None);
     }
 }

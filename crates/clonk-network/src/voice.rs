@@ -1,3 +1,5 @@
+use ring::rand::{SecureRandom as _, SystemRandom};
+use ring::{aead, agreement, hkdf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -12,9 +14,9 @@ use crate::ClientId;
 /// Duration represented by every encoded voice payload. Keeping this fixed
 /// avoids trusting a sender-controlled sample count during decoder allocation.
 pub const VOICE_FRAME_DURATION_MS: u16 = 20;
-/// V1's exact independently decodable IMA ADPCM payload size. A different
-/// codec or frame shape must use a new wire signature rather than making this
-/// version sender-sized.
+/// This wire version's exact independently decodable IMA ADPCM payload size. A
+/// different codec or frame shape must use a new wire signature rather than
+/// making this version sender-sized.
 pub const VOICE_PAYLOAD_BYTES: usize = 164;
 pub const MAX_VOICE_PAYLOAD_BYTES: usize = VOICE_PAYLOAD_BYTES;
 pub(crate) const MAX_VOICE_DIRECT_RECIPIENTS: usize = 32;
@@ -23,7 +25,28 @@ pub(crate) const VOICE_ROUTE_COOKIE_BYTES: usize = 16;
 /// A Rust-only datagram signature. It is recognized before the reliable-UDP
 /// packet header is inspected, so its following bytes can never advance the
 /// reliable receive window or enter PostMortem recovery.
-pub(crate) const VOICE_MEDIA_PREFIX: &[u8; 5] = b"\x7fC4V1";
+///
+/// V2 seals everything after the route cookie. The signature is bumped rather
+/// than reused because a V1 build reads the cookie out of a V2 announcement
+/// happily — it simply ignores the trailing agreement key — and would then
+/// parse ciphertext as a cleartext packet. Bumping makes that mismatch fail at
+/// the cheapest possible check instead of deep inside a length-driven parse.
+pub(crate) const VOICE_MEDIA_PREFIX: &[u8; 5] = b"\x7fC4V2";
+
+/// X25519 public value exchanged in the capability announcement.
+pub(crate) const VOICE_KEY_AGREEMENT_PUBLIC_BYTES: usize = 32;
+/// ChaCha20-Poly1305 key derived per route and per direction.
+pub(crate) const VOICE_MEDIA_KEY_BYTES: usize = 32;
+const VOICE_MEDIA_NONCE_BYTES: usize = aead::NONCE_LEN;
+const VOICE_MEDIA_TAG_BYTES: usize = 16;
+
+/// Domain separation for the media key schedule. The salt names the wire
+/// version so a future frame shape cannot derive the same key from the same
+/// exchange; the info string is qualified by the *receiving* route cookie,
+/// which is what makes the two directions independent (see
+/// [`derive_route_media_keys`]).
+const VOICE_MEDIA_KEY_SALT: &[u8] = b"clonk-rs voice media v2";
+const VOICE_MEDIA_KEY_INFO: &[u8] = b"media key";
 
 const VOICE_PACKET_DIRECT: u8 = 0;
 const VOICE_PACKET_RELAY_REQUEST: u8 = 1;
@@ -31,9 +54,11 @@ const VOICE_PACKET_RELAYED: u8 = 2;
 const VOICE_PACKET_FIXED_HEADER: usize = 18;
 pub(crate) const MAX_VOICE_WIRE_BYTES: usize = VOICE_MEDIA_PREFIX.len()
     + VOICE_ROUTE_COOKIE_BYTES
+    + VOICE_MEDIA_NONCE_BYTES
     + VOICE_PACKET_FIXED_HEADER
     + MAX_VOICE_DIRECT_RECIPIENTS * std::mem::size_of::<ClientId>()
-    + MAX_VOICE_PAYLOAD_BYTES;
+    + MAX_VOICE_PAYLOAD_BYTES
+    + VOICE_MEDIA_TAG_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoiceFrame {
@@ -48,15 +73,16 @@ pub struct VoiceFrame {
 }
 
 /// An unpredictable bearer cookie generated independently for each admitted
-/// reliable-UDP route. It authenticates best-effort media to that route but
-/// does not encrypt the media or protect an on-path observer.
+/// reliable-UDP route. It names the route a datagram belongs to and lets the
+/// transport drop a foreign one before any parsing; confidentiality is the
+/// separate job of the sealed body ([`VoiceMediaCipher`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VoiceRouteCookie([u8; VOICE_ROUTE_COOKIE_BYTES]);
 
 impl VoiceRouteCookie {
     pub(crate) fn generate() -> Option<Self> {
         let mut bytes = [0_u8; VOICE_ROUTE_COOKIE_BYTES];
-        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes).ok()?;
+        SystemRandom::new().fill(&mut bytes).ok()?;
         Some(Self(bytes))
     }
 
@@ -81,47 +107,239 @@ impl VoiceRouteCookie {
     }
 }
 
-/// Directional authentication state for one admitted transport route. The
-/// local receive cookie is sent through that route's reliable stream; the peer
-/// receive cookie is learned from the corresponding reliable announcement and
-/// is placed on outbound best-effort datagrams.
-#[derive(Clone, Copy, Debug, Default)]
+/// One direction of one route's media protection: the cookie that names the
+/// direction on the wire, and the key that seals everything behind it.
+#[derive(Clone, Copy)]
+pub(crate) struct VoiceMediaCipher {
+    cookie: VoiceRouteCookie,
+    key: [u8; VOICE_MEDIA_KEY_BYTES],
+}
+
+// Derived `Debug` would print the key into any log that formats a route.
+impl std::fmt::Debug for VoiceMediaCipher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VoiceMediaCipher")
+            .field("cookie", &self.cookie)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VoiceMediaCipher {
+    #[cfg(test)]
+    pub(crate) const fn from_parts(
+        cookie: VoiceRouteCookie,
+        key: [u8; VOICE_MEDIA_KEY_BYTES],
+    ) -> Self {
+        Self { cookie, key }
+    }
+
+    pub(crate) const fn cookie(self) -> VoiceRouteCookie {
+        self.cookie
+    }
+
+    fn sealing_key(&self) -> Result<aead::LessSafeKey, VoiceCodecError> {
+        aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &self.key)
+            .map(aead::LessSafeKey::new)
+            .map_err(|_| VoiceCodecError::MediaKeyUnusable)
+    }
+
+    /// Bytes bound to the ciphertext but sent in the clear. Covering the
+    /// signature and the cookie means a sealed body cannot be lifted onto a
+    /// different route or reinterpreted under a different wire version.
+    fn associated_data(&self) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES);
+        aad.extend_from_slice(VOICE_MEDIA_PREFIX);
+        aad.extend_from_slice(&self.cookie.into_bytes());
+        aad
+    }
+}
+
+/// One route's ephemeral X25519 contribution.
+///
+/// The two halves are stored apart because they have different lifetimes: ring
+/// consumes the secret to agree, so it exists for exactly one derivation, while
+/// the public value keeps being announced. The host answers every announcement
+/// it receives with its own, and that reply lands after agreement has already
+/// consumed the secret.
+fn generate_voice_key_agreement() -> Option<(
+    agreement::EphemeralPrivateKey,
+    [u8; VOICE_KEY_AGREEMENT_PUBLIC_BYTES],
+)> {
+    let secret =
+        agreement::EphemeralPrivateKey::generate(&agreement::X25519, &SystemRandom::new()).ok()?;
+    let public = secret.compute_public_key().ok()?.as_ref().try_into().ok()?;
+    Some((secret, public))
+}
+
+/// Turns one completed exchange into the route's two independent directional
+/// keys.
+///
+/// Both ends run this with mirrored arguments and must land on the same pair,
+/// so the direction cannot be labelled by "host" or "client" — a mesh route
+/// has neither. It is labelled by the *receiving* side's cookie instead: the
+/// key I open with is qualified by my own cookie, the key I seal with by my
+/// peer's, and my peer's mirrored call assigns the same two keys the opposite
+/// way round.
+fn derive_route_media_keys(
+    local_secret: agreement::EphemeralPrivateKey,
+    local_public: [u8; VOICE_KEY_AGREEMENT_PUBLIC_BYTES],
+    local_cookie: VoiceRouteCookie,
+    peer_cookie: VoiceRouteCookie,
+    peer_public: [u8; VOICE_KEY_AGREEMENT_PUBLIC_BYTES],
+) -> Option<(VoiceMediaCipher, VoiceMediaCipher)> {
+    // An announcement echoed back verbatim would agree with itself, collapse
+    // both directions onto one key, and let the echoer replay our own audio at
+    // us. Neither half of our own announcement may come back as the peer's.
+    if peer_public == local_public || peer_cookie == local_cookie {
+        return None;
+    }
+    let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public);
+    agreement::agree_ephemeral(local_secret, &peer_public_key, |shared_secret| {
+        let secret =
+            hkdf::Salt::new(hkdf::HKDF_SHA256, VOICE_MEDIA_KEY_SALT).extract(shared_secret);
+        expand_media_key(&secret, local_cookie)
+            .zip(expand_media_key(&secret, peer_cookie))
+            .map(|(receive, send)| {
+                (
+                    VoiceMediaCipher {
+                        cookie: local_cookie,
+                        key: receive,
+                    },
+                    VoiceMediaCipher {
+                        cookie: peer_cookie,
+                        key: send,
+                    },
+                )
+            })
+    })
+    .ok()
+    .flatten()
+}
+
+fn expand_media_key(
+    secret: &hkdf::Prk,
+    receiver_cookie: VoiceRouteCookie,
+) -> Option<[u8; VOICE_MEDIA_KEY_BYTES]> {
+    let receiver_cookie = receiver_cookie.into_bytes();
+    let mut key = [0_u8; VOICE_MEDIA_KEY_BYTES];
+    secret
+        .expand(&[VOICE_MEDIA_KEY_INFO, &receiver_cookie], hkdf::HKDF_SHA256)
+        .ok()?
+        .fill(&mut key)
+        .ok()?;
+    Some(key)
+}
+
+/// Directional media protection for one admitted transport route.
+///
+/// The route announces a locally generated cookie and an ephemeral X25519
+/// public value on its own reliable control stream, and learns the peer's from
+/// the matching announcement. Agreement is what buys confidentiality: the
+/// control stream is cleartext, so a key *sent* over it would be readable by
+/// the same observer the media is being hidden from, while neither side's
+/// ephemeral secret ever leaves the process.
+///
+/// That bounds the guarantee honestly. A passive observer cannot recover
+/// audio. An attacker who can *rewrite* the reliable control stream can
+/// substitute its own announcement, which the whole cleartext LegacyClonk
+/// control protocol already concedes — there is no peer identity here to bind
+/// an exchange to, and inventing one would not survive a C++ peer.
+#[derive(Default)]
 pub(crate) struct VoiceRouteAuthentication {
     local_receive_cookie: Option<VoiceRouteCookie>,
-    peer_receive_cookie: Option<VoiceRouteCookie>,
+    local_public_key: Option<[u8; VOICE_KEY_AGREEMENT_PUBLIC_BYTES]>,
+    local_secret: Option<agreement::EphemeralPrivateKey>,
+    receive: Option<VoiceMediaCipher>,
+    send: Option<VoiceMediaCipher>,
+}
+
+// `EphemeralPrivateKey` is not `Debug`, and the derived form on the rest would
+// print a route's bearer cookie into any log that formats session state.
+impl std::fmt::Debug for VoiceRouteAuthentication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VoiceRouteAuthentication")
+            .field("negotiated", &self.is_negotiated())
+            .finish_non_exhaustive()
+    }
 }
 
 impl VoiceRouteAuthentication {
     pub(crate) fn new_udp() -> Self {
-        Self {
-            local_receive_cookie: VoiceRouteCookie::generate(),
-            peer_receive_cookie: None,
-        }
+        VoiceRouteCookie::generate()
+            .zip(generate_voice_key_agreement())
+            .map(
+                |(local_receive_cookie, (local_secret, local_public_key))| Self {
+                    local_receive_cookie: Some(local_receive_cookie),
+                    local_public_key: Some(local_public_key),
+                    local_secret: Some(local_secret),
+                    receive: None,
+                    send: None,
+                },
+            )
+            .unwrap_or_default()
     }
 
     pub(crate) fn announcement(&self) -> Option<crate::PortCapabilities> {
         self.local_receive_cookie
-            .map(|cookie| crate::PortCapabilities::supported().with_voice_cookie(cookie))
+            .zip(self.local_public_key)
+            .map(|(cookie, public)| {
+                crate::PortCapabilities::supported()
+                    .with_voice_cookie(cookie)
+                    .with_voice_public_key(public)
+            })
     }
 
     pub(crate) fn record_peer_capabilities(&mut self, capabilities: crate::PortCapabilities) {
-        if self.peer_receive_cookie.is_none()
-            && capabilities.has(crate::PortCapabilities::VOICE_CHAT)
-        {
-            self.peer_receive_cookie = capabilities.voice_cookie();
+        if self.is_negotiated() || !capabilities.has(crate::PortCapabilities::VOICE_CHAT) {
+            return;
+        }
+        // A peer that announces voice without an agreement key is an older
+        // port build. There is no cleartext fallback to drop to: leaving the
+        // route unnegotiated is the whole point.
+        let Some((((local_cookie, local_public), peer_cookie), peer_public)) = self
+            .local_receive_cookie
+            .zip(self.local_public_key)
+            .zip(capabilities.voice_cookie())
+            .zip(capabilities.voice_public_key())
+        else {
+            return;
+        };
+        // Taken only once the announcement is complete: agreement consumes the
+        // secret, so a truncated one must not strand the route. Consuming it on
+        // a *failed* agreement is deliberate — the route then stays closed.
+        let derived = self.local_secret.take().and_then(|local_secret| {
+            derive_route_media_keys(
+                local_secret,
+                local_public,
+                local_cookie,
+                peer_cookie,
+                peer_public,
+            )
+        });
+        if let Some((receive, send)) = derived {
+            self.receive = Some(receive);
+            self.send = Some(send);
         }
     }
 
+    /// The cookie the transport matches inbound datagrams against before any
+    /// parsing. Cleartext by necessity — it is the pre-parse drop check.
     pub(crate) fn receive_cookie(&self) -> Option<VoiceRouteCookie> {
         self.local_receive_cookie
     }
 
-    pub(crate) fn send_cookie(&self) -> Option<VoiceRouteCookie> {
-        self.peer_receive_cookie
+    pub(crate) fn receive_cipher(&self) -> Option<VoiceMediaCipher> {
+        self.receive
+    }
+
+    pub(crate) fn send_cipher(&self) -> Option<VoiceMediaCipher> {
+        self.send
     }
 
     pub(crate) const fn is_negotiated(&self) -> bool {
-        self.local_receive_cookie.is_some() && self.peer_receive_cookie.is_some()
+        self.receive.is_some() && self.send.is_some()
     }
 }
 
@@ -253,6 +471,10 @@ pub enum VoiceCodecError {
     MissingSignature,
     #[error("voice media route cookie is missing or invalid")]
     InvalidRouteCookie,
+    #[error("voice media key could not be used")]
+    MediaKeyUnusable,
+    #[error("voice media packet did not authenticate under this route's key")]
+    MediaNotAuthentic,
     #[error("voice media packet is truncated")]
     Truncated,
     #[error("voice media packet kind {0} is unknown")]
@@ -322,15 +544,41 @@ pub(crate) fn encode_voice_packet(packet: &VoicePacket) -> Result<Vec<u8>, Voice
     Ok(wire)
 }
 
+/// Seals one packet for one route direction.
+///
+/// The nonce is drawn fresh per datagram rather than derived from the frame
+/// header, because the header is not unique under a single key: `sequence` is
+/// a `u16` that wraps after about 22 minutes of continuous speech without
+/// advancing `stream_epoch`, and a host relays many sources' frames under one
+/// key, so two speakers routinely share a header. A random 96-bit nonce keeps
+/// the lane stateless — nothing to resynchronize, so nothing that would make a
+/// dropped or reordered datagram anyone's problem.
 pub(crate) fn encode_authenticated_voice_packet(
-    cookie: VoiceRouteCookie,
+    cipher: VoiceMediaCipher,
     packet: &VoicePacket,
 ) -> Result<Vec<u8>, VoiceCodecError> {
     let packet = encode_voice_packet(packet)?;
-    let mut wire = Vec::with_capacity(packet.len() + VOICE_ROUTE_COOKIE_BYTES);
+    let mut nonce = [0_u8; VOICE_MEDIA_NONCE_BYTES];
+    SystemRandom::new()
+        .fill(&mut nonce)
+        .map_err(|_| VoiceCodecError::MediaKeyUnusable)?;
+    let mut sealed = packet[VOICE_MEDIA_PREFIX.len()..].to_vec();
+    cipher
+        .sealing_key()?
+        .seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key(nonce),
+            aead::Aad::from(cipher.associated_data()),
+            &mut sealed,
+        )
+        .map_err(|_| VoiceCodecError::MediaKeyUnusable)?;
+
+    let mut wire = Vec::with_capacity(
+        VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES + nonce.len() + sealed.len(),
+    );
     wire.extend_from_slice(VOICE_MEDIA_PREFIX);
-    wire.extend_from_slice(&cookie.into_bytes());
-    wire.extend_from_slice(&packet[VOICE_MEDIA_PREFIX.len()..]);
+    wire.extend_from_slice(&cipher.cookie.into_bytes());
+    wire.extend_from_slice(&nonce);
+    wire.extend_from_slice(&sealed);
     Ok(wire)
 }
 
@@ -342,7 +590,7 @@ pub(crate) fn voice_datagram_has_cookie(wire: &[u8], expected: VoiceRouteCookie)
 
 pub(crate) fn decode_authenticated_voice_packet(
     wire: &[u8],
-    expected: VoiceRouteCookie,
+    cipher: VoiceMediaCipher,
 ) -> Result<VoicePacket, VoiceCodecError> {
     let body = wire
         .strip_prefix(VOICE_MEDIA_PREFIX)
@@ -350,28 +598,46 @@ pub(crate) fn decode_authenticated_voice_packet(
     let cookie = body
         .get(..VOICE_ROUTE_COOKIE_BYTES)
         .ok_or(VoiceCodecError::InvalidRouteCookie)?;
-    if !expected.matches(cookie) {
+    if !cipher.cookie.matches(cookie) {
         return Err(VoiceCodecError::InvalidRouteCookie);
     }
-    let mut packet = Vec::with_capacity(wire.len() - VOICE_ROUTE_COOKIE_BYTES);
+    let nonce: [u8; VOICE_MEDIA_NONCE_BYTES] = body
+        .get(VOICE_ROUTE_COOKIE_BYTES..VOICE_ROUTE_COOKIE_BYTES + VOICE_MEDIA_NONCE_BYTES)
+        .and_then(|nonce| nonce.try_into().ok())
+        .ok_or(VoiceCodecError::Truncated)?;
+    let mut sealed = body
+        .get(VOICE_ROUTE_COOKIE_BYTES + VOICE_MEDIA_NONCE_BYTES..)
+        .filter(|sealed| sealed.len() > VOICE_MEDIA_TAG_BYTES)
+        .ok_or(VoiceCodecError::Truncated)?
+        .to_vec();
+    let opened = cipher
+        .sealing_key()?
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(nonce),
+            aead::Aad::from(cipher.associated_data()),
+            &mut sealed,
+        )
+        .map_err(|_| VoiceCodecError::MediaNotAuthentic)?;
+
+    let mut packet = Vec::with_capacity(VOICE_MEDIA_PREFIX.len() + opened.len());
     packet.extend_from_slice(VOICE_MEDIA_PREFIX);
-    packet.extend_from_slice(&body[VOICE_ROUTE_COOKIE_BYTES..]);
+    packet.extend_from_slice(opened);
     decode_voice_packet(&packet)
 }
 
 pub(crate) fn admit_voice_ingress(
     wire: &[u8],
-    expected_cookie: VoiceRouteCookie,
+    cipher: VoiceMediaCipher,
     authenticated_source: ClientId,
     limiter: &mut VoiceIngressLimiter,
     now: Instant,
 ) -> Option<VoicePacket> {
-    if !voice_datagram_has_cookie(wire, expected_cookie)
+    if !voice_datagram_has_cookie(wire, cipher.cookie())
         || !limiter.allow(authenticated_source, now)
     {
         return None;
     }
-    decode_authenticated_voice_packet(wire, expected_cookie).ok()
+    decode_authenticated_voice_packet(wire, cipher).ok()
 }
 
 pub(crate) fn decode_voice_packet(wire: &[u8]) -> Result<VoicePacket, VoiceCodecError> {
@@ -525,15 +791,127 @@ mod tests {
     }
 
     #[test]
+    fn sealed_media_round_trips_and_leaves_no_plaintext_on_the_wire() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let payload = vec![0x5a; VOICE_PAYLOAD_BYTES];
+        let packet = VoicePacket::Direct(VoiceFrame::outbound(7, 11, 29, payload.clone()).unwrap());
+
+        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+
+        assert!(
+            !wire.windows(payload.len()).any(|window| window == payload),
+            "an on-path observer must not read the encoded audio off the wire"
+        );
+        assert_eq!(decode_authenticated_voice_packet(&wire, cipher), Ok(packet));
+    }
+
+    /// Drives both halves of one route's announcement exchange the way the
+    /// session loops do: each side announces on its own reliable stream, and
+    /// each records what the other announced.
+    fn negotiated_route_pair() -> (VoiceRouteAuthentication, VoiceRouteAuthentication) {
+        let mut local = VoiceRouteAuthentication::new_udp();
+        let mut peer = VoiceRouteAuthentication::new_udp();
+        let (local_announcement, peer_announcement) = (
+            local.announcement().expect("local route announces"),
+            peer.announcement().expect("peer route announces"),
+        );
+
+        local.record_peer_capabilities(peer_announcement);
+        peer.record_peer_capabilities(local_announcement);
+        (local, peer)
+    }
+
+    #[test]
+    fn the_largest_sealed_packet_still_fits_the_transport_datagram_cap() {
+        // The transport drops anything over this cap before parsing it, so a
+        // cap that forgot the nonce or the tag would silently discard exactly
+        // the fullest relay requests rather than fail loudly.
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let largest = VoicePacket::RelayRequest {
+            frame: VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+            direct_recipients: (0..MAX_VOICE_DIRECT_RECIPIENTS as ClientId).collect(),
+        };
+
+        let wire = encode_authenticated_voice_packet(cipher, &largest).unwrap();
+
+        assert_eq!(wire.len(), MAX_VOICE_WIRE_BYTES);
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, cipher),
+            Ok(largest)
+        );
+    }
+
+    #[test]
+    fn a_tampered_sealed_packet_never_reaches_the_decoder() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let packet = VoicePacket::Direct(VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap());
+        let wire = encode_authenticated_voice_packet(cipher, &packet).unwrap();
+
+        // Every byte the cookie does not already cover is under the tag.
+        for index in VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES..wire.len() {
+            let mut tampered = wire.clone();
+            tampered[index] ^= 0x01;
+            assert_eq!(
+                decode_authenticated_voice_packet(&tampered, cipher),
+                Err(VoiceCodecError::MediaNotAuthentic),
+                "byte {index} is not covered by the seal"
+            );
+        }
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire[..wire.len() - 1], cipher),
+            Err(VoiceCodecError::MediaNotAuthentic),
+            "a truncated seal must not open"
+        );
+    }
+
+    #[test]
+    fn two_seals_of_one_packet_never_repeat_a_nonce() {
+        // A repeated nonce under one key is what breaks ChaCha20-Poly1305, and
+        // the frame header cannot supply a unique one: `sequence` is a `u16`
+        // that wraps, and a host seals many speakers' frames under one key.
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let packet = VoicePacket::Direct(VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap());
+        let nonce_range = VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES
+            ..VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES + VOICE_MEDIA_NONCE_BYTES;
+
+        let nonces = (0..32)
+            .map(|_| {
+                encode_authenticated_voice_packet(cipher, &packet).unwrap()[nonce_range.clone()]
+                    .to_vec()
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            nonces.len(),
+            32,
+            "the same frame must never seal identically"
+        );
+    }
+
+    #[test]
     fn voice_wire_rejects_a_cookie_from_another_admitted_route() {
-        let expected = VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]);
-        let other_route = VoiceRouteCookie::from_bytes([0x22; VOICE_ROUTE_COOKIE_BYTES]);
+        let (local, _) = negotiated_route_pair();
+        let (other_route, _) = negotiated_route_pair();
+        let expected = local.receive_cipher().unwrap();
+        let other_route = other_route.receive_cipher().unwrap();
         let frame = VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap();
         let wire =
             encode_authenticated_voice_packet(other_route, &VoicePacket::Direct(frame.clone()))
                 .unwrap();
 
-        assert!(!voice_datagram_has_cookie(&wire, expected));
+        assert!(!voice_datagram_has_cookie(&wire, expected.cookie()));
         assert_eq!(
             decode_authenticated_voice_packet(&wire, expected),
             Err(VoiceCodecError::InvalidRouteCookie)
@@ -545,39 +923,84 @@ mod tests {
     }
 
     #[test]
-    fn route_media_authentication_requires_both_directional_cookies() {
-        let local = VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]);
-        let peer = VoiceRouteCookie::from_bytes([0x22; VOICE_ROUTE_COOKIE_BYTES]);
-        let mut authentication = VoiceRouteAuthentication {
-            local_receive_cookie: Some(local),
-            peer_receive_cookie: None,
-        };
+    fn route_media_keys_agree_across_the_link_and_differ_per_direction() {
+        let (local, peer) = negotiated_route_pair();
 
-        assert!(!authentication.is_negotiated());
-        authentication
-            .record_peer_capabilities(crate::PortCapabilities::supported().with_voice_cookie(peer));
-        assert!(authentication.is_negotiated());
+        assert!(local.is_negotiated() && peer.is_negotiated());
+        let frame = VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap();
+        let packet = VoicePacket::Direct(frame);
+        // What one side seals to send, the other opens on receive.
+        let outbound =
+            encode_authenticated_voice_packet(local.send_cipher().unwrap(), &packet).unwrap();
+        assert_eq!(
+            decode_authenticated_voice_packet(&outbound, peer.receive_cipher().unwrap()),
+            Ok(packet.clone())
+        );
+        // The reverse direction is a different key, so our own sealed frame
+        // fed back to us is not ours to open.
+        assert_eq!(
+            decode_authenticated_voice_packet(&outbound, local.receive_cipher().unwrap()),
+            Err(VoiceCodecError::InvalidRouteCookie)
+        );
+        let reflected = encode_authenticated_voice_packet(
+            VoiceMediaCipher::from_parts(
+                local.receive_cipher().unwrap().cookie(),
+                peer.receive_cipher().unwrap().key,
+            ),
+            &packet,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_authenticated_voice_packet(&reflected, local.receive_cipher().unwrap()),
+            Err(VoiceCodecError::MediaNotAuthentic),
+            "relabelling a send-direction frame with the receive cookie must not open it"
+        );
     }
 
     #[test]
-    fn route_voice_negotiation_requires_capability_and_cookie_on_the_same_link() {
-        let local = VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]);
-        let peer = VoiceRouteCookie::from_bytes([0x22; VOICE_ROUTE_COOKIE_BYTES]);
-        let mut authentication = VoiceRouteAuthentication {
-            local_receive_cookie: Some(local),
-            peer_receive_cookie: None,
-        };
+    fn route_voice_negotiation_requires_capability_cookie_and_agreement_key_together() {
+        let mut authentication = VoiceRouteAuthentication::new_udp();
+        let peer = VoiceRouteAuthentication::new_udp();
+        let announcement = peer.announcement().unwrap();
+        let (peer_cookie, peer_public) = (
+            announcement.voice_cookie().unwrap(),
+            announcement.voice_public_key().unwrap(),
+        );
 
         authentication.record_peer_capabilities(crate::PortCapabilities::from_bits(
             crate::PortCapabilities::VOICE_CHAT,
         ));
         assert!(!authentication.is_negotiated());
-        authentication
-            .record_peer_capabilities(crate::PortCapabilities::default().with_voice_cookie(peer));
+        authentication.record_peer_capabilities(
+            crate::PortCapabilities::default()
+                .with_voice_cookie(peer_cookie)
+                .with_voice_public_key(peer_public),
+        );
         assert!(!authentication.is_negotiated());
-        authentication
-            .record_peer_capabilities(crate::PortCapabilities::supported().with_voice_cookie(peer));
+        // A peer that announces voice and a cookie but no agreement key is an
+        // older port build. There is no cleartext fallback to drop back to.
+        authentication.record_peer_capabilities(
+            crate::PortCapabilities::supported().with_voice_cookie(peer_cookie),
+        );
+        assert!(
+            !authentication.is_negotiated(),
+            "a peer that cannot agree a key gets no media lane at all"
+        );
+        authentication.record_peer_capabilities(announcement);
         assert!(authentication.is_negotiated());
+    }
+
+    #[test]
+    fn an_echoed_announcement_cannot_reflect_our_own_audio_back_at_us() {
+        let mut authentication = VoiceRouteAuthentication::new_udp();
+        let echoed = authentication.announcement().unwrap();
+
+        authentication.record_peer_capabilities(echoed);
+
+        assert!(
+            !authentication.is_negotiated(),
+            "agreeing with our own announcement would collapse both directions onto one key"
+        );
     }
 
     #[test]
@@ -652,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn version_one_accepts_only_the_fixed_codec_payload_size() {
+    fn the_wire_version_accepts_only_the_fixed_codec_payload_size() {
         assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 163]).is_err());
         assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 164]).is_ok());
         assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 165]).is_err());
@@ -681,8 +1104,10 @@ mod tests {
     #[test]
     fn ingress_admission_checks_route_cookie_before_consuming_source_budget() {
         let start = Instant::now();
-        let expected = VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]);
-        let forged = VoiceRouteCookie::from_bytes([0x22; VOICE_ROUTE_COOKIE_BYTES]);
+        let (local, _) = negotiated_route_pair();
+        let (other_route, _) = negotiated_route_pair();
+        let expected = local.receive_cipher().unwrap();
+        let forged = other_route.receive_cipher().unwrap();
         let packet = VoicePacket::Direct(
             VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
         );
