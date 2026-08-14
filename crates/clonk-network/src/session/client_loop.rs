@@ -530,7 +530,34 @@ fn send_client_voice_frame(
         return;
     };
     let frame = frame.with_authenticated_source(local_client_id);
-    let routes = transport.authenticated_voice_send_routes();
+    send_client_voice_frame_to_routes(
+        frame,
+        transport.authenticated_voice_send_routes(),
+        udp_handle,
+    );
+}
+
+fn send_client_voice_frame_to_routes(
+    frame: crate::VoiceFrame,
+    routes: Vec<(ClientId, SocketAddr, crate::voice::VoiceMediaCipher)>,
+    udp_handle: &crate::ReliableUdpSessionHandle,
+) {
+    let host_route = routes
+        .iter()
+        .copied()
+        .find(|(peer_id, _, _)| *peer_id == HOST_CLIENT_ID);
+    // Direct fanout and the host relay share one bounded hub queue. Hold the
+    // relay's slot before filling the rest: without it, a burst of direct
+    // routes can silence the host and every peer that needs its fallback.
+    let relay_permit = match host_route {
+        Some(_) => {
+            let Some(permit) = udp_handle.try_reserve_voice_media() else {
+                return;
+            };
+            Some(permit)
+        }
+        None => None,
+    };
     let mut direct_recipients = Vec::new();
     for (peer_id, peer, cipher) in routes
         .iter()
@@ -550,10 +577,7 @@ fn send_client_voice_frame(
             direct_recipients.push(peer_id);
         }
     }
-    let Some((_, host_peer, host_cipher)) = routes
-        .into_iter()
-        .find(|(peer_id, _, _)| *peer_id == HOST_CLIENT_ID)
-    else {
+    let Some(((_, host_peer, host_cipher), relay_permit)) = host_route.zip(relay_permit) else {
         return;
     };
     let relay = crate::voice::VoicePacket::RelayRequest {
@@ -561,7 +585,7 @@ fn send_client_voice_frame(
         direct_recipients,
     };
     if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cipher, &relay) {
-        let _ = udp_handle.try_send_voice_media(host_peer, wire);
+        relay_permit.send(host_peer, wire);
     }
 }
 
@@ -2733,6 +2757,63 @@ mod tests {
             !received.insert(7, 11),
             "retained duplicates stay suppressed"
         );
+    }
+
+    #[test]
+    fn client_voice_reserves_host_relay_when_direct_fanout_saturates_media_queue() {
+        let cipher = crate::voice::VoiceMediaCipher::from_parts(
+            crate::voice::VoiceRouteCookie::from_bytes(
+                [0x11; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
+            ),
+            [0x22; crate::voice::VOICE_MEDIA_KEY_BYTES],
+        );
+        let host_peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+        let mut routes = (1_u32..=10)
+            .map(|client_id| {
+                (
+                    client_id,
+                    SocketAddr::from(([127, 0, 0, 1], 40_000 + client_id as u16)),
+                    cipher,
+                )
+            })
+            .collect::<Vec<_>>();
+        routes.push((HOST_CLIENT_ID, host_peer, cipher));
+        let peer_ids = routes
+            .iter()
+            .map(|(client_id, peer, _)| (*peer, *client_id))
+            .collect::<BTreeMap<_, _>>();
+        let (udp_handle, mut queued) = crate::ReliableUdpSessionHandle::test_voice_queue();
+        let frame =
+            crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; crate::voice::VOICE_PAYLOAD_BYTES])
+                .unwrap()
+                .with_authenticated_source(77);
+
+        send_client_voice_frame_to_routes(frame, routes, &udp_handle);
+
+        let mut direct_recipients = Vec::new();
+        let mut relayed_recipients = None;
+        while let Ok(datagram) = queued.try_recv() {
+            match crate::voice::decode_authenticated_voice_packet(&datagram.payload, cipher)
+                .unwrap()
+            {
+                crate::voice::VoicePacket::Direct(_) => {
+                    direct_recipients.push(peer_ids[&datagram.peer]);
+                }
+                crate::voice::VoicePacket::RelayRequest {
+                    direct_recipients, ..
+                } if datagram.peer == host_peer => {
+                    relayed_recipients = Some(direct_recipients);
+                }
+                packet => panic!("unexpected queued voice packet: {packet:?}"),
+            }
+        }
+
+        assert!(!direct_recipients.is_empty());
+        assert!(
+            direct_recipients.len() < 10,
+            "the direct fanout must actually saturate the bounded queue",
+        );
+        assert_eq!(relayed_recipients, Some(direct_recipients));
     }
 
     struct RetireAfterFlushWriter {
