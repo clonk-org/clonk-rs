@@ -78,7 +78,7 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
             " # v7.0.1"
         )
 
-        self.assertEqual(workflow.count(checkout), 2)
+        self.assertEqual(workflow.count(checkout), 3)
         self.assertNotIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
         self.assertIn("tool: cargo-nextest@0.9.91", workflow)
 
