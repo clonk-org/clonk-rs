@@ -957,7 +957,7 @@ impl ClientRouteManager {
                 .routes
                 .get(&local_connection_id)
                 .expect("new client route exists");
-            if let Some(cookie) = voice_auth.receive_cookie() {
+            if let Some(cookie) = route.voice_auth.receive_cookie() {
                 route.outbound.set_voice_receive_cookie(cookie);
             }
             let _ = route.outbound.send(ClientRouteCommand::Message(
@@ -1192,7 +1192,7 @@ impl ClientRouteManager {
 
     pub(crate) fn authenticated_voice_send_routes(
         &self,
-    ) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceRouteCookie)> {
+    ) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceMediaCipher)> {
         if !self.voice_enabled {
             return Vec::new();
         }
@@ -1204,14 +1204,14 @@ impl ClientRouteManager {
                 if !route.voice_auth.is_negotiated() {
                     return None;
                 }
-                let cookie = route.voice_auth.send_cookie()?;
+                let cipher = route.voice_auth.send_cipher()?;
                 (route.protocol == crate::NetworkProtocol::Udp
                     && !route.outbound.is_closed()
                     && selected.insert(route.peer_id))
                 .then_some((
                     route.peer_id,
                     crate::canonical_reliable_udp_peer_address(peer_addr),
-                    cookie,
+                    cipher,
                 ))
             })
             .collect()
@@ -1220,7 +1220,7 @@ impl ClientRouteManager {
     pub(crate) fn authenticated_voice_ingress(
         &self,
         source: SocketAddr,
-    ) -> Option<(ClientId, crate::voice::VoiceRouteCookie)> {
+    ) -> Option<(ClientId, crate::voice::VoiceMediaCipher)> {
         if !self.voice_enabled {
             return None;
         }
@@ -1238,8 +1238,8 @@ impl ClientRouteManager {
                 .then(|| {
                     route
                         .voice_auth
-                        .receive_cookie()
-                        .map(|cookie| (route.peer_id, cookie))
+                        .receive_cipher()
+                        .map(|cipher| (route.peer_id, cipher))
                 })
                 .flatten()
         })

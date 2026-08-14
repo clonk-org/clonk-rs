@@ -96,8 +96,15 @@ another one, and none of them changes the fixed 20 ms frames voice travels in.
 Speech fades linearly over 700 landscape pixels. Terrain does not block it, so
 a wall or cave between two Clonks has no effect beyond their distance. Voice
 uses best-effort UDP between peers that positively negotiate support; older
-LegacyClonk clients remain compatible but silent. Voice packets are not
-encrypted, so do not use in-game voice for sensitive conversation.
+LegacyClonk clients remain compatible but silent.
+
+Voice packets are encrypted. Each connection agrees its own key over the game's
+reliable control stream, so somebody watching the network cannot listen in, and
+a peer that cannot agree a key gets no voice at all rather than an unencrypted
+fallback. That key exchange is not tied to any identity, so it does not defend
+against somebody who can actively rewrite your game traffic — the same
+limitation the rest of the network protocol has. Treat voice as private from
+onlookers, not as a secure channel.
 
 Tracker music needs the optional libxmp 4 runtime; install it through your
 platform package manager, or point `LC_LIBXMP_LIBRARY` at a compatible library.

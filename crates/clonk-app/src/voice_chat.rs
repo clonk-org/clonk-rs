@@ -35,8 +35,18 @@
 //! one source it may attenuate, because the sound and music paths owe
 //! SDL_mixer's arithmetic. Landscape
 //! openness and obstacles deliberately do not occlude speech
-//! (clonk-org/clonk-rs#418), and the media lane is not encrypted
-//! (clonk-org/clonk-rs#426).
+//! (clonk-org/clonk-rs#418).
+//!
+//! The media lane is encrypted (clonk-org/clonk-rs#426): each route agrees its
+//! own key over the reliable control stream and seals every frame under it, so
+//! a passive observer recovers nothing, and a peer that cannot agree a key gets
+//! no lane rather than a cleartext one. That exchange is bound to no identity,
+//! so it does not defend against an attacker who can rewrite the cleartext
+//! control stream — the limitation the rest of the protocol already carries.
+//! The seal keeps no replay window, deliberately, since that would put per-
+//! connection state on a lane whose droppability is the point; a repeated frame
+//! is instead refused here, by [`VoiceActivityTracker::note_frame`], which
+//! accepts only a stream epoch and sequence that advance.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

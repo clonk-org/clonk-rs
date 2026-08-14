@@ -532,7 +532,7 @@ fn send_client_voice_frame(
     let frame = frame.with_authenticated_source(local_client_id);
     let routes = transport.authenticated_voice_send_routes();
     let mut direct_recipients = Vec::new();
-    for (peer_id, peer, cookie) in routes
+    for (peer_id, peer, cipher) in routes
         .iter()
         .copied()
         .filter(|(peer_id, _, _)| *peer_id != HOST_CLIENT_ID)
@@ -541,7 +541,7 @@ fn send_client_voice_frame(
             break;
         }
         let Ok(wire) = crate::voice::encode_authenticated_voice_packet(
-            cookie,
+            cipher,
             &crate::voice::VoicePacket::Direct(frame.clone()),
         ) else {
             continue;
@@ -550,7 +550,7 @@ fn send_client_voice_frame(
             direct_recipients.push(peer_id);
         }
     }
-    let Some((_, host_peer, host_cookie)) = routes
+    let Some((_, host_peer, host_cipher)) = routes
         .into_iter()
         .find(|(peer_id, _, _)| *peer_id == HOST_CLIENT_ID)
     else {
@@ -560,7 +560,7 @@ fn send_client_voice_frame(
         frame,
         direct_recipients,
     };
-    if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cookie, &relay) {
+    if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cipher, &relay) {
         let _ = udp_handle.try_send_voice_media(host_peer, wire);
     }
 }
@@ -572,12 +572,12 @@ fn handle_client_voice_media(
     known_clients: &BTreeMap<i32, clonk_engine::ClientCoreControlData>,
     limiter: &mut crate::voice::VoiceIngressLimiter,
 ) {
-    let Some((ingress_peer_id, receive_cookie)) = transport.authenticated_voice_ingress(media.peer)
+    let Some((ingress_peer_id, receive_cipher)) = transport.authenticated_voice_ingress(media.peer)
     else {
         return;
     };
     let Ok(packet) =
-        crate::voice::decode_authenticated_voice_packet(&media.payload, receive_cookie)
+        crate::voice::decode_authenticated_voice_packet(&media.payload, receive_cipher)
     else {
         return;
     };
