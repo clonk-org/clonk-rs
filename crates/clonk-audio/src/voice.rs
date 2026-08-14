@@ -9,7 +9,9 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::voice_echo::VoiceEchoReference;
-use crate::voice_processing::{VoiceProcessing, VoiceProcessingSwitches};
+#[cfg(any(feature = "cpal", test))]
+use crate::voice_processing::VoiceProcessing;
+use crate::voice_processing::VoiceProcessingSwitches;
 
 /// Voice chat uses independently decodable 20 ms mono frames at 16 kHz.
 pub const VOICE_SAMPLE_RATE: u32 = 16_000;
@@ -404,6 +406,7 @@ impl StreamingVoiceResampler {
     }
 }
 
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 pub(crate) fn voice_f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32_768.0)
         .round()

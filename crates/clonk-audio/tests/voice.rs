@@ -3,7 +3,10 @@ use clonk_audio::{
     VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
 };
 #[cfg(not(feature = "cpal"))]
-use clonk_audio::{VoiceCapture, VoiceCaptureError};
+use clonk_audio::{
+    VoiceCapture, VoiceCaptureError, VoiceCaptureOptions, VoiceProcessingConfig,
+    VoiceProcessingSwitches,
+};
 
 #[test]
 fn voice_codec_encodes_fixed_independently_decodable_twenty_millisecond_frames() {
@@ -76,8 +79,11 @@ fn voice_codec_rejects_every_noncanonical_frame_shape() {
 #[cfg(not(feature = "cpal"))]
 #[test]
 fn feature_disabled_capture_api_fails_without_touching_a_device() {
+    let options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+        VoiceProcessingConfig::default(),
+    ));
     assert!(matches!(
-        VoiceCapture::open(),
+        VoiceCapture::open(options),
         Err(VoiceCaptureError::Unavailable)
     ));
 }

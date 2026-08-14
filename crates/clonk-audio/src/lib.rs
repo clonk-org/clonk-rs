@@ -4,7 +4,12 @@ mod midi;
 mod mixer;
 mod tracker;
 mod voice;
+// Without the `cpal` feature nothing can open a microphone, so the capture-side
+// halves of these two have no caller in that build. They still compile, and
+// their tests still run.
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_echo;
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_processing;
 mod wav;
 
