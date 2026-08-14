@@ -848,6 +848,48 @@ mod tests {
     }
 
     #[test]
+    fn sealing_leaves_the_lane_droppable_and_reorderable() {
+        // The lane stays off the lockstep path precisely because losing or
+        // reordering a datagram costs nothing. A seal carrying per-connection
+        // state — a rolling nonce, a replay window, a rekey schedule — would
+        // quietly turn a dropped frame into a stalled stream.
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let stream = (0..8)
+            .map(|sequence| {
+                VoicePacket::Direct(
+                    VoiceFrame::outbound(7, 11, sequence, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let wire = stream
+            .iter()
+            .map(|packet| encode_authenticated_voice_packet(cipher, packet).unwrap())
+            .collect::<Vec<_>>();
+
+        // Delivered backwards, with every third datagram lost.
+        let delivered = wire
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(index, _)| index % 3 != 0)
+            .map(|(index, wire)| {
+                (
+                    index,
+                    decode_authenticated_voice_packet(wire, cipher).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(delivered.len(), 5);
+        for (index, packet) in delivered {
+            assert_eq!(packet, stream[index], "datagram {index} decoded alone");
+        }
+    }
+
+    #[test]
     fn a_tampered_sealed_packet_never_reaches_the_decoder() {
         let cipher = VoiceMediaCipher::from_parts(
             VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
