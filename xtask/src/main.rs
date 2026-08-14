@@ -1966,7 +1966,7 @@ fn macos_info_plist() -> String {
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Clonk uses the microphone for push-to-talk proximity voice chat.</string>
+	<string>Clonk uses the microphone for proximity voice chat.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>
@@ -3057,9 +3057,13 @@ mod tests {
         let plist = macos_info_plist();
 
         assert!(plist.contains("<key>NSMicrophoneUsageDescription</key>"));
-        assert!(plist.contains(
-            "<string>Clonk uses the microphone for push-to-talk proximity voice chat.</string>"
-        ));
+        // The string must cover every way the microphone can open, so it names
+        // the feature rather than one of its two activation modes: naming
+        // push-to-talk would understate it for a player on voice activation
+        // (clonk-org/clonk-rs#422).
+        assert!(
+            plist.contains("<string>Clonk uses the microphone for proximity voice chat.</string>")
+        );
     }
 
     #[test]

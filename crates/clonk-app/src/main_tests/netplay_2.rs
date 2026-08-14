@@ -223,6 +223,52 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
 }
 
 #[test]
+fn voice_activation_never_opens_a_microphone_the_player_did_not_opt_in_to() {
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = opens.clone();
+
+    struct UnreachableVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for UnreachableVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, _events, _voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    // Voice activation selected, but the microphone opt-in itself never taken.
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = false;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_activation_threshold = 0.0;
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
+        observed.set(observed.get() + 1);
+        Ok(UnreachableVoiceSource)
+    });
+
+    for _ in 0..5 {
+        app.update_voice_chat();
+    }
+
+    assert_eq!(
+        opens.get(),
+        0,
+        "Voice.Enabled is the microphone opt-in; the activation mode is only how an opted-in \
+         microphone is keyed",
+    );
+    assert!(!app.voice_chat.capture_active());
+}
+
+#[test]
 fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
     let mut app = new_classic_running_sandbox_app();
     let local_client = 7;

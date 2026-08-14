@@ -2,8 +2,14 @@
 //! positional mix.
 //!
 //! This is a deliberate Rust-only extension (clonk-org/clonk-rs#301), **not a
-//! parity claim** — there is no C++ oracle for any of it. It is opt-in
-//! push-to-talk and opens the microphone only for a held configured key.
+//! parity claim** — there is no C++ oracle for any of it. It is opt-in: nothing
+//! here opens a microphone unless `Voice.Enabled` is set. An opted-in player
+//! then chooses how it opens, and push-to-talk — the microphone open only for a
+//! held configured key — is and stays the default. Voice activation
+//! (clonk-org/clonk-rs#422) is the alternative: the capture is open while the
+//! player is eligible to speak, and [`VoiceActivationGate`] decides per frame
+//! whether what it hears is transmitted. Neither mode weakens the other, and a
+//! player who has taken neither opt-in is never recorded at all.
 //!
 //! **The determinism boundary is the invariant to protect.** Fixed 20 ms,
 //! 16 kHz mono IMA ADPCM frames travel on a bounded, droppable UDP media lane

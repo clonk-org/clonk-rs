@@ -30,10 +30,14 @@ impl VoiceActivationMode {
     pub const PUSH_TO_TALK: &'static str = "PushToTalk";
     pub const VOICE_ACTIVATED: &'static str = "VoiceActivated";
 
+    /// Accepts exactly what `advanced_config`'s enum row accepts: the canonical
+    /// token, case-sensitively, or the index it stores alongside it. Anything
+    /// else is `None`, which leaves push-to-talk in place — a typo must not open
+    /// a microphone.
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim() {
-            Self::PUSH_TO_TALK => Some(Self::PushToTalk),
-            Self::VOICE_ACTIVATED => Some(Self::VoiceActivated),
+            Self::PUSH_TO_TALK | "0" => Some(Self::PushToTalk),
+            Self::VOICE_ACTIVATED | "1" => Some(Self::VoiceActivated),
             _ => None,
         }
     }
@@ -562,6 +566,37 @@ mod tests {
         );
         assert_eq!(options.voice_activation_threshold, 1.0);
         assert_eq!(options.voice_activation_hangover_ms, 0);
+    }
+
+    #[test]
+    fn voice_activation_mode_reads_exactly_what_the_advanced_editor_writes() {
+        // `advanced_config::enum_row` renders whichever spelling it accepts, so
+        // a value this parser rejects but the editor renders would show one
+        // mode in the dialog while the microphone obeys the other — and saving
+        // the dialog would then silently rewrite the player's choice.
+        let read = |raw: &str| {
+            let mut config = Config::new();
+            config.set_in(Some("Voice"), "ActivationMode", raw);
+            let mut options = AudioOptions::default();
+            options.apply_config(&config);
+            options.voice_activation_mode
+        };
+
+        assert_eq!(
+            read(" VoiceActivated "),
+            VoiceActivationMode::VoiceActivated
+        );
+        assert_eq!(
+            read("1"),
+            VoiceActivationMode::VoiceActivated,
+            "the editor also accepts the enum's index",
+        );
+        assert_eq!(read("0"), VoiceActivationMode::PushToTalk);
+        assert_eq!(
+            read("voiceactivated"),
+            VoiceActivationMode::PushToTalk,
+            "the editor matches the token case-sensitively, so this parser must too",
+        );
     }
 
     #[test]
