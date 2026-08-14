@@ -145,6 +145,160 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
 }
 
 #[test]
+fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_game() {
+    use std::cell::RefCell;
+
+    struct TestVoiceSource {
+        frames: RefCell<Vec<clonk_audio::VoiceInputFrame>>,
+    }
+
+    impl crate::voice_chat::VoiceFrameSource for TestVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            std::mem::take(&mut *self.frames.borrow_mut())
+        }
+    }
+
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    let local_player = app.local_owner;
+    app.engine
+        .test_player_mut(local_player)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, _events, mut voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_activation_threshold = 0.5;
+    options.voice_activation_hangover_ms = 0;
+
+    let payload = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
+        Ok(TestVoiceSource {
+            frames: RefCell::new(vec![
+                clonk_audio::VoiceInputFrame { payload, level: 0.1 },
+                clonk_audio::VoiceInputFrame { payload, level: 0.9 },
+            ]),
+        })
+    });
+
+    assert!(
+        !app.voice_chat.capture_active(),
+        "no key has been pressed and no tick has run yet",
+    );
+    assert!(
+        !app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed),
+        "voice activation must leave the push-to-talk key to the game",
+    );
+
+    app.update_voice_chat();
+    assert!(app.voice_chat.capture_active());
+    assert_eq!(
+        app.voice_chat.capture_key(),
+        None,
+        "a voice-activated capture is owned by no key",
+    );
+
+    let outbound = voice.try_recv_outbound().test_value();
+    assert_eq!(outbound.player_id, local_player);
+    assert_eq!(outbound.sequence, 0);
+    assert!(
+        voice.try_recv_outbound().is_none(),
+        "the frame below the threshold must never reach the wire",
+    );
+    assert!(app
+        .voice_chat
+        .active_speakers(Instant::now())
+        .contains(&(local_client, local_player)));
+
+    app.window_active = false;
+    app.update_voice_chat();
+    assert!(
+        !app.voice_chat.capture_active(),
+        "leaving the window must close a voice-activated capture too",
+    );
+}
+
+#[test]
+fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, _events, _voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+
+    app.update_voice_chat();
+    assert!(app.voice_chat.capture_active());
+
+    app.audio.test_mut().options.voice_activation_mode =
+        crate::settings::VoiceActivationMode::PushToTalk;
+    app.update_voice_chat();
+    assert!(
+        !app.voice_chat.capture_active(),
+        "no key holds this capture open, so nothing else would ever close it",
+    );
+}
+
+#[test]
+fn a_microphone_voice_activation_cannot_open_is_not_retried_every_tick() {
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = opens.clone();
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, _events, _voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    struct UnreachableVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for UnreachableVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            unreachable!("this microphone never opens")
+        }
+    }
+
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(
+        move || -> Result<UnreachableVoiceSource, _> {
+            observed.set(observed.get() + 1);
+            Err(clonk_audio::VoiceCaptureError::NoInputDevice)
+        },
+    );
+
+    for _ in 0..5 {
+        app.update_voice_chat();
+    }
+    assert_eq!(opens.get(), 1, "a failed open must not be retried per tick");
+
+    app.window_active = false;
+    app.update_voice_chat();
+    app.window_active = true;
+    app.update_voice_chat();
+    assert_eq!(
+        opens.get(),
+        2,
+        "becoming eligible again is what clears the failure",
+    );
+}
+
+#[test]
 fn direct_runtime_repairs_urls_truncated_by_the_old_rust_parser() {
     // C++ defaults both fields to the complete HTTPS URL
     // (C4Config.h:35-38; C4Config.cpp:545-550). The old Rust parser

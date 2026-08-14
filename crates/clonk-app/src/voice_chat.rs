@@ -166,6 +166,7 @@ pub(crate) struct VoiceChatState {
     capture_opener: VoiceCaptureOpener,
     capture_key: Option<winit::keyboard::KeyCode>,
     activation_gate: VoiceActivationGate,
+    activation_open_failed: bool,
     stream_epoch: u32,
     next_sequence: u16,
     pub(crate) remote_streams: BTreeMap<(i32, i32), RemoteVoiceStream>,
@@ -191,6 +192,7 @@ impl VoiceChatState {
             }),
             capture_key: None,
             activation_gate: VoiceActivationGate::default(),
+            activation_open_failed: false,
             stream_epoch: 0,
             next_sequence: 0,
             remote_streams: BTreeMap::new(),
@@ -223,9 +225,27 @@ impl VoiceChatState {
         Ok(())
     }
 
+    /// Opens a capture no push-to-talk key owns, for a player who has chosen
+    /// voice activation.
+    ///
+    /// A failed open latches. Voice activation has no key press to rate-limit
+    /// it, so without the latch a missing or busy microphone would be reopened
+    /// on every tick for as long as the player stays in the game. The latch
+    /// clears the next time the capture stops — which is what a player who has
+    /// just plugged a microphone in will cause by leaving and re-entering.
+    pub(crate) fn start_voice_activated_capture(&mut self) -> Result<(), VoiceCaptureError> {
+        if self.capture.is_some() || self.activation_open_failed {
+            return Ok(());
+        }
+        let opened = self.start_capture(None);
+        self.activation_open_failed = opened.is_err();
+        opened
+    }
+
     pub(crate) fn stop_capture(&mut self) {
         self.capture = None;
         self.capture_key = None;
+        self.activation_open_failed = false;
         self.activation_gate.close();
     }
 
