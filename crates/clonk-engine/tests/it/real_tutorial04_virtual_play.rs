@@ -1062,76 +1062,41 @@ fn blast_one_tfln(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let thrown = carried_tflns
+        .first()
+        .copied()
+        .expect("the Clonk carries the replacement TFLN");
+    if next_face_x < 414 && !attached {
+        // Arm the TFLN while it still occupies the Clonk's only inventory
+        // slot, so blast debris cannot take that slot before the final throw.
+        // Double Dig activates Contents(0), and Activated lasts sixty ticks
+        // (C4ObjectCom.cpp:531-539; TFlint.c4d/ActMap.txt:1-10).
+        player.double_tap(COM_DIG)?;
+        player.wait_until(
+            "the carried replacement TFLN reaches its final fuse",
+            60,
+            |engine| {
+                engine.object_snapshot(thrown).is_some_and(|flint| {
+                    flint.container == Some(clonk)
+                        && flint.action.name == "Activated"
+                        && flint.action.time >= 48
+                })
+            },
+        )?;
+    }
     // C++ throws while walking and drops while scaling/hangling, so this one
     // physical command follows the procedure-specific behavior a player gets.
     player.tap(COM_THROW)?;
     player.wait_until(
         "a replacement TFLN leaves the Clonk's inventory",
         30,
-        |engine| clonk_contents_count(engine, clonk, "TFLN") == remaining,
+        |engine| {
+            clonk_contents_count(engine, clonk, "TFLN") == remaining
+                && engine
+                    .object_snapshot(thrown)
+                    .is_some_and(|flint| flint.container.is_none())
+        },
     )?;
-    let thrown = carried_tflns
-        .into_iter()
-        .find(|item| {
-            player
-                .engine()
-                .object_snapshot(*item)
-                .is_some_and(|item| item.container.is_none())
-        })
-        .expect("the thrown replacement TFLN exists in the tunnel");
-    if next_face_x < 414 && !attached {
-        player.wait_until(
-            "the replacement TFLN returns or the Clonk must retreat",
-            80,
-            |engine| {
-                engine.object_snapshot(thrown).is_none_or(|flint| {
-                    flint.container == Some(clonk)
-                        || (flint.action.name == "Activated" && flint.action.time >= 48)
-                        || engine
-                            .object_snapshot(clonk)
-                            .is_some_and(|clonk| !clonk.contents.is_empty())
-                })
-            },
-        )?;
-        if player
-            .engine()
-            .object_snapshot(thrown)
-            .is_some_and(|flint| flint.container == Some(clonk))
-        {
-            player.wait_until(
-                "the Clonk catches the lit replacement TFLN while facing the gold face",
-                30,
-                |engine| {
-                    engine.object_snapshot(clonk).is_some_and(|object| {
-                        object.action.name == "Walk"
-                            && object.direction == Direction::Left
-                            && engine
-                                .object_snapshot(thrown)
-                                .is_some_and(|flint| flint.container == Some(clonk))
-                    })
-                },
-            )?;
-            player.wait_until(
-                "the replacement TFLN fuse burns down at the gold face",
-                50,
-                |engine| {
-                    engine.object_snapshot(thrown).is_some_and(|flint| {
-                        flint.action.name == "Activated" && flint.action.time >= 48
-                    })
-                },
-            )?;
-            player.tap(COM_THROW)?;
-            player.wait_until(
-                "the nearly spent replacement TFLN is thrown at the gold face",
-                10,
-                |engine| {
-                    engine
-                        .object_snapshot(thrown)
-                        .is_some_and(|flint| flint.container.is_none())
-                },
-            )?;
-        }
-    }
     // Keep the retreat control active for the complete fuse. The thrown TFLN
     // continues moving after it first reaches a safe radius, so stopping at a
     // snapshot distance can let it bounce back and detonate beside the Clonk.
@@ -1187,7 +1152,7 @@ fn blast_one_tfln(
         player,
         clonk,
         "the Clonk recovers after each replacement blast",
-        60,
+        180,
         true,
     )?;
     Ok(())

@@ -3,8 +3,8 @@ use std::error::Error;
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
-    Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT,
-    COM_THROW, COM_UP,
+    Direction, Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_DIG, COM_DOWN, COM_LEFT,
+    COM_RIGHT, COM_THROW, COM_UP,
 };
 
 fn load_tutorial06() -> (Engine, i32) {
@@ -778,18 +778,96 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     reached_basin?;
     player.hold_until(
         COM_RIGHT,
-        "the CRYS carrier reaches the upper-passage wall",
-        // Depending on the drained basin's material motion, the swimmer can
-        // first attach to the x=226 wall. Keep the same physical Right held
-        // through that bounded Scale detour and stop on the actual transfer
-        // coordinate (C4Object.cpp:3618-3632,4823-4855).
-        400,
+        "the CRYS carrier reaches the upper passage or its wall",
+        120,
         |engine| {
             engine
                 .object_snapshot(first_clonk)
-                .is_some_and(|object| object.position.x >= 278)
+                .is_some_and(|object| object.position.x >= 278 || object.action.name == "Scale")
         },
     )?;
+    let carrier = player
+        .engine()
+        .object_snapshot(first_clonk)
+        .expect("the CRYS carrier survives the drained basin");
+    if carrier.position.x < 278 {
+        // Some material-motion layouts attach the swimmer to the x=226 wall.
+        // The opposite Scale edge lets go; UpRight then returns the Clonk to the
+        // drained transfer channel, where Stop clears the diagonal swim
+        // velocity before Right resumes the crossing
+        // (C4Object.cpp:3618-3632,3654-3664,4823-4855,4957-4963;
+        // C4ObjectCom.cpp:310-314).
+        let let_go = if carrier.direction == Direction::Right {
+            COM_LEFT
+        } else {
+            COM_RIGHT
+        };
+        player.tap(let_go)?;
+        player.wait_until("the CRYS carrier releases the basin wall", 80, |engine| {
+            engine
+                .object_snapshot(first_clonk)
+                .is_some_and(|object| object.action.name != "Scale")
+        })?;
+        player.press(COM_RIGHT)?;
+        let reached_channel = player.hold_until(
+            COM_UP,
+            "the CRYS carrier returns to the drained transfer channel",
+            180,
+            |engine| {
+                engine
+                    .object_snapshot(first_clonk)
+                    .is_some_and(|object| object.position.y <= 315)
+            },
+        );
+        player.release(COM_RIGHT)?;
+        reached_channel?;
+        player.wait_until(
+            "the CRYS carrier comes to rest in the transfer channel",
+            120,
+            |engine| {
+                engine.object_snapshot(first_clonk).is_some_and(|object| {
+                    object.velocity.x == 0
+                        && object.velocity.y == 0
+                        && object.fixed_velocity.is_none()
+                })
+            },
+        )?;
+        player.hold_until(
+            COM_RIGHT,
+            "the CRYS carrier reaches or stops beside the upper-passage wall",
+            120,
+            |engine| {
+                engine.object_snapshot(first_clonk).is_some_and(|object| {
+                    object.position.x >= 278
+                        || (object.position.x >= 270
+                            && object.velocity.x == 0
+                            && object.fixed_velocity.is_none())
+                })
+            },
+        )?;
+        if player
+            .engine()
+            .object_snapshot(first_clonk)
+            .is_some_and(|object| object.position.x < 278)
+        {
+            player.press(COM_RIGHT)?;
+            let reached_wall = player.hold_until(
+                COM_DOWN,
+                "the CRYS carrier aligns beside the upper-passage wall",
+                120,
+                |engine| {
+                    engine.object_snapshot(first_clonk).is_some_and(|object| {
+                        object.position.x >= 278
+                            || (object.position.x >= 272
+                                && object.velocity.x == 0
+                                && object.fixed_velocity.is_none())
+                    })
+                },
+            );
+            player.release(COM_RIGHT)?;
+            reached_wall?;
+        }
+    }
     // Current seed-zero terrain leaves a lip between the two Clonks. Bring
     // the empty rescuer alongside the carrier before using the physical
     // Throw-key Drop, so Collection transfers CRYS instead of letting it
@@ -863,6 +941,9 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.assert_milestone("CursorRight returns to the CRYS carrier", |engine| {
         engine.crew_cursor(owner) == Some(first_clonk)
     })?;
+    // Drop at rest so ObjectComDrop uses no directional throw force. The
+    // nearby builder can collect CRYS without it flying past the transfer
+    // point (C4ObjectCom.cpp:640-671).
     player.tap(COM_THROW)?;
     player.wait_until(
         "the escaped CLNK drops CRYS beside its rescuer",
@@ -876,9 +957,11 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.assert_milestone("CursorRight selects the CRYS-carrying builder", |engine| {
         engine.crew_cursor(owner) == Some(builder)
     })?;
-    // The C++-exact carriage stop leaves the pickup slightly west of the
-    // shaft. Center underneath ELEC before surfacing instead of depending
-    // on the former overshoot to do that implicitly.
+    // ELEC is the physical floor at (330,326). Center over it, wait for the
+    // raw swim velocity to stop, then descend onto its solid mask. ObjectComUp
+    // cannot jump from DFA_SWIM, while Down accelerates toward the contact
+    // that restores Walk (C4ObjectCom.cpp:335-350;
+    // C4Object.cpp:4319-4379,4938-4956).
     player.hold_until(
         COM_RIGHT,
         "the CRYS-carrying builder reaches the ELEC shaft",
@@ -886,43 +969,47 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         |engine| {
             engine
                 .object_snapshot(builder)
-                .is_some_and(|object| object.position.x >= 300)
-        },
-    )?;
-    player.tap(COM_LEFT)?;
-    player.wait_until("the CRYS carrier stops beneath ELEC", 80, |engine| {
-        engine
-            .object_snapshot(builder)
-            .is_some_and(|object| object.position.x <= 330 && object.velocity.x == 0)
-    })?;
-    player.hold_until(
-        COM_UP,
-        "the CRYS-carrying builder surfaces by ELEC",
-        180,
-        |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.action.name == "Walk" && object.position.y <= 316)
-        },
-    )?;
-    player.hold_until(
-        COM_RIGHT,
-        "the CRYS-carrying builder centers over ELEC",
-        80,
-        |engine| {
-            engine
-                .object_snapshot(builder)
                 .is_some_and(|object| object.position.x >= 329)
         },
     )?;
-    player.tap(COM_DOWN)?;
-    player.wait_until("the CRYS-carrying builder settles on ELEC", 80, |engine| {
+    player.wait_until("the CRYS carrier comes to rest above ELEC", 80, |engine| {
         engine.object_snapshot(builder).is_some_and(|object| {
-            object.action.name == "Walk" && (327..=333).contains(&object.position.x)
+            object.velocity.x == 0 && object.velocity.y == 0 && object.fixed_velocity.is_none()
         })
     })?;
-    player.ticks(12)?;
-    player.tap(COM_DOWN)?;
+    player.hold_until(
+        COM_DOWN,
+        "the CRYS-carrying builder settles on ELEC",
+        80,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Walk" && (327..=333).contains(&object.position.x)
+            })
+        },
+    )?;
+    player.hold_until(
+        COM_LEFT,
+        "the CRYS-carrying builder centers on ELEC",
+        40,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x <= 332)
+        },
+    )?;
+    player.wait_until("the CRYS carrier comes to rest on ELEC", 40, |engine| {
+        engine.object_snapshot(builder).is_some_and(|object| {
+            object.action.name == "Walk"
+                && (327..=333).contains(&object.position.x)
+                && object.velocity.x == 0
+                && object.velocity.y == 0
+                && object.fixed_velocity.is_none()
+        })
+    })?;
+    player.wait_out_double_click()?;
+    // Walk Down runs ObjectComDownDouble and grabs the nearby ELEC in C++
+    // (C4Object.cpp:3582-3586; C4ObjectCom.cpp:573-589).
+    player.double_tap(COM_DOWN)?;
     player.wait_until("the CRYS-carrying builder grabs ELEC", 100, |engine| {
         engine.object_snapshot(builder).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(elevator_case)
