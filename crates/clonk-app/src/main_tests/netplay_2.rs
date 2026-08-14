@@ -24,7 +24,17 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         }
     }
 
+    fn mix_frames(system: &clonk_audio::AudioSystem, frames: usize) -> Vec<i16> {
+        let mut output = vec![0; frames.saturating_mul(2)];
+        system.mixer().mix_i16(&mut output);
+        output
+    }
+
     let mut app = new_classic_running_sandbox_app();
+    app.audio.test_mut().system = clonk_audio::AudioSystem::new_manual_with_resampling(
+        8,
+        clonk_audio::ResamplingMode::Linear,
+    );
     let local_client = 7;
     let local_player = app.local_owner;
     app.engine
@@ -52,6 +62,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     let remote_cursor = app.engine.spawn_test_object(
         SpawnConfig::new("CLNK")
             .with_owner(remote_player)
+            .with_position(Vector2::new(160, 100))
             .with_container(remote_container),
     );
     app.engine
@@ -65,6 +76,26 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         Some(remote_container),
         "the runtime seam exercises a speaking selected crew inside a container",
     );
+    let viewport_inputs = collect_viewport_inputs(&app.snapshot).test_value();
+    app.graphics.render_frame(&app.snapshot, &viewport_inputs);
+    let remote_position = crate::voice_chat::authenticated_selected_voice_crew(
+        &app.snapshot,
+        remote_client,
+        remote_player,
+    )
+    .test_value()
+    .position;
+    let (remote_audibility, remote_pan) = compute_object_positional_mix(
+        remote_position,
+        &app.snapshot,
+        &app.graphics.active_viewport_projections(),
+    );
+    let remote_volume = remote_audibility * app.audio.test_ref().options.voice_volume;
+    let reference_audio = clonk_audio::AudioSystem::new_manual_with_resampling(
+        8,
+        clonk_audio::ResamplingMode::Linear,
+    );
+    let mut reference_voice = crate::voice_chat::VoiceChatState::default();
 
     let (manager, _events, mut voice) =
         NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
@@ -104,29 +135,179 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         "focus loss must close an active push-to-talk capture",
     );
 
-    let inbound = clonk_network::VoiceFrame {
+    let simulation_before_remote_voice = app.engine.snapshot();
+    let admission_started_at = Instant::now();
+    let batched_admission_at = admission_started_at + Duration::from_millis(65);
+    for sequence in [0, 2, 1, 3] {
+        let inbound = clonk_network::VoiceFrame {
+            client_id: remote_client as u32,
+            player_id: remote_player,
+            stream_epoch: 4,
+            sequence,
+            payload: clonk_audio::encode_voice_frame(
+                &[2_000 + sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .to_vec(),
+        };
+        assert!(reference_voice
+            .accept_remote_frame(&app.snapshot, &inbound, batched_admission_at)
+            .is_some());
+        voice.send_inbound(inbound).test_value();
+    }
+    app.update_voice_chat_at(batched_admission_at);
+
+    let stream_id = crate::voice_chat::voice_stream_id(remote_client, remote_player);
+    let first_reference_frames = reference_voice.drain_remote_playout(
+        remote_client,
+        remote_player,
+        batched_admission_at,
+        clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES,
+        0,
+    );
+    assert_eq!(
+        first_reference_frames
+            .iter()
+            .map(|frame| (frame.sequence, frame.concealed))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (1, false), (2, false), (3, false)],
+    );
+    for frame in first_reference_frames {
+        reference_audio.queue_voice_stream_with_mix(
+            stream_id,
+            frame.samples,
+            remote_volume,
+            remote_pan,
+        );
+    }
+    assert_eq!(
+        app.audio
+            .test_ref()
+            .system
+            .voice_stream_stats(stream_id)
+            .queued_frames,
+        4,
+    );
+
+    let sample_rate =
+        usize::try_from(app.audio.test_ref().system.mixer().sample_rate()).unwrap_or(usize::MAX);
+    let first_mix_frames = sample_rate.saturating_mul(35) / 1_000;
+    let second_mix_frames = sample_rate.saturating_mul(20) / 1_000;
+    let total_mix_frames = sample_rate.saturating_mul(120) / 1_000;
+    let final_mix_frames = total_mix_frames
+        .saturating_sub(first_mix_frames)
+        .saturating_sub(second_mix_frames);
+    let mut actual_output = mix_frames(&app.audio.test_ref().system, first_mix_frames);
+    let mut expected_output = mix_frames(&reference_audio, first_mix_frames);
+
+    let missing_successor = clonk_network::VoiceFrame {
         client_id: remote_client as u32,
         player_id: remote_player,
         stream_epoch: 4,
-        sequence: 0,
-        payload: clonk_audio::encode_voice_frame(&[2_000; clonk_audio::VOICE_FRAME_SAMPLES])
+        sequence: 5,
+        payload: clonk_audio::encode_voice_frame(&[2_005; clonk_audio::VOICE_FRAME_SAMPLES])
             .to_vec(),
     };
-    voice.send_inbound(inbound).test_value();
-    app.update_voice_chat();
+    assert!(reference_voice
+        .accept_remote_frame(
+            &app.snapshot,
+            &missing_successor,
+            admission_started_at + Duration::from_millis(100),
+        )
+        .is_some());
+    voice.send_inbound(missing_successor).test_value();
+    app.update_voice_chat_at(admission_started_at + Duration::from_millis(100));
+    assert!(reference_voice
+        .drain_remote_playout(
+            remote_client,
+            remote_player,
+            admission_started_at + Duration::from_millis(100),
+            2,
+            3,
+        )
+        .is_empty());
+    actual_output.extend(mix_frames(&app.audio.test_ref().system, second_mix_frames));
+    expected_output.extend(mix_frames(&reference_audio, second_mix_frames));
 
-    let stream_id = crate::voice_chat::voice_stream_id(remote_client, remote_player);
-    assert_eq!(
-        app.audio.test_ref().system.voice_stream_stats(stream_id),
-        clonk_audio::VoiceStreamStats {
-            queued_frames: 1,
-            dropped_stale_frames: 0,
-        },
+    app.update_voice_chat_at(admission_started_at + Duration::from_millis(120));
+    let final_reference_frames = reference_voice.drain_remote_playout(
+        remote_client,
+        remote_player,
+        admission_started_at + Duration::from_millis(120),
+        3,
+        2,
     );
-    let remote_activity = app.voice_chat.active_speakers(Instant::now());
+    assert_eq!(
+        final_reference_frames
+            .iter()
+            .map(|frame| (frame.sequence, frame.concealed))
+            .collect::<Vec<_>>(),
+        vec![(4, true), (5, false)],
+    );
+    for frame in final_reference_frames {
+        reference_audio.queue_voice_stream_with_mix(
+            stream_id,
+            frame.samples,
+            remote_volume,
+            remote_pan,
+        );
+    }
+    actual_output.extend(mix_frames(&app.audio.test_ref().system, final_mix_frames));
+    expected_output.extend(mix_frames(&reference_audio, final_mix_frames));
+
+    assert_eq!(
+        app.voice_chat
+            .remote_playout_stats(remote_client, remote_player)
+            .concealed_frames,
+        1,
+        "the runtime must consume the missing packet through loss concealment",
+    );
+    assert_eq!(
+        actual_output, expected_output,
+        "the runtime must queue the ordered and concealed PCM into the mixer",
+    );
+    let stereo_frames = expected_output.chunks_exact(2).collect::<Vec<_>>();
+    assert!(stereo_frames
+        .iter()
+        .any(|frame| frame.iter().any(|&sample| sample != 0)));
+    let playout_frame_samples = sample_rate.saturating_mul(20) / 1_000;
+    assert!(stereo_frames
+        .chunks(playout_frame_samples)
+        .all(|frame| frame
+            .iter()
+            .any(|sample| sample.iter().any(|&value| value != 0))));
+    let last_active_frame = stereo_frames
+        .iter()
+        .rposition(|frame| frame.iter().any(|&sample| sample != 0))
+        .test_value();
+    assert!(stereo_frames[..=last_active_frame].windows(2).all(|pair| {
+        (i32::from(pair[1][0]) - i32::from(pair[0][0])).abs() <= 128
+            && (i32::from(pair[1][1]) - i32::from(pair[0][1])).abs() <= 128
+    }));
+    assert_eq!(
+        app.engine.snapshot(),
+        simulation_before_remote_voice,
+        "voice playout state must not become observable to the simulation",
+    );
+    let remote_activity = app
+        .voice_chat
+        .active_speakers(admission_started_at + Duration::from_millis(120));
     assert!(remote_activity.contains(&(remote_client, remote_player)));
     assert!(
         collect_speaking_overlay_objects(&app.snapshot, &remote_activity).contains(&remote_cursor)
+    );
+
+    app.snapshot
+        .players
+        .iter_mut()
+        .find(|player| player.id == remote_player)
+        .test_value()
+        .cursor = None;
+    app.update_voice_chat_at(admission_started_at + Duration::from_millis(200));
+    assert!(
+        !app.voice_chat
+            .remote_streams
+            .contains_key(&(remote_client, remote_player)),
+        "invalidated ownership must discard pending remote playout",
     );
 
     app.audio.test_mut().options.voice_enabled = false;
@@ -179,8 +360,14 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
     app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
         Ok(TestVoiceSource {
             frames: RefCell::new(vec![
-                clonk_audio::VoiceInputFrame { payload, level: 0.1 },
-                clonk_audio::VoiceInputFrame { payload, level: 0.9 },
+                clonk_audio::VoiceInputFrame {
+                    payload,
+                    level: 0.1,
+                },
+                clonk_audio::VoiceInputFrame {
+                    payload,
+                    level: 0.9,
+                },
             ]),
         })
     });
@@ -293,7 +480,8 @@ fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
     options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
     // A stub source, never the real `VoiceCapture`: a test must not depend on
     // the host owning a microphone, and must certainly not open one.
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(|| Ok(SilentVoiceSource));
+    app.voice_chat =
+        crate::voice_chat::VoiceChatState::with_source_opener(|| Ok(SilentVoiceSource));
 
     app.update_voice_chat();
     assert!(app.voice_chat.capture_active());
