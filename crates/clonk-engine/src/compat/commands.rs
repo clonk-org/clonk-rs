@@ -3639,6 +3639,13 @@ fn apply_preview_command_experience(target: ObjectId) -> Result<(), RuntimeError
 /// C4Command::Call invokes Target->Call(...) before ExecuteCommand returns
 /// (C4Command.cpp:2355-2368). Deferring that event past later script
 /// mutations can erase the queued arguments.
+///
+/// Freshly emitted Call commands carry no result action: `C4Command::Call`
+/// runs `Finish(true)` before the call and deliberately touches nothing
+/// afterwards. A result action only reaches here from a save predating the
+/// dedicated ControlTransfer event, so this mirrors the non-preview handler
+/// in `Engine::apply_command_event` for that shape rather than inventing a
+/// second set of rules for it.
 fn preview_call_object_function(event: CommandEvent) -> Result<(), RuntimeError> {
     let CommandEvent::CallObjectFunction {
         object_id,
@@ -3654,15 +3661,44 @@ fn preview_call_object_function(event: CommandEvent) -> Result<(), RuntimeError>
     else {
         return Ok(());
     };
+    let tx_value = tx_value
+        .or_else(|| tx_definition.map(Value::C4Id))
+        .or_else(|| tx.map(Value::Int))
+        .unwrap_or(Value::Nil);
+    // Bind the completion target before the callback can replace the command
+    // stack, exactly like the non-preview path does.
+    let command_instance_id = on_result
+        .as_ref()
+        .map_or(0, |action| preview_call_result_instance_id(caller, action));
+
+    // Saves from before the dedicated ControlTransfer event retain the old
+    // generic-call shape. Execute the cached definition function with
+    // native's Status bypass and getBool return conversion just like a newly
+    // emitted ControlTransfer event.
+    let legacy_transfer = function == "ControlTransfer"
+        && matches!(
+            &on_result,
+            Some(CallResultAction::CompleteCommandOnFalse {
+                command: CommandId::Transfer
+            })
+        );
+    if legacy_transfer {
+        preview_control_transfer(
+            object_id,
+            caller,
+            tx_value,
+            ty.unwrap_or(0),
+            command_instance_id,
+        );
+        return Ok(());
+    }
+
     if !preview_object_is_present(object_id) {
         return Ok(());
     }
     let args = [
         object_reference_value(caller),
-        tx_value
-            .or_else(|| tx_definition.map(Value::C4Id))
-            .or_else(|| tx.map(Value::Int))
-            .unwrap_or(Value::Nil),
+        tx_value,
         Value::Int(ty.unwrap_or(0)),
         target2.map(object_reference_value).unwrap_or(Value::Nil),
     ];
@@ -3681,6 +3717,39 @@ fn preview_call_object_function(event: CommandEvent) -> Result<(), RuntimeError>
     let Some(action) = on_result else {
         return Ok(());
     };
+    preview_apply_call_result(action, caller, result, command_instance_id);
+    Ok(())
+}
+
+/// Host-preview twin of `Engine::resolve_call_result_instance_id`.
+fn preview_call_result_instance_id(caller: ObjectId, action: &CallResultAction) -> u64 {
+    let kind = match action {
+        CallResultAction::CompleteCommandOnFalse { command }
+        | CallResultAction::CompleteCommandOnTrue { command }
+        | CallResultAction::FailCommandOnFalse { command } => {
+            CommandEventInstanceKind::Exact(*command)
+        }
+        CallResultAction::ResolveExitActivation => CommandEventInstanceKind::ExitActivation,
+    };
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(caller))
+            .map_or(0, |scope| {
+                scope.live_commands.resolve_event_instance_id(kind, 0)
+            })
+    })
+}
+
+/// Host-preview twin of `Engine::apply_call_result`. The exact instance is
+/// resolved before the callback runs, so a callback that pushes another
+/// command of the same kind cannot inherit this result.
+fn preview_apply_call_result(
+    action: CallResultAction,
+    caller: ObjectId,
+    result: bool,
+    command_instance_id: u64,
+) {
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(scope) = borrow
@@ -3691,20 +3760,35 @@ fn preview_call_object_function(event: CommandEvent) -> Result<(), RuntimeError>
         };
         match action {
             CallResultAction::CompleteCommandOnFalse { command } if !result => {
-                scope.live_commands.complete_front_if(command);
+                scope
+                    .live_commands
+                    .finish_command_instance(command, command_instance_id);
             }
             CallResultAction::CompleteCommandOnTrue { command } if result => {
-                scope.live_commands.complete_front_if(command);
+                scope
+                    .live_commands
+                    .finish_command_instance(command, command_instance_id);
             }
             CallResultAction::FailCommandOnFalse { command } if !result => {
-                scope.live_commands.fail_front_if(command);
+                scope
+                    .live_commands
+                    .fail_command_instance(command, command_instance_id);
             }
-            _ => {}
+            CallResultAction::ResolveExitActivation => {
+                // Only ActivateEntrance carries this (command/model.rs), and
+                // it has its own preview twin with the feedback plumbing.
+                debug_assert!(
+                    false,
+                    "CallObjectFunction never carries ResolveExitActivation"
+                );
+            }
+            CallResultAction::CompleteCommandOnFalse { .. }
+            | CallResultAction::CompleteCommandOnTrue { .. }
+            | CallResultAction::FailCommandOnFalse { .. } => {}
         }
         scope.command_stack_replaced = true;
         scope.command_count = scope.live_commands.len();
     });
-    Ok(())
 }
 
 /// C4Command::Transfer invokes the definition host's AfterLink-cached
