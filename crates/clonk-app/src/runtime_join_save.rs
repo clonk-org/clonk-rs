@@ -3,14 +3,15 @@
 //! This is the Rust counterpart of
 //! `C4PlayerInfoList::SetAsRestoreInfos(PlayerInfos, true, true, true, true)`.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clonk_engine::{
     ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, LiveC4SaveComponents,
-    LiveC4SavePlayerPolicy, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_SCRIPT,
-    PLAYER_INFO_TYPE_USER,
+    LiveC4SavePlayerPolicy, LiveC4SavePolicy, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
 };
 use clonk_network::{
     LiveNetworkDynamic, LiveNetworkDynamicComponent, LiveNetworkDynamicSpec, PlayerInfoListSnapshot,
@@ -32,6 +33,40 @@ pub struct RuntimeJoinPlayerGroupTarget {
 pub struct RuntimeJoinRestorePlan {
     pub restore_infos: PlayerInfoListSnapshot,
     pub player_groups: Vec<RuntimeJoinPlayerGroupTarget>,
+}
+
+impl RuntimeJoinRestorePlan {
+    /// Reject the impossible exact-save state where `SavePlayerInfos.txt`
+    /// would retain a joined row without the corresponding `Game.txt`
+    /// `Player<ID>` section.
+    pub fn validate_for_live_save(
+        &self,
+        policy: LiveC4SavePolicy<'_>,
+        live_player_info_ids: impl IntoIterator<Item = i32>,
+    ) -> Result<()> {
+        if !policy.is_exact() {
+            return Ok(());
+        }
+        let live_player_info_ids = live_player_info_ids.into_iter().collect::<HashSet<_>>();
+        let missing = self
+            .restore_infos
+            .clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .map(|player| player.id)
+            .filter(|player| !live_player_info_ids.contains(player))
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "exact save has joined SavePlayerInfos IDs without matching Game.txt Player<ID> sections: {}",
+            missing
+                .into_iter()
+                .map(|player| player.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Ok(())
+    }
 }
 
 /// One already-serialized small `.c4p` child selected by the restore plan.
@@ -605,6 +640,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 6]
         );
+    }
+
+    #[test]
+    fn restore_plan_rejects_a_joined_player_without_a_runtime_section() {
+        // SetAsRestoreInfos keeps only IsJoined rows, while exact Game.txt
+        // serialization emits one Player<ID> section per live C4Player
+        // (src/C4PlayerInfo.cpp:1637-1665; src/C4Game.cpp:1987-1994).
+        let plan = set_as_runtime_join_restore_infos(
+            &[client_core(1, b"One")],
+            &snapshot(vec![ClientPlayerInfosSnapshot {
+                client_id: 1,
+                flags: 0,
+                players: vec![player(
+                    3,
+                    PLAYER_INFO_TYPE_USER,
+                    PLAYER_INFO_FLAG_JOINED,
+                    b"Three.c4p",
+                )],
+            }]),
+        );
+
+        let error = plan
+            .validate_for_live_save(clonk_engine::LiveC4SavePolicy::RuntimeNetwork, [1, 2])
+            .expect_err("joined player 3 has no matching runtime section");
+
+        assert_eq!(
+            error.to_string(),
+            "exact save has joined SavePlayerInfos IDs without matching Game.txt Player<ID> sections: 3"
+        );
+    }
+
+    #[test]
+    fn nonexact_scenario_restore_plan_needs_no_runtime_player_section() {
+        // C4GameSaveScenario saves script-player restore rows but does not
+        // save exact runtime Player<ID> sections (src/C4GameSave.h:117-131).
+        let plan = set_as_live_save_restore_infos(
+            &[],
+            &snapshot(vec![ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![player(
+                    3,
+                    PLAYER_INFO_TYPE_SCRIPT,
+                    PLAYER_INFO_FLAG_JOINED,
+                    b"Script.c4p",
+                )],
+            }]),
+            false,
+            clonk_engine::LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            }
+            .player_policy(),
+        );
+
+        plan.validate_for_live_save(
+            clonk_engine::LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            },
+            [],
+        )
+        .expect("nonexact scenarios intentionally omit runtime player sections");
     }
 
     #[test]

@@ -252,6 +252,24 @@ impl GameApp {
             .active_scenario
             .clone()
             .ok_or_else(|| anyhow!("active scenario metadata is unavailable"))?;
+        let validation_policy = match kind {
+            ConsoleSaveKind::Scenario => clonk_engine::LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            },
+            ConsoleSaveKind::Savegame => clonk_engine::LiveC4SavePolicy::Savegame {
+                target_group_name: "",
+            },
+        };
+        let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+            &self.control_clients.snapshot(),
+            &self.recording_player_info_snapshot(),
+            self.network.is_some(),
+            validation_policy.player_policy(),
+        );
+        restore_plan.validate_for_live_save(
+            validation_policy,
+            self.engine.players().map(|player| player.player_info_id()),
+        )?;
         let mut source_path = if retarget_active_scenario {
             active.path.clone()
         } else {
@@ -571,14 +589,6 @@ impl GameApp {
                 &mut folder_save_journal,
             )?;
 
-            let clients = self.control_clients.snapshot();
-            let player_infos = self.recording_player_info_snapshot();
-            let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
-                &clients,
-                &player_infos,
-                self.network.is_some(),
-                policy.player_policy(),
-            );
             // C4PlayerInfoList::Save deletes the old entry before compiling.
             group.remove_entry("SavePlayerInfos.txt");
             folder_save_journal.delete_entry("SavePlayerInfos.txt");
@@ -1041,16 +1051,19 @@ impl GameApp {
             .active_scenario
             .clone()
             .unwrap_or_else(FrontendScenario::fallback);
-        let savegame_player_policy = clonk_engine::LiveC4SavePolicy::Savegame {
+        let savegame_policy = clonk_engine::LiveC4SavePolicy::Savegame {
             target_group_name: "",
-        }
-        .player_policy();
+        };
         let source_restore_plan = runtime_join_save::set_as_live_save_restore_infos(
             &self.control_clients.snapshot(),
             &self.recording_player_info_snapshot(),
             self.network.is_some(),
-            savegame_player_policy,
+            savegame_policy.player_policy(),
         );
+        source_restore_plan.validate_for_live_save(
+            savegame_policy,
+            self.engine.players().map(|player| player.player_info_id()),
+        )?;
         let source_save_player_infos =
             Some(if source_restore_plan.restore_infos.clients.is_empty() {
                 Vec::new()
