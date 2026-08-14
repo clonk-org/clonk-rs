@@ -4950,8 +4950,15 @@ impl GameApp {
         self.script_created_objects = false;
         self.full_speed = false;
         self.frame_skip = 1;
-        self.control_clients =
-            initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
+        if session == NetworkSessionTeardown::Clear {
+            self.control_clients =
+                initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
+        } else {
+            // The retained manager still owns exactly these connections. A
+            // local-only rebuild would keep their sockets while erasing the
+            // peers from both sides of the lobby they are returning to.
+            self.control_clients.clear_nonhost_lobby_ready();
+        }
         self.network_client_activity.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.local_player_profile_paths.clear();

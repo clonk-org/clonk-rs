@@ -11048,6 +11048,15 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
         app.network_lobby.is_some(),
         "the client lands in the lobby rather than the game list"
     );
+    assert!(
+        app.network_lobby
+            .test_ref()
+            .controller
+            .rows()
+            .iter()
+            .any(|row| row.id() == LobbyRosterId::Client(0)),
+        "the connected host must remain in the restarted lobby roster"
+    );
 }
 
 #[test]
