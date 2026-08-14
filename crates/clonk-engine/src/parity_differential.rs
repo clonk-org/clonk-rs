@@ -7,7 +7,8 @@
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
-//! `src/C4SolidMaskBitmap.h`, plus complete `FnEval`, DirectExec's temporary
+//! `src/C4SolidMaskBitmap.h`, mechanically extracted DFA_PUSH/DFA_PULL/DFA_FIGHT
+//! direction blocks from `src/C4Object.cpp`, plus complete `FnEval`, DirectExec's temporary
 //! context setup, `C4Effect::Execute`, C4AulScriptFunc's engine-call
 //! forwarding and script-context setup, `FnGetX`/`FnGetY`,
 //! `C4Object::DigOutMaterialCast`,
@@ -46,7 +47,7 @@ use crate::{
     DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
     EffectVarValue, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo,
     PhysicsSettings, PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING,
-    CATEGORY_OBJECT, OWNER_NONE,
+    CATEGORY_OBJECT, CATEGORY_VEHICLE, OWNER_NONE,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -293,6 +294,123 @@ fn action_direction_engine() -> (Engine, crate::ObjectId) {
         )
         .expect("oracle fixture spawns");
     (engine, id)
+}
+
+fn action_push_pull_fight_direction_engine(case: &Value) -> (Engine, crate::ObjectId) {
+    let name = case["name"]
+        .as_str()
+        .expect("procedure-direction case has a name");
+    let (action_name, procedure, walk) = match name {
+        "push_positive_subpixel" => ("Push", "PUSH", 1),
+        "pull_positive_subpixel" => ("Pull", "PULL", 1),
+        "fight_target_right_negative_velocity" | "fight_equal_x_negative_velocity" => {
+            ("Fight", "FIGHT", 35_000)
+        }
+        other => panic!("unknown procedure-direction case `{other}`"),
+    };
+    let actor_script = r#"#strict
+local turn_starts, turn_start_dir;
+protected func TurnStart()
+{
+    turn_starts = turn_starts + 1;
+    turn_start_dir = GetDir();
+    return true;
+}
+"#;
+    let mut actor = Definition::from_script("ACTR", "Actor", actor_script)
+        .expect("procedure-direction actor compiles");
+    actor.set_c4_callback_convention(true);
+    actor.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+    actor.set_physical(PhysicalInfo {
+        walk,
+        push: 100_000,
+        ..PhysicalInfo::default()
+    });
+    actor.configure_actions(
+        Some(action_name.to_string()),
+        HashMap::from([
+            (
+                action_name.to_string(),
+                ActionSpec::default()
+                    .with_procedure(procedure)
+                    .with_directions(2)
+                    .with_flip_dir(1)
+                    .with_turn_action("Turn"),
+            ),
+            (
+                "Turn".to_string(),
+                ActionSpec::default()
+                    .with_directions(2)
+                    .with_flip_dir(1)
+                    .with_start_call("TurnStart"),
+            ),
+        ]),
+    );
+
+    let mut target = Definition::from_script("TRGT", "Target", "#strict\n")
+        .expect("procedure-direction target compiles");
+    target.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+    target.set_grab(1);
+    target.set_mass(200);
+    target.configure_actions(
+        Some("Fight".to_string()),
+        HashMap::from([(
+            "Fight".to_string(),
+            ActionSpec::default()
+                .with_procedure("FIGHT")
+                .with_directions(2),
+        )]),
+    );
+
+    let mut engine = Engine::with_seed(0);
+    engine.set_physics(PhysicsSettings::new(0, 20, -20));
+    engine
+        .register_definition(actor)
+        .expect("procedure-direction actor registers");
+    engine
+        .register_definition(target)
+        .expect("procedure-direction target registers");
+    let target_id = engine
+        .spawn_object(
+            SpawnConfig::new("TRGT")
+                .with_category(if procedure == "FIGHT" {
+                    CATEGORY_OBJECT
+                } else {
+                    CATEGORY_VEHICLE
+                })
+                .with_position(crate::Vector2::new(i(case, "target_x") as i32, 0))
+                .with_action(ActionState::new("Fight")),
+        )
+        .expect("procedure-direction target spawns");
+    let mut action = ActionState::new(action_name);
+    action.target = Some(target_id);
+    let direction = match i(case, "initial_direction") {
+        0 => Direction::Left,
+        1 => Direction::Right,
+        other => panic!("invalid procedure-direction fixture direction {other}"),
+    };
+    let initial_xdir = if procedure == "FIGHT" {
+        C4Fixed::from_raw(i(case, "xdir_raw") as i32)
+    } else {
+        C4Fixed::ZERO
+    };
+    let actor_id = engine
+        .spawn_object(
+            SpawnConfig::new("ACTR")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(crate::Vector2::new(i(case, "actor_x") as i32, 0))
+                .with_action(action)
+                .with_direction(direction)
+                .with_command_direction(CommandDirection::Right)
+                .with_fixed_velocity(FixedVec2::new(initial_xdir, C4Fixed::ZERO))
+                .with_mobile(true),
+        )
+        .expect("procedure-direction actor spawns");
+    let actor_idx = engine
+        .find_object_index(actor_id)
+        .expect("procedure-direction actor exists");
+    engine.objects[actor_idx].state.draw_transform = None;
+    (engine, actor_id)
 }
 
 fn swim_action_direction_engine() -> (Engine, crate::ObjectId) {
@@ -3307,6 +3425,120 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             i(section, "fix_x_after_move"),
             i64::from(object.fixed_position.x.val()),
         );
+    }
+
+    // 12b. Exact DFA_PUSH/PULL raw-xdir direction blocks and DFA_FIGHT's
+    //      target-relative direction block (C4Object.cpp:5106-5108,
+    //      5189-5192,5241-5243). These run through the full Rust executor so
+    //      a later integer-velocity direction tail cannot mask the result.
+    let procedure_direction_cases = golden["action_push_pull_fight_direction"]
+        .as_array()
+        .expect("procedure-direction golden is an array");
+    let expected_procedure_direction_names = [
+        "push_positive_subpixel",
+        "pull_positive_subpixel",
+        "fight_target_right_negative_velocity",
+        "fight_equal_x_negative_velocity",
+    ];
+    assert_eq!(
+        procedure_direction_cases.len(),
+        expected_procedure_direction_names.len(),
+        "procedure-direction golden must retain the complete extracted matrix"
+    );
+    for (case, expected_name) in procedure_direction_cases
+        .iter()
+        .zip(expected_procedure_direction_names)
+    {
+        assert_eq!(
+            case["name"].as_str(),
+            Some(expected_name),
+            "procedure-direction golden row order/name drifted"
+        );
+    }
+    for (idx, case) in procedure_direction_cases.iter().enumerate() {
+        let name = case["name"]
+            .as_str()
+            .expect("procedure-direction case has a name");
+        let (mut engine, actor_id) = action_push_pull_fight_direction_engine(case);
+        let actor_idx = engine
+            .find_object_index(actor_id)
+            .expect("procedure-direction actor exists");
+        let returned_early = engine
+            .apply_physics_at_index(actor_idx)
+            .expect("procedure-direction physics applies");
+        assert!(
+            !returned_early,
+            "procedure-direction case `{name}` must reach the native phase tail"
+        );
+        let actor_idx = engine
+            .find_object_index(actor_id)
+            .expect("procedure-direction actor survives");
+        let actor = &engine.objects[actor_idx];
+        let turn_starts = match actor.state.local_vars.get("turn_starts") {
+            Some(ScriptValue::Int(count)) => i64::from(*count),
+            _ => 0,
+        };
+        let turn_start_dir = match actor.state.local_vars.get("turn_start_dir") {
+            Some(ScriptValue::Int(direction)) => i64::from(*direction),
+            _ => -1,
+        };
+        let action_is_turn = i64::from(actor.state.action.name == "Turn");
+        // FlipDir=1 plus the deliberately cleared transform is controlled
+        // instrumentation for zero-versus-one SetDir calls. The golden field
+        // itself remains the C++ scaffold's explicit call count.
+        let set_dir_call_probe = i64::from(actor.state.draw_transform.is_some());
+
+        expect_eq(
+            "action_push_pull_fight_direction",
+            idx,
+            "set_dir_calls",
+            i(case, "set_dir_calls"),
+            set_dir_call_probe,
+        );
+        expect_eq(
+            "action_push_pull_fight_direction",
+            idx,
+            "runs_turn_action",
+            i(case, "runs_turn_action"),
+            action_is_turn,
+        );
+        expect_eq(
+            "action_push_pull_fight_direction",
+            idx,
+            "turn_starts",
+            i(case, "runs_turn_action"),
+            turn_starts,
+        );
+        expect_eq(
+            "action_push_pull_fight_direction",
+            idx,
+            "turn_start_dir",
+            i(case, "turn_start_dir"),
+            turn_start_dir,
+        );
+        expect_eq(
+            "action_push_pull_fight_direction",
+            idx,
+            "direction",
+            i(case, "direction"),
+            i64::from(actor.state.direction.to_script_value()),
+        );
+        if matches!(name, "push_positive_subpixel" | "pull_positive_subpixel") {
+            expect_eq(
+                "action_push_pull_fight_direction",
+                idx,
+                "xdir_raw",
+                i(case, "xdir_raw"),
+                i64::from(actor.fixed_velocity.x.val()),
+            );
+            expect_eq(
+                "action_push_pull_fight_direction",
+                idx,
+                "xdir_pixel",
+                i(case, "xdir_pixel"),
+                i64::from(actor.state.velocity.x),
+            );
+        }
     }
 
     // 13. C4Object::ExecAction DFA_SWIM + SetDir ordering

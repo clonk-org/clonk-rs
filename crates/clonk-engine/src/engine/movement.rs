@@ -1101,13 +1101,14 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn apply_physics_at_index(&mut self, idx: usize) -> Result<bool, EngineError> {
-        self.apply_physics_at_index_inner(idx, None)
+        self.apply_physics_at_index_inner(idx, None, None)
     }
 
     pub(crate) fn apply_physics_at_index_inner(
         &mut self,
         mut idx: usize,
         captured_physical: Option<&mut Option<PhysicalInfo>>,
+        mut captured_phase_advance: Option<&mut Option<i32>>,
     ) -> Result<bool, EngineError> {
         if idx >= self.objects.len() {
             return Ok(false);
@@ -1390,6 +1391,7 @@ impl Engine {
             return Ok(true);
         }
 
+        let mut procedure_phase_advance = None;
         let mut push_handled = false;
         if matches!(procedure, ActionProcedure::Push) {
             if !self.apply_push_procedure(
@@ -1398,6 +1400,7 @@ impl Engine {
                 movement_profile,
                 &definition_id,
                 physical,
+                &mut procedure_phase_advance,
             )? {
                 return Ok(true);
             }
@@ -1412,10 +1415,14 @@ impl Engine {
                 movement_profile,
                 &definition_id,
                 physical,
+                &mut procedure_phase_advance,
             )? {
                 return Ok(true);
             }
             pull_handled = true;
+        }
+        if let Some(slot) = captured_phase_advance.as_mut() {
+            **slot = procedure_phase_advance;
         }
 
         // DFA_LIFT applies the target force and all target callbacks before
@@ -1468,10 +1475,6 @@ impl Engine {
         }
 
         let mut exec_set_direction = None;
-        // C4Object::SetDir refreshes the FlipDir mirror in place
-        // (C4Object.cpp:4276-4279); the arms below face inside a live
-        // `&mut` borrow, so resolve the ActMap FlipDir up front.
-        let exec_flip_dir = self.object_action_flip_dir(idx);
         {
             // At-limit physical training before the ComDir movement: Scale
             // Tick5 (C4Object.cpp:4810-4812), Hangle Tick5 (:4844-4846),
@@ -1866,33 +1869,6 @@ impl Engine {
                         _ => None,
                     };
                     object.state.mobile = true;
-                }
-                ActionProcedure::Push => {
-                    if object.state.velocity.x < 0 {
-                        object.state.write_direction(Direction::Left, exec_flip_dir);
-                    } else if object.state.velocity.x > 0 {
-                        object
-                            .state
-                            .write_direction(Direction::Right, exec_flip_dir);
-                    }
-                }
-                ActionProcedure::Pull => {
-                    if object.state.velocity.x < 0 {
-                        object.state.write_direction(Direction::Left, exec_flip_dir);
-                    } else if object.state.velocity.x > 0 {
-                        object
-                            .state
-                            .write_direction(Direction::Right, exec_flip_dir);
-                    }
-                }
-                ActionProcedure::Fight => {
-                    if object.state.velocity.x < 0 {
-                        object.state.write_direction(Direction::Left, exec_flip_dir);
-                    } else if object.state.velocity.x > 0 {
-                        object
-                            .state
-                            .write_direction(Direction::Right, exec_flip_dir);
-                    }
                 }
                 _ => {}
             }

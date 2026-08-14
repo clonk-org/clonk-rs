@@ -4156,12 +4156,29 @@ fn failed_push_stands_in_walk_and_adds_cpp_delay_command() {
     );
 }
 
-fn push_containment_engine(with_physical: bool) -> Engine {
-    let mut pusher = test_definition("PCPS", "Containment pusher", "");
+fn push_containment_engine(with_physical: bool, with_actor_turn: bool) -> Engine {
+    let pusher_script = with_actor_turn.then_some(
+        r#"#strict
+local turn_starts, turn_start_dir, turn_sets_xdir;
+protected func TurnStart()
+{
+    turn_starts = turn_starts + 1;
+    turn_start_dir = GetDir();
+    if (turn_sets_xdir) SetXDir(100, this(), 100);
+    return true;
+}
+"#,
+    );
+    let mut pusher = test_definition(
+        "PCPS",
+        "Containment pusher",
+        pusher_script.unwrap_or_default(),
+    );
+    pusher.set_c4_callback_convention(with_actor_turn);
     pusher.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
     if with_physical {
         pusher.set_physical(PhysicalInfo {
-            walk: 35_000,
+            walk: if with_actor_turn { 100 } else { 35_000 },
             push: 45_000,
             ..PhysicalInfo::default()
         });
@@ -4172,20 +4189,33 @@ fn push_containment_engine(with_physical: bool) -> Engine {
                 .with_walk_acceleration(3),
         );
     }
-    pusher.configure_actions(
-        Some("Idle".to_string()),
-        HashMap::from([
-            ("Idle".to_string(), ActionSpec::default()),
-            (
-                "Walk".to_string(),
-                ActionSpec::default().with_procedure("WALK"),
-            ),
-            (
-                "Push".to_string(),
-                ActionSpec::default().with_procedure("PUSH"),
-            ),
-        ]),
-    );
+    let mut push_action = ActionSpec::default().with_procedure("PUSH");
+    if with_actor_turn {
+        push_action = push_action
+            .with_directions(2)
+            .with_turn_action("Turn")
+            .with_delay(1)
+            .with_length(200);
+    }
+    let mut pusher_actions = HashMap::from([
+        ("Idle".to_string(), ActionSpec::default()),
+        (
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("WALK"),
+        ),
+        ("Push".to_string(), push_action),
+    ]);
+    if with_actor_turn {
+        pusher_actions.insert(
+            "Turn".to_string(),
+            ActionSpec::default()
+                .with_directions(2)
+                .with_delay(1)
+                .with_length(200)
+                .with_start_call("TurnStart"),
+        );
+    }
+    pusher.configure_actions(Some("Idle".to_string()), pusher_actions);
 
     let mut target = test_definition("PCTG", "Containment target", "");
     target.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
@@ -4265,11 +4295,91 @@ protected func TurnStart()
 }
 
 #[test]
+fn push_faces_from_a_positive_subpixel_xdir() {
+    // DFA_PUSH tests the raw C4Fixed xdir before SetDir, which runs the
+    // TurnAction while the old direction is still live even when the
+    // whole-pixel velocity mirror is zero (C4Object.cpp:5103-5108).
+    let mut engine = push_containment_engine(false, true);
+    let (pusher_id, _) = spawn_push_direction_case(&mut engine, "Idle");
+    let pusher_idx = engine.test_object_index(pusher_id);
+    engine.objects[pusher_idx]
+        .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(-196_607), C4Fixed::ZERO));
+    engine.objects[pusher_idx].state.mobile = true;
+
+    let _ = engine.apply_physics_at_index(pusher_idx).test_value();
+
+    let pusher = &engine.objects[pusher_idx];
+    assert_eq!(pusher.fixed_velocity.x, C4Fixed::from_raw(1));
+    assert_eq!(pusher.state.velocity.x, 0);
+    assert_eq!(pusher.state.action.name, "Turn");
+    assert_eq!(pusher.state.direction, Direction::Right);
+    assert_eq!(
+        pusher.state.local_vars.get("turn_starts"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        pusher.state.local_vars.get("turn_start_dir"),
+        Some(&Value::Int(0)),
+        "TurnAction Start observes the old direction"
+    );
+}
+
+#[test]
+fn physical_push_runs_turn_action_for_a_positive_subpixel_xdir() {
+    // Native DFA_PUSH writes the raw follow xdir before SetDir. With this
+    // tiny Walk physical the result is raw +183 but still mirrors to zero;
+    // SetDir nevertheless runs TurnAction exactly once
+    // (C4Object.cpp:5103-5108).
+    let mut engine = push_containment_engine(true, true);
+    let (pusher_id, _) = spawn_push_direction_case(&mut engine, "Idle");
+    let pusher_idx = engine.test_object_index(pusher_id);
+
+    let _ = engine.apply_physics_at_index(pusher_idx).test_value();
+
+    let pusher = &engine.objects[pusher_idx];
+    assert_eq!(pusher.fixed_velocity.x, C4Fixed::from_raw(183));
+    assert_eq!(pusher.state.velocity.x, 0);
+    assert_eq!(pusher.state.action.name, "Turn");
+    assert_eq!(pusher.state.direction, Direction::Right);
+    assert_eq!(
+        pusher.state.local_vars.get("turn_starts"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        pusher.state.local_vars.get("turn_start_dir"),
+        Some(&Value::Int(0)),
+        "TurnAction Start observes the old direction"
+    );
+}
+
+#[test]
+fn push_latches_phase_advance_before_turn_action_mutates_xdir() {
+    // DFA_PUSH assigns iPhaseAdvance from the raw follow xdir immediately
+    // before SetDir. TurnAction may change live xdir, but the old phase value
+    // remains latched for the tail of ExecAction (C4Object.cpp:5106-5108).
+    let mut engine = push_containment_engine(true, true);
+    let (pusher_id, _) = spawn_push_direction_case(&mut engine, "Idle");
+    let pusher_idx = engine.test_object_index(pusher_id);
+    engine.objects[pusher_idx]
+        .state
+        .local_vars
+        .insert("turn_sets_xdir".to_string(), Value::Int(1));
+
+    let _ = engine.test_tick();
+
+    let pusher_idx = engine.test_object_index(pusher_id);
+    let pusher = &engine.objects[pusher_idx];
+    assert_eq!(pusher.fixed_velocity.x, itofix(1));
+    assert_eq!(pusher.state.action.name, "Turn");
+    assert_eq!(pusher.state.action.phase, 0);
+}
+
+#[test]
 fn push_keeps_an_idle_targets_direction() {
     // C4Object::Push calls SetDir from the target's pre-force raw xdir,
     // but SetDir rejects ActIdle. The positive xdir still receives the
     // push force; only Action.Dir remains Left/zero.
-    let mut engine = push_containment_engine(true);
+    let mut engine = push_containment_engine(true, false);
     let (pusher_id, target_id) = spawn_push_direction_case(&mut engine, "Idle");
     let pusher_idx = engine.test_object_index(pusher_id);
 
@@ -4291,7 +4401,7 @@ fn push_runs_an_active_targets_turn_action_once() {
     // SetDir validates Drive's two directions, runs TurnAction before
     // assigning the new direction, then Push continues from the live
     // post-callback velocity.
-    let mut engine = push_containment_engine(true);
+    let mut engine = push_containment_engine(true, false);
     let (pusher_id, target_id) = spawn_push_direction_case(&mut engine, "Drive");
     let pusher_idx = engine.test_object_index(pusher_id);
 
@@ -4335,7 +4445,7 @@ fn push_inside_action_target_stops_before_force_and_controller_transfer() {
     // Action.Target, before calculating or applying any force
     // (C4Object.cpp:5058-5063). StopActionDelayCommand must leave the
     // existing stack below its pristine SilentSub Wait(50).
-    let mut engine = push_containment_engine(true);
+    let mut engine = push_containment_engine(true, false);
     let target_id = engine.spawn_test_object(
         SpawnConfig::new("PCTG")
             .with_category(CATEGORY_VEHICLE)
@@ -4403,7 +4513,7 @@ fn push_rejects_contained_target_on_zero_physical_fallback() {
     // C4Object::Push rejects every contained target before applying force
     // (C4Object.cpp:1785-1790). The zero-physical compatibility path does
     // not call push_object, so ExecAction must preserve that gate too.
-    let mut engine = push_containment_engine(false);
+    let mut engine = push_containment_engine(false, false);
     let pusher_id = engine.spawn_test_object(
         SpawnConfig::new("PCPS")
             .with_category(CATEGORY_OBJECT)
@@ -4447,7 +4557,7 @@ fn push_from_unrelated_container_still_applies_force_to_inactive_target() {
     // `Contained == Action.Target` is identity, not a generic contained
     // check. Being inside some other object must leave PUSH unchanged,
     // and C4Object::Push accepts every nonzero target Status.
-    let mut engine = push_containment_engine(true);
+    let mut engine = push_containment_engine(true, false);
     let unrelated_id = engine.spawn_test_object(
         SpawnConfig::new("PCTG")
             .with_category(CATEGORY_VEHICLE)
@@ -4500,7 +4610,10 @@ fn push_procedure_moves_target_and_pusher() {
     let mut pusher_definition = test_definition("Pusher", "Pusher", script);
     let mut pusher_actions = HashMap::new();
     pusher_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
-    pusher_actions.insert("Push".to_string(), ActionSpec::for_procedure("push"));
+    pusher_actions.insert(
+        "Push".to_string(),
+        ActionSpec::for_procedure("push").with_directions(2),
+    );
     pusher_definition.configure_actions(Some("Idle".to_string()), pusher_actions);
     pusher_definition.set_movement_profile(
         MovementProfile::default()
@@ -4884,7 +4997,10 @@ fn pull_procedure_moves_target_and_puller() {
     let mut puller_definition = test_definition("Puller", "Puller", script);
     let mut puller_actions = HashMap::new();
     puller_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
-    puller_actions.insert("Pull".to_string(), ActionSpec::for_procedure("pull"));
+    puller_actions.insert(
+        "Pull".to_string(),
+        ActionSpec::for_procedure("pull").with_directions(2),
+    );
     puller_definition.configure_actions(Some("Idle".to_string()), puller_actions);
     puller_definition.set_movement_profile(
         MovementProfile::default()
@@ -4959,6 +5075,163 @@ fn pull_procedure_moves_target_and_puller() {
     );
 }
 
+fn subpixel_pull_direction_case(with_physical: bool) -> (Engine, ObjectId) {
+    let actor_script = r#"#strict
+local turn_starts, turn_start_dir, turn_sets_xdir;
+protected func TurnStart()
+{
+    turn_starts = turn_starts + 1;
+    turn_start_dir = GetDir();
+    if (turn_sets_xdir) SetXDir(100, this(), 100);
+    return true;
+}
+"#;
+    let mut puller = test_definition("SPUL", "Subpixel puller", actor_script);
+    puller.set_c4_callback_convention(true);
+    puller.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+    if with_physical {
+        puller.set_physical(PhysicalInfo {
+            walk: 100,
+            push: 45_000,
+            ..PhysicalInfo::default()
+        });
+    } else {
+        puller.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(6)
+                .with_walk_acceleration(3),
+        );
+    }
+    puller.configure_actions(
+        Some("Idle".to_string()),
+        HashMap::from([
+            ("Idle".to_string(), ActionSpec::default()),
+            (
+                "Pull".to_string(),
+                ActionSpec::default()
+                    .with_procedure("PULL")
+                    .with_directions(2)
+                    .with_turn_action("Turn")
+                    .with_delay(1)
+                    .with_length(200),
+            ),
+            (
+                "Turn".to_string(),
+                ActionSpec::default()
+                    .with_directions(2)
+                    .with_delay(1)
+                    .with_length(200)
+                    .with_start_call("TurnStart"),
+            ),
+        ]),
+    );
+
+    let mut target = test_definition("SPUT", "Subpixel pull target", "");
+    target.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+    target.set_grab(1);
+    target.set_mass(200);
+
+    let mut engine = Engine::with_seed(355);
+    engine.register_test_definition(puller);
+    engine.register_test_definition(target);
+    engine.set_physics(
+        PhysicsSettings::new(0, 20, -20)
+            .with_max_horizontal_speed(20)
+            .test_value(),
+    );
+    let target_id = engine.spawn_test_object(
+        SpawnConfig::new("SPUT")
+            .with_category(CATEGORY_VEHICLE)
+            .with_position(if with_physical {
+                Vector2::new(12, 0)
+            } else {
+                Vector2::ZERO
+            }),
+    );
+    let mut pull = ActionState::new("Pull");
+    pull.target = Some(target_id);
+    let puller_id = engine.spawn_test_object(
+        SpawnConfig::new("SPUL")
+            .with_category(CATEGORY_OBJECT)
+            .with_position(if with_physical {
+                Vector2::ZERO
+            } else {
+                Vector2::new(20, 0)
+            })
+            .with_action(pull)
+            .with_direction(Direction::Left)
+            .with_command_direction(CommandDirection::Right)
+            .with_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(-196_607), C4Fixed::ZERO))
+            .with_mobile(true),
+    );
+    (engine, puller_id)
+}
+
+fn assert_subpixel_puller_turned(engine: &Engine, puller_id: ObjectId, expected_xdir: i32) {
+    let puller_idx = engine.test_object_index(puller_id);
+    let puller = &engine.objects[puller_idx];
+    assert_eq!(puller.fixed_velocity.x, C4Fixed::from_raw(expected_xdir));
+    assert_eq!(puller.state.velocity.x, 0);
+    assert_eq!(puller.state.action.name, "Turn");
+    assert_eq!(puller.state.direction, Direction::Right);
+    assert_eq!(
+        puller.state.local_vars.get("turn_starts"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        puller.state.local_vars.get("turn_start_dir"),
+        Some(&Value::Int(0)),
+        "TurnAction Start observes the old direction"
+    );
+}
+
+#[test]
+fn pull_faces_from_a_positive_subpixel_xdir() {
+    // The zero-physical compatibility path still applies DFA_PULL's raw
+    // C4Fixed SetDir semantics instead of reading the rounded velocity mirror
+    // (C4Object.cpp:5186-5194).
+    let (mut engine, puller_id) = subpixel_pull_direction_case(false);
+    let puller_idx = engine.test_object_index(puller_id);
+
+    let _ = engine.apply_physics_at_index(puller_idx).test_value();
+
+    assert_subpixel_puller_turned(&engine, puller_id, 1);
+}
+
+#[test]
+fn physical_pull_runs_turn_action_for_a_positive_subpixel_xdir() {
+    // Native DFA_PULL assigns raw +366 in this geometry, then SetDir runs
+    // TurnAction despite the whole-pixel velocity mirror remaining zero
+    // (C4Object.cpp:5186-5194).
+    let (mut engine, puller_id) = subpixel_pull_direction_case(true);
+    let puller_idx = engine.test_object_index(puller_id);
+
+    let _ = engine.apply_physics_at_index(puller_idx).test_value();
+
+    assert_subpixel_puller_turned(&engine, puller_id, 366);
+}
+
+#[test]
+fn pull_latches_phase_advance_before_turn_action_mutates_xdir() {
+    // DFA_PULL starts from a zero phase baseline and updates it from raw xdir
+    // immediately before SetDir. TurnAction's later xdir write does not change
+    // that latched value (C4Object.cpp:5189-5192).
+    let (mut engine, puller_id) = subpixel_pull_direction_case(true);
+    let puller_idx = engine.test_object_index(puller_id);
+    engine.objects[puller_idx]
+        .state
+        .local_vars
+        .insert("turn_sets_xdir".to_string(), Value::Int(1));
+
+    let _ = engine.test_tick();
+
+    let puller_idx = engine.test_object_index(puller_id);
+    let puller = &engine.objects[puller_idx];
+    assert_eq!(puller.fixed_velocity.x, itofix(1));
+    assert_eq!(puller.state.action.name, "Turn");
+    assert_eq!(puller.state.action.phase, 0);
+}
+
 fn fight_failure_engine() -> Engine {
     let mut fighter = test_definition("L73F", "Fighter", "#strict");
     fighter.set_category(CATEGORY_OBJECT);
@@ -4983,7 +5256,10 @@ fn fight_failure_engine() -> Engine {
             ),
             (
                 "Fight".to_string(),
-                ActionSpec::default().with_procedure("FIGHT"),
+                ActionSpec::default()
+                    .with_procedure("FIGHT")
+                    .with_directions(2)
+                    .with_flip_dir(1),
             ),
         ]),
     );
@@ -5274,6 +5550,46 @@ fn wide_vertex_fight_pair(separation: i32) -> (Engine, ObjectId, ObjectId) {
             .with_action(fight),
     );
     (engine, fighter, target)
+}
+
+#[test]
+fn fight_at_the_same_x_keeps_facing_despite_opposite_raw_velocity() {
+    // DFA_FIGHT calls SetDir zero times when the target's whole-pixel x is
+    // equal, then approaches using the retained facing. In particular, it
+    // must not synthesize a same-direction FlipDir update
+    // (C4Object.cpp:5241-5251).
+    let (mut engine, fighter, _) = wide_vertex_fight_pair(0);
+    let fighter_idx = engine.test_object_index(fighter);
+    engine.objects[fighter_idx].state.direction = Direction::Right;
+    engine.objects[fighter_idx].state.draw_transform = None;
+    engine.objects[fighter_idx]
+        .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(-61_790), C4Fixed::ZERO));
+
+    let _ = engine.apply_physics_at_index(fighter_idx).test_value();
+
+    let fighter = &engine.objects[fighter_idx];
+    assert_eq!(fighter.fixed_velocity.x, C4Fixed::from_raw(-40_000));
+    assert_eq!(fighter.state.direction, Direction::Right);
+    assert_eq!(fighter.state.draw_transform, None, "SetDir was not called");
+}
+
+#[test]
+fn fight_faces_its_target_instead_of_its_subpixel_xdir() {
+    // DFA_FIGHT chooses direction from the target's whole-pixel position,
+    // then approaches using that facing; xdir does not choose the direction
+    // (C4Object.cpp:5241-5251).
+    let (mut engine, fighter, _) = wide_vertex_fight_pair(-10);
+    let fighter_idx = engine.test_object_index(fighter);
+    engine.objects[fighter_idx].state.direction = Direction::Right;
+    engine.objects[fighter_idx]
+        .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(61_790), C4Fixed::ZERO));
+
+    let _ = engine.apply_physics_at_index(fighter_idx).test_value();
+
+    let fighter = &engine.objects[fighter_idx];
+    assert_eq!(fighter.fixed_velocity.x, C4Fixed::from_raw(40_000));
+    assert_eq!(fighter.state.velocity.x, 1);
+    assert_eq!(fighter.state.direction, Direction::Left);
 }
 
 #[test]
@@ -5640,7 +5956,10 @@ fn fight_procedure_moves_toward_target() {
     fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
     let mut fighter_actions = HashMap::new();
     fighter_actions.insert("Idle".to_string(), ActionSpec::for_procedure("walk"));
-    fighter_actions.insert("Fight".to_string(), ActionSpec::for_procedure("fight"));
+    fighter_actions.insert(
+        "Fight".to_string(),
+        ActionSpec::for_procedure("fight").with_directions(2),
+    );
     fighter_definition.configure_actions(Some("Idle".to_string()), fighter_actions);
     // DFA_FIGHT approaches with the Walk physical (C4Object.cpp:5225-5228),
     // not the movement profile. 35000 is the stock Clonk DefCore value.

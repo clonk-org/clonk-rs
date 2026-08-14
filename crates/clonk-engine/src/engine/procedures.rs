@@ -1548,6 +1548,7 @@ impl Engine {
         definition_id: &DefinitionId,
         direction: Direction,
     ) -> Result<(), EngineError> {
+        let object_id = self.objects[idx].id;
         let Some((current_direction, turn_action)) =
             self.definitions.get(definition_id).and_then(|definition| {
                 let library = definition.action_library();
@@ -1574,8 +1575,37 @@ impl Engine {
                 self.action_with_calls(idx, definition_id, &turn_action)?;
             }
         }
-        self.write_object_direction(idx, direction);
+        if let Some(idx) = self.find_object_index(object_id) {
+            self.write_object_direction(idx, direction);
+        }
         Ok(())
+    }
+
+    /// The two independent raw-xdir phase/`SetDir` tests shared by DFA_PUSH
+    /// and DFA_PULL (C4Object.cpp:5103-5108,5186-5194). Each branch latches
+    /// phase advance before its TurnAction callback; a callback may mutate
+    /// xdir, the action, or the definition, so the positive test then uses the
+    /// live object and may replace that latch.
+    fn set_exec_direction_from_xdir_live(
+        &mut self,
+        object_id: ObjectId,
+        mut phase_advance: i32,
+    ) -> Result<(Option<usize>, i32), EngineError> {
+        if let Some(idx) = self.find_object_index(object_id) {
+            if self.objects[idx].fixed_velocity.x < C4Fixed::ZERO {
+                phase_advance = -math::fixtoi(self.objects[idx].fixed_velocity.x * 10);
+                let definition_id = self.objects[idx].definition_id.clone();
+                self.set_exec_action_direction(idx, &definition_id, Direction::Left)?;
+            }
+        }
+        if let Some(idx) = self.find_object_index(object_id) {
+            if self.objects[idx].fixed_velocity.x > C4Fixed::ZERO {
+                phase_advance = math::fixtoi(self.objects[idx].fixed_velocity.x * 10);
+                let definition_id = self.objects[idx].definition_id.clone();
+                self.set_exec_action_direction(idx, &definition_id, Direction::Right)?;
+            }
+        }
+        Ok((self.find_object_index(object_id), phase_advance))
     }
 
     /// Exact `C4Object::SetDir` gate for direct command/native paths
@@ -2817,6 +2847,7 @@ impl Engine {
         command_direction: CommandDirection,
         _definition_id: &DefinitionId,
         physical: PhysicalInfo,
+        phase_advance: &mut Option<i32>,
     ) -> Result<bool, EngineError> {
         let puller_id = self.objects[idx].id;
         let position = self.objects[idx].state.position;
@@ -2915,15 +2946,13 @@ impl Engine {
         // grounded.
         let xdir = movement + walk * (target_x - position.x).clamp(-10, 10) / 10;
         let physics = self.physics;
-        let flip_dir = self.object_action_flip_dir(idx);
+        self.objects[idx].fixed_velocity.x = xdir;
+        let (live_idx, advance) = self.set_exec_direction_from_xdir_live(puller_id, 0)?;
+        *phase_advance = Some(advance);
+        let Some(idx) = live_idx else {
+            return Ok(false);
+        };
         let object = &mut self.objects[idx];
-        object.fixed_velocity.x = xdir;
-        if xdir < C4Fixed::ZERO {
-            object.state.write_direction(Direction::Left, flip_dir);
-        }
-        if xdir > C4Fixed::ZERO {
-            object.state.write_direction(Direction::Right, flip_dir);
-        }
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
         object.refresh_velocity_from_fixed();
@@ -2937,6 +2966,7 @@ impl Engine {
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
         physical: PhysicalInfo,
+        phase_advance: &mut Option<i32>,
     ) -> Result<bool, EngineError> {
         let puller_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
@@ -2981,6 +3011,7 @@ impl Engine {
                 command_direction,
                 definition_id,
                 physical,
+                phase_advance,
             );
         }
 
@@ -3082,6 +3113,9 @@ impl Engine {
             }
         }
 
+        let (_, advance) = self.set_exec_direction_from_xdir_live(puller_id, 0)?;
+        *phase_advance = Some(advance);
+
         Ok(true)
     }
 
@@ -3140,25 +3174,47 @@ impl Engine {
 
         let fighter_position = self.objects[idx].state.position;
         let target_position = self.objects[target_idx].state.position;
-        let initial_direction = self.objects[idx].state.direction;
 
         // Physical training (C4Object.cpp:5214-5216): Tick5 trains Fight.
         if self.frame.is_multiple_of(5) {
             self.train_physical(idx, "Fight", 1, C4_MAX_PHYSICAL);
         }
 
-        // Direction (C4Object.cpp:5218-5220): face the target; equal x keeps
-        // the previous facing.
-        let direction = if target_position.x > fighter_position.x {
-            Direction::Right
-        } else if target_position.x < fighter_position.x {
-            Direction::Left
-        } else {
-            initial_direction
+        // Direction (C4Object.cpp:5241-5243): these are independent tests,
+        // not an assignment from velocity. Equal x calls SetDir zero times;
+        // after a right-facing TurnAction, the left test reads the live actor
+        // and Action.Target again.
+        if target_position.x > fighter_position.x {
+            let definition_id = self.objects[idx].definition_id.clone();
+            self.set_exec_action_direction(idx, &definition_id, Direction::Right)?;
+        }
+        let Some(idx) = self.find_object_index(fighter_id) else {
+            return Ok(false);
         };
-        self.write_object_direction(idx, direction);
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            return Ok(false);
+        };
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
+        if self.objects[target_idx].state.position.x < self.objects[idx].state.position.x {
+            let definition_id = self.objects[idx].definition_id.clone();
+            self.set_exec_action_direction(idx, &definition_id, Direction::Left)?;
+        }
+        let Some(idx) = self.find_object_index(fighter_id) else {
+            return Ok(false);
+        };
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            return Ok(false);
+        };
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
+        let fighter_position = self.objects[idx].state.position;
+        let target_position = self.objects[target_idx].state.position;
+        let direction = self.objects[idx].state.direction;
 
-        // Position (C4Object.cpp:5221-5228): stand beside the target at half
+        // Position (C4Object.cpp:5244-5251): stand beside the target at half
         // its shape width + 2, approach with the Walk physical:
         // lLimit = ValByPhysical(95, Walk), Towards(xdir, ±lLimit, lLimit).
         let target_half_width = self.objects[target_idx]
@@ -3486,6 +3542,7 @@ impl Engine {
         command_direction: CommandDirection,
         definition_id: &DefinitionId,
         physical: PhysicalInfo,
+        phase_advance: &mut Option<i32>,
     ) -> Result<bool, EngineError> {
         let limit = math::val_by_physical(280, physical.walk);
         // ComDir → target speed and straightening (C4Object.cpp:5049-5057).
@@ -3548,8 +3605,6 @@ impl Engine {
             .max(sax - push_distance)
             .min(sax + sawdt - 1 + push_distance);
         let physics = self.physics;
-        let flip_dir = self.object_action_flip_dir(idx);
-        let object = &mut self.objects[idx];
         let mut xdir = C4Fixed::ZERO;
         if position.x < target_x {
             xdir = limit;
@@ -3557,14 +3612,15 @@ impl Engine {
         if position.x > target_x {
             xdir = -limit;
         }
-        object.fixed_velocity.x = xdir;
-        // SetDir by xdir (C4Object.cpp:5089-5090), grounded (5092).
-        if xdir < C4Fixed::ZERO {
-            object.state.write_direction(Direction::Left, flip_dir);
-        }
-        if xdir > C4Fixed::ZERO {
-            object.state.write_direction(Direction::Right, flip_dir);
-        }
+        self.objects[idx].fixed_velocity.x = xdir;
+        // SetDir by raw xdir (C4Object.cpp:5103-5108), grounded (5110).
+        let pusher_id = self.objects[idx].id;
+        let (live_idx, advance) = self.set_exec_direction_from_xdir_live(pusher_id, 1)?;
+        *phase_advance = Some(advance);
+        let Some(idx) = live_idx else {
+            return Ok(false);
+        };
+        let object = &mut self.objects[idx];
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
         object.refresh_velocity_from_fixed();
@@ -3607,7 +3663,9 @@ impl Engine {
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
         physical: PhysicalInfo,
+        phase_advance: &mut Option<i32>,
     ) -> Result<bool, EngineError> {
+        let pusher_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
             self.stop_action_delay_command(idx, definition_id)?;
             return Ok(false);
@@ -3642,6 +3700,7 @@ impl Engine {
                 command_direction,
                 definition_id,
                 physical,
+                phase_advance,
             );
         }
 
@@ -3690,6 +3749,9 @@ impl Engine {
                 physics,
             );
         }
+
+        let (_, advance) = self.set_exec_direction_from_xdir_live(pusher_id, 1)?;
+        *phase_advance = Some(advance);
 
         Ok(true)
     }

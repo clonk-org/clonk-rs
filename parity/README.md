@@ -35,6 +35,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `landscape_path` | `src/C4LandscapePath.h`, called by `src/C4Landscape.cpp:890-915` | 17×15 PixCnt traversal and authoritative pixel-plane occupancy at cell edges |
 | `action_direction` | `src/C4ActionDirection.h`, called by `C4Object::ExecAction`/`SetDir` | raw-C4Fixed facing, TurnAction fixed-position resync, and stale pre-transition phase ordering |
 | `action_swim_direction` | `src/C4ActionDirection.h`, called by DFA_SWIM/`SetDir` | SwimAccel facing changes, TurnAction two-axis fixed-position resync, and stale Swim phase ordering |
+| `action_push_pull_fight_direction` | mechanically extracted `C4Object.cpp` DFA_PUSH/DFA_PULL/DFA_FIGHT direction blocks | raw sub-pixel Push/Pull facing, target-relative Fight facing, TurnAction dispatch, and zero `SetDir` calls at equal x |
 | `action_callbacks` | `src/C4ActionCallbacks.h`, called by `C4Object::SetAction` | synchronous callback count and Start-before-End/Abort ordering |
 | `connect_missing_target_removal` | mechanically extracted `C4Object.cpp` DFA_CONNECT missing-target branch | `LineBreak(true)` before `AssignRemoval`/`Destruction`, with final deleted status |
 | `connect_geometry_break_removal` | mechanically extracted `C4Shape::LineConnect` vertex guard + later DFA_CONNECT break branch | zero-argument `LineBreak()` before the same removal lifecycle |
@@ -142,6 +143,11 @@ live shadow-diff — see "Phase 2" below.
   Swim/Turn ActMap frame and compares raw velocity/position plus action, facing,
   phase, and time; the decisive fixed-y snap is observable only when internal
   DFA_SWIM facing goes through `SetDir`.
+- `action_push_pull_fight_direction` compiles the exact production direction
+  branches mechanically lifted from DFA_PUSH, DFA_PULL, and DFA_FIGHT. Rust
+  drives the corresponding real procedures through `Engine::apply_physics_at_index`
+  and compares raw sub-pixel velocity, whole-pixel mirrors, facing, TurnAction
+  dispatch, and the equal-x Fight case where C++ makes no `SetDir` call.
 - `action_callbacks` calls the production `C4ActionCallbacks.h` dispatcher
   used by `C4Object::SetAction`. Its Start-only case is the minimized Goldrush
   frame-192 WIPF double-`Sitting` divergence; real Rust script fixtures also

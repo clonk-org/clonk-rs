@@ -814,8 +814,12 @@ impl Engine {
             let (exec_action_definition_id, exec_action_library) =
                 self.object_definition_context(idx)?;
             let mut exec_action_physical = None;
-            let exec_action_returned_early =
-                self.apply_physics_at_index_inner(idx, Some(&mut exec_action_physical))?;
+            let mut exec_action_phase_advance = None;
+            let exec_action_returned_early = self.apply_physics_at_index_inner(
+                idx,
+                Some(&mut exec_action_physical),
+                Some(&mut exec_action_phase_advance),
+            )?;
             if self.objects[idx].destroyed {
                 continue;
             }
@@ -843,31 +847,41 @@ impl Engine {
                     // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
                     // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
                     // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
-                    let phase_advance = match exec_action_library
-                        .procedure_for_entry(&exec_action_source, exec_action_index)
-                    {
-                        ActionProcedure::Walk | ActionProcedure::Hang => {
-                            math::fixtoi(object.fixed_velocity.x.abs() * 10)
-                        }
-                        ActionProcedure::Push if object.fixed_velocity.x.is_nonzero() => {
-                            math::fixtoi(object.fixed_velocity.x.abs() * 10)
-                        }
-                        ActionProcedure::Push => 1,
-                        ActionProcedure::Pull => math::fixtoi(object.fixed_velocity.x.abs() * 10),
-                        ActionProcedure::Scale => math::fixtoi(object.fixed_velocity.y.abs() * 14),
-                        ActionProcedure::Swim => {
-                            math::fixtoi(math::val_by_physical(160, physical_for_advance.swim) * 10)
-                        }
-                        ActionProcedure::Dig
-                            if object.state.command_direction == CommandDirection::Stop =>
+                    // PUSH/PULL latch this value immediately before SetDir;
+                    // a synchronous TurnAction may mutate live xdir afterward
+                    // (C4Object.cpp:5106-5108,5189-5192). Other procedures
+                    // derive it at their native post-steering point here.
+                    let phase_advance = exec_action_phase_advance.unwrap_or_else(|| {
+                        match exec_action_library
+                            .procedure_for_entry(&exec_action_source, exec_action_index)
                         {
-                            0
+                            ActionProcedure::Walk | ActionProcedure::Hang => {
+                                math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                            }
+                            ActionProcedure::Push if object.fixed_velocity.x.is_nonzero() => {
+                                math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                            }
+                            ActionProcedure::Push => 1,
+                            ActionProcedure::Pull => {
+                                math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                            }
+                            ActionProcedure::Scale => {
+                                math::fixtoi(object.fixed_velocity.y.abs() * 14)
+                            }
+                            ActionProcedure::Swim => math::fixtoi(
+                                math::val_by_physical(160, physical_for_advance.swim) * 10,
+                            ),
+                            ActionProcedure::Dig
+                                if object.state.command_direction == CommandDirection::Stop =>
+                            {
+                                0
+                            }
+                            ActionProcedure::Dig => math::fixtoi(
+                                math::val_by_physical(125, physical_for_advance.dig) * 40,
+                            ),
+                            _ => 1,
                         }
-                        ActionProcedure::Dig => {
-                            math::fixtoi(math::val_by_physical(125, physical_for_advance.dig) * 40)
-                        }
-                        _ => 1,
-                    };
+                    });
                     exec_action_library.advance_state_from_entry_by(
                         &mut object.state.action,
                         &exec_action_source,
