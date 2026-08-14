@@ -40,7 +40,7 @@ retries = 2
 # scenario routes first so they overlap the thousands of short unit tests
 # instead of becoming a serial tail at the end of the workspace gate.
 [[profile.default.overrides]]
-filter = '(package(clonk-app) and test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]_route|delivers_tutorial08_surface_wipfs_to_hut|flings_tutorial05_wood_to_the_right_hill)/)) or (package(clonk-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|tutorial(01|02|03|08|09|10)_virtual_player_completes_)/))'
+filter = '(package(clonk-app) and test(/app_virtual_keyboard_(completes_real_tutorial(0[1-3]|05)_route|delivers_tutorial08_surface_wipfs_to_hut)/)) or (package(clonk-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|tutorial(0[1-9]|10)_virtual_player_completes_)/))'
 priority = 100
 
 [[profile.default.overrides]]
