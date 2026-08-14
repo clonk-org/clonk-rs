@@ -13,6 +13,46 @@ const DEFAULT_RES_X: u32 = 800;
 const DEFAULT_RES_Y: u32 = 600;
 const MIN_RESOLUTION: u32 = 1;
 
+/// How the microphone is opened once voice chat is enabled at all. Port-only:
+/// LegacyClonk has no voice chat, so neither mode has a C++ oracle.
+///
+/// Push-to-talk is the default and stays the default. A player who has not
+/// asked for [`VoiceActivationMode::VoiceActivated`] keeps the property that
+/// the microphone is closed unless the configured key is held.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VoiceActivationMode {
+    #[default]
+    PushToTalk,
+    VoiceActivated,
+}
+
+impl VoiceActivationMode {
+    pub const PUSH_TO_TALK: &'static str = "PushToTalk";
+    pub const VOICE_ACTIVATED: &'static str = "VoiceActivated";
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            Self::PUSH_TO_TALK => Some(Self::PushToTalk),
+            Self::VOICE_ACTIVATED => Some(Self::VoiceActivated),
+            _ => None,
+        }
+    }
+}
+
+/// The two tuning values a voice-activated capture needs, resolved into the
+/// units the gate compares against: a level threshold on the same `0.0..=1.0`
+/// scale as [`clonk_audio::voice_activation_level`], and a release tail counted
+/// in whole captured frames.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoiceActivation {
+    pub threshold: f32,
+    pub hangover_frames: u32,
+}
+
+const VOICE_FRAME_MILLISECONDS: u32 =
+    clonk_audio::VOICE_FRAME_SAMPLES as u32 * 1_000 / clonk_audio::VOICE_SAMPLE_RATE;
+const MAX_VOICE_ACTIVATION_HANGOVER_MS: i32 = 2_000;
+
 #[derive(Debug, Clone)]
 pub struct AudioOptions {
     pub max_channels: usize,
@@ -29,6 +69,14 @@ pub struct AudioOptions {
     pub voice_enabled: bool,
     pub voice_volume: f32,
     pub voice_push_to_talk: VirtualKeyCode,
+    pub voice_activation_mode: VoiceActivationMode,
+    /// Level a captured frame must reach to open a voice-activated capture, on
+    /// the `0.0..=1.0` scale of [`clonk_audio::voice_activation_level`]. `0.0`
+    /// transmits everything the capture hears; `1.0` never opens.
+    pub voice_activation_threshold: f32,
+    /// How long a voice-activated capture keeps transmitting after the level
+    /// falls back below the threshold, so word endings are not clipped.
+    pub voice_activation_hangover_ms: u32,
 }
 
 impl Default for AudioOptions {
@@ -46,6 +94,10 @@ impl Default for AudioOptions {
             voice_enabled: false,
             voice_volume: 1.0,
             voice_push_to_talk: VirtualKeyCode::Backquote,
+            voice_activation_mode: VoiceActivationMode::default(),
+            // -36 dBFS: above a quiet room, below ordinary speech.
+            voice_activation_threshold: 0.4,
+            voice_activation_hangover_ms: 400,
         }
     }
 }
@@ -163,6 +215,41 @@ impl AudioOptions {
                 self.voice_push_to_talk = key;
             }
         }
+
+        // An unreadable mode deliberately leaves the push-to-talk default in
+        // place rather than falling through to an open microphone.
+        if let Some(mode) = config
+            .get_in(Some("Voice"), "ActivationMode")
+            .and_then(VoiceActivationMode::parse)
+        {
+            self.voice_activation_mode = mode;
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "ActivationThreshold") {
+            if let Some(value) = parse_native_config_integer(raw) {
+                self.voice_activation_threshold = value.clamp(0, 100) as f32 / 100.0;
+            }
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "ActivationHangover") {
+            if let Some(value) = parse_native_config_integer(raw) {
+                self.voice_activation_hangover_ms =
+                    value.clamp(0, MAX_VOICE_ACTIVATION_HANGOVER_MS) as u32;
+            }
+        }
+    }
+
+    /// The gate settings for a voice-activated capture, or `None` while the
+    /// player is on the push-to-talk default and every captured frame goes out.
+    pub(crate) fn voice_activation(&self) -> Option<VoiceActivation> {
+        (self.voice_activation_mode == VoiceActivationMode::VoiceActivated).then(|| {
+            VoiceActivation {
+                threshold: self.voice_activation_threshold,
+                hangover_frames: self
+                    .voice_activation_hangover_ms
+                    .div_ceil(VOICE_FRAME_MILLISECONDS),
+            }
+        })
     }
 
     pub(crate) fn music_volume_percent(&self) -> i32 {
@@ -370,6 +457,9 @@ mod tests {
             voice_enabled: true,
             voice_volume: 0.42,
             voice_push_to_talk: VirtualKeyCode::KeyT,
+            voice_activation_mode: VoiceActivationMode::VoiceActivated,
+            voice_activation_threshold: 0.25,
+            voice_activation_hangover_ms: 260,
         };
 
         options.write_startup_sound_config(&mut config);
@@ -419,6 +509,59 @@ mod tests {
         assert!(options.voice_enabled);
         assert_eq!(options.voice_volume, 0.37);
         assert_eq!(options.voice_push_to_talk, VirtualKeyCode::KeyT);
+    }
+
+    #[test]
+    fn voice_activation_is_an_opt_in_alternative_to_the_default_push_to_talk() {
+        let defaults = AudioOptions::default();
+        assert_eq!(
+            defaults.voice_activation_mode,
+            VoiceActivationMode::PushToTalk,
+            "the microphone stays key-held unless the player asks for otherwise",
+        );
+        assert_eq!(defaults.voice_activation_threshold, 0.4);
+        assert_eq!(defaults.voice_activation_hangover_ms, 400);
+        assert!(defaults.voice_activation().is_none());
+
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "ActivationMode", "VoiceActivated");
+        config.set_in(Some("Voice"), "ActivationThreshold", "25");
+        config.set_in(Some("Voice"), "ActivationHangover", "260");
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+
+        assert_eq!(
+            options.voice_activation_mode,
+            VoiceActivationMode::VoiceActivated
+        );
+        assert_eq!(options.voice_activation_threshold, 0.25);
+        assert_eq!(options.voice_activation_hangover_ms, 260);
+        let activation = options
+            .voice_activation()
+            .expect("voice activation is configured");
+        assert_eq!(activation.threshold, 0.25);
+        assert_eq!(
+            activation.hangover_frames, 13,
+            "260 ms rounds up to 13 whole 20 ms frames of tail",
+        );
+    }
+
+    #[test]
+    fn voice_activation_config_rejects_values_outside_its_documented_range() {
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "ActivationMode", "Nonsense");
+        config.set_in(Some("Voice"), "ActivationThreshold", "175");
+        config.set_in(Some("Voice"), "ActivationHangover", "-1");
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+
+        assert_eq!(
+            options.voice_activation_mode,
+            VoiceActivationMode::PushToTalk,
+            "an unreadable mode must not silently open the microphone",
+        );
+        assert_eq!(options.voice_activation_threshold, 1.0);
+        assert_eq!(options.voice_activation_hangover_ms, 0);
     }
 
     #[test]
