@@ -2069,6 +2069,7 @@ pub(crate) struct CommandPreviewOutcome {
     pub(crate) throw_preludes: Vec<CommandEvent>,
     pub(crate) entrance_attempts: Vec<(ObjectId, ObjectId, Option<CallResultAction>, u64)>,
     pub(crate) control_transfers: Vec<(ObjectId, ObjectId, Value, i32, u64)>,
+    pub(crate) call_attempts: Vec<CommandEvent>,
     pub(crate) exit_attempts: Vec<CommandEvent>,
     pub(crate) failure_feedback: Vec<(ObjectId, CommandFailureFeedback)>,
     pub(crate) move_to_stops: Vec<ObjectId>,
@@ -2094,6 +2095,7 @@ impl CommandPreviewOutcome {
         self.throw_preludes.append(&mut other.throw_preludes);
         self.entrance_attempts.append(&mut other.entrance_attempts);
         self.control_transfers.append(&mut other.control_transfers);
+        self.call_attempts.append(&mut other.call_attempts);
         self.exit_attempts.append(&mut other.exit_attempts);
         self.failure_feedback.append(&mut other.failure_feedback);
         self.move_to_stops.append(&mut other.move_to_stops);
@@ -2115,6 +2117,7 @@ impl CommandPreviewOutcome {
             || !self.throw_preludes.is_empty()
             || !self.entrance_attempts.is_empty()
             || !self.control_transfers.is_empty()
+            || !self.call_attempts.is_empty()
             || !self.exit_attempts.is_empty()
             || !self.failure_feedback.is_empty()
             || !self.move_to_stops.is_empty()
@@ -3633,6 +3636,77 @@ fn apply_preview_command_experience(target: ObjectId) -> Result<(), RuntimeError
     })
 }
 
+/// C4Command::Call invokes Target->Call(...) before ExecuteCommand returns
+/// (C4Command.cpp:2355-2368). Deferring that event past later script
+/// mutations can erase the queued arguments.
+fn preview_call_object_function(event: CommandEvent) -> Result<(), RuntimeError> {
+    let CommandEvent::CallObjectFunction {
+        object_id,
+        function,
+        caller,
+        tx,
+        tx_value,
+        tx_definition,
+        ty,
+        target2,
+        on_result,
+    } = event
+    else {
+        return Ok(());
+    };
+    if !preview_object_is_present(object_id) {
+        return Ok(());
+    }
+    let args = [
+        object_reference_value(caller),
+        tx_value
+            .or_else(|| tx_definition.map(Value::C4Id))
+            .or_else(|| tx.map(Value::Int))
+            .unwrap_or(Value::Nil),
+        Value::Int(ty.unwrap_or(0)),
+        target2.map(object_reference_value).unwrap_or(Value::Nil),
+    ];
+    let result = match call_world_object_function(object_id, &function, &args) {
+        Some(Ok(value)) => value.as_bool(),
+        Some(Err(error)) => {
+            tracing::error!(
+                %error,
+                "Call command error; continuing like the C++ fail-safe exec"
+            );
+            log_runtime_call_frames("", error.call_frames());
+            false
+        }
+        None => false,
+    };
+    let Some(action) = on_result else {
+        return Ok(());
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(scope) = borrow
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(caller))
+        else {
+            return;
+        };
+        match action {
+            CallResultAction::CompleteCommandOnFalse { command } if !result => {
+                scope.live_commands.complete_front_if(command);
+            }
+            CallResultAction::CompleteCommandOnTrue { command } if result => {
+                scope.live_commands.complete_front_if(command);
+            }
+            CallResultAction::FailCommandOnFalse { command } if !result => {
+                scope.live_commands.fail_front_if(command);
+            }
+            _ => {}
+        }
+        scope.command_stack_replaced = true;
+        scope.command_count = scope.live_commands.len();
+    });
+    Ok(())
+}
+
 /// C4Command::Transfer invokes the definition host's AfterLink-cached
 /// function pointer directly. Script ExecuteCommand must complete that call
 /// before returning to the next VM instruction, without C4Object::Call's
@@ -3880,6 +3954,7 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         throw_preludes,
         entrance_attempts,
         control_transfers,
+        call_attempts,
         exit_attempts,
         failure_feedback,
         move_to_stops,
@@ -4003,6 +4078,9 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     for (object_id, caller, tx_value, ty, command_instance_id) in control_transfers {
         preview_control_transfer(object_id, caller, tx_value, ty, command_instance_id);
+    }
+    for event in call_attempts {
+        preview_call_object_function(event)?;
     }
     for event in exit_attempts {
         preview_command_exit(event)?;

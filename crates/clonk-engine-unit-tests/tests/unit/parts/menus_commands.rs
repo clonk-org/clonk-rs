@@ -4628,6 +4628,77 @@ protected func WorkFailed(caller, tx, ty, target2)
 }
 
 #[test]
+fn execute_command_call_runs_before_later_script_mutations() {
+    // C4Command.cpp:2355-2368 finishes C4CMD_Call and invokes
+    // Target->Call(...) before ExecuteCommand returns. A later
+    // RemoveObject in the same script must not erase that callback.
+    let actor_script = r#"#strict 3
+public func Run(object handler, object payload)
+{
+  AddCommand(this(), "Call", handler, payload, 0, nil, 0, "Work", 0, 1);
+  ExecuteCommand();
+  RemoveObject(payload);
+  return true;
+}
+"#;
+    let handler_script = r#"#strict 3
+local called, seen, truthy;
+protected func Work(object caller, object payload)
+{
+  called++;
+  seen = payload;
+  truthy = !!payload;
+  return true;
+}
+"#;
+    let mut engine = Engine::with_seed(434);
+    let mut actor = test_definition("ECCA", "Call actor", actor_script);
+    actor.set_crew_member(true);
+    engine.register_test_definition(actor);
+    engine.register_test_script_definition("ECCH", "Call handler", handler_script);
+    engine.register_test_definition(simple_definition("ECCP"));
+
+    let handler = engine.spawn_test_object(SpawnConfig::new("ECCH"));
+    let payload = engine.spawn_test_object(SpawnConfig::new("ECCP"));
+    let actor_id = engine.spawn_test_object(
+        SpawnConfig::new("ECCA")
+            .with_alive(true)
+            .with_crew_member(true),
+    );
+    let actor_idx = engine.test_object_index(actor_id);
+    assert_eq!(
+        engine
+            .call_object_function(
+                actor_idx,
+                "Run",
+                vec![
+                    object_reference_value(handler),
+                    object_reference_value(payload),
+                ],
+            )
+            .expect("ExecuteCommand Call completes"),
+        Value::Bool(true)
+    );
+
+    let handler_state = engine.test_object_snapshot(handler);
+    assert_eq!(
+        handler_state.local_vars.get("called"),
+        Some(&Value::Int(1)),
+        "Work must run synchronously inside ExecuteCommand"
+    );
+    assert_eq!(
+        handler_state.local_vars.get("seen"),
+        Some(&Value::Nil),
+        "AssignRemoval still clears the stored payload after Work returns"
+    );
+    assert_eq!(
+        handler_state.local_vars.get("truthy"),
+        Some(&Value::Bool(true)),
+        "Work must observe the live payload before RemoveObject"
+    );
+}
+
+#[test]
 fn build_without_can_construct_reports_cantbuild_message() {
     let script = r#"#strict 3
 local needs_material_called;
