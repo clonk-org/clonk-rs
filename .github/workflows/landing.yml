@@ -45,6 +45,49 @@ jobs:
             exit 1
           fi
 
+  # Preserve all 18 merge-queue Linux shards. This PR-only runner can contend
+  # with a merge group; another admission leg requires revisiting the 20-runner
+  # budget.
+  pull-request-quality:
+    name: Pull request quality
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install native dependencies
+        run: |
+          packages=(libasound2-dev libudev-dev)
+          if ! sudo apt-get install --yes --no-install-recommends "${packages[@]}"; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+          fi
+
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+        with:
+          components: clippy, rustfmt
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          shared-key: full-parity
+          save-if: false
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint the workspace
+        run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
+
   # The merge queue creates the exact commit that will land. Release commits
   # package there, while still read-only, so the post-merge workflow only has
   # to promote already-tested immutable artifacts.
@@ -413,6 +456,7 @@ jobs:
       actions: read
     needs:
       - pull-request-title
+      - pull-request-quality
       - release-context
       - release-prebuild
       - release-build
@@ -427,6 +471,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           TITLE_RESULT: ${{ needs.pull-request-title.result }}
+          QUALITY_RESULT: ${{ needs.pull-request-quality.result }}
           RELEASE_CONTEXT_RESULT: ${{ needs.release-context.result }}
           RELEASE_PREBUILD_RESULT: ${{ needs.release-prebuild.result }}
           RELEASE_BUILD_RESULT: ${{ needs.release-build.result }}
@@ -446,6 +491,7 @@ jobs:
 
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             require_result title "$TITLE_RESULT" success
+            require_result quality "$QUALITY_RESULT" success
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
             require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
             require_result release-build "$RELEASE_BUILD_RESULT" skipped
@@ -454,6 +500,7 @@ jobs:
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" skipped
           elif [[ "$EVENT_NAME" == "merge_group" ]]; then
             require_result title "$TITLE_RESULT" skipped
+            require_result quality "$QUALITY_RESULT" skipped
             require_result release-context "$RELEASE_CONTEXT_RESULT" success
             case "$IS_RELEASE" in
               true)
@@ -475,6 +522,7 @@ jobs:
             require_result windows-smoke "$WINDOWS_SMOKE_RESULT" success
           else
             require_result title "$TITLE_RESULT" skipped
+            require_result quality "$QUALITY_RESULT" skipped
             require_result release-context "$RELEASE_CONTEXT_RESULT" skipped
             require_result release-prebuild "$RELEASE_PREBUILD_RESULT" skipped
             require_result release-build "$RELEASE_BUILD_RESULT" skipped

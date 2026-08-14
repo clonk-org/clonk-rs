@@ -48,7 +48,7 @@ class CiLatencyTests(unittest.TestCase):
             scopes,
             {"full-parity", "windows-runtime-msvc"},
         )
-        self.assertEqual(landing.count("save-if: false"), 2)
+        self.assertEqual(landing.count("save-if: false"), 3)
         self.assertNotIn(
             "save-if: ${{ github.event_name == 'workflow_dispatch' }}",
             landing,
@@ -337,6 +337,7 @@ class CiLatencyTests(unittest.TestCase):
 
     def test_overlapping_linux_checks_share_setup_without_failing_open(self):
         workflow = LANDING.read_text(encoding="utf-8")
+        linux = workflow[workflow.index("  linux:") : workflow.index("  windows-smoke:")]
         unit_and_parity = matrix_entry(workflow, "workspace unit and parity")
         quality = matrix_entry(workflow, "workspace quality")
 
@@ -360,7 +361,7 @@ class CiLatencyTests(unittest.TestCase):
             "repository hygiene",
         ):
             self.assertNotIn(f"          - name: {old_name}\n", workflow)
-        self.assertNotIn("components: clippy, rustfmt", workflow)
+        self.assertNotIn("components: clippy, rustfmt", linux)
 
     def test_quality_fetches_only_the_pinned_oracle_history(self):
         workflow = LANDING.read_text(encoding="utf-8")

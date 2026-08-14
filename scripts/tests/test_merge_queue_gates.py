@@ -143,6 +143,63 @@ class MergeQueueGateTests(unittest.TestCase):
             "Windows landing checks belong in the one fail-closed landing graph",
         )
 
+    def test_pull_requests_run_formatting_and_strict_workspace_clippy(self):
+        quality = job_block(LANDING, "pull-request-quality")
+
+        self.assertRegex(
+            quality,
+            r"(?m)^    if: github\.event_name == 'pull_request'$",
+        )
+        self.assertIn("runs-on: ubuntu-24.04", quality)
+        self.assertIn("timeout-minutes: 15", quality)
+        self.assertIn("fetch-depth: 1", quality)
+        self.assertIn("persist-credentials: false", quality)
+        self.assertIn("submodules: recursive", quality)
+        self.assertIn("libasound2-dev libudev-dev", quality)
+        self.assertIn(
+            "uses: dtolnay/rust-toolchain@"
+            "46511b1c83438f0dd37c02d843619ece5a4abb5b",
+            quality,
+        )
+        self.assertIn("components: clippy, rustfmt", quality)
+        self.assertIn(
+            "uses: Swatinem/rust-cache@"
+            "6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+            quality,
+        )
+        self.assertIn("shared-key: full-parity", quality)
+        self.assertEqual(quality.count("save-if: false"), 1)
+        commands = (
+            "cargo fmt --all -- --check",
+            "cargo clippy --profile test --workspace --lib --bins --tests "
+            "--features xtask/engine-tools --locked -- -D warnings",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertRegex(quality, rf"(?m)^        run: {re.escape(command)}$")
+        self.assertNotIn("cargo nextest", quality)
+        self.assertNotIn("python3 -m unittest", quality)
+        self.assertNotIn("continue-on-error:", quality)
+        self.assertNotRegex(quality, r"(?m)^        if:")
+
+    def test_landing_gate_requires_pull_request_quality_only_during_admission(self):
+        gate = job_block(LANDING, "landing-gate")
+        script = step_script(LANDING, "Enforce landing results")
+
+        self.assertRegex(gate, r"(?m)^      - pull-request-quality$")
+        self.assertIn(
+            "QUALITY_RESULT: ${{ needs.pull-request-quality.result }}",
+            gate,
+        )
+        self.assertEqual(
+            script.count('require_result quality "$QUALITY_RESULT" success'),
+            1,
+        )
+        self.assertEqual(
+            script.count('require_result quality "$QUALITY_RESULT" skipped'),
+            2,
+        )
+
     def test_one_required_gate_fails_closed_over_every_queue_job(self):
         workflow = LANDING.read_text(encoding="utf-8")
         self.assertEqual(workflow.count("name: Landing gate"), 1)
@@ -172,6 +229,7 @@ class MergeQueueGateTests(unittest.TestCase):
             **os.environ,
             "EVENT_NAME": "merge_group",
             "TITLE_RESULT": "skipped",
+            "QUALITY_RESULT": "skipped",
             "RELEASE_CONTEXT_RESULT": "success",
             "RELEASE_PREBUILD_RESULT": "skipped",
             "RELEASE_BUILD_RESULT": "skipped",
@@ -187,6 +245,7 @@ class MergeQueueGateTests(unittest.TestCase):
                 {
                     "EVENT_NAME": "pull_request",
                     "TITLE_RESULT": "success",
+                    "QUALITY_RESULT": "success",
                     "RELEASE_CONTEXT_RESULT": "skipped",
                     "RELEASE_PREBUILD_RESULT": "skipped",
                     "IS_RELEASE": "",
@@ -195,7 +254,45 @@ class MergeQueueGateTests(unittest.TestCase):
                 },
                 0,
             ),
+            (
+                "pull request quality failed",
+                {
+                    "EVENT_NAME": "pull_request",
+                    "TITLE_RESULT": "success",
+                    "QUALITY_RESULT": "failure",
+                    "RELEASE_CONTEXT_RESULT": "skipped",
+                    "RELEASE_PREBUILD_RESULT": "skipped",
+                    "IS_RELEASE": "",
+                    "LINUX_RESULT": "skipped",
+                    "WINDOWS_SMOKE_RESULT": "skipped",
+                },
+                1,
+            ),
             ("ordinary merge group", {}, 0),
+            (
+                "merge group unexpectedly ran pull request quality",
+                {"QUALITY_RESULT": "success"},
+                1,
+            ),
+            (
+                "workflow dispatch",
+                {
+                    "EVENT_NAME": "workflow_dispatch",
+                    "RELEASE_CONTEXT_RESULT": "skipped",
+                    "IS_RELEASE": "",
+                },
+                0,
+            ),
+            (
+                "workflow dispatch unexpectedly ran pull request quality",
+                {
+                    "EVENT_NAME": "workflow_dispatch",
+                    "QUALITY_RESULT": "success",
+                    "RELEASE_CONTEXT_RESULT": "skipped",
+                    "IS_RELEASE": "",
+                },
+                1,
+            ),
             (
                 "release merge group",
                 {
