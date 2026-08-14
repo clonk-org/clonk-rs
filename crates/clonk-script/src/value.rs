@@ -661,11 +661,27 @@ pub fn cnv_fn(from: C4VType, to: C4VType) -> CnvFn {
 #[derive(Clone, Default)]
 struct ValueMapStorage {
     entries: IndexMap<Value, Value>,
+    // Native C4ValueHash never rehashes an existing node. AssignRemoval's
+    // in-place Set0 therefore leaves a nested object key in the bucket it
+    // was inserted under (C4ValueHash.cpp:49-136). `live_keys` holds the
+    // mutated key after that sweep; `entries` keeps the insertion-time key.
+    insert_hashes: Vec<usize>,
+    live_keys: Vec<Value>,
     // C4ValueHash allocates mapped C4Value slots separately from its hash
     // entries. Removing an entry retains that slot in emptyValues, including
     // any value left behind when the key itself became nil. New keys reuse
     // the most recently removed slot.
     empty_values: Vec<Value>,
+}
+
+impl ValueMapStorage {
+    fn lookup_index(&self, key: &Value) -> Option<usize> {
+        let hash = key.c4_value_hash();
+        self.insert_hashes
+            .iter()
+            .zip(self.live_keys.iter())
+            .position(|(insert_hash, live_key)| *insert_hash == hash && live_key == key)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -696,6 +712,8 @@ impl ValueMap {
     pub fn with_capacity(capacity: usize) -> Self {
         Self(Arc::new(ValueMapStorage {
             entries: IndexMap::with_capacity(capacity),
+            insert_hashes: Vec::with_capacity(capacity),
+            live_keys: Vec::with_capacity(capacity),
             empty_values: Vec::new(),
         }))
     }
@@ -708,8 +726,12 @@ impl ValueMap {
         self.0.entries.is_empty()
     }
 
-    pub fn iter(&self) -> indexmap::map::Iter<'_, Value, Value> {
-        self.0.entries.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&Value, &Value)> {
+        self.0
+            .live_keys
+            .iter()
+            .zip(self.0.entries.values())
+            .chain(self.0.entries.iter().skip(self.0.live_keys.len()))
     }
 
     pub fn iter_mut(&mut self) -> indexmap::map::IterMut<'_, Value, Value> {
@@ -782,44 +804,50 @@ impl ValueMap {
             self.shift_remove(&key);
             self.recycle_value_slot(Value::Nil);
         } else {
-            self.insert(key, value);
+            self.insert_key(Value::from(key), value);
         }
     }
 
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
-        if self.0.entries.contains_key(&StringQuery(key)) {
-            return Arc::make_mut(&mut self.0)
-                .entries
-                .shift_remove(&StringQuery(key));
+        let escaped = c4_string_literal_query(key);
+        let query = if self.0.entries.contains_key(&StringQuery(key)) {
+            StringQuery(key)
+        } else {
+            StringQuery(escaped.as_deref()?)
+        };
+        let storage = Arc::make_mut(&mut self.0);
+        let index = storage.entries.get_index_of(&query)?;
+        storage.insert_hashes.remove(index);
+        if index < storage.live_keys.len() {
+            storage.live_keys.remove(index);
         }
-        let key = c4_string_literal_query(key)?;
-        if !self.0.entries.contains_key(&StringQuery(key.as_ref())) {
-            return None;
-        }
-        Arc::make_mut(&mut self.0)
+        storage
             .entries
-            .shift_remove(&StringQuery(key.as_ref()))
+            .shift_remove_index(index)
+            .map(|(_, value)| value)
     }
 
     pub fn get_key(&self, key: &Value) -> Option<&Value> {
-        self.0.entries.get(key)
+        let index = self.0.lookup_index(key)?;
+        self.0.entries.get_index(index).map(|(_, value)| value)
     }
 
     pub fn get_key_mut(&mut self, key: &Value) -> Option<&mut Value> {
-        if !self.0.entries.contains_key(key) {
-            return None;
-        }
-        Arc::make_mut(&mut self.0).entries.get_mut(key)
+        let index = self.0.lookup_index(key)?;
+        Arc::make_mut(&mut self.0)
+            .entries
+            .get_index_mut(index)
+            .map(|(_, value)| value)
     }
 
     pub fn contains_value_key(&self, key: &Value) -> bool {
-        self.0.entries.contains_key(key)
+        self.0.lookup_index(key).is_some()
     }
 
     pub fn insert_key(&mut self, key: Value, value: Value) -> Option<Value> {
         let storage = Arc::make_mut(&mut self.0);
-        if let Some(current) = storage.entries.get_mut(&key) {
-            return Some(std::mem::replace(current, value));
+        if let Some(index) = storage.lookup_index(&key) {
+            return Some(std::mem::replace(&mut storage.entries[index], value));
         }
 
         if let Some(recycled) = storage.empty_values.pop() {
@@ -834,7 +862,11 @@ impl ValueMap {
             }
         }
 
-        storage.entries.insert(key, value)
+        let insert_hash = key.c4_value_hash();
+        storage.live_keys.push(key.clone());
+        storage.entries.insert(key, value);
+        storage.insert_hashes.push(insert_hash);
+        None
     }
 
     /// Retain one removed C4ValueHash mapped slot for native-order reuse.
@@ -884,7 +916,10 @@ impl ValueMap {
         let storage = Arc::make_mut(&mut self.0);
         if let Some(recycled) = storage.empty_values.pop() {
             if matches!(&recycled, Value::C4Id(id) if c4_id_raw(id) == 0) {
+                let insert_hash = key.c4_value_hash();
+                storage.live_keys.push(key.clone());
                 storage.entries.insert(key, recycled);
+                storage.insert_hashes.push(insert_hash);
             } else {
                 storage.empty_values.push(Value::Nil);
             }
@@ -911,10 +946,16 @@ impl ValueMap {
     }
 
     pub fn shift_remove_key(&mut self, key: &Value) -> Option<Value> {
-        if !self.0.entries.contains_key(key) {
-            return None;
+        let index = self.0.lookup_index(key)?;
+        let storage = Arc::make_mut(&mut self.0);
+        storage.insert_hashes.remove(index);
+        if index < storage.live_keys.len() {
+            storage.live_keys.remove(index);
         }
-        Arc::make_mut(&mut self.0).entries.shift_remove(key)
+        storage
+            .entries
+            .shift_remove_index(index)
+            .map(|(_, value)| value)
     }
 
     /// Whether this map contains an object reference at any nesting depth.
@@ -926,30 +967,55 @@ impl ValueMap {
     }
 
     fn clear_object_references_matching(&mut self, removed: &impl Fn(u64) -> bool) -> bool {
-        if !self.0.entries.iter().any(|(key, value)| {
-            key.contains_object_reference_matching(removed)
-                || value.contains_object_reference_matching(removed)
-        }) {
+        let needs_sweep = self
+            .0
+            .live_keys
+            .iter()
+            .any(|key| key.contains_object_reference_matching(removed))
+            || self.0.entries.iter().any(|(key, value)| {
+                key.contains_object_reference_matching(removed)
+                    || value.contains_object_reference_matching(removed)
+            })
+            || self
+                .0
+                .empty_values
+                .iter()
+                .any(|value| value.contains_object_reference_matching(removed));
+        if !needs_sweep {
             return false;
         }
 
-        // This models the visible C4Value tree needed by AssignRemoval. Exact
-        // C4ValueHash bucket, alias, and recycled-slot behavior is tracked in
-        // clonk-org/clonk-rs#433.
         let storage = Arc::make_mut(&mut self.0);
-        let entries = std::mem::take(&mut storage.entries);
-        let mut rebuilt = IndexMap::with_capacity(entries.len());
-
-        for (mut key, mut value) in entries {
+        let mut index = 0;
+        while index < storage.entries.len() {
+            let Some((key, value)) = storage.entries.get_index(index) else {
+                break;
+            };
+            let mut key = key.clone();
+            let mut value = value.clone();
             let direct_key = matches!(&key, Value::Object(id) if removed(*id));
             let direct_value = matches!(&value, Value::Object(id) if removed(*id));
             key.clear_object_references_matching(removed);
             value.clear_object_references_matching(removed);
-            if !(direct_key || direct_value) {
-                rebuilt.insert(key, value);
+            if direct_key || direct_value {
+                storage.entries.shift_remove_index(index);
+                if index < storage.insert_hashes.len() {
+                    storage.insert_hashes.remove(index);
+                }
+                if index < storage.live_keys.len() {
+                    storage.live_keys.remove(index);
+                }
+                storage.empty_values.push(value);
+            } else {
+                if let Some((_, slot)) = storage.entries.get_index_mut(index) {
+                    *slot = value;
+                }
+                if let Some(live_key) = storage.live_keys.get_mut(index) {
+                    *live_key = key;
+                }
+                index += 1;
             }
         }
-        storage.entries = rebuilt;
         true
     }
 }
@@ -1175,10 +1241,22 @@ impl Value {
             Self::Array(values) => values
                 .iter()
                 .any(|value| value.contains_object_reference_matching(removed)),
-            Self::Proplist(entries) => entries.0.entries.iter().any(|(key, value)| {
-                key.contains_object_reference_matching(removed)
-                    || value.contains_object_reference_matching(removed)
-            }),
+            Self::Proplist(entries) => {
+                entries
+                    .0
+                    .live_keys
+                    .iter()
+                    .any(|key| key.contains_object_reference_matching(removed))
+                    || entries.0.entries.iter().any(|(key, value)| {
+                        key.contains_object_reference_matching(removed)
+                            || value.contains_object_reference_matching(removed)
+                    })
+                    || entries
+                        .0
+                        .empty_values
+                        .iter()
+                        .any(|value| value.contains_object_reference_matching(removed))
+            }
             Self::Int(_)
             | Self::Bool(_)
             | Self::RawBool(_)
@@ -2266,6 +2344,20 @@ mod cnv_tests {
     // Each Rust value presents the `C4V_Type` the conversion table is indexed
     // by (C4Value.h:37-54). The eager Rust value model only ever maps `Nil` to
     // `C4V_Any`; there is no `C4V_pC4Value` public value representation.
+    #[test]
+    fn assign_removal_recycles_a_direct_object_key_slot() {
+        let mut map = ValueMap::new();
+        map.insert_key(Value::Object(7), Value::Int(7));
+        map.clear_object_references_matching(&|id| id == 7);
+        assert_eq!(map.len(), 0);
+        map.assign("a".into(), Value::Nil);
+        assert_eq!(
+            map.len(),
+            0,
+            "nil assignment must reuse and then drop the recycled 7 slot"
+        );
+    }
+
     #[test]
     fn value_reports_its_c4v_type() {
         assert_eq!(Value::Nil.c4v_type(), C4VType::Any);

@@ -3294,11 +3294,10 @@ fn c4_map_operator_equal(left: &ValueMap, right: &ValueMap) -> bool {
     left.len() == right.len()
         && left.iter().all(|(left_key, left_value)| {
             right
-                .iter()
-                .find(|(right_key, _)| c4_typed_equal(left_key, right_key))
+                .get_key(left_key)
                 // C4ValueHash::operator== spells this `other[key] != value`,
                 // so the other map's value is the asymmetric operator lhs.
-                .is_some_and(|(_, right_value)| c4_operator_equal(right_value, left_value))
+                .is_some_and(|right_value| c4_operator_equal(right_value, left_value))
         })
 }
 

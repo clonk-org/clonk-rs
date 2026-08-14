@@ -185,3 +185,34 @@ fn computed_literal_evaluates_key_then_value_in_source_order() {
     // same insertion order and therefore produces the decimal suffix 1234.
     assert_eq!(run(source, &[]), Value::Int(41_234));
 }
+
+#[test]
+fn assign_removal_keeps_a_nested_key_in_its_insertion_bucket() {
+    // Nested object keys stay in their insertion hash after Set0. Native
+    // C4ValueHash::operator== is an asymmetric lookup, so a later map keyed
+    // by [nil] finds the stale node one way only (C4ValueHash.cpp:150-181).
+    let mut engine = Engine::new();
+    engine.register_host_function("Clear", |_| {
+        clonk_script::clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe(object target) {
+  var stale = { [[target]] = 1 };
+  Clear();
+  var fresh = { [[nil]] = 1 };
+  return [fresh == stale, stale == fresh];
+}
+"#,
+        )
+        .expect("nested key bucket probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[Value::Object(7)])
+            .expect("nested key bucket runs"),
+        Value::Array(vec![Value::Bool(false), Value::Bool(true)])
+    );
+}
