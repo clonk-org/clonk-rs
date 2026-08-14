@@ -360,6 +360,7 @@ impl VoiceCaptureProcessor {
 /// Streaming linear interpolation down to [`VOICE_SAMPLE_RATE`]. Capture uses
 /// it on the microphone's own rate; the echo reference uses it on the mixer's
 /// output rate, so both sides of the canceller see the same resampling.
+#[derive(Debug)]
 pub(crate) struct StreamingVoiceResampler {
     source_per_output: f64,
     previous: Option<f32>,
@@ -418,7 +419,12 @@ pub fn voice_activation_level(samples: &[i16; VOICE_FRAME_SAMPLES]) -> f32 {
         .map(|sample| f64::from(*sample) * f64::from(*sample))
         .sum::<f64>()
         / VOICE_FRAME_SAMPLES as f64;
-    let rms = mean_square.sqrt() / 32_768.0;
+    voice_level_from_rms(mean_square.sqrt() / 32_768.0)
+}
+
+/// [`voice_activation_level`]'s curve, for a root mean square already in
+/// `0.0..=1.0` of full scale.
+pub(crate) fn voice_level_from_rms(rms: f64) -> f32 {
     if rms <= 0.0 {
         return 0.0;
     }
