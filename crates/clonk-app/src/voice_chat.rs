@@ -162,15 +162,17 @@ impl VoiceChatState {
         Self::with_source_opener(opener)
     }
 
+    /// `key` is the push-to-talk key whose release closes this capture again;
+    /// `None` opens a capture no key owns.
     pub(crate) fn start_capture(
         &mut self,
-        key: winit::keyboard::KeyCode,
+        key: Option<winit::keyboard::KeyCode>,
     ) -> Result<(), VoiceCaptureError> {
         if self.capture.is_some() {
             return Ok(());
         }
         self.capture = Some((self.capture_opener)()?);
-        self.capture_key = Some(key);
+        self.capture_key = key;
         self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
         self.next_sequence = 0;
         Ok(())
@@ -640,10 +642,10 @@ mod tests {
         assert!(!voice.capture_active());
 
         voice
-            .start_capture(winit::keyboard::KeyCode::Backquote)
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
             .unwrap();
         voice
-            .start_capture(winit::keyboard::KeyCode::Backquote)
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
             .unwrap();
         assert_eq!(opens.get(), 1);
         assert_eq!(
@@ -657,7 +659,7 @@ mod tests {
 
         voice.stop_capture();
         voice
-            .start_capture(winit::keyboard::KeyCode::Backquote)
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
             .unwrap();
         assert_eq!(opens.get(), 2);
         assert_eq!(

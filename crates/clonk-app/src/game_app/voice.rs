@@ -62,7 +62,7 @@ impl GameApp {
         {
             return true;
         }
-        if let Err(error) = self.voice_chat.start_capture(key) {
+        if let Err(error) = self.voice_chat.start_capture(Some(key)) {
             tracing::warn!(%error, "push-to-talk could not open the microphone");
         }
         true
