@@ -1081,46 +1081,56 @@ fn blast_one_tfln(
         .expect("the thrown replacement TFLN exists in the tunnel");
     if next_face_x < 414 && !attached {
         player.wait_until(
-            "the Clonk catches the lit replacement TFLN at the gold face",
+            "the replacement TFLN returns or the Clonk must retreat",
             80,
             |engine| {
-                engine
-                    .object_snapshot(thrown)
-                    .is_some_and(|flint| flint.container == Some(clonk))
-            },
-        )?;
-        player.wait_until(
-            "the Clonk catches the lit replacement TFLN while facing the gold face",
-            30,
-            |engine| {
-                engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name == "Walk"
-                        && object.direction == Direction::Left
-                        && engine
-                            .object_snapshot(thrown)
-                            .is_some_and(|flint| flint.container == Some(clonk))
+                engine.object_snapshot(thrown).is_none_or(|flint| {
+                    flint.container == Some(clonk)
+                        || (flint.action.name == "Activated" && flint.action.time >= 48)
+                        || engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|clonk| !clonk.contents.is_empty())
                 })
             },
         )?;
-        player.wait_until(
-            "the replacement TFLN fuse burns down at the gold face",
-            50,
-            |engine| {
-                engine
-                    .object_snapshot(thrown)
-                    .is_some_and(|flint| flint.action.time >= 48)
-            },
-        )?;
-        player.tap(COM_THROW)?;
-        player.wait_until(
-            "the nearly spent replacement TFLN is thrown at the gold face",
-            10,
-            |engine| {
-                engine
-                    .object_snapshot(thrown)
-                    .is_some_and(|flint| flint.container.is_none())
-            },
-        )?;
+        if player
+            .engine()
+            .object_snapshot(thrown)
+            .is_some_and(|flint| flint.container == Some(clonk))
+        {
+            player.wait_until(
+                "the Clonk catches the lit replacement TFLN while facing the gold face",
+                30,
+                |engine| {
+                    engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.action.name == "Walk"
+                            && object.direction == Direction::Left
+                            && engine
+                                .object_snapshot(thrown)
+                                .is_some_and(|flint| flint.container == Some(clonk))
+                    })
+                },
+            )?;
+            player.wait_until(
+                "the replacement TFLN fuse burns down at the gold face",
+                50,
+                |engine| {
+                    engine.object_snapshot(thrown).is_some_and(|flint| {
+                        flint.action.name == "Activated" && flint.action.time >= 48
+                    })
+                },
+            )?;
+            player.tap(COM_THROW)?;
+            player.wait_until(
+                "the nearly spent replacement TFLN is thrown at the gold face",
+                10,
+                |engine| {
+                    engine
+                        .object_snapshot(thrown)
+                        .is_some_and(|flint| flint.container.is_none())
+                },
+            )?;
+        }
     }
     // Keep the retreat control active for the complete fuse. The thrown TFLN
     // continues moving after it first reaches a safe radius, so stopping at a

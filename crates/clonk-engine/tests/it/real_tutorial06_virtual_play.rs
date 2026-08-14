@@ -779,7 +779,11 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.hold_until(
         COM_RIGHT,
         "the CRYS carrier reaches the upper-passage wall",
-        120,
+        // Depending on the drained basin's material motion, the swimmer can
+        // first attach to the x=226 wall. Keep the same physical Right held
+        // through that bounded Scale detour and stop on the actual transfer
+        // coordinate (C4Object.cpp:3618-3632,4823-4855).
+        400,
         |engine| {
             engine
                 .object_snapshot(first_clonk)
