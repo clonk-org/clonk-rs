@@ -56,10 +56,7 @@ pub(crate) struct VoiceRouteCookie([u8; VOICE_ROUTE_COOKIE_BYTES]);
 impl VoiceRouteCookie {
     pub(crate) fn generate() -> Option<Self> {
         let mut bytes = [0_u8; VOICE_ROUTE_COOKIE_BYTES];
-        rustls::crypto::ring::default_provider()
-            .secure_random
-            .fill(&mut bytes)
-            .ok()?;
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes).ok()?;
         Some(Self(bytes))
     }
 
