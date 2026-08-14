@@ -179,8 +179,19 @@ pub(crate) struct VoiceChatState {
 }
 
 impl Default for VoiceChatState {
+    #[cfg(not(test))]
     fn default() -> Self {
         Self::with_source_opener(VoiceCapture::open)
+    }
+
+    /// Under test the default state can never reach a real device. A test that
+    /// forgets to inject a source would otherwise open the *developer's*
+    /// microphone, pass locally, and then fail on a CI runner that has no input
+    /// device — which is exactly how this arrived. Tests that exercise capture
+    /// pass their own source to [`VoiceChatState::with_source_opener`].
+    #[cfg(test)]
+    fn default() -> Self {
+        Self::with_source_opener(|| Err::<VoiceCapture, _>(VoiceCaptureError::Unavailable))
     }
 }
 

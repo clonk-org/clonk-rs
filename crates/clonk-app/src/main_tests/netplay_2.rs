@@ -270,6 +270,14 @@ fn voice_activation_never_opens_a_microphone_the_player_did_not_opt_in_to() {
 
 #[test]
 fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
+    struct SilentVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for SilentVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
     let mut app = new_classic_running_sandbox_app();
     let local_client = 7;
     app.engine
@@ -283,6 +291,9 @@ fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
     let options = &mut app.audio.test_mut().options;
     options.voice_enabled = true;
     options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    // A stub source, never the real `VoiceCapture`: a test must not depend on
+    // the host owning a microphone, and must certainly not open one.
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(|| Ok(SilentVoiceSource));
 
     app.update_voice_chat();
     assert!(app.voice_chat.capture_active());
