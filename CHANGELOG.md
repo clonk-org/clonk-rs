@@ -4,6 +4,23 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-08-14
+
+### Bug fixes
+
+- Reconcile retired player profiles before rejoin (#479)
+- Improve proximity voice reliability and quality (#478)
+- Keep connected clients in the lobby after restart (#476)
+- Dispatch ExecuteCommand Call before later script mutations (#462)
+- Attach Push, Pull and Fight grounding after their live SetDir (#461)
+- Clear removed object references from retained VM temporaries (#463)
+- Preserve native C4ValueHash state when object references are cleared (#464)
+
+### Performance
+
+- Keep slowest tests below ten seconds (#477)
+- Instance retained landscape fog chunks compactly (#473)
+
 ## [0.12.0] - 2026-08-14
 
 ### Bug fixes
