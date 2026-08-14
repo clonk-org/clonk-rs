@@ -524,27 +524,56 @@ impl GameApp {
     /// the profile for a later `ActivateNewPlayer`
     /// (src/C4PlayerList.cpp:219-267,398-409). The engine owns retirement, so
     /// mirror it into the synchronized registry once the tick has applied it.
+    /// Also repair an older Joined row whose one-frame removal edge was missed:
+    /// native cannot retain that state because `SetRemoved` runs inside the
+    /// same `C4PlayerList::Remove` call.
     pub(crate) fn mirror_retired_player_info(&mut self, players_before_tick: &[(i32, i32)]) {
-        let retired_player_info = players_before_tick
+        let live_player_info_ids = self
+            .engine
+            .players()
+            .map(|player| player.player_info_id())
+            .collect::<Vec<_>>();
+        let mut retired_player_infos = players_before_tick
             .iter()
-            .find(|(player, _)| self.engine.player(*player).is_none())
+            .filter(|(player, _)| self.engine.player(*player).is_none())
             .map(|(_, player_info)| *player_info)
-            .filter(|player_info| *player_info != 0);
-        if let Some(player_info) = retired_player_info {
-            let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-            // Resolve the rejoin policy here so it and the elimination records
-            // it gates always share one lifetime: every path that replaces the
-            // registry drops both together.
-            let rejoin_allowed = self.rejoin_after_elimination_allowed();
+            .filter(|player_info| *player_info != 0)
+            .collect::<Vec<_>>();
+        retired_player_infos.extend(
             self.control_player_infos
-                .set_rejoin_after_elimination_allowed(rejoin_allowed);
-            if self
+                .retained_rows_snapshot()
+                .1
+                .into_iter()
+                .flat_map(|(_, _, players)| players)
+                .filter(|player| {
+                    player.id != 0
+                        && player.is_joined()
+                        && !live_player_info_ids.contains(&player.id)
+                })
+                .map(|player| player.id),
+        );
+        retired_player_infos.sort_unstable();
+        retired_player_infos.dedup();
+        if retired_player_infos.is_empty() {
+            return;
+        }
+
+        let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        // Resolve the rejoin policy here so it and the elimination records it
+        // gates always share one lifetime: every path that replaces the
+        // registry drops both together.
+        let rejoin_allowed = self.rejoin_after_elimination_allowed();
+        self.control_player_infos
+            .set_rejoin_after_elimination_allowed(rejoin_allowed);
+        let mut changed = false;
+        for player_info in retired_player_infos {
+            changed |= self
                 .control_player_infos
-                .mark_retired(player_info, game_part_frame)
-            {
-                self.prune_host_local_alternate_colors();
-                self.publish_current_host_player_infos();
-            }
+                .mark_retired(player_info, game_part_frame);
+        }
+        if changed {
+            self.prune_host_local_alternate_colors();
+            self.publish_current_host_player_infos();
         }
     }
 
