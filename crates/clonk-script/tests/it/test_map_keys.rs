@@ -2,7 +2,7 @@
 //! as `[expression]`, and C4ValueHash keeps the insertion position of the
 //! first equal key when a later literal entry overwrites its value.
 
-use clonk_script::{Engine, Value};
+use clonk_script::{clear_active_object_references, Engine, Value, ValueMap};
 
 fn run(source: &str, args: &[Value]) -> Value {
     let mut engine = Engine::new();
@@ -184,4 +184,184 @@ fn computed_literal_evaluates_key_then_value_in_source_order() {
     // Evaluation is key 1, value 2, key 3, value 4; foreach observes the
     // same insertion order and therefore produces the decimal suffix 1234.
     assert_eq!(run(source, &[]), Value::Int(41_234));
+}
+
+#[test]
+fn assign_removal_keeps_a_nested_key_in_its_insertion_bucket() {
+    // Nested object keys stay in their insertion hash after Set0. Native
+    // C4ValueHash::operator== is an asymmetric lookup, so a later map keyed
+    // by [nil] finds the stale node one way only (C4ValueHash.cpp:150-181).
+    let mut engine = Engine::new();
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe(object target) {
+  var stale = { [[target]] = 1 };
+  Clear();
+  var fresh = { [[nil]] = 1 };
+  return [fresh == stale, stale == fresh];
+}
+"#,
+        )
+        .expect("nested key bucket probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[Value::Object(7)])
+            .expect("nested key bucket runs"),
+        Value::Array(vec![Value::Bool(false), Value::Bool(true)])
+    );
+}
+
+/// Host functions for the AssignRemoval sweep probes below. Each reports the
+/// map's first key through a different accessor so a divergence between them
+/// is visible from script.
+fn sweep_probe_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine.register_host_function("Clear7", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine.register_host_function("Clear9", |_| {
+        clear_active_object_references(9);
+        Ok(Value::Nil)
+    });
+    engine.register_host_function("Nine", |_| Ok(Value::Object(9)));
+    engine.register_host_function("Fresh7", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Len", |args| {
+        let Some(Value::Proplist(map)) = args.first() else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(map.len() as i32))
+    });
+    engine.register_host_function("KeyViaIter", |args| {
+        let Some(Value::Proplist(map)) = args.first() else {
+            return Ok(Value::Nil);
+        };
+        Ok(map
+            .iter()
+            .next()
+            .map(|(key, _)| key.clone())
+            .unwrap_or(Value::Nil))
+    });
+    engine.register_host_function("KeyViaIntoIter", |args| {
+        let Some(Value::Proplist(map)) = args.first().cloned() else {
+            return Ok(Value::Nil);
+        };
+        Ok(map
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .unwrap_or(Value::Nil))
+    });
+    engine.register_host_function("KeyAfterSaveLoad", |args| {
+        let Some(Value::Proplist(map)) = args.first() else {
+            return Ok(Value::Nil);
+        };
+        let encoded = serde_json::to_value(map).expect("a map serializes");
+        let restored: ValueMap = serde_json::from_value(encoded).expect("a map deserializes");
+        let first = restored.iter().next().map(|(key, _)| key.clone());
+        Ok(first.unwrap_or(Value::Nil))
+    });
+    engine.register_host_function("HiddenValues", |args| {
+        let Some(Value::Proplist(map)) = args.first() else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Array(map.hidden_values().cloned().collect()))
+    });
+    engine
+}
+
+fn run_sweep_probe(source: &str) -> Value {
+    let mut engine = sweep_probe_engine();
+    engine.load_script(source).expect("script should load");
+    engine
+        .call("Test", &[Value::Object(7)])
+        .expect("script should run")
+}
+
+#[test]
+fn assign_removal_shows_the_swept_key_through_every_accessor() {
+    // Set0 rewrites the one key C4Value the node owns (C4Object.cpp:312), so
+    // there is no second spelling of that key left for iteration, a move out
+    // of the map, or a save/load round trip to disagree about.
+    assert_eq!(
+        run_sweep_probe(
+            r#"#strict 3
+func Test(object target) {
+  var map = { [[target]] = 1 };
+  Clear7();
+  return [KeyViaIter(map), KeyViaIntoIter(map), KeyAfterSaveLoad(map)];
+}
+"#
+        ),
+        Value::Array(vec![
+            Value::Array(vec![Value::Nil]),
+            Value::Array(vec![Value::Nil]),
+            Value::Array(vec![Value::Nil]),
+        ])
+    );
+}
+
+#[test]
+fn a_later_unrelated_sweep_keeps_an_already_cleared_key_nil() {
+    // The second sweep must mutate the key in place again, never rebuild it
+    // from an insertion-time copy: object 7 is gone and cannot come back.
+    assert_eq!(
+        run_sweep_probe(
+            r#"#strict 3
+func Test(object target) {
+  var map = { [[target]] = 1, other = Nine() };
+  Clear7();
+  Clear9();
+  return KeyViaIter(map);
+}
+"#
+        ),
+        Value::Array(vec![Value::Nil])
+    );
+}
+
+#[test]
+fn reinserting_a_swept_keys_original_shape_adds_a_second_node() {
+    // The stale node stays in the bucket its live object hashed to, so the
+    // fresh key misses it and C4ValueHash allocates a second node
+    // (C4ValueHash.cpp:49-136).
+    assert_eq!(
+        run_sweep_probe(
+            r#"#strict 3
+func Test(object target) {
+  var map = { [[target]] = 1 };
+  Clear7();
+  map[[Fresh7()]] = 2;
+  return Len(map);
+}
+"#
+        ),
+        Value::Int(2)
+    );
+}
+
+#[test]
+fn assign_removal_clears_a_retained_mapped_slot() {
+    // A slot retained in emptyValues is still a registered C4Value
+    // (C4Value.cpp:78-99), so the FirstRef sweep reaches it there too.
+    assert_eq!(
+        run_sweep_probe(
+            r#"#strict 3
+func Test(object target) {
+  var map = {};
+  map[target] = [Nine()];
+  Clear7();
+  Clear9();
+  return HiddenValues(map);
+}
+"#
+        ),
+        Value::Array(vec![Value::Array(vec![Value::Nil])])
+    );
 }
