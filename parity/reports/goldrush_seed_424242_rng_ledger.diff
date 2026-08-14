@@ -1,0 +1,110 @@
+diff --git a/rust/crates/lc-engine/src/ffi.rs b/rust/crates/lc-engine/src/ffi.rs
+index 6d168dc69..87b9d6e10 100644
+--- a/rust/crates/lc-engine/src/ffi.rs
++++ b/rust/crates/lc-engine/src/ffi.rs
+@@ -2383,6 +2383,7 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
+     network_packet_count: usize,
+     controls: *const *const c_char,
+     control_count: usize,
++    rng_random3: i32,
+     rng_hold: u32,
+     rng_count: i32,
+     error_out: *mut *mut c_char,
+@@ -2439,28 +2440,20 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
+             expected.controls = entries.clone();
+         } else {
+             expected.controls.clear();
+-            // The synced-RNG registers must match once both engines completed the
+-            // frame (C4Random.h:29-30) — report the FIRST divergence; a ledger slip
+-            // precedes and explains most downstream state diffs.
+-            {
+-                let rng = runtime.engine.debug_rng_clone();
+-                if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+-                    eprintln!("RNGMARK frame={frame} rust_count={} cpp_count={rng_count}", rng.count);
+-                }
+-                if (rng.hold != rng_hold || rng.count != rng_count)
+-                    && !runtime.rng_mismatch_reported
+-                {
+-                    runtime.rng_mismatch_reported = true;
+-                    tracing::error!(
+-                        frame,
+-                        rust_hold = rng.hold,
+-                        rust_count = rng.count,
+-                        cpp_hold = rng_hold,
+-                        cpp_count = rng_count,
+-                        "synced RNG ledger diverged"
+-                    );
+-                }
+-            }
++        }
++        // RandomHold/Count and FRndPtr3 are synchronized state (C4Random.h:29-30;
++        // C4Random.cpp:24-41; C4Control.cpp:445-451,482-492). Fail on the first
++        // divergence before comparing its downstream state effects.
++        let rng = runtime.engine.debug_rng_clone();
++        if rng.rnd3_ptr() != rng_random3 || rng.hold != rng_hold || rng.count != rng_count {
++            set_error(
++                error_out,
++                format!(
++                    "frame {frame}: synced RNG state rust ({},{},{}) cpp ({rng_random3},{rng_hold},{rng_count})",
++                    rng.rnd3_ptr(), rng.hold, rng.count
++                ),
++            );
++            return false;
+         }
+         if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
+             let detail = format!("frame {frame}: {detail}");
+@@ -2497,6 +2490,21 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
+         expected.controls.clear();
+     }
+
++    // RandomHold/Count and FRndPtr3 are synchronized state (C4Random.h:29-30;
++    // C4Random.cpp:24-41; C4Control.cpp:445-451,482-492). Fail on the first
++    // divergence before comparing its downstream state effects.
++    let rng = runtime.engine.debug_rng_clone();
++    if rng.rnd3_ptr() != rng_random3 || rng.hold != rng_hold || rng.count != rng_count {
++        set_error(
++            error_out,
++            format!(
++                "frame {frame}: synced RNG state rust ({},{},{}) cpp ({rng_random3},{rng_hold},{rng_count})",
++                rng.rnd3_ptr(), rng.hold, rng.count
++            ),
++        );
++        return false;
++    }
++
+     if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
+         let detail = format!("frame {frame}: {detail}");
+         set_error(error_out, detail);
+diff --git a/rust/include/lc_engine_ffi.h b/rust/include/lc_engine_ffi.h
+index f33b8bbb3..f025ad020 100644
+--- a/rust/include/lc_engine_ffi.h
++++ b/rust/include/lc_engine_ffi.h
+@@ -337,6 +337,7 @@ bool lc_engine_runtime_compare_snapshot(
+     size_t network_packet_count,
+     const char *const *controls,
+     size_t control_count,
++    int32_t rng_random3,
+     uint32_t rng_hold,
+     int32_t rng_count,
+     char **error_message);
+diff --git a/src/rust/RustEngineBridge.cpp b/src/rust/RustEngineBridge.cpp
+index f76f6934e..fb19e6323 100644
+--- a/src/rust/RustEngineBridge.cpp
++++ b/src/rust/RustEngineBridge.cpp
+@@ -47,6 +47,8 @@
+ #include <unordered_map>
+ #include <unordered_set>
+
++extern int32_t FRndPtr3;
++
+ namespace {
+
+ constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+@@ -2149,6 +2151,7 @@ void OnFrame(C4Game &game) {
+                     network_count,
+                     control_data,
+                     control_count,
++                    FRndPtr3,
+                     RandomHold,
+                     RandomCount,
+                     &error_message)) {

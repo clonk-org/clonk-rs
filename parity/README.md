@@ -246,6 +246,22 @@ The Rust checker is `crates/clonk-engine/src/parity_differential.rs`. On any
 mismatch it panics with `PARITY DIVERGENCE in <section> entry <i> field <f>:
 C++ golden = <x>, Rust = <y>` — i.e. the first divergence, fully localized.
 
+## Historical full-scenario evidence
+
+The [Gold Rush seed 424242 report](reports/goldrush_seed_424242.json) records a
+continuous historical shadow differential through frame 15,000. It uses the
+Rust revision that established the previous 14,415-frame horizon and the exact
+scenario, content, and player inputs recovered from that run. The pinned
+oracle's base C++ `src` tree is byte-identical at the execution revision. The
+report records both base tree IDs and the diagnostic-only bridge/ABI patch that
+makes synchronized `FRndPtr3`/`RandomHold`/`RandomCount` mismatches fail closed
+on every frame without changing simulation logic.
+
+This is historical evidence for clonk-org/clonk-rs#394, not a claim that the
+current Rust engine matches the full C++ scenario. The later oracle pin carries
+a different bundled Rust tree, and the current tree no longer exposes the live
+C ABI bridge; neither is validated by this report.
+
 ## Layout
 
 ```
@@ -256,20 +272,22 @@ parity/
     .gen/               # generated build inputs (oracle_fixed.h, sine_table.cpp) — disposable
   golden/
     parity_golden.json  # committed C++ golden output (the oracle)
+  reports/
+    goldrush_seed_424242.json             # historical scenario horizon
+    goldrush_seed_424242_rng_ledger.diff  # fail-closed RNG diagnostic
 ```
 
 ## Phase 2 (future): live full-scenario shadow-diff
 
-`src/rust/RustEngineBridge.cpp` already runs the Rust engine alongside C++ each
-frame (`OnFrame`, gated by `USE_RUST_ENGINE_VALIDATION`, controlled by the
-`LC_RUST_ENGINE_*` env vars). To extend the differential to full scenarios
-(collision, landscape, materials):
+The current Rust tree does not expose the C ABI consumed by the historical
+`src/rust/RustEngineBridge.cpp`. The execution checkout used by the report links
+its own historical Rust snapshot; its base C++ `src` tree is byte-identical to
+the later pin. That bridge already transports raw
+`fix_x/fix_y/fix_r/xdir/ydir/rdir` values and reports first-field mismatches,
+but it cannot validate current Rust.
 
-1. Fix the `ffi` cargo feature so `cargo xtask ffi` builds (`B2`); it is currently
-   pre-existing-broken on unrelated fields (`ControlEvent`, `construction`,
-   `messages`, `ObjectBaseGraphics`).
-2. Extend the C-ABI snapshot (`LcEngineObjectSnapshot`) to carry **raw `C4Fixed`**
-   `fix_x/fix_y/fix_r/xdir/ydir/rdir` (it currently transports whole pixels via
-   `fixtoi`, masking sub-pixel desync).
-3. Make the bridge's comparison report the **first per-field divergence** (it
-   currently logs a single "parity mismatch") and dump both states.
+A current-tree full-scenario gate needs a new live trace or C-ABI consumer that
+runs the current engine against the same pinned C++ source, content revision,
+seed, and controls. Until that exists, `cargo xtask parity verify` remains the
+Phase 1 primitive gate and historical scenario reports must stay explicitly
+scoped to their bundled Rust revision.
