@@ -5356,6 +5356,9 @@ impl EffectHostContext {
                     ty,
                     command_instance_id,
                 )),
+                event @ CommandEvent::CallObjectFunction { .. } => {
+                    outcome.call_attempts.push(event)
+                }
                 event @ (CommandEvent::CommandExitObject { .. }
                 | CommandEvent::CommandExitIntoParent { .. }) => outcome.exit_attempts.push(event),
                 CommandEvent::NativeCommandSuccess { object_id, command } => {
