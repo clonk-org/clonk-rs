@@ -86,6 +86,159 @@ func Probe() {
 }
 
 #[test]
+fn a_tree_walk_index_clears_an_array_base_retained_during_removal() {
+    // AB_ARRAYA keeps the constructed array C4Value on the stack until the
+    // index operand finishes. AssignRemoval therefore nils that base before
+    // the element is read (C4AulExec.cpp array-index opcodes; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(0))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0); // force the tree-walk path
+  return [Target()][Clear()];
+}
+"#,
+        )
+        .expect("tree-walk index probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk index runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_concat_clears_a_left_array_retained_during_removal() {
+    // AB_Concat retains the left operand C4Value while the right operand
+    // executes, so AssignRemoval nils the left array's object before concat
+    // copies it (C4AulExec.cpp:594-657; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  return [Target()] .. [Clear()];
+}
+"#,
+        )
+        .expect("tree-walk concat probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk concat runs"),
+        Value::Array(vec![Value::Nil, Value::Nil])
+    );
+}
+
+#[test]
+fn a_tree_walk_proplist_clears_a_key_retained_during_removal() {
+    // AB_MAP retains each constructed key C4Value while the matching value
+    // expression runs (C4AulExec.cpp map construction; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine.register_host_function("FirstKey", |args| {
+        let Value::Proplist(map) = args.first().cloned().unwrap_or(Value::Nil) else {
+            return Ok(Value::Nil);
+        };
+        Ok(map
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .unwrap_or(Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  return FirstKey({ [Target()] = Clear() });
+}
+"#,
+        )
+        .expect("tree-walk proplist probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk proplist runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_foreach_clears_an_iterable_retained_during_removal() {
+    // AB_FOREACH keeps the iterable C4Value on the stack for the loop body
+    // (C4AulExec.cpp foreach; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  var seen;
+  for (var item in [Target(), Clear()]) seen = item;
+  return seen;
+}
+"#,
+        )
+        .expect("tree-walk foreach probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk foreach runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_assignment_clears_an_lvalue_base_retained_during_removal() {
+    // AB_Set retains the destination C4Value while the RHS executes
+    // (C4AulExec.cpp assignment opcodes; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  var map = { a = Target() };
+  map.a = Clear();
+  return map.a;
+}
+"#,
+        )
+        .expect("tree-walk assignment probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("tree-walk assignment runs"),
+        Value::Int(1)
+    );
+}
+
+#[test]
 fn failsafe_global_call_to_missing_function_evaluates_arguments_then_returns_nil() {
     let mut engine = Engine::new();
     let calls = Arc::new(AtomicUsize::new(0));

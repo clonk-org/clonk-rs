@@ -3335,6 +3335,12 @@ impl ReturnValue {
         let _result_slot = ValueStackReservation::reserve(1)?;
         self.into_tracked()
     }
+
+    fn clear_object_reference_sweeps(&mut self, cursor: usize) {
+        if let Self::Value(tracked) = self {
+            tracked.clear_object_reference_sweeps(cursor);
+        }
+    }
 }
 
 struct GlobalCallContextGuard<'a> {
@@ -6022,7 +6028,8 @@ impl<'a> Vm<'a> {
                         !equal
                     }));
                 }
-                let left = self.evaluate(lhs, env, depth)?;
+                let left_sweep_cursor = object_reference_sweep_cursor();
+                let mut left = self.evaluate(lhs, env, depth)?;
                 // && and || are Lua-style: they return the surviving operand
                 // value unchanged, not a coerced bool (C4AulExec.cpp:999-1021,
                 // AB_JUMPAND/AB_JUMPOR leave the operand on the stack).
@@ -6056,6 +6063,7 @@ impl<'a> Vm<'a> {
                 }
                 let _left_slot = ValueStackReservation::reserve(1)?;
                 let right = self.evaluate(rhs, env, depth)?;
+                clear_value_for_object_reference_sweeps(&mut left, left_sweep_cursor);
                 self.eval_binary(left, op, right, env.strict_level, None)
             }
             Expr::GlobalCall {
@@ -6593,12 +6601,14 @@ impl<'a> Vm<'a> {
                 let mut map = ValueMap::with_capacity(entries.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
+                    let key_sweep_cursor = object_reference_sweep_cursor();
                     let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
                     value_stack.grow(1)?;
-                    let key = key.into_value()?;
+                    let mut key = key.into_value()?;
                     let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let value = value.into_value()?;
+                    clear_value_for_object_reference_sweeps(&mut key, key_sweep_cursor);
                     c4_map_assign_set(&mut map, key, value);
                 }
                 Ok(Value::Proplist(map))
@@ -6733,12 +6743,14 @@ impl<'a> Vm<'a> {
                 let mut tracked = Vec::with_capacity(entries.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
+                    let key_sweep_cursor = object_reference_sweep_cursor();
                     let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
                     value_stack.grow(1)?;
-                    let key = key.into_value()?;
+                    let mut key = key.into_value()?;
                     let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let value = value.into_tracked()?;
+                    clear_value_for_object_reference_sweeps(&mut key, key_sweep_cursor);
                     tracked.push((key, value));
                 }
                 Ok(TrackedValue::proplist(tracked))
@@ -6784,9 +6796,11 @@ impl<'a> Vm<'a> {
                 self.evaluate_safe_navigation_tracked(receiver, steps, env, depth)
             }
             Expr::Binary(left, BinaryOp::Concat, right) => {
-                let left = self.evaluate_tracked(left, env, depth)?;
+                let left_sweep_cursor = object_reference_sweep_cursor();
+                let mut left = self.evaluate_tracked(left, env, depth)?;
                 let _left_slot = ValueStackReservation::reserve(1)?;
                 let right = self.evaluate_tracked(right, env, depth)?;
+                left.clear_object_reference_sweeps(left_sweep_cursor);
                 self.eval_concat_tracked(left, right, env.strict_level, "..")
             }
             Expr::Binary(left, BinaryOp::NilCoalescing, right) => {
@@ -9814,9 +9828,13 @@ impl<'a> Vm<'a> {
                 self.property_reference_or_value(base, property, env)
             }
             Expr::Index(base, index_operand) => {
-                let base = self.evaluate_reference_or_value(base, env, depth)?;
+                let base_sweep_cursor = object_reference_sweep_cursor();
+                let mut base = self.evaluate_reference_or_value(base, env, depth)?;
                 let _base_slot = ValueStackReservation::reserve(1)?;
-                self.index_reference_or_value(base, index_operand, env, depth)
+                let (index, _index_slot) =
+                    self.evaluate_index_operand(index_operand, env, depth)?;
+                base.clear_object_reference_sweeps(base_sweep_cursor);
+                self.index_value_reference_or_value(base, index, env)
             }
             Expr::ArrayAppend(base) => self.evaluate_array_append(base, env, depth),
             Expr::GlobalCall {
