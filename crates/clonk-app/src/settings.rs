@@ -1,3 +1,4 @@
+use clonk_audio::VoiceProcessingConfig;
 use clonk_core::std_config::Config;
 use clonk_frontend::startup_options_graphics::{
     MAX_GRAPHICS_SCALE_PERCENT, MIN_GRAPHICS_SCALE_PERCENT,
@@ -81,6 +82,15 @@ pub struct AudioOptions {
     /// How long a voice-activated capture keeps transmitting after the level
     /// falls back below the threshold, so word endings are not clipped.
     pub voice_activation_hangover_ms: u32,
+    /// Subtract what this machine is playing from what its microphone hears,
+    /// so speakers do not send the game — or the other players — back out.
+    pub voice_echo_cancellation: bool,
+    /// Hold down the part of the capture that does not change while someone
+    /// talks: fans, hum, traffic.
+    pub voice_noise_suppression: bool,
+    /// Bring every talker to the same loudness, whatever their microphone and
+    /// however far from it they sit.
+    pub voice_automatic_gain_control: bool,
 }
 
 impl Default for AudioOptions {
@@ -102,6 +112,13 @@ impl Default for AudioOptions {
             // -36 dBFS: above a quiet room, below ordinary speech.
             voice_activation_threshold: 0.4,
             voice_activation_hangover_ms: 400,
+            // Capture processing follows the microphone opt-in rather than
+            // being a second one: a player who has enabled voice chat wants to
+            // be heard, not to send their room back to everyone else
+            // (clonk-org/clonk-rs#421).
+            voice_echo_cancellation: true,
+            voice_noise_suppression: true,
+            voice_automatic_gain_control: true,
         }
     }
 }
@@ -240,6 +257,30 @@ impl AudioOptions {
                 self.voice_activation_hangover_ms =
                     value.clamp(0, MAX_VOICE_ACTIVATION_HANGOVER_MS) as u32;
             }
+        }
+
+        for (key, target) in [
+            ("EchoCancellation", &mut self.voice_echo_cancellation),
+            ("NoiseSuppression", &mut self.voice_noise_suppression),
+            (
+                "AutomaticGainControl",
+                &mut self.voice_automatic_gain_control,
+            ),
+        ] {
+            if let Some(parsed) = config.get_in(Some("Voice"), key).and_then(parse_bool) {
+                *target = parsed;
+            }
+        }
+    }
+
+    /// Which capture-processing stages the microphone runs
+    /// (clonk-org/clonk-rs#421). Independent of how the microphone opens: both
+    /// push-to-talk and voice activation capture through the same chain.
+    pub(crate) fn voice_processing(&self) -> VoiceProcessingConfig {
+        VoiceProcessingConfig {
+            echo_cancellation: self.voice_echo_cancellation,
+            noise_suppression: self.voice_noise_suppression,
+            automatic_gain_control: self.voice_automatic_gain_control,
         }
     }
 
@@ -494,6 +535,9 @@ mod tests {
             voice_activation_mode: VoiceActivationMode::VoiceActivated,
             voice_activation_threshold: 0.25,
             voice_activation_hangover_ms: 260,
+            voice_echo_cancellation: false,
+            voice_noise_suppression: true,
+            voice_automatic_gain_control: false,
         };
 
         options.write_startup_sound_config(&mut config);
@@ -559,6 +603,9 @@ mod tests {
         // no room for them and they are set-once, not a choice.
         assert_eq!(config.get_in(Some("Voice"), "ActivationThreshold"), None);
         assert_eq!(config.get_in(Some("Voice"), "ActivationHangover"), None);
+        assert_eq!(config.get_in(Some("Voice"), "EchoCancellation"), None);
+        assert_eq!(config.get_in(Some("Voice"), "NoiseSuppression"), None);
+        assert_eq!(config.get_in(Some("Voice"), "AutomaticGainControl"), None);
         assert_eq!(
             config.get_in(Some("Sound"), "Sound"),
             None,
@@ -600,6 +647,45 @@ mod tests {
         assert!(options.voice_enabled);
         assert_eq!(options.voice_volume, 0.37);
         assert_eq!(options.voice_push_to_talk, VirtualKeyCode::KeyT);
+    }
+
+    #[test]
+    fn capture_processing_is_on_by_default_and_each_stage_switches_off_alone() {
+        let defaults = AudioOptions::default();
+        assert_eq!(
+            defaults.voice_processing(),
+            VoiceProcessingConfig::default(),
+            "an opted-in microphone is cleaned up unless the player says otherwise",
+        );
+
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "NoiseSuppression", "false");
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+
+        assert_eq!(
+            options.voice_processing(),
+            VoiceProcessingConfig {
+                noise_suppression: false,
+                ..VoiceProcessingConfig::default()
+            },
+            "switching one stage off leaves the other two running",
+        );
+
+        config.set_in(Some("Voice"), "EchoCancellation", "0");
+        config.set_in(Some("Voice"), "AutomaticGainControl", "nonsense");
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+
+        assert_eq!(
+            options.voice_processing(),
+            VoiceProcessingConfig {
+                echo_cancellation: false,
+                noise_suppression: false,
+                automatic_gain_control: true,
+            },
+            "an unreadable value leaves its stage as it was, like every other Voice key",
+        );
     }
 
     #[test]

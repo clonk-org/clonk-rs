@@ -105,7 +105,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]),
         level: 1.0,
     };
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
         Ok(TestVoiceSource {
             frames: RefCell::new(vec![captured]),
         })
@@ -357,7 +357,7 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
     options.voice_activation_hangover_ms = 0;
 
     let payload = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
         Ok(TestVoiceSource {
             frames: RefCell::new(vec![
                 clonk_audio::VoiceInputFrame {
@@ -437,7 +437,7 @@ fn voice_activation_never_opens_a_microphone_the_player_did_not_opt_in_to() {
     options.voice_enabled = false;
     options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
     options.voice_activation_threshold = 0.0;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move || {
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
         observed.set(observed.get() + 1);
         Ok(UnreachableVoiceSource)
     });
@@ -481,7 +481,7 @@ fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
     // A stub source, never the real `VoiceCapture`: a test must not depend on
     // the host owning a microphone, and must certainly not open one.
     app.voice_chat =
-        crate::voice_chat::VoiceChatState::with_source_opener(|| Ok(SilentVoiceSource));
+        crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(SilentVoiceSource));
 
     app.update_voice_chat();
     assert!(app.voice_chat.capture_active());
@@ -493,6 +493,123 @@ fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
         !app.voice_chat.capture_active(),
         "no key holds this capture open, so nothing else would ever close it",
     );
+}
+
+#[test]
+fn capture_processing_follows_the_settings_without_reopening_the_microphone() {
+    struct SilentVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for SilentVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed_opens = opens.clone();
+    let switches: std::rc::Rc<std::cell::RefCell<Option<std::sync::Arc<_>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed_switches = switches.clone();
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, _events, _voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_noise_suppression = false;
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+        observed_opens.set(observed_opens.get() + 1);
+        *observed_switches.borrow_mut() = Some(options.processing.clone());
+        Ok(SilentVoiceSource)
+    });
+
+    app.update_voice_chat();
+
+    assert_eq!(opens.get(), 1);
+    let switches = switches.borrow().clone().test_value();
+    assert_eq!(
+        switches.get(),
+        clonk_audio::VoiceProcessingConfig {
+            noise_suppression: false,
+            ..clonk_audio::VoiceProcessingConfig::default()
+        },
+        "the capture opens with what the player configured",
+    );
+
+    app.audio.test_mut().options.voice_automatic_gain_control = false;
+    app.update_voice_chat();
+
+    assert_eq!(
+        switches.get(),
+        clonk_audio::VoiceProcessingConfig {
+            noise_suppression: false,
+            automatic_gain_control: false,
+            ..clonk_audio::VoiceProcessingConfig::default()
+        },
+        "a stage switched off mid-call reaches the open microphone",
+    );
+    assert_eq!(
+        opens.get(),
+        1,
+        "and does it without closing and reopening the device",
+    );
+}
+
+#[test]
+fn only_a_capture_that_cancels_echo_asks_the_mixer_for_a_reference() {
+    struct SilentVoiceSource;
+
+    impl crate::voice_chat::VoiceFrameSource for SilentVoiceSource {
+        fn drain_frames(&self) -> Vec<clonk_audio::VoiceInputFrame> {
+            Vec::new()
+        }
+    }
+
+    let referenced = std::rc::Rc::new(std::cell::Cell::new(None));
+    let observed = referenced.clone();
+    let mut app = new_classic_running_sandbox_app();
+    let local_client = 7;
+    app.engine
+        .test_player_mut(app.local_owner)
+        .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
+    app.snapshot = app.engine.snapshot();
+
+    let (manager, _events, _voice) =
+        NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
+    app.network = Some(manager);
+    let options = &mut app.audio.test_mut().options;
+    options.voice_enabled = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    options.voice_echo_cancellation = false;
+    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+        observed.set(Some(options.echo_reference.is_some()));
+        Ok(SilentVoiceSource)
+    });
+
+    app.update_voice_chat();
+    assert_eq!(
+        referenced.get(),
+        Some(false),
+        "nothing asks the mixer to publish what it plays until something cancels it",
+    );
+
+    // Close that capture, turn echo cancellation on, and open another.
+    app.audio.test_mut().options.voice_activation_mode =
+        crate::settings::VoiceActivationMode::PushToTalk;
+    app.update_voice_chat();
+    let options = &mut app.audio.test_mut().options;
+    options.voice_echo_cancellation = true;
+    options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
+    app.update_voice_chat();
+
+    assert_eq!(referenced.get(), Some(true));
 }
 
 #[test]
@@ -521,7 +638,7 @@ fn a_microphone_voice_activation_cannot_open_is_not_retried_every_tick() {
     }
 
     app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(
-        move || -> Result<UnreachableVoiceSource, _> {
+        move |_| -> Result<UnreachableVoiceSource, _> {
             observed.set(observed.get() + 1);
             Err(clonk_audio::VoiceCaptureError::NoInputDevice)
         },

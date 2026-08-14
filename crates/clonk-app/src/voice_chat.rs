@@ -39,10 +39,12 @@
 //! (clonk-org/clonk-rs#426).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clonk_audio::{
-    decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceInputFrame,
+    decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions,
+    VoiceEchoReference, VoiceInputFrame, VoiceProcessingConfig, VoiceProcessingSwitches,
 };
 use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 
@@ -174,7 +176,8 @@ impl VoiceFrameSource for VoiceCapture {
     }
 }
 
-type VoiceCaptureOpener = Box<dyn FnMut() -> Result<Box<dyn VoiceFrameSource>, VoiceCaptureError>>;
+type VoiceCaptureOpener =
+    Box<dyn FnMut(VoiceCaptureOptions) -> Result<Box<dyn VoiceFrameSource>, VoiceCaptureError>>;
 
 #[derive(Debug, Default)]
 pub(crate) struct RemoteVoiceStream {
@@ -506,6 +509,10 @@ pub(crate) struct VoiceChatState {
     activity: VoiceActivityTracker,
     capture: Option<Box<dyn VoiceFrameSource>>,
     capture_opener: VoiceCaptureOpener,
+    /// Shared with the live capture, so a settings change reaches the
+    /// microphone thread on its next frame instead of waiting for the
+    /// microphone to close (clonk-org/clonk-rs#421).
+    processing: Arc<VoiceProcessingSwitches>,
     capture_key: Option<winit::keyboard::KeyCode>,
     activation_gate: VoiceActivationGate,
     activation_open_failed: bool,
@@ -527,22 +534,23 @@ impl Default for VoiceChatState {
     /// pass their own source to [`VoiceChatState::with_source_opener`].
     #[cfg(test)]
     fn default() -> Self {
-        Self::with_source_opener(|| Err::<VoiceCapture, _>(VoiceCaptureError::Unavailable))
+        Self::with_source_opener(|_| Err::<VoiceCapture, _>(VoiceCaptureError::Unavailable))
     }
 }
 
 impl VoiceChatState {
     pub(crate) fn with_source_opener<F, S>(mut opener: F) -> Self
     where
-        F: FnMut() -> Result<S, VoiceCaptureError> + 'static,
+        F: FnMut(VoiceCaptureOptions) -> Result<S, VoiceCaptureError> + 'static,
         S: VoiceFrameSource + 'static,
     {
         Self {
             activity: VoiceActivityTracker::default(),
             capture: None,
-            capture_opener: Box::new(move || {
-                opener().map(|source| Box::new(source) as Box<dyn VoiceFrameSource>)
+            capture_opener: Box::new(move |options| {
+                opener(options).map(|source| Box::new(source) as Box<dyn VoiceFrameSource>)
             }),
+            processing: VoiceProcessingSwitches::new(VoiceProcessingConfig::default()),
             capture_key: None,
             activation_gate: VoiceActivationGate::default(),
             activation_open_failed: false,
@@ -555,22 +563,32 @@ impl VoiceChatState {
     #[cfg(test)]
     fn with_capture_opener<F, S>(opener: F) -> Self
     where
-        F: FnMut() -> Result<S, VoiceCaptureError> + 'static,
+        F: FnMut(VoiceCaptureOptions) -> Result<S, VoiceCaptureError> + 'static,
         S: VoiceFrameSource + 'static,
     {
         Self::with_source_opener(opener)
     }
 
+    /// Which capture-processing stages run. Takes effect on the microphone's
+    /// next frame, whether or not one is open.
+    pub(crate) fn set_processing(&self, config: VoiceProcessingConfig) {
+        self.processing.set(config);
+    }
+
     /// `key` is the push-to-talk key whose release closes this capture again;
-    /// `None` opens a capture no key owns.
+    /// `None` opens a capture no key owns. `echo_reference` is what the mixer
+    /// is playing, which the canceller needs and nothing else does.
     pub(crate) fn start_capture(
         &mut self,
         key: Option<winit::keyboard::KeyCode>,
+        echo_reference: Option<VoiceEchoReference>,
     ) -> Result<(), VoiceCaptureError> {
         if self.capture.is_some() {
             return Ok(());
         }
-        self.capture = Some((self.capture_opener)()?);
+        let mut options = VoiceCaptureOptions::new(self.processing.clone());
+        options.echo_reference = echo_reference;
+        self.capture = Some((self.capture_opener)(options)?);
         self.capture_key = key;
         self.activation_gate.close();
         self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
@@ -586,11 +604,14 @@ impl VoiceChatState {
     /// on every tick for as long as the player stays in the game. The latch
     /// clears the next time the capture stops — which is what a player who has
     /// just plugged a microphone in will cause by leaving and re-entering.
-    pub(crate) fn start_voice_activated_capture(&mut self) -> Result<(), VoiceCaptureError> {
+    pub(crate) fn start_voice_activated_capture(
+        &mut self,
+        echo_reference: Option<VoiceEchoReference>,
+    ) -> Result<(), VoiceCaptureError> {
         if self.capture.is_some() || self.activation_open_failed {
             return Ok(());
         }
-        let opened = self.start_capture(None);
+        let opened = self.start_capture(None, echo_reference);
         self.activation_open_failed = opened.is_err();
         opened
     }
@@ -1817,7 +1838,7 @@ mod tests {
     fn microphone_opens_only_for_an_explicit_capture_start() {
         let opens = Rc::new(Cell::new(0));
         let observed_opens = opens.clone();
-        let mut voice = VoiceChatState::with_capture_opener(move || {
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
             observed_opens.set(observed_opens.get() + 1);
             Ok(TestVoiceSource::with_frame([0; 164]))
         });
@@ -1826,10 +1847,10 @@ mod tests {
         assert!(!voice.capture_active());
 
         voice
-            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
             .unwrap();
         voice
-            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
             .unwrap();
         assert_eq!(opens.get(), 1);
         assert_eq!(
@@ -1843,7 +1864,7 @@ mod tests {
 
         voice.stop_capture();
         voice
-            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
             .unwrap();
         assert_eq!(opens.get(), 2);
         assert_eq!(
@@ -1857,16 +1878,43 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_opens_with_the_processing_the_player_has_configured() {
+        let opened = Rc::new(RefCell::new(None));
+        let observed = opened.clone();
+        let mut voice = VoiceChatState::with_capture_opener(move |options| {
+            *observed.borrow_mut() = Some(options.processing.clone());
+            Ok(TestVoiceSource::with_frame([0; 164]))
+        });
+        let quiet_room = VoiceProcessingConfig {
+            noise_suppression: false,
+            ..VoiceProcessingConfig::default()
+        };
+
+        voice.set_processing(quiet_room);
+        voice.start_capture(None, None).unwrap();
+
+        let switches = opened.borrow().clone().expect("the capture opened");
+        assert_eq!(switches.get(), quiet_room);
+
+        voice.set_processing(VoiceProcessingConfig::DISABLED);
+        assert_eq!(
+            switches.get(),
+            VoiceProcessingConfig::DISABLED,
+            "the open capture reads the same switches, so a change reaches it",
+        );
+    }
+
+    #[test]
     fn voice_activation_transmits_speech_with_a_release_tail_on_a_fresh_stream() {
         let levels = [0.1, 0.9, 0.1, 0.1, 0.1, 0.9];
         let mut voice =
-            VoiceChatState::with_capture_opener(move || Ok(TestVoiceSource::with_levels(&levels)));
+            VoiceChatState::with_capture_opener(move |_| Ok(TestVoiceSource::with_levels(&levels)));
         let activation = VoiceActivation {
             threshold: 0.5,
             hangover_frames: 2,
         };
 
-        voice.start_capture(None).unwrap();
+        voice.start_capture(None, None).unwrap();
 
         assert_eq!(
             voice
@@ -1884,10 +1932,10 @@ mod tests {
     fn push_to_talk_transmits_every_captured_frame_including_silence() {
         let levels = [0.0, 0.0];
         let mut voice =
-            VoiceChatState::with_capture_opener(move || Ok(TestVoiceSource::with_levels(&levels)));
+            VoiceChatState::with_capture_opener(move |_| Ok(TestVoiceSource::with_levels(&levels)));
 
         voice
-            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
             .unwrap();
 
         assert_eq!(
@@ -1905,13 +1953,13 @@ mod tests {
     fn a_zero_threshold_keeps_a_voice_activated_capture_permanently_open() {
         let levels = [0.0, 0.0];
         let mut voice =
-            VoiceChatState::with_capture_opener(move || Ok(TestVoiceSource::with_levels(&levels)));
+            VoiceChatState::with_capture_opener(move |_| Ok(TestVoiceSource::with_levels(&levels)));
         let activation = VoiceActivation {
             threshold: 0.0,
             hangover_frames: 0,
         };
 
-        voice.start_capture(None).unwrap();
+        voice.start_capture(None, None).unwrap();
 
         assert_eq!(voice.drain_captured_frames(Some(&activation)).len(), 2);
     }
@@ -1919,7 +1967,7 @@ mod tests {
     #[test]
     fn stopping_a_capture_closes_the_activation_gate_behind_it() {
         let opens = Cell::new(0);
-        let mut voice = VoiceChatState::with_capture_opener(move || {
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
             opens.set(opens.get() + 1);
             // The reopened capture hears nothing but a quiet room.
             Ok(TestVoiceSource::with_levels(if opens.get() == 1 {
@@ -1933,10 +1981,10 @@ mod tests {
             hangover_frames: 8,
         };
 
-        voice.start_capture(None).unwrap();
+        voice.start_capture(None, None).unwrap();
         assert_eq!(voice.drain_captured_frames(Some(&activation)).len(), 1);
         voice.stop_capture();
-        voice.start_capture(None).unwrap();
+        voice.start_capture(None, None).unwrap();
 
         assert!(
             voice.drain_captured_frames(Some(&activation)).is_empty(),

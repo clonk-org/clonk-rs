@@ -78,6 +78,21 @@ Once enabled, `ActivationMode` chooses how the microphone opens:
 
 `Volume` scales incoming speech in either mode.
 
+What the microphone picks up is cleaned up before it is sent, and each stage
+can be switched off on its own under **Options → Advanced → Voice**:
+
+- `EchoCancellation` subtracts what this machine is playing from what its
+  microphone hears, so speakers do not send the game — or the other players —
+  back out. Headphones make it unnecessary; on speakers it is what stops
+  everyone else hearing themselves.
+- `NoiseSuppression` holds down the part of the capture that does not change
+  while you talk: fans, hum, traffic outside.
+- `AutomaticGainControl` brings every talker to the same loudness, so a distant
+  microphone is not drowned out by the person sitting on top of theirs.
+
+All three start on. They follow the microphone opt-in rather than adding
+another one, and none of them changes the fixed 20 ms frames voice travels in.
+
 Speech fades linearly over 700 landscape pixels. Terrain does not block it, so
 a wall or cave between two Clonks has no effect beyond their distance. Voice
 uses best-effort UDP between peers that positively negotiate support; older

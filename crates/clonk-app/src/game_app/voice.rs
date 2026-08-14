@@ -24,6 +24,16 @@ impl GameApp {
             .and_then(|audio| audio.options.voice_activation())
     }
 
+    /// What the mixer is playing, for the echo canceller to subtract. Asking
+    /// for it is what makes the mixer publish it at all, so a player who has
+    /// switched echo cancellation off never starts it.
+    fn voice_echo_reference(&self) -> Option<clonk_audio::VoiceEchoReference> {
+        self.audio
+            .as_ref()
+            .filter(|audio| audio.options.voice_echo_cancellation)
+            .map(|audio| audio.system.voice_echo_reference())
+    }
+
     pub(crate) fn handle_voice_key(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
         let configured_key = self
             .audio
@@ -73,7 +83,8 @@ impl GameApp {
         {
             return true;
         }
-        if let Err(error) = self.voice_chat.start_capture(Some(key)) {
+        let echo_reference = self.voice_echo_reference();
+        if let Err(error) = self.voice_chat.start_capture(Some(key), echo_reference) {
             tracing::warn!(%error, "push-to-talk could not open the microphone");
         }
         true
@@ -91,7 +102,11 @@ impl GameApp {
             }
             return;
         }
-        if let Err(error) = self.voice_chat.start_voice_activated_capture() {
+        let echo_reference = self.voice_echo_reference();
+        if let Err(error) = self
+            .voice_chat
+            .start_voice_activated_capture(echo_reference)
+        {
             tracing::warn!(%error, "voice activation could not open the microphone");
         }
     }
@@ -125,6 +140,13 @@ impl GameApp {
             let removed = self.voice_chat.clear();
             self.remove_voice_playback(removed);
             return;
+        }
+
+        // Whatever the player has set right now, handed to a capture that may
+        // already be open: the stages are switched, not reopened.
+        if let Some(audio) = self.audio.as_ref() {
+            self.voice_chat
+                .set_processing(audio.options.voice_processing());
         }
 
         let expired = self.voice_chat.expire_playback(now);
