@@ -4262,7 +4262,7 @@ fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
     assert_engine_parity_boundary(
         sound_error,
         ClassicParityBoundary::RuntimeAudioSystem {
-            action: "the startup Options Sound sheet",
+            action: "the startup Options Audio sheet",
         },
     );
     assert_eq!(
@@ -4278,7 +4278,7 @@ fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
         .render(&mut frame)
         .expect_err("render preflight must reject guessed Sound state");
     let expected = ClassicParityBoundary::RuntimeAudioSystem {
-        action: "the startup Options Sound sheet",
+        action: "the startup Options Audio sheet",
     };
     assert_eq!(
         error.downcast_ref::<ClassicParityBoundary>(),

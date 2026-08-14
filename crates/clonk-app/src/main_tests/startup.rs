@@ -415,6 +415,7 @@ fn startup_options_visible_labels_follow_runtime_resources() {
         ("IDS_DLG_PROGRAM", "Programm"),
         ("IDS_DLG_GRAPHICS", "Grafik"),
         ("IDS_DLG_SOUND", "Ton"),
+        ("IDS_DLG_AUDIO", "Klang"),
         ("IDS_DLG_KEYBOARD", "Tastatur"),
         ("IDS_DLG_GAMEPAD", "Gamepad"),
         ("IDS_DLG_NETWORK", "Netzwerk"),
@@ -461,9 +462,12 @@ fn startup_options_visible_labels_follow_runtime_resources() {
 
     // The caption drops its mnemonic marker like every FullscreenDialog title.
     assert_eq!(labels.title, "Einstellungen");
+    // The third sheet reads the port-only `IDS_DLG_AUDIO`, not the C++
+    // `IDS_DLG_SOUND` the ingame menu still uses for its own "Sound" entry:
+    // the port hosts the voice-chat group there too (clonk-org/clonk-rs#452).
     assert_eq!(
         labels.sheets,
-        ["Programm", "Grafik", "Ton", "Tastatur", "Gamepad", "Netzwerk"].map(str::to_string)
+        ["Programm", "Grafik", "Klang", "Tastatur", "Gamepad", "Netzwerk"].map(str::to_string)
     );
     assert_eq!(labels.back, "Zurueck");
     assert_eq!(labels.language, "Sprache");

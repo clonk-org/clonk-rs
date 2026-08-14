@@ -50,6 +50,7 @@ pub mod startup_options_controls;
 pub mod startup_options_dlg;
 pub mod startup_options_graphics;
 pub mod startup_options_network;
+pub mod startup_options_voice;
 pub mod startup_plrproperties;
 pub mod startup_plrsel;
 pub mod startup_portraitsel;

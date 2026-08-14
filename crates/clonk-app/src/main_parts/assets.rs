@@ -7948,7 +7948,10 @@ fn options_sheet_by_name(name: &str) -> Option<clonk_frontend::startup_options_d
     match name.to_ascii_lowercase().as_str() {
         "program" => Some(OptionsSheet::Program),
         "graphics" => Some(OptionsSheet::Graphics),
-        "sound" => Some(OptionsSheet::Sound),
+        // `audio` is the caption the sheet now carries
+        // (clonk-org/clonk-rs#452); `sound` stays accepted because it is the
+        // C++ name and what existing invocations pass.
+        "audio" | "sound" => Some(OptionsSheet::Sound),
         "keyboard" => Some(OptionsSheet::Keyboard),
         "gamepad" => Some(OptionsSheet::Gamepad),
         "network" => Some(OptionsSheet::Network),

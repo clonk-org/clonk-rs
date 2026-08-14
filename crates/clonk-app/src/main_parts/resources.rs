@@ -3308,6 +3308,12 @@ pub(crate) fn load_options_sound_state(
         audio.options.music_volume_percent() as u8,
         audio.options.sound_volume_percent() as u8,
     )
+    // Port-only voice row (clonk-org/clonk-rs#452).
+    .with_voice(
+        audio.options.voice_enabled,
+        audio.options.voice_volume_percent() as u8,
+        crate::control_options::format_key_label(audio.options.voice_push_to_talk),
+    )
 }
 
 pub(crate) fn load_options_graphics_state(
@@ -4817,6 +4823,7 @@ pub(crate) fn apply_startup_options_config(
     );
     if let Some(audio_options) = audio_options {
         audio_options.write_startup_sound_config(config);
+        audio_options.write_startup_voice_config(config);
     }
     config.set_in(
         Some("Graphics"),

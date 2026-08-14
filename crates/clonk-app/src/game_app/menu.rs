@@ -4481,7 +4481,10 @@ impl GameApp {
                     persist: accepted,
                 });
             }
-            MessageDialogContinuation::OptionsControlCapture(_) => {}
+            // Both capture modals apply their binding from the key event
+            // itself; closing them has nothing left to do.
+            MessageDialogContinuation::OptionsControlCapture(_)
+            | MessageDialogContinuation::OptionsVoicePushToTalkCapture => {}
             MessageDialogContinuation::OptionsAlternateServerNotice => {
                 if checkbox_checked == Some(true) {
                     if let Some(dialog) = self.startup_options_dialog.as_mut() {

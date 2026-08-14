@@ -4313,6 +4313,11 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
         audio.options.sound_enabled = false;
         audio.set_music_volume_percent(83);
         audio.set_sound_volume_percent(27);
+        // The port-only voice row seeds from the same live options
+        // (clonk-org/clonk-rs#452).
+        audio.options.voice_enabled = true;
+        audio.options.voice_volume = 0.42;
+        audio.options.voice_push_to_talk = VirtualKeyCode::KeyT;
     }
     app.open_options_menu();
     assert_eq!(
@@ -4320,7 +4325,7 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
             .as_ref()
             .expect("options dialog")
             .sound(),
-        &SoundSheetState::new(true, false, true, false, 83, 27)
+        &SoundSheetState::new(true, false, true, false, 83, 27).with_voice(true, 42, "T".into())
     );
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::Sound(
@@ -4351,6 +4356,14 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
             id: SoundVolumeId::SoundEffects,
             value: 75,
         }),
+        OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+            id: SoundCheckboxId::VoiceEnabled,
+            checked: false,
+        }),
+        OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+            id: SoundVolumeId::Voice,
+            value: 60,
+        }),
     ])
     .test_value();
 
@@ -4361,6 +4374,8 @@ fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
     assert!(audio.options.sound_enabled);
     assert_eq!(audio.options.music_volume_percent(), 25);
     assert_eq!(audio.options.sound_volume_percent(), 75);
+    assert!(!audio.options.voice_enabled);
+    assert_eq!(audio.options.voice_volume_percent(), 60);
     assert_eq!(
         lock_unpoisoned(&audio.music_control).effective_volume(),
         0.25,

@@ -3306,6 +3306,9 @@ impl GameApp {
         if self.handle_options_control_capture_key(key, state)? {
             return Ok(());
         }
+        if self.handle_options_voice_capture_key(key, state)? {
+            return Ok(());
+        }
         if let Err(error) = self.guard_runtime_key_dispatch(key) {
             if key == VirtualKeyCode::Pause {
                 // An unknown global KeyConfig may have rebound the physical

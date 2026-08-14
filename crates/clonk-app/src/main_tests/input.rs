@@ -4628,6 +4628,62 @@ fn control_capture_prompt_quotes_the_sheet_label_for_every_control() {
     assert_eq!(labels[10], "Special 1");
 }
 
+/// The port-only push-to-talk rebind reuses the classic `IDS_MSG_DEFINEKEY`
+/// modal and the same production key routing, so a modified chord is rejected
+/// and a bare key is bound and shown on the button (clonk-org/clonk-rs#452).
+#[test]
+fn options_voice_key_capture_reuses_the_classic_modal_and_rejects_chords() {
+    use clonk_frontend::message_dialog::MessageDialogIcon;
+    use clonk_frontend::startup_options_dlg::OptionsDlgAction;
+
+    let mut app = new_classic_menu_app(640, 480);
+    app.audio.test_mut().options.voice_push_to_talk = VirtualKeyCode::Backquote;
+    app.open_options_menu();
+    app.process_options_dialog_actions(vec![OptionsDlgAction::BeginVoicePushToTalkCapture])
+        .test_value();
+
+    let modal = app.message_dialogs.last().test_value();
+    assert_eq!(modal.state.caption(), "Assign key");
+    assert_eq!(
+        modal.state.message(),
+        "Press the key to hold down while speaking."
+    );
+    assert_eq!(modal.state.icon(), MessageDialogIcon::Standard(24));
+
+    // A modified chord is consumed and rejected, exactly like a crew binding.
+    app.test_modifiers(ModifiersState::SHIFT);
+    app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
+    assert_eq!(
+        app.audio.test_ref().options.voice_push_to_talk,
+        VirtualKeyCode::Backquote
+    );
+    assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+        dialog.continuation,
+        MessageDialogContinuation::OptionsVoicePushToTalkCapture
+    )));
+    app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
+
+    app.test_modifiers(ModifiersState::empty());
+    app.test_key(VirtualKeyCode::KeyV, ElementState::Pressed);
+    assert_eq!(
+        app.audio.test_ref().options.voice_push_to_talk,
+        VirtualKeyCode::KeyV
+    );
+    assert_eq!(
+        app.startup_options_dialog
+            .as_ref()
+            .expect("options dialog")
+            .sound()
+            .push_to_talk_key,
+        "V"
+    );
+    assert!(
+        app.message_dialogs.is_empty(),
+        "the modal closes on capture"
+    );
+    app.test_key(VirtualKeyCode::KeyV, ElementState::Released);
+}
+
 #[test]
 fn options_key_capture_matches_classic_modal_and_production_input_routing() {
     use clonk_frontend::message_dialog::MessageDialogIcon;

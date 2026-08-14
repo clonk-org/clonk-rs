@@ -264,6 +264,12 @@ impl AudioOptions {
         normalized_volume_percent(self.sound_volume)
     }
 
+    /// `Config.Voice.Volume`, in the `0..=100` domain the Audio sheet's bar and
+    /// the Advanced editor's row both use.
+    pub(crate) fn voice_volume_percent(&self) -> i32 {
+        normalized_volume_percent(self.voice_volume)
+    }
+
     pub(crate) fn set_music_volume_percent(&mut self, value: i32) {
         self.music_volume = normalized_volume(value);
     }
@@ -299,6 +305,19 @@ impl AudioOptions {
             "SoundVolume",
             self.sound_volume_percent().to_string(),
         );
+    }
+
+    /// The port-only `[Voice]` keys the Audio sheet edits
+    /// (clonk-org/clonk-rs#452). They live in their own section rather than
+    /// `[Sound]` because `[Sound]` is C4Config's on-disk layout and every key
+    /// in it has a C++ counterpart.
+    pub(crate) fn write_startup_voice_config(&self, config: &mut Config) {
+        let section = Some("Voice");
+        config.set_in(section, "Enabled", bool_config_value(self.voice_enabled));
+        config.set_in(section, "Volume", self.voice_volume_percent().to_string());
+        if let Some(encoded) = crate::input::encode_virtual_key_code(self.voice_push_to_talk) {
+            config.set_in(section, "PushToTalkKey", encoded.to_string());
+        }
     }
 }
 
@@ -488,6 +507,49 @@ mod tests {
             config.get_in(Some("General"), "Unrelated"),
             Some("also-keep-me")
         );
+    }
+
+    /// The Audio sheet's port-only row round-trips through `[Voice]` and never
+    /// reaches `[Sound]`, whose keys all have a C4Config counterpart
+    /// (clonk-org/clonk-rs#452).
+    #[test]
+    fn audio_options_write_only_the_three_port_only_voice_keys() {
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "VendorExtension", "keep-me");
+        let options = AudioOptions {
+            voice_enabled: true,
+            voice_volume: 0.42,
+            voice_push_to_talk: VirtualKeyCode::KeyT,
+            ..AudioOptions::default()
+        };
+
+        options.write_startup_voice_config(&mut config);
+
+        assert_eq!(config.get_in(Some("Voice"), "Enabled"), Some("true"));
+        assert_eq!(config.get_in(Some("Voice"), "Volume"), Some("42"));
+        let expected_key = crate::input::encode_virtual_key_code(VirtualKeyCode::KeyT)
+            .expect("T has a native key code")
+            .to_string();
+        assert_eq!(
+            config.get_in(Some("Voice"), "PushToTalkKey"),
+            Some(expected_key.as_str())
+        );
+        assert_eq!(
+            config.get_in(Some("Voice"), "VendorExtension"),
+            Some("keep-me")
+        );
+        assert_eq!(
+            config.get_in(Some("Sound"), "Sound"),
+            None,
+            "the port-only row must not reach the classic sound section"
+        );
+
+        // The written values are exactly what `apply_config` reads back.
+        let mut reloaded = AudioOptions::default();
+        reloaded.apply_config(&config);
+        assert!(reloaded.voice_enabled);
+        assert_eq!(reloaded.voice_volume, 0.42);
+        assert_eq!(reloaded.voice_push_to_talk, VirtualKeyCode::KeyT);
     }
 
     #[test]

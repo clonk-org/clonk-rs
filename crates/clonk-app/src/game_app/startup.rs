@@ -818,6 +818,40 @@ impl GameApp {
         Ok(())
     }
 
+    /// `Config.Voice.Enabled` from the port-only Audio-sheet row
+    /// (clonk-org/clonk-rs#452). Like the classic rows this only edits the live
+    /// options; the sheet's close-save writes them.
+    ///
+    /// A session's `NetworkManager` snapshots this flag when it is constructed
+    /// (`main.rs`, `game_app::network`), so toggling it here reaches the next
+    /// hosted or joined game rather than one already running -- which the
+    /// startup Options dialog can never be open over.
+    pub(crate) fn set_startup_voice_enabled(&mut self, enabled: bool) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup voice-chat option",
+                },
+            ))
+        })?;
+        audio.options.voice_enabled = enabled;
+        Ok(())
+    }
+
+    /// `Config.Voice.Volume` from the port-only Audio-sheet bar. The positional
+    /// mix multiplies this in every frame, so it is live immediately.
+    pub(crate) fn set_startup_voice_volume(&mut self, value: i32) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup voice-volume slider",
+                },
+            ))
+        })?;
+        audio.options.voice_volume = value.clamp(0, 100) as f32 / 100.0;
+        Ok(())
+    }
+
     pub(crate) fn process_main_menu_actions(
         &mut self,
         actions: Vec<MainMenuAction>,
@@ -5598,7 +5632,7 @@ impl GameApp {
         {
             return Err(anyhow::Error::new(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
-                    action: "the startup Options Sound sheet",
+                    action: "the startup Options Audio sheet",
                 },
             )));
         }

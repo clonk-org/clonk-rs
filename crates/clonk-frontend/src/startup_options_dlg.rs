@@ -3,6 +3,14 @@
 //! engine's F9 reference capture
 //! (`target/parity-specs/options.md`, `build/Screenshots/ref-options.png`).
 //!
+//! Two deliberate divergences on the third tab (clonk-org/clonk-rs#452): it is
+//! captioned "Audio" through the port-only `IDS_DLG_AUDIO` (see
+//! [`SHEET_TITLES`]), and it carries a port-only voice-chat group in the
+//! vertical slack C++'s own grid leaves unused below the Volume group (see
+//! [`crate::startup_options_voice`]). Every C++ control on the sheet keeps its
+//! exact rect and its exact focus position; the port-only ones are appended
+//! after them.
+//!
 //! Geometry mirrors the C++ ctor `C4StartupOptionsDlg.cpp:609-985` in exact
 //! integer math; widget rendering mirrors `C4GuiTabular.cpp` (tab strip),
 //! `C4GuiComboBox.cpp:138-185`, `C4GuiCheckBox.cpp:110-137`,
@@ -47,6 +55,7 @@ use crate::startup_options_network::{
     network_sheet_hit_test, NetworkCheckboxId, NetworkPortId, NetworkSheetHit, NetworkSheetLayout,
     NetworkSheetState, NetworkTextField,
 };
+use crate::startup_options_voice::{VoiceGroupLayout, VoiceGroupMetrics};
 use crate::{
     draw_image_bilinear, draw_image_bilinear_additive, draw_image_strip, GuiPoint, ImageData,
     KeyCode,
@@ -128,6 +137,14 @@ pub struct OptionsLabels {
     pub music: String,
     /// `IDS_CTL_SOUNDFX`.
     pub sound_effects: String,
+    /// The port-only voice group's four strings: `IDS_CTL_VOICECHAT`,
+    /// `IDS_CTL_VOICEENABLED`, `IDS_CTL_VOICEVOLUME` and
+    /// `IDS_CTL_VOICEPUSHTOTALK` (clonk-org/clonk-rs#452). C++ has no
+    /// counterpart to any of them.
+    pub voice_chat: String,
+    pub voice_enabled: String,
+    pub voice_volume: String,
+    pub voice_push_to_talk: String,
     /// `IDS_CTL_DISPLAYMODE`.
     pub display_mode: String,
     /// `IDS_CTL_GRAPHICSSCALE`.
@@ -165,7 +182,7 @@ impl Default for OptionsLabels {
             sheets: [
                 "Program".into(),
                 "Graphics".into(),
-                "Sound".into(),
+                "Audio".into(),
                 "Keyboard".into(),
                 "Gamepad".into(),
                 "Network".into(),
@@ -184,6 +201,10 @@ impl Default for OptionsLabels {
             no_language_info: "Language pack not available.".into(),
             music: "Music".into(),
             sound_effects: "Sound effects".into(),
+            voice_chat: "Voice chat".into(),
+            voice_enabled: "Enable voice chat".into(),
+            voice_volume: "Voice volume".into(),
+            voice_push_to_talk: "Push to talk".into(),
             display_mode: "Display mode".into(),
             graphics_scale: "Scale".into(),
             effects_low: "Low".into(),
@@ -206,8 +227,16 @@ impl Default for OptionsLabels {
 /// Sheet titles + icon phases, ctor order (C4StartupOptionsDlg.cpp:663-668;
 /// LanguageUS.txt). Program and Sound are pixel-implemented; the remaining
 /// sheets are data stubs for the tab strip.
+///
+/// Deliberate divergence: C++ captions the third sheet `IDS_DLG_SOUND`
+/// ("Sound"). The port also hosts the port-only voice-chat group there
+/// (clonk-org/clonk-rs#452), which "Sound" no longer describes, so the caption
+/// resolves through the port-only `IDS_DLG_AUDIO` instead. Only the caption
+/// moves: the tab strip lays every clip, icon and centred caption anchor out at
+/// a fixed 95px pitch (C4GuiTabular.cpp:436-441,59-64), so no pixel depends on
+/// the text's length.
 pub const SHEET_TITLES: [&str; 6] = [
-    "Program", "Graphics", "Sound", "Keyboard", "Gamepad", "Network",
+    "Program", "Graphics", "Audio", "Keyboard", "Gamepad", "Network",
 ];
 
 /// Entries filled by `C4StartupOptionsDlg::OnFontFaceComboFill`, in native
@@ -549,7 +578,8 @@ impl Aligner {
 // Layout
 // ---------------------------------------------------------------------------
 
-/// Pixel-exact geometry for the Sound sheet, in screen coordinates.
+/// Pixel-exact geometry for the Sound sheet, in screen coordinates. Every field
+/// but [`Self::voice`] mirrors `C4StartupOptionsDlg.cpp:921-985` exactly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoundSheetLayout {
     pub frontend_group: IntRect,
@@ -560,15 +590,54 @@ pub struct SoundSheetLayout {
     pub quiet_labels: [IntRect; 2],
     pub loud_labels: [IntRect; 2],
     pub sliders: [IntRect; 2],
+    /// The port-only Voice chat group, laid into the slack C++'s grid leaves
+    /// below [`Self::volume_group`], or `None` where that slack is too small
+    /// (see [`crate::startup_options_voice`]).
+    pub voice: Option<VoiceGroupLayout>,
 }
 
 impl SoundSheetLayout {
-    pub const fn checkbox(&self, id: SoundCheckboxId) -> IntRect {
-        self.checkboxes[id.index()]
+    pub fn checkbox(&self, id: SoundCheckboxId) -> IntRect {
+        match id {
+            // The port-only row lives in the voice group, so it is absent
+            // exactly when that group is. A degenerate rect is never hit and
+            // never drawn.
+            SoundCheckboxId::VoiceEnabled => self
+                .voice
+                .map(|voice| voice.enabled_check)
+                .unwrap_or_default(),
+            _ => self.checkboxes[id.index()],
+        }
     }
 
-    pub const fn slider(&self, id: SoundVolumeId) -> IntRect {
-        self.sliders[id.index()]
+    pub fn slider(&self, id: SoundVolumeId) -> IntRect {
+        match id {
+            SoundVolumeId::Voice => self
+                .voice
+                .map(|voice| voice.volume_slider)
+                .unwrap_or_default(),
+            _ => self.sliders[id.index()],
+        }
+    }
+
+    /// The heading drawn for `id`: above the bar for C++'s two rows, inline to
+    /// its left for the port-only voice row.
+    pub fn volume_heading(&self, id: SoundVolumeId) -> IntRect {
+        match id {
+            SoundVolumeId::Voice => self
+                .voice
+                .map(|voice| voice.volume_label)
+                .unwrap_or_default(),
+            _ => self.volume_headings[id.index()],
+        }
+    }
+
+    /// The "quiet"/"loud" bar ends, which only C++'s two rows carry.
+    pub fn volume_ends(&self, id: SoundVolumeId) -> Option<(IntRect, IntRect)> {
+        match id {
+            SoundVolumeId::Voice => None,
+            _ => Some((self.quiet_labels[id.index()], self.loud_labels[id.index()])),
+        }
     }
 }
 
@@ -1051,6 +1120,24 @@ pub fn options_dlg_layout_for(
         loud_labels[i] = child_abs(volume_client, row.get_from_right(loud_w, loud_h));
         sliders[i] = child_abs(volume_client, row.get_centered(row.inner_width(), 16));
     }
+    // Port-only Voice chat group in the slack C++'s grid leaves below the
+    // Volume group (clonk-org/clonk-rs#452). It is computed last and reads only
+    // rects that are already final, so no C++ cell can be perturbed by it.
+    let voice_metrics = VoiceGroupMetrics {
+        row_height: sound_check_h,
+        enable_check_width: book_w(&labels.voice_enabled) + sound_check_h + 4,
+        push_to_talk_label_width: book_w(&voice_push_to_talk_heading(labels)),
+        volume_label_width: book_w(&sound_volume_heading(labels, SoundVolumeId::Voice)),
+        title_line_height: title_lh,
+    };
+    let voice = VoiceGroupLayout::below(
+        volume_group,
+        sheet,
+        indent_x1,
+        indent_y1,
+        indent_y2,
+        &voice_metrics,
+    );
     let sound = SoundSheetLayout {
         frontend_group,
         game_group,
@@ -1060,6 +1147,7 @@ pub fn options_dlg_layout_for(
         quiet_labels,
         loud_labels,
         sliders,
+        voice,
     };
     let graphics = graphics_sheet_layout(sheet);
     // Both control areas are built from the sheet client rect with the dialog's
@@ -1200,22 +1288,26 @@ pub struct ProgramSheetState {
     pub fair_crew_strength: i32,
 }
 
-/// One checkbox on the classic Sound sheet, in C++ construction/focus order
-/// (`C4StartupOptionsDlg.cpp:932-959`).
+/// One checkbox on the Audio sheet: C++'s four in construction/focus order
+/// (`C4StartupOptionsDlg.cpp:932-959`), then the port-only voice opt-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SoundCheckboxId {
     FrontendMusic,
     FrontendSoundEffects,
     GameMusic,
     GameSoundEffects,
+    /// `Config.Voice.Enabled`. Port-only, and deliberately last so C++'s four
+    /// keep their exact focus order (clonk-org/clonk-rs#452).
+    VoiceEnabled,
 }
 
 impl SoundCheckboxId {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::FrontendMusic,
         Self::FrontendSoundEffects,
         Self::GameMusic,
         Self::GameSoundEffects,
+        Self::VoiceEnabled,
     ];
 
     const fn index(self) -> usize {
@@ -1224,25 +1316,31 @@ impl SoundCheckboxId {
             Self::FrontendSoundEffects => 1,
             Self::GameMusic => 2,
             Self::GameSoundEffects => 3,
+            Self::VoiceEnabled => 4,
         }
     }
 }
 
-/// One pointer-only volume slider on the classic Sound sheet, in construction
-/// order (`C4StartupOptionsDlg.cpp:967-984`).
+/// One pointer-only volume slider on the Audio sheet: C++'s two in
+/// construction order (`C4StartupOptionsDlg.cpp:967-984`), then the port-only
+/// voice playback volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SoundVolumeId {
     Music,
     SoundEffects,
+    /// `Config.Voice.Volume`. Port-only, and deliberately last
+    /// (clonk-org/clonk-rs#452).
+    Voice,
 }
 
 impl SoundVolumeId {
-    pub const ALL: [Self; 2] = [Self::Music, Self::SoundEffects];
+    pub const ALL: [Self; 3] = [Self::Music, Self::SoundEffects, Self::Voice];
 
     const fn index(self) -> usize {
         match self {
             Self::Music => 0,
             Self::SoundEffects => 1,
+            Self::Voice => 2,
         }
     }
 }
@@ -1272,8 +1370,8 @@ pub enum SoundSheetAction {
     TestSound(SoundSheetSound),
 }
 
-/// Live values displayed by the classic Sound sheet. Volumes use the C++
-/// callback domain `0..=100`, not normalized mixer floats.
+/// Live values displayed by the Audio sheet. Volumes use the C++ callback
+/// domain `0..=100`, not normalized mixer floats.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoundSheetState {
     pub frontend_music: bool,
@@ -1282,9 +1380,18 @@ pub struct SoundSheetState {
     pub game_sound_effects: bool,
     pub music_volume: u8,
     pub sound_effects_volume: u8,
+    /// `Config.Voice.Enabled`; port-only, and off unless the player opts in.
+    pub voice_enabled: bool,
+    /// `Config.Voice.Volume`; port-only.
+    pub voice_volume: u8,
+    /// The bound `Config.Voice.PushToTalkKey` as the app formats it for
+    /// display. Port-only, and empty until the app seeds it.
+    pub push_to_talk_key: String,
 }
 
 impl SoundSheetState {
+    /// The C++ sound page's own six values. The port-only voice row keeps its
+    /// defaults; [`Self::with_voice`] sets it.
     pub fn new(
         frontend_music: bool,
         frontend_sound_effects: bool,
@@ -1300,7 +1407,19 @@ impl SoundSheetState {
             game_sound_effects,
             music_volume: music_volume.min(100),
             sound_effects_volume: sound_effects_volume.min(100),
+            voice_enabled: false,
+            voice_volume: 100,
+            push_to_talk_key: String::new(),
         }
+    }
+
+    /// Seeds the port-only voice row (clonk-org/clonk-rs#452).
+    #[must_use]
+    pub fn with_voice(mut self, enabled: bool, volume: u8, push_to_talk_key: String) -> Self {
+        self.voice_enabled = enabled;
+        self.voice_volume = volume.min(100);
+        self.push_to_talk_key = push_to_talk_key;
+        self
     }
 
     pub const fn checkbox(&self, id: SoundCheckboxId) -> bool {
@@ -1309,6 +1428,7 @@ impl SoundSheetState {
             SoundCheckboxId::FrontendSoundEffects => self.frontend_sound_effects,
             SoundCheckboxId::GameMusic => self.game_music,
             SoundCheckboxId::GameSoundEffects => self.game_sound_effects,
+            SoundCheckboxId::VoiceEnabled => self.voice_enabled,
         }
     }
 
@@ -1316,6 +1436,7 @@ impl SoundSheetState {
         match id {
             SoundVolumeId::Music => self.music_volume,
             SoundVolumeId::SoundEffects => self.sound_effects_volume,
+            SoundVolumeId::Voice => self.voice_volume,
         }
     }
 
@@ -1325,6 +1446,7 @@ impl SoundSheetState {
             SoundCheckboxId::FrontendSoundEffects => self.frontend_sound_effects = checked,
             SoundCheckboxId::GameMusic => self.game_music = checked,
             SoundCheckboxId::GameSoundEffects => self.game_sound_effects = checked,
+            SoundCheckboxId::VoiceEnabled => self.voice_enabled = checked,
         }
     }
 
@@ -1332,6 +1454,7 @@ impl SoundSheetState {
         match id {
             SoundVolumeId::Music => self.music_volume = value.min(100),
             SoundVolumeId::SoundEffects => self.sound_effects_volume = value.min(100),
+            SoundVolumeId::Voice => self.voice_volume = value.min(100),
         }
     }
 }
@@ -1547,6 +1670,10 @@ pub enum OptionsDlgAction {
     /// One ordered callback/feedback effect from the fully implemented Sound
     /// sheet. Ordering inside the outer action vector is observable.
     Sound(SoundSheetAction),
+    /// Open the "press a key" modal for `Config.Voice.PushToTalkKey`. Port-only
+    /// (clonk-org/clonk-rs#452); the app owns the capture, exactly as it does
+    /// for [`Self::BeginControlCapture`].
+    BeginVoicePushToTalkCapture,
     Graphics(GraphicsSheetAction),
     OpenGraphicsScaleText,
     BeginControlCapture(ControlCaptureTarget),
@@ -1636,6 +1763,8 @@ enum OptionsFocus {
     Program(OptionsProgramFocusTarget),
     Graphics(OptionsGraphicsFocusTarget),
     SoundCheckbox(SoundCheckboxId),
+    /// The port-only push-to-talk key button (clonk-org/clonk-rs#452).
+    VoicePushToTalk,
     Control(ControlSheetHit),
     Network(NetworkSheetHit),
 }
@@ -1648,6 +1777,7 @@ enum OptionsHit {
     FairCrewSlider(ProgramSliderPart),
     SoundCheckbox(SoundCheckboxId),
     SoundSlider(SoundVolumeId, SoundSliderPart),
+    VoicePushToTalk,
     Graphics(GraphicsHitTarget),
     Control(ControlSheetHit),
     Network(NetworkSheetHit),
@@ -1711,7 +1841,9 @@ pub struct OptionsDlgState {
     pressed_program_button: Option<OptionsProgramFocusTarget>,
     captured_sound_slider: Option<SoundVolumeId>,
     pressed_sound_arrow: Option<(SoundVolumeId, SoundSliderDirection)>,
-    sound_slider_positions: [Option<i32>; 2],
+    sound_slider_positions: [Option<i32>; 3],
+    /// The port-only key button's `fDown` (`C4GuiButton.cpp:112-128`).
+    pressed_voice_push_to_talk: bool,
     captured_graphics_slider: Option<GraphicsSliderId>,
     pressed_graphics_arrow: Option<(GraphicsSliderId, GraphicsSliderDirection)>,
     graphics_slider_positions: [Option<i32>; 2],
@@ -1772,7 +1904,8 @@ impl OptionsDlgState {
             pressed_program_button: None,
             captured_sound_slider: None,
             pressed_sound_arrow: None,
-            sound_slider_positions: [None; 2],
+            sound_slider_positions: [None; 3],
+            pressed_voice_push_to_talk: false,
             captured_graphics_slider: None,
             pressed_graphics_arrow: None,
             graphics_slider_positions: [None; 2],
@@ -1814,7 +1947,7 @@ impl OptionsDlgState {
         self.back_pointer_owned = false;
         self.pressed_back = false;
         self.fair_crew_slider_position = None;
-        self.sound_slider_positions = [None; 2];
+        self.sound_slider_positions = [None; 3];
         self.graphics_slider_positions = [None; 2];
         self.sync_fair_crew_slider_position();
         self.sync_sound_slider_positions();
@@ -1901,8 +2034,15 @@ impl OptionsDlgState {
     /// positions are re-derived on the next layout sync.
     pub fn set_sound_state(&mut self, sound: SoundSheetState) {
         self.sound = sound;
-        self.sound_slider_positions = [None; 2];
+        self.sound_slider_positions = [None; 3];
         self.sync_sound_slider_positions();
+    }
+
+    /// Refreshes the port-only key button's caption after the app captures a
+    /// new `Config.Voice.PushToTalkKey` (clonk-org/clonk-rs#452). The bound key
+    /// is display-only, so this never relayouts.
+    pub fn set_voice_push_to_talk_label(&mut self, label: String) {
+        self.sound.push_to_talk_key = label;
     }
 
     /// `C4StartupOptionsDlg::KeyMusicToggle` uses `SetChecked`, which updates
@@ -2060,6 +2200,7 @@ impl OptionsDlgState {
         self.pressed_graphics_arrow = None;
         self.pressed_release_target = None;
         self.pressed_control = None;
+        self.pressed_voice_push_to_talk = false;
         Vec::new()
     }
 
@@ -2124,6 +2265,7 @@ impl OptionsDlgState {
         self.pressed_graphics_arrow = None;
         self.pressed_release_target = None;
         self.pressed_control = None;
+        self.pressed_voice_push_to_talk = false;
         self.set_pointer_position(Some(position));
         match self.hovered {
             Some(OptionsHit::Back) => {
@@ -2174,6 +2316,11 @@ impl OptionsDlgState {
             Some(OptionsHit::SoundSlider(id, part)) => {
                 self.pressed_back = false;
                 self.begin_sound_slider_pointer(id, part, position)
+            }
+            Some(OptionsHit::VoicePushToTalk) => {
+                self.pressed_back = false;
+                self.pressed_release_target = self.hovered;
+                Vec::new()
             }
             Some(OptionsHit::Graphics(hit)) => {
                 self.pressed_back = false;
@@ -2305,6 +2452,9 @@ impl OptionsDlgState {
                     target @ (OptionsProgramFocusTarget::ResetButton
                     | OptionsProgramFocusTarget::AdvancedButton),
                 )) => return self.activate_program_button(target),
+                Some(OptionsHit::VoicePushToTalk) => {
+                    return vec![OptionsDlgAction::BeginVoicePushToTalkCapture]
+                }
                 _ => {}
             }
         }
@@ -2388,8 +2538,36 @@ impl OptionsDlgState {
                 };
                 self.press_control(target)
             }
+            KeyCode::Enter | KeyCode::Space
+                if self.focus == OptionsFocus::VoicePushToTalk && self.voice_group_present() =>
+            {
+                self.press_voice_push_to_talk()
+            }
             _ => Vec::new(),
         }
+    }
+
+    /// The port-only key button is an ordinary `Button`, so it latches and
+    /// sounds exactly like the control sheet's (clonk-org/clonk-rs#452).
+    fn press_voice_push_to_talk(&mut self) -> Vec<OptionsDlgAction> {
+        if self.pressed_voice_push_to_talk {
+            return Vec::new();
+        }
+        self.pressed_voice_push_to_talk = true;
+        vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+    }
+
+    fn release_voice_push_to_talk(&mut self) -> Vec<OptionsDlgAction> {
+        if !std::mem::take(&mut self.pressed_voice_push_to_talk) {
+            return Vec::new();
+        }
+        if self.focus != OptionsFocus::VoicePushToTalk {
+            return vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)];
+        }
+        vec![
+            OptionsDlgAction::ProgramGuiSound(GuiSound::Click),
+            OptionsDlgAction::BeginVoicePushToTalkCapture,
+        ]
     }
 
     /// `Button::SetDown` — latch `fDown` and play `ArrowHit`
@@ -2444,6 +2622,9 @@ impl OptionsDlgState {
             if self.pressed_control.is_some() {
                 return self.release_control();
             }
+            if self.pressed_voice_push_to_talk {
+                return self.release_voice_push_to_talk();
+            }
         }
         if matches!(key, KeyCode::Enter | KeyCode::Space)
             && self.focus == OptionsFocus::Back
@@ -2478,11 +2659,23 @@ impl OptionsDlgState {
                         .map(|id| OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))),
                 );
             }
-            OptionsSheet::Sound => order.extend(
-                SoundCheckboxId::ALL
-                    .into_iter()
-                    .map(OptionsFocus::SoundCheckbox),
-            ),
+            OptionsSheet::Sound => {
+                order.extend(
+                    SoundCheckboxId::ALL
+                        .into_iter()
+                        .map(OptionsFocus::SoundCheckbox),
+                );
+                // The port-only key button is the sheet's last control. Like
+                // C++'s own conditionally hidden controls, it leaves the raw
+                // order when the group has no room at all.
+                if self.voice_group_present() {
+                    order.push(OptionsFocus::VoicePushToTalk);
+                } else {
+                    order.retain(|focus| {
+                        *focus != OptionsFocus::SoundCheckbox(SoundCheckboxId::VoiceEnabled)
+                    });
+                }
+            }
             OptionsSheet::Keyboard | OptionsSheet::Gamepad => {
                 let device = if self.active_sheet == OptionsSheet::Keyboard {
                     ControlDevice::Keyboard
@@ -2534,6 +2727,10 @@ impl OptionsDlgState {
             OptionsFocus::Back | OptionsFocus::Tabular => true,
             OptionsFocus::Program(_) => self.active_sheet == OptionsSheet::Program,
             OptionsFocus::Graphics(_) => self.active_sheet == OptionsSheet::Graphics,
+            OptionsFocus::SoundCheckbox(SoundCheckboxId::VoiceEnabled)
+            | OptionsFocus::VoicePushToTalk => {
+                self.active_sheet == OptionsSheet::Sound && self.voice_group_present()
+            }
             OptionsFocus::SoundCheckbox(_) => self.active_sheet == OptionsSheet::Sound,
             OptionsFocus::Control(target) => {
                 let device = match self.active_sheet {
@@ -2640,10 +2837,14 @@ impl OptionsDlgState {
             {
                 self.press_control(target)
             }
+            OptionsFocus::VoicePushToTalk if self.focus_is_visible(self.focus) => {
+                self.press_voice_push_to_talk()
+            }
             OptionsFocus::None
             | OptionsFocus::Tabular
             | OptionsFocus::Graphics(_)
             | OptionsFocus::Control(_)
+            | OptionsFocus::VoicePushToTalk
             | OptionsFocus::Network(_) => Vec::new(),
         }
     }
@@ -2656,6 +2857,9 @@ impl OptionsDlgState {
         }
         if self.pressed_control.is_some() {
             return self.release_control();
+        }
+        if self.pressed_voice_push_to_talk {
+            return self.release_voice_push_to_talk();
         }
         if self.focus == OptionsFocus::Back && self.pressed_back {
             self.pressed_back = false;
@@ -2832,6 +3036,13 @@ impl OptionsDlgState {
 
     fn fair_crew_arrow_pressed(&self, direction: ProgramSliderDirection) -> bool {
         self.pressed_fair_crew_arrow == Some(direction)
+    }
+
+    /// Whether the port-only Voice chat group fits this resolution at all.
+    fn voice_group_present(&self) -> bool {
+        self.layout
+            .as_ref()
+            .is_some_and(|layout| layout.sound.voice.is_some())
     }
 
     fn sound_checkbox_highlighted(&self, id: SoundCheckboxId) -> bool {
@@ -3399,6 +3610,7 @@ fn sound_checkbox_label(labels: &OptionsLabels, id: SoundCheckboxId) -> &str {
         SoundCheckboxId::FrontendSoundEffects | SoundCheckboxId::GameSoundEffects => {
             &labels.sound_effects
         }
+        SoundCheckboxId::VoiceEnabled => &labels.voice_enabled,
     }
 }
 
@@ -3407,7 +3619,13 @@ fn sound_volume_heading(labels: &OptionsLabels, id: SoundVolumeId) -> String {
     match id {
         SoundVolumeId::Music => format!("{}:", labels.music),
         SoundVolumeId::SoundEffects => format!("{}:", labels.sound_effects),
+        SoundVolumeId::Voice => format!("{}:", labels.voice_volume),
     }
+}
+
+/// The port-only push-to-talk row's heading, with the same trailing `':'`.
+fn voice_push_to_talk_heading(labels: &OptionsLabels) -> String {
+    format!("{}:", labels.voice_push_to_talk)
 }
 
 const CONTROL_KEY_TOOLTIP_KEYS: [&str; CONTROL_KEY_COUNT] = [
@@ -3442,6 +3660,9 @@ const fn sound_checkbox_tooltip_key(id: SoundCheckboxId) -> &'static str {
         SoundCheckboxId::FrontendSoundEffects => "IDS_DESC_MENUSOUND",
         SoundCheckboxId::GameMusic => "IDS_DESC_GAMEMUSIC",
         SoundCheckboxId::GameSoundEffects => "IDS_DESC_GAMESOUND",
+        // Port-only key, shipped in `planet/System.c4g` alongside C++'s own
+        // `IDS_DESC_*` tips (clonk-org/clonk-rs#452).
+        SoundCheckboxId::VoiceEnabled => "IDS_DESC_VOICEENABLED",
     }
 }
 
@@ -3449,8 +3670,12 @@ const fn sound_volume_tooltip_key(id: SoundVolumeId) -> &'static str {
     match id {
         SoundVolumeId::Music => "IDS_DESC_VOLUMEMUSIC",
         SoundVolumeId::SoundEffects => "IDS_DESC_VOLUMESOUND",
+        SoundVolumeId::Voice => "IDS_DESC_VOICEVOLUME",
     }
 }
+
+/// The port-only push-to-talk button's tip.
+const VOICE_PUSH_TO_TALK_TOOLTIP_KEY: &str = "IDS_DESC_VOICEPUSHTOTALK";
 
 const fn network_port_tooltip_key(id: NetworkPortId) -> &'static str {
     match id {
@@ -3599,6 +3824,13 @@ fn options_tooltip_at(
             for id in SoundVolumeId::ALL {
                 if rect_contains(&layout.sound.slider(id), point) {
                     return resource(sound_volume_tooltip_key(id));
+                }
+            }
+            if let Some(voice) = layout.sound.voice.as_ref() {
+                if rect_contains(&voice.push_to_talk_button, point)
+                    || rect_contains(&voice.push_to_talk_label, point)
+                {
+                    return resource(VOICE_PUSH_TO_TALK_TOOLTIP_KEY);
                 }
             }
         }
@@ -3796,6 +4028,11 @@ fn options_hit_test(
                 continue;
             };
             return Some(OptionsHit::SoundSlider(id, part));
+        }
+        if let Some(voice) = layout.sound.voice.as_ref() {
+            if rect_contains(&voice.push_to_talk_button, point) {
+                return Some(OptionsHit::VoicePushToTalk);
+            }
         }
     }
     if active_sheet == OptionsSheet::Graphics {
@@ -5097,32 +5334,40 @@ impl OptionsDlgScreen {
         }
 
         Self::draw_group_box(surface, book, &layout.volume_group, "Volume control", gamma);
+        // The port-only group's frame, opt-in and key button; its volume bar
+        // and heading go through the shared loop below, exactly like C++'s two
+        // (clonk-org/clonk-rs#452).
+        if let Some(voice) = layout.voice.as_ref() {
+            Self::draw_voice_group(surface, assets, book, voice, state, gamma, draw_focus);
+        }
         for id in SoundVolumeId::ALL {
-            let i = id.index();
+            if id == SoundVolumeId::Voice && layout.voice.is_none() {
+                continue;
+            }
+            let heading = layout.volume_heading(id);
             book.book.draw_with_gamma(
                 surface,
-                layout.volume_headings[i].x,
-                layout.volume_headings[i].y,
+                heading.x,
+                heading.y,
                 &sound_volume_heading(&state.labels, id),
                 STARTUP_FONT_RGBA,
                 TextAlign::Left,
                 true,
                 gamma,
             );
-            for (rect, text) in [
-                (&layout.quiet_labels[i], "quiet"),
-                (&layout.loud_labels[i], "loud"),
-            ] {
-                book.book.draw_with_gamma(
-                    surface,
-                    rect.x + rect.w / 2,
-                    rect.y,
-                    text,
-                    STARTUP_FONT_RGBA,
-                    TextAlign::Center,
-                    true,
-                    gamma,
-                );
+            if let Some((quiet, loud)) = layout.volume_ends(id) {
+                for (rect, text) in [(quiet, "quiet"), (loud, "loud")] {
+                    book.book.draw_with_gamma(
+                        surface,
+                        rect.x + rect.w / 2,
+                        rect.y,
+                        text,
+                        STARTUP_FONT_RGBA,
+                        TextAlign::Center,
+                        true,
+                        gamma,
+                    );
+                }
             }
             let slider = layout.slider(id);
             Self::draw_book_scrollbar(
@@ -5135,6 +5380,59 @@ impl OptionsDlgScreen {
                 gamma,
             );
         }
+    }
+
+    /// The port-only Voice chat group (clonk-org/clonk-rs#452). Every widget is
+    /// one the C++ sheets already draw -- a titled `GroupBox`, a `CheckBox`, a
+    /// left-aligned `Label` and a `SmallButton` -- so it inherits their exact
+    /// facets and focus highlighting; only its contents are new.
+    fn draw_voice_group(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        book: &BookFonts,
+        layout: &VoiceGroupLayout,
+        state: &OptionsDlgState,
+        gamma: Option<&GammaRamp>,
+        draw_focus: bool,
+    ) {
+        Self::draw_group_box(
+            surface,
+            book,
+            &layout.group,
+            &state.labels.voice_chat,
+            gamma,
+        );
+        let id = SoundCheckboxId::VoiceEnabled;
+        Self::draw_checkbox(
+            surface,
+            assets,
+            book,
+            &layout.enabled_check,
+            sound_checkbox_label(&state.labels, id),
+            state.sound.checkbox(id),
+            draw_focus && state.sound_checkbox_highlighted(id),
+            gamma,
+        );
+        book.book.draw_with_gamma(
+            surface,
+            layout.push_to_talk_label.x,
+            layout.push_to_talk_label.y,
+            &voice_push_to_talk_heading(&state.labels),
+            STARTUP_FONT_RGBA,
+            TextAlign::Left,
+            true,
+            gamma,
+        );
+        Self::draw_small_button(
+            surface,
+            assets,
+            book,
+            &layout.push_to_talk_button,
+            &state.sound.push_to_talk_key,
+            draw_focus && state.focus == OptionsFocus::VoicePushToTalk,
+            state.pressed_voice_push_to_talk,
+            gamma,
+        );
     }
 
     fn draw_graphics_sheet(
@@ -7015,6 +7313,174 @@ mod tests {
         assert_eq!(state.controls().selected_set(ControlDevice::Keyboard), 3);
     }
 
+    /// The port-only Voice chat group takes the vertical slack C++'s own 2x5
+    /// grid leaves unused below the Volume group, so not one C++ rect moves.
+    #[test]
+    fn voice_group_takes_the_cpp_grid_slack_without_moving_a_single_cpp_rect() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        // 800x600 leaves only 91px of slack against 720p's 172, so it is the
+        // resolution the group is most likely to escape at.
+        for (width, height) in [(1280, 720), (800, 600), (1920, 1080)] {
+            assert_voice_group_fits(width, height, &gui, &book);
+        }
+    }
+
+    fn assert_voice_group_fits(width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
+        let with_voice = options_dlg_layout(width, height, gui, book);
+        let voice = with_voice
+            .sound
+            .voice
+            .as_ref()
+            .unwrap_or_else(|| panic!("voice group at {width}x{height}"));
+        let my = with_voice.client.h / 200;
+
+        // Directly below the Volume group, on the same column band, ending
+        // inside the sheet.
+        assert_eq!(voice.group.x, with_voice.sound.volume_group.x);
+        assert_eq!(voice.group.w, with_voice.sound.volume_group.w);
+        assert_eq!(
+            voice.group.y,
+            with_voice.sound.volume_group.y + with_voice.sound.volume_group.h + my
+        );
+        assert!(
+            voice.group.y + voice.group.h <= with_voice.sheet.y + with_voice.sheet.h,
+            "voice group {:?} escapes sheet {:?}",
+            voice.group,
+            with_voice.sheet
+        );
+
+        // Every child sits inside the titled client rect.
+        let client_top = voice.group.y + 4 + gui.caption.line_height;
+        for child in [
+            voice.enabled_check,
+            voice.volume_label,
+            voice.volume_slider,
+            voice.push_to_talk_label,
+            voice.push_to_talk_button,
+        ] {
+            assert!(child.y >= client_top, "{child:?} above client top");
+            assert!(
+                child.y + child.h <= voice.group.y + voice.group.h - 4,
+                "{child:?} below client bottom of {:?}",
+                voice.group
+            );
+            assert!(child.x >= voice.group.x + 4, "{child:?} left of client");
+            assert!(
+                child.x + child.w <= voice.group.x + voice.group.w - 4,
+                "{child:?} right of client"
+            );
+        }
+        // Row 0 holds the opt-in on the left and the labelled key button on the
+        // right; row 1 holds the bar below both.
+        assert_eq!(voice.push_to_talk_label.y, voice.enabled_check.y);
+        assert_eq!(voice.push_to_talk_button.y, voice.enabled_check.y);
+        assert!(voice.push_to_talk_button.x > voice.push_to_talk_label.x);
+        assert!(voice.enabled_check.x < voice.push_to_talk_label.x);
+        assert!(voice.volume_label.y > voice.enabled_check.y);
+        assert!(voice.volume_slider.x > voice.volume_label.x);
+    }
+
+    /// The port-only controls answer the pointer exactly like the C++ controls
+    /// beside them: the opt-in toggles on left-up with an `ArrowHit`, the bar
+    /// drags, and the key button asks the app to open its capture modal. Only
+    /// the sound-effects bar plays a test sample, so the voice bar must not.
+    #[test]
+    fn voice_controls_toggle_drag_and_capture_like_their_cpp_neighbours() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::default());
+        let voice = layout.sound.voice.expect("voice group at 720p");
+        let book = book_fonts();
+
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(voice.push_to_talk_button),
+            "IDS_DESC_VOICEPUSHTOTALK",
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            right_inside(voice.enabled_check),
+            "IDS_DESC_VOICEENABLED",
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(voice.volume_slider),
+            "IDS_DESC_VOICEVOLUME",
+        );
+
+        // Opt-in: off by default, on after a click. Only the box square is
+        // clickable, as on C++'s own four (`CheckBox::MouseInput`).
+        assert!(!state.sound().voice_enabled);
+        let check = GuiPoint::new(
+            (voice.enabled_check.x + voice.enabled_check.h / 2) as f32,
+            (voice.enabled_check.y + voice.enabled_check.h / 2) as f32,
+        );
+        assert!(state.handle_pointer_down(check).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(check),
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit)),
+                OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                    id: SoundCheckboxId::VoiceEnabled,
+                    checked: true,
+                }),
+            ]
+        );
+        assert!(state.sound().voice_enabled);
+
+        // Bar: a track press seeks and reports, without a test sample.
+        let bar = voice.volume_slider;
+        let quiet = GuiPoint::new((bar.x + 24) as f32, (bar.y + bar.h / 2) as f32);
+        let actions = state.handle_pointer_down(quiet);
+        assert_eq!(
+            actions,
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::Voice,
+                    value: 0,
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::Command)),
+            ]
+        );
+        assert_eq!(state.sound().voice_volume, 0);
+        let loud = GuiPoint::new((bar.x + bar.w - 24) as f32, (bar.y + bar.h / 2) as f32);
+        state.handle_pointer_up(loud);
+        assert_eq!(state.sound().voice_volume, 100);
+
+        // Key button: a completed press asks the app for the capture modal.
+        let button = rect_center(voice.push_to_talk_button);
+        assert!(state.handle_pointer_down(button).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(button),
+            vec![OptionsDlgAction::BeginVoicePushToTalkCapture]
+        );
+    }
+
+    /// 640x480 leaves only 50px below the Volume group -- less than one titled
+    /// group box -- so the port-only group is omitted rather than drawn over
+    /// C++'s own controls. Advanced Settings still reaches every Voice key.
+    #[test]
+    fn voice_group_is_omitted_where_the_cpp_grid_leaves_no_room() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        assert!(options_dlg_layout(640, 480, &gui, &book)
+            .sound
+            .voice
+            .is_none());
+        assert!(options_dlg_layout(800, 600, &gui, &book)
+            .sound
+            .voice
+            .is_some());
+    }
+
+    #[test]
+    fn third_sheet_is_captioned_audio_because_it_also_carries_voice_chat() {
+        assert_eq!(SHEET_TITLES[2], "Audio");
+        assert_eq!(OptionsLabels::default().sheets[2], "Audio");
+    }
+
     #[test]
     fn sound_layout_uses_cpp_grid_math_and_caption_font_client_inset() {
         let gui = endeavour_font_set();
@@ -7369,7 +7835,10 @@ mod tests {
 
     #[test]
     fn sound_focus_cycle_and_raw_low_button_match_control_priority() {
-        let (mut state, _) = live_sound_state(SoundSheetState::default());
+        // The port-only voice opt-in defaults off, so it is seeded on here to
+        // keep every checkbox on the sheet starting from the same state.
+        let (mut state, _) =
+            live_sound_state(SoundSheetState::default().with_voice(true, 100, "Backquote".into()));
         assert_eq!(state.focus, OptionsFocus::Tabular);
 
         for id in SoundCheckboxId::ALL {
@@ -7391,6 +7860,21 @@ mod tests {
             assert!(!state.sound().checkbox(id));
             assert!(state.handle_gamepad_low_up().is_empty());
         }
+        // The port-only key button is the sheet's last control, and it is a
+        // `Button`: Enter latches `fDown` and activates on release.
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(state.focus, OptionsFocus::VoicePushToTalk);
+        assert_eq!(
+            state.handle_key_down(KeyCode::Enter),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        assert_eq!(
+            state.handle_key_up(KeyCode::Enter),
+            vec![
+                OptionsDlgAction::ProgramGuiSound(GuiSound::Click),
+                OptionsDlgAction::BeginVoicePushToTalkCapture,
+            ]
+        );
         assert!(state.handle_tab(false).is_empty());
         assert_eq!(state.focus, OptionsFocus::Back);
         assert!(state.handle_tab(false).is_empty());
@@ -7398,9 +7882,13 @@ mod tests {
         assert!(state.handle_tab(true).is_empty());
         assert_eq!(state.focus, OptionsFocus::Back);
         assert!(state.handle_tab(true).is_empty());
+        assert_eq!(state.focus, OptionsFocus::VoicePushToTalk);
+        assert!(state.handle_tab(true).is_empty());
+        // Shift-Tab again lands on the port-only opt-in appended after C++'s
+        // four checkboxes.
         assert_eq!(
             state.focused_sound_checkbox(),
-            Some(SoundCheckboxId::GameSoundEffects)
+            Some(SoundCheckboxId::VoiceEnabled)
         );
         assert_eq!(
             state.handle_ctrl_tab(false),
