@@ -86,6 +86,163 @@ func Probe() {
 }
 
 #[test]
+fn a_tree_walk_index_clears_an_array_base_retained_during_removal() {
+    // AB_ARRAYA keeps the constructed array C4Value on the stack until the
+    // index operand finishes. AssignRemoval therefore nils that base before
+    // the element is read (C4AulExec.cpp array-index opcodes; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(0))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0); // force the tree-walk path
+  return [Target()][Clear()];
+}
+"#,
+        )
+        .expect("tree-walk index probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk index runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_concat_clears_a_left_array_retained_during_removal() {
+    // AB_Concat retains the left operand C4Value while the right operand
+    // executes, so AssignRemoval nils the left array's object before concat
+    // copies it (C4AulExec.cpp:594-657; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Nil)
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  return [Target()] .. [Clear()];
+}
+"#,
+        )
+        .expect("tree-walk concat probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk concat runs"),
+        Value::Array(vec![Value::Nil, Value::Nil])
+    );
+}
+
+#[test]
+fn a_tree_walk_proplist_clears_a_key_retained_during_removal() {
+    // AB_MAP retains each constructed key C4Value while the matching value
+    // expression runs (C4AulExec.cpp map construction; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine.register_host_function("FirstKey", |args| {
+        let Value::Proplist(map) = args.first().cloned().unwrap_or(Value::Nil) else {
+            return Ok(Value::Nil);
+        };
+        Ok(map
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .unwrap_or(Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  return FirstKey({ [Target()] = Clear() });
+}
+"#,
+        )
+        .expect("tree-walk proplist probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk proplist runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_foreach_clears_an_iterable_retained_during_removal() {
+    // AB_FOREACH keeps the iterable C4Value on the stack for the loop body
+    // (C4AulExec.cpp foreach; C4Object.cpp:312). Read the FIRST element: the
+    // last one is Clear()'s own return value and would be nil either way.
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  var first, seen;
+  for (var item in [Target(), Clear()]) {
+    if (seen == 0) first = item;
+    seen++;
+  }
+  return [first, seen];
+}
+"#,
+        )
+        .expect("tree-walk foreach probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk foreach runs"),
+        Value::Array(vec![Value::Nil, Value::Int(2)])
+    );
+}
+
+#[test]
+fn a_tree_walk_assignment_clears_an_lvalue_base_retained_during_removal() {
+    // AB_Set retains the destination C4Value while the RHS executes
+    // (C4AulExec.cpp assignment opcodes; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  var map = { a = Target() };
+  map.a = Clear();
+  return map.a;
+}
+"#,
+        )
+        .expect("tree-walk assignment probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("tree-walk assignment runs"),
+        Value::Int(1)
+    );
+}
+
+#[test]
 fn failsafe_global_call_to_missing_function_evaluates_arguments_then_returns_nil() {
     let mut engine = Engine::new();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -355,4 +512,131 @@ fn adjacent_global_call_is_not_special_below_strict3() {
             "unexpected error for directive {directive:?}: {error}"
         );
     }
+}
+
+#[test]
+fn a_tree_walk_proplist_clears_an_earlier_value_retained_during_removal() {
+    // Every completed key/value pair stays on the AB_MAP stack until the map
+    // opcode pops them, so a removal in a later entry clears the earlier ones
+    // (C4AulExec.cpp map construction; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  var map = { a = Target(), b = Clear() };
+  return map.a;
+}
+"#,
+        )
+        .expect("tree-walk proplist value probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("tree-walk proplist value runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_proplist_clears_an_earlier_key_retained_during_removal() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine.register_host_function("FirstKey", |args| {
+        let Value::Proplist(map) = args.first().cloned().unwrap_or(Value::Nil) else {
+            return Ok(Value::Nil);
+        };
+        Ok(map
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .unwrap_or(Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  return FirstKey({ [Target()] = 1, b = Clear() });
+}
+"#,
+        )
+        .expect("tree-walk proplist key probe parses");
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("tree-walk proplist key runs"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn a_tree_walk_equality_clears_a_left_operand_retained_during_removal() {
+    // AB_Equal pops both operands at once, so the left one is still a
+    // registered C4Value while the right side removes (C4AulExec.cpp
+    // comparison opcodes; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    // Removes object 7, then hands back a freshly constructed reference to
+    // it. Values built after the sweep stay valid, so only the retained left
+    // operand may read nil.
+    engine.register_host_function("ClearThenRemake", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Object(7))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Probe() {
+  SetLocal(0, 0);
+  return Target() == ClearThenRemake();
+}
+"#,
+        )
+        .expect("tree-walk equality probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk equality runs"),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn a_tree_walk_eager_and_clears_a_left_operand_retained_during_removal() {
+    // Below #strict 2 both sides always evaluate through AB_And, which keeps
+    // the left operand on the stack across the right side
+    // (C4AulParse.cpp:3003, C4AulExec.cpp:733-748; C4Object.cpp:312).
+    let mut engine = Engine::new();
+    engine.register_host_function("Target", |_| Ok(Value::Object(7)));
+    engine.register_host_function("Clear", |_| {
+        clear_active_object_references(7);
+        Ok(Value::Int(1))
+    });
+    engine
+        .load_script(
+            r#"#strict
+func Probe() {
+  SetLocal(0, 0);
+  return Target() && Clear();
+}
+"#,
+        )
+        .expect("tree-walk eager and probe parses");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("tree-walk eager and runs"),
+        Value::Bool(false)
+    );
 }

@@ -468,6 +468,18 @@ fn clear_value_for_object_reference_sweeps(value: &mut Value, cursor: usize) {
     });
 }
 
+/// C++ keeps every completed key/value pair of an AB_MAP on the value stack
+/// until the map opcode pops them, so a removal inside a later entry clears
+/// all of the earlier ones (C4AulExec.cpp map construction; C4Object.cpp:312).
+fn clear_map_for_object_reference_sweeps(map: &mut ValueMap, cursor: usize) {
+    let mut retained = Value::Proplist(std::mem::take(map));
+    clear_value_for_object_reference_sweeps(&mut retained, cursor);
+    let Value::Proplist(cleared) = retained else {
+        unreachable!("a reference-swept map remains a map");
+    };
+    *map = cleared;
+}
+
 fn object_target_id(value: &Value) -> Option<u64> {
     match value {
         Value::Object(id) if *id != 0 => Some(*id),
@@ -3334,6 +3346,12 @@ impl ReturnValue {
         let _result_slot = ValueStackReservation::reserve(1)?;
         self.into_tracked()
     }
+
+    fn clear_object_reference_sweeps(&mut self, cursor: usize) {
+        if let Self::Value(tracked) = self {
+            tracked.clear_object_reference_sweeps(cursor);
+        }
+    }
 }
 
 struct GlobalCallContextGuard<'a> {
@@ -6005,9 +6023,11 @@ impl<'a> Vm<'a> {
                     .map(|tracked| tracked.value);
                 }
                 if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-                    let left = self.evaluate_tracked(lhs, env, depth)?;
+                    let left_sweep_cursor = object_reference_sweep_cursor();
+                    let mut left = self.evaluate_tracked(lhs, env, depth)?;
                     let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate_tracked(rhs, env, depth)?;
+                    left.clear_object_reference_sweeps(left_sweep_cursor);
                     let equal = self.values_equal(
                         &left.value,
                         &right.value,
@@ -6021,7 +6041,8 @@ impl<'a> Vm<'a> {
                         !equal
                     }));
                 }
-                let left = self.evaluate(lhs, env, depth)?;
+                let left_sweep_cursor = object_reference_sweep_cursor();
+                let mut left = self.evaluate(lhs, env, depth)?;
                 // && and || are Lua-style: they return the surviving operand
                 // value unchanged, not a coerced bool (C4AulExec.cpp:999-1021,
                 // AB_JUMPAND/AB_JUMPOR leave the operand on the stack).
@@ -6040,6 +6061,10 @@ impl<'a> Vm<'a> {
                     }
                     let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate(rhs, env, depth)?;
+                    // AB_And leaves the left operand on the stack across the
+                    // right side, so a removal there clears it before the
+                    // coercion reads it (C4AulExec.cpp:733-748).
+                    clear_value_for_object_reference_sweeps(&mut left, left_sweep_cursor);
                     return Ok(Value::Bool(left.as_bool() && right.as_bool()));
                 }
                 if matches!(op, BinaryOp::Or) {
@@ -6051,10 +6076,12 @@ impl<'a> Vm<'a> {
                     }
                     let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate(rhs, env, depth)?;
+                    clear_value_for_object_reference_sweeps(&mut left, left_sweep_cursor);
                     return Ok(Value::Bool(left.as_bool() || right.as_bool()));
                 }
                 let _left_slot = ValueStackReservation::reserve(1)?;
                 let right = self.evaluate(rhs, env, depth)?;
+                clear_value_for_object_reference_sweeps(&mut left, left_sweep_cursor);
                 self.eval_binary(left, op, right, env.strict_level, None)
             }
             Expr::GlobalCall {
@@ -6592,12 +6619,16 @@ impl<'a> Vm<'a> {
                 let mut map = ValueMap::with_capacity(entries.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
+                    let entry_sweep_cursor = object_reference_sweep_cursor();
                     let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
                     value_stack.grow(1)?;
-                    let key = key.into_value()?;
+                    let mut key = key.into_value()?;
+                    let value_sweep_cursor = object_reference_sweep_cursor();
                     let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let value = value.into_value()?;
+                    clear_value_for_object_reference_sweeps(&mut key, value_sweep_cursor);
+                    clear_map_for_object_reference_sweeps(&mut map, entry_sweep_cursor);
                     c4_map_assign_set(&mut map, key, value);
                 }
                 Ok(Value::Proplist(map))
@@ -6729,15 +6760,22 @@ impl<'a> Vm<'a> {
                 Ok(TrackedValue::array(tracked))
             }
             Expr::Proplist(entries) => {
-                let mut tracked = Vec::with_capacity(entries.len());
+                let mut tracked: Vec<(Value, TrackedValue)> = Vec::with_capacity(entries.len());
                 let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
+                    let entry_sweep_cursor = object_reference_sweep_cursor();
                     let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
                     value_stack.grow(1)?;
-                    let key = key.into_value()?;
+                    let mut key = key.into_value()?;
+                    let value_sweep_cursor = object_reference_sweep_cursor();
                     let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
                     value_stack.grow(1)?;
                     let value = value.into_tracked()?;
+                    clear_value_for_object_reference_sweeps(&mut key, value_sweep_cursor);
+                    for (retained_key, retained_value) in &mut tracked {
+                        clear_value_for_object_reference_sweeps(retained_key, entry_sweep_cursor);
+                        retained_value.clear_object_reference_sweeps(entry_sweep_cursor);
+                    }
                     tracked.push((key, value));
                 }
                 Ok(TrackedValue::proplist(tracked))
@@ -6783,9 +6821,11 @@ impl<'a> Vm<'a> {
                 self.evaluate_safe_navigation_tracked(receiver, steps, env, depth)
             }
             Expr::Binary(left, BinaryOp::Concat, right) => {
-                let left = self.evaluate_tracked(left, env, depth)?;
+                let left_sweep_cursor = object_reference_sweep_cursor();
+                let mut left = self.evaluate_tracked(left, env, depth)?;
                 let _left_slot = ValueStackReservation::reserve(1)?;
                 let right = self.evaluate_tracked(right, env, depth)?;
+                left.clear_object_reference_sweeps(left_sweep_cursor);
                 self.eval_concat_tracked(left, right, env.strict_level, "..")
             }
             Expr::Binary(left, BinaryOp::NilCoalescing, right) => {
@@ -9813,9 +9853,13 @@ impl<'a> Vm<'a> {
                 self.property_reference_or_value(base, property, env)
             }
             Expr::Index(base, index_operand) => {
-                let base = self.evaluate_reference_or_value(base, env, depth)?;
+                let base_sweep_cursor = object_reference_sweep_cursor();
+                let mut base = self.evaluate_reference_or_value(base, env, depth)?;
                 let _base_slot = ValueStackReservation::reserve(1)?;
-                self.index_reference_or_value(base, index_operand, env, depth)
+                let (index, _index_slot) =
+                    self.evaluate_index_operand(index_operand, env, depth)?;
+                base.clear_object_reference_sweeps(base_sweep_cursor);
+                self.index_value_reference_or_value(base, index, env)
             }
             Expr::ArrayAppend(base) => self.evaluate_array_append(base, env, depth),
             Expr::GlobalCall {
