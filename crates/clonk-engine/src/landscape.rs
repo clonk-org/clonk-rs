@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::mem;
 use std::ops::Range;
@@ -21,6 +21,9 @@ const C4M_BACKGROUND: i32 = 0;
 const C4M_SOLID: i32 = 50;
 /// DensityLiquid lower bound (C4M_Liquid, C4Material.h:203).
 const C4M_LIQUID: i32 = 25;
+/// Largest quake-exposed fragment treated as particle debris rather than
+/// preserved terrain. This keeps the cleanup from peeling shelves or islands.
+const MAX_SHAKE_FREE_DEBRIS_PIXELS: usize = 2;
 /// C4M_MaxTexIndex: slot 127 is reserved for landscape diffs, so runtime
 /// texture-map lookup/allocation only visits 1..126 (C4Constants.h:63;
 /// C4Texture.cpp:319-340).
@@ -4396,6 +4399,96 @@ impl Landscape {
             }
         }
         material_id
+    }
+
+    /// Identify small solid fragments exposed by `ShakeFree` and return their
+    /// material in deterministic PXS creation order. This is the
+    /// product-level cleanup for clonk-org/clonk-rs#438: pinned C++ only
+    /// checks `Instable` materials here, which leaves stable Earth debris in
+    /// the collision raster after its support is shaken away.
+    pub(crate) fn shake_free_fragments(
+        &self,
+        cleared_solid_pixels: &[Vector2],
+        materials: &MaterialSet,
+    ) -> Vec<(Vector2, MaterialId)> {
+        if self.grid_dimensions().is_none() {
+            return Vec::new();
+        }
+        let mut seeds = BTreeSet::new();
+        for position in cleared_solid_pixels {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx != 0 || dy != 0 {
+                        seeds
+                            .insert((position.y.saturating_add(dy), position.x.saturating_add(dx)));
+                    }
+                }
+            }
+        }
+        let mut accepted = BTreeSet::new();
+        let mut dislodged = Vec::new();
+
+        for seed in seeds {
+            if accepted.contains(&seed) || self.density_at(seed.1, seed.0, materials) < C4M_SOLID {
+                continue;
+            }
+
+            let mut pending = VecDeque::from([seed]);
+            let mut seen = BTreeSet::new();
+            let mut component = Vec::new();
+            let mut releasable = true;
+            while let Some((y, x)) = pending.pop_front() {
+                if !seen.insert((y, x)) {
+                    continue;
+                }
+
+                let material = self.material_at(x, y);
+                if !material
+                    .and_then(|material| materials.get_by_id(material))
+                    .is_some_and(|material| {
+                        material.dig_free() && !material.instable() && material.is_solid()
+                    })
+                {
+                    releasable = false;
+                }
+                if let Some(material) = material {
+                    component.push((Vector2::new(x, y), material));
+                }
+                if seen.len() > MAX_SHAKE_FREE_DEBRIS_PIXELS {
+                    releasable = false;
+                    break;
+                }
+
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let neighbor = (y.saturating_add(dy), x.saturating_add(dx));
+                        if self.density_at(neighbor.1, neighbor.0, materials) < C4M_SOLID {
+                            continue;
+                        }
+                        if !seen.contains(&neighbor) {
+                            pending.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+
+            if releasable {
+                accepted.extend(
+                    component
+                        .iter()
+                        .map(|(position, _)| (position.y, position.x)),
+                );
+                dislodged.extend(component);
+            }
+        }
+
+        dislodged.sort_unstable_by(|(left, _), (right, _)| {
+            right.y.cmp(&left.y).then_with(|| left.x.cmp(&right.x))
+        });
+        dislodged
     }
 
     /// ClearPix on the grid (no diggable gate) — C4Landscape::ClearRect's

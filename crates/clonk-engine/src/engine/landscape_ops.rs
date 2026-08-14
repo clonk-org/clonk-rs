@@ -803,6 +803,7 @@ impl Engine {
             .as_ref()
             .is_some_and(|landscape| landscape.pixel_grid().is_some())
         {
+            let mut cleared_solid_pixels = Vec::new();
             // C4Landscape::ShakeFree walks top-to-bottom in this exact
             // circle order. ShakeFreePix clears each DigFree pixel, creates
             // its zero-velocity PXS, then probes instability; non-DigFree
@@ -825,6 +826,13 @@ impl Engine {
                             .get_by_id(*material)
                             .is_some_and(|material| material.dig_free())
                     }) {
+                        if self
+                            .materials
+                            .get_by_id(material)
+                            .is_some_and(|material| material.is_solid())
+                        {
+                            cleared_solid_pixels.push(Vector2::new(x, y));
+                        }
                         self.pxs_system.create(
                             material,
                             itofix(x),
@@ -834,6 +842,29 @@ impl Engine {
                         );
                     }
                     self.check_instability_range(x, y);
+                }
+            }
+
+            let dislodged = self
+                .landscape
+                .as_ref()
+                .map(|landscape| {
+                    landscape.shake_free_fragments(&cleared_solid_pixels, &self.materials)
+                })
+                .unwrap_or_default();
+            for (position, material) in dislodged {
+                let cleared = self.landscape.as_mut().and_then(|landscape| {
+                    landscape.dig_free_pix(position.x, position.y, &self.materials)
+                });
+                if cleared == Some(material) {
+                    self.pxs_system.create(
+                        material,
+                        itofix(position.x),
+                        itofix(position.y),
+                        C4Fixed::ZERO,
+                        C4Fixed::ZERO,
+                    );
+                    self.check_instability_range(position.x, position.y);
                 }
             }
             return;

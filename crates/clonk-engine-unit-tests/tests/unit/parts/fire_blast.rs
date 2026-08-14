@@ -705,6 +705,50 @@
     }
 
     #[test]
+    fn shake_free_preview_stops_reporting_a_newly_orphaned_pixel_as_solid() {
+        let materials = test_materials(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+        "#,
+        );
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+
+        let mut bytes = vec![0; 5 * 6];
+        bytes[5 + 2] = 1;
+        bytes[2 * 5 + 2] = 1;
+        let grid = landscape::PixelGrid::new(
+            5,
+            6,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(5, vec![6; 5]).test_value();
+        world.set_world_height(6);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let probe = test_definition(
+            "SPRB",
+            "Shake preview probe",
+            "#strict 3\nfunc Probe() { ShakeFree(2, 3, 1); return GBackSolid(2, 1); }",
+        );
+        engine.register_test_definition(probe);
+        let probe = engine.spawn_test_object(SpawnConfig::new("SPRB"));
+
+        assert_eq!(
+            engine.call_test_object_function(engine.test_object_index(probe), "Probe", Vec::new()),
+            Value::Bool(false),
+            "later script in the same callback observes the orphan as non-solid"
+        );
+    }
+
+    #[test]
     fn dig_free_rect_host_fold_credits_material_contents_once() {
         // Two fresh pixels per call and a conversion threshold of three make
         // duplicate host/fold credit observable: the first call must not cast,
