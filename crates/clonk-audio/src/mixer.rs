@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::decoder::{decode_audio, AudioDecodeError, DecodedAudio, MusicStream};
 use crate::voice::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
+use crate::voice_echo::{VoiceEchoReference, VoiceEchoTap};
 
 const SDL_MIXER_MAX_VOLUME: f32 = 128.0;
 const SDL_MIXER_MAX_PANNING: f32 = 255.0;
@@ -458,6 +459,13 @@ impl AudioSystem {
         &self.mixer
     }
 
+    /// See [`AudioMixer::voice_echo_reference`]. Asking for it is what starts
+    /// the mixer publishing what it plays, so only a microphone capture that
+    /// could come to cancel an echo should.
+    pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        self.mixer.voice_echo_reference()
+    }
+
     pub fn resampling_mode(&self) -> ResamplingMode {
         self.mixer.resampling_mode
     }
@@ -888,6 +896,11 @@ struct MixerState {
     active_music: Option<MusicPlayback>,
     voice_streams: BTreeMap<VoiceStreamId, VoiceStreamPlayback>,
     voice_limiter: VoiceLimiter,
+    /// Installed the first time a capture asks for an echo reference, and kept
+    /// for the rest of the session: it costs one downmix per output frame, and
+    /// tearing it down while a microphone still held the other end of it would
+    /// be a race for no gain.
+    echo_tap: Option<VoiceEchoTap>,
     next_sound_id: u32,
     next_music_id: u32,
     next_inert_channel_generation: u64,
@@ -1011,6 +1024,7 @@ impl AudioMixer {
             active_music: None,
             voice_streams: BTreeMap::new(),
             voice_limiter: VoiceLimiter::new(sample_rate),
+            echo_tap: None,
             next_sound_id: 1,
             next_music_id: 1,
             next_inert_channel_generation: 1,
@@ -1351,6 +1365,18 @@ impl AudioMixer {
         true
     }
 
+    /// The mono 16 kHz copy of everything this mixer plays, for a microphone
+    /// capture to cancel out of what it hears. Installing the tap is the only
+    /// thing that makes the mixer publish it; a session that never opens a
+    /// capture never pays for it.
+    pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        let mut state = self.state.lock().unwrap();
+        state
+            .echo_tap
+            .get_or_insert_with(|| VoiceEchoTap::new(self.sample_rate))
+            .reference()
+    }
+
     pub fn mix_i16(&self, output: &mut [i16]) {
         self.mix_into_channels(output, 2);
     }
@@ -1444,6 +1470,7 @@ impl AudioMixer {
                 active_music,
                 voice_streams,
                 voice_limiter,
+                echo_tap,
                 ..
             } = &mut *state;
             if active_channel_indices.is_empty()
@@ -1453,6 +1480,14 @@ impl AudioMixer {
                     .all(|stream| stream.frames.is_empty())
             {
                 voice_limiter.reset();
+                // The output buffer is already zero-filled, and converting
+                // silence into it frame by frame is exactly what this exit
+                // avoids. The echo reference still has to advance: a capture
+                // reads it as a clock, and a gap in it would look like the
+                // room suddenly changing shape.
+                if let Some(tap) = echo_tap.as_mut() {
+                    tap.push_silence(frames);
+                }
                 return;
             }
             debug_assert!(active_channel_indices
@@ -1540,6 +1575,10 @@ impl AudioMixer {
                             finished_music = true;
                         }
                     }
+                }
+
+                if let Some(tap) = echo_tap.as_mut() {
+                    tap.push_output_frame(left, right);
                 }
 
                 let offset = frame_index * output_channels;
@@ -2879,6 +2918,66 @@ mod tests {
         assert!(mixer.channel_is_playing(channel));
         mixer.halt_channel(channel);
         assert!(!mixer.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn the_mixer_publishes_what_it_plays_as_a_mono_echo_reference() {
+        use crate::voice_echo::EchoReferenceReader;
+
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 8);
+        let mut reader = EchoReferenceReader::new(mixer.voice_echo_reference());
+        let sound = mixer
+            .load_sound(&generate_sine_wave(100, 440.0, VOICE_SAMPLE_RATE))
+            .unwrap();
+        mixer.play_sound(sound, false).unwrap();
+
+        let mut output = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut output);
+
+        let mut far = [0.0; VOICE_FRAME_SAMPLES];
+        reader.read(&mut far);
+        assert!(
+            far.iter().any(|sample| *sample != 0.0),
+            "the reference carries the sound the mixer just played",
+        );
+        for (index, sample) in far.iter().enumerate() {
+            let mixed = (output[index * 2] + output[index * 2 + 1]) * 0.5;
+            assert!(
+                (sample - mixed).abs() < 1e-6,
+                "reference sample {index} was {sample}, output was {mixed}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_idle_mixer_advances_the_echo_reference_without_converting_samples() {
+        use crate::voice_echo::EchoReferenceReader;
+
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 32);
+        let mut reader = EchoReferenceReader::new(mixer.voice_echo_reference());
+        let zero_writes = Arc::new(AtomicUsize::new(0));
+        let sample_writes = Arc::new(AtomicUsize::new(0));
+        let mut output = vec![
+            CountingSample {
+                zero_writes: Arc::clone(&zero_writes),
+                sample_writes: Arc::clone(&sample_writes),
+            };
+            VOICE_FRAME_SAMPLES * 2
+        ];
+
+        mixer.mix_into_channels(&mut output, 2);
+
+        assert_eq!(
+            sample_writes.load(Ordering::Relaxed),
+            0,
+            "an idle mixer still converts nothing per frame",
+        );
+        let mut far = [1.0; VOICE_FRAME_SAMPLES];
+        reader.read(&mut far);
+        assert_eq!(
+            far, [0.0; VOICE_FRAME_SAMPLES],
+            "a silent output still moves the reference clock forward",
+        );
     }
 
     #[test]

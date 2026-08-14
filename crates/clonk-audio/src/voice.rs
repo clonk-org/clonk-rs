@@ -8,6 +8,11 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::voice_echo::VoiceEchoReference;
+#[cfg(any(feature = "cpal", test))]
+use crate::voice_processing::VoiceProcessing;
+use crate::voice_processing::VoiceProcessingSwitches;
+
 /// Voice chat uses independently decodable 20 ms mono frames at 16 kHz.
 pub const VOICE_SAMPLE_RATE: u32 = 16_000;
 pub const VOICE_FRAME_SAMPLES: usize = 320;
@@ -20,9 +25,12 @@ const IMA_CODE_BYTES: usize = (VOICE_FRAME_SAMPLES - 1).div_ceil(2);
 pub const VOICE_ENCODED_FRAME_BYTES: usize = IMA_HEADER_BYTES + IMA_CODE_BYTES;
 pub type EncodedVoiceFrame = [u8; VOICE_ENCODED_FRAME_BYTES];
 
-/// One captured frame together with how loud it was. The level is measured on
-/// the PCM the encoder consumed, so a voice-activation gate never has to decode
-/// a frame back just to decide whether to transmit it.
+/// One captured frame together with how loud it was, so a voice-activation
+/// gate never has to decode a frame back just to decide whether to transmit it.
+///
+/// The level is measured on the frame as the microphone heard it, before
+/// automatic gain control — see
+/// [`VoiceProcessing::process`](crate::voice_processing::VoiceProcessing::process).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoiceInputFrame {
     pub payload: EncodedVoiceFrame,
@@ -77,6 +85,33 @@ pub enum VoiceCaptureError {
     Stream(String),
 }
 
+/// How a capture treats what it hears: which processing stages run, and the
+/// far-end signal the echo canceller needs.
+#[derive(Clone, Debug)]
+pub struct VoiceCaptureOptions {
+    /// Read by the microphone thread once per frame, so a settings change
+    /// reaches a capture that is already open.
+    pub processing: Arc<VoiceProcessingSwitches>,
+    /// What the mixer is playing, from
+    /// [`AudioSystem::voice_echo_reference`](crate::AudioSystem::voice_echo_reference).
+    /// Without it there is nothing to cancel an echo against.
+    pub echo_reference: Option<VoiceEchoReference>,
+}
+
+impl VoiceCaptureOptions {
+    pub fn new(processing: Arc<VoiceProcessingSwitches>) -> Self {
+        Self {
+            processing,
+            echo_reference: None,
+        }
+    }
+
+    pub fn with_echo_reference(mut self, reference: VoiceEchoReference) -> Self {
+        self.echo_reference = Some(reference);
+        self
+    }
+}
+
 /// Explicitly opened microphone capture. Merely constructing [`AudioSystem`](crate::AudioSystem)
 /// never opens an input device or requests microphone permission.
 pub struct VoiceCapture {
@@ -89,13 +124,14 @@ pub struct VoiceCapture {
 impl VoiceCapture {
     /// Opens and starts the default microphone input stream. This is the only
     /// production entry point that touches a capture device.
-    pub fn open() -> Result<Self, VoiceCaptureError> {
+    pub fn open(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
         #[cfg(feature = "cpal")]
         {
-            Self::open_cpal()
+            Self::open_cpal(options)
         }
         #[cfg(not(feature = "cpal"))]
         {
+            drop(options);
             Err(VoiceCaptureError::Unavailable)
         }
     }
@@ -111,7 +147,7 @@ impl VoiceCapture {
     }
 
     #[cfg(feature = "cpal")]
-    fn open_cpal() -> Result<Self, VoiceCaptureError> {
+    fn open_cpal(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
@@ -126,79 +162,34 @@ impl VoiceCapture {
         let (sender, frames) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
         let dropped_frames = Arc::new(AtomicU64::new(0));
         let stream_config = supported.config();
+        let processing = VoiceProcessing::new(options.processing, options.echo_reference);
+        // One arm per PCM format cpal can hand us; only the negotiated one
+        // ever runs, so each may take the channel, the counter and the
+        // processing chain by value.
+        macro_rules! input_stream {
+            ($sample:ty) => {
+                build_voice_input_stream::<$sample>(
+                    &device,
+                    stream_config,
+                    sender,
+                    dropped_frames.clone(),
+                    processing,
+                )?
+            };
+        }
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::I8 => build_voice_input_stream::<i8>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I16 => build_voice_input_stream::<i16>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I24 => build_voice_input_stream::<cpal::I24>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I32 => build_voice_input_stream::<i32>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::I64 => build_voice_input_stream::<i64>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U8 => build_voice_input_stream::<u8>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U16 => build_voice_input_stream::<u16>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U24 => build_voice_input_stream::<cpal::U24>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U32 => build_voice_input_stream::<u32>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::U64 => build_voice_input_stream::<u64>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::F32 => build_voice_input_stream::<f32>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
-            cpal::SampleFormat::F64 => build_voice_input_stream::<f64>(
-                &device,
-                stream_config,
-                sender,
-                dropped_frames.clone(),
-            )?,
+            cpal::SampleFormat::I8 => input_stream!(i8),
+            cpal::SampleFormat::I16 => input_stream!(i16),
+            cpal::SampleFormat::I24 => input_stream!(cpal::I24),
+            cpal::SampleFormat::I32 => input_stream!(i32),
+            cpal::SampleFormat::I64 => input_stream!(i64),
+            cpal::SampleFormat::U8 => input_stream!(u8),
+            cpal::SampleFormat::U16 => input_stream!(u16),
+            cpal::SampleFormat::U24 => input_stream!(cpal::U24),
+            cpal::SampleFormat::U32 => input_stream!(u32),
+            cpal::SampleFormat::U64 => input_stream!(u64),
+            cpal::SampleFormat::F32 => input_stream!(f32),
+            cpal::SampleFormat::F64 => input_stream!(f64),
             _ => {
                 return Err(VoiceCaptureError::Stream(
                     "unsupported non-PCM microphone sample format".to_string(),
@@ -235,14 +226,20 @@ fn build_voice_input_stream<T>(
     config: cpal::StreamConfig,
     sender: SyncSender<VoiceInputFrame>,
     dropped_frames: Arc<AtomicU64>,
+    processing: VoiceProcessing,
 ) -> Result<cpal::Stream, VoiceCaptureError>
 where
     T: cpal::SizedSample + VoiceInputSample + Send + 'static,
 {
     use cpal::traits::DeviceTrait;
 
-    let mut processor =
-        VoiceCaptureProcessor::new(config.sample_rate, config.channels, sender, dropped_frames)?;
+    let mut processor = VoiceCaptureProcessor::new(
+        config.sample_rate,
+        config.channels,
+        sender,
+        dropped_frames,
+        processing,
+    )?;
     device
         .build_input_stream(
             config,
@@ -297,8 +294,11 @@ impl_voice_input_sample!(
 struct VoiceCaptureProcessor {
     channels: usize,
     resampler: StreamingVoiceResampler,
-    samples: [i16; VOICE_FRAME_SAMPLES],
+    /// The frame is gathered as floats because the processing chain works in
+    /// them; quantizing to the encoder's integers is the last step.
+    frame: [f32; VOICE_FRAME_SAMPLES],
     sample_count: usize,
+    processing: VoiceProcessing,
     sender: SyncSender<VoiceInputFrame>,
     dropped_frames: Arc<AtomicU64>,
 }
@@ -310,40 +310,48 @@ impl VoiceCaptureProcessor {
         channels: u16,
         sender: SyncSender<VoiceInputFrame>,
         dropped_frames: Arc<AtomicU64>,
+        processing: VoiceProcessing,
     ) -> Result<Self, VoiceCaptureError> {
         validate_capture_config(sample_rate, channels)?;
         Ok(Self {
             channels: usize::from(channels),
             resampler: StreamingVoiceResampler::new(sample_rate),
-            samples: [0; VOICE_FRAME_SAMPLES],
+            frame: [0.0; VOICE_FRAME_SAMPLES],
             sample_count: 0,
+            processing,
             sender,
             dropped_frames,
         })
     }
 
     fn process_interleaved<T: VoiceInputSample>(&mut self, input: &[T]) {
-        for frame in input.chunks_exact(self.channels) {
-            let mono = frame
+        for input_frame in input.chunks_exact(self.channels) {
+            let mono = input_frame
                 .iter()
                 .map(|sample| sample.to_voice_f32())
                 .sum::<f32>()
                 / self.channels as f32;
             let Self {
                 resampler,
-                samples,
+                frame,
                 sample_count,
+                processing,
                 sender,
                 dropped_frames,
                 ..
             } = self;
             resampler.push_sample(mono, |sample| {
-                samples[*sample_count] = voice_f32_to_i16(sample);
+                frame[*sample_count] = sample;
                 *sample_count += 1;
                 if *sample_count == VOICE_FRAME_SAMPLES {
+                    let level = processing.process(frame);
+                    let mut samples = [0_i16; VOICE_FRAME_SAMPLES];
+                    for (quantized, processed) in samples.iter_mut().zip(frame.iter()) {
+                        *quantized = voice_f32_to_i16(*processed);
+                    }
                     let captured = VoiceInputFrame {
-                        payload: encode_voice_frame(samples),
-                        level: voice_activation_level(samples),
+                        payload: encode_voice_frame(&samples),
+                        level,
                     };
                     if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
                         sender.try_send(captured)
@@ -357,17 +365,19 @@ impl VoiceCaptureProcessor {
     }
 }
 
-#[cfg(any(feature = "cpal", test))]
-struct StreamingVoiceResampler {
+/// Streaming linear interpolation down to [`VOICE_SAMPLE_RATE`]. Capture uses
+/// it on the microphone's own rate; the echo reference uses it on the mixer's
+/// output rate, so both sides of the canceller see the same resampling.
+#[derive(Debug)]
+pub(crate) struct StreamingVoiceResampler {
     source_per_output: f64,
     previous: Option<f32>,
     current_source_index: u64,
     next_output_position: f64,
 }
 
-#[cfg(any(feature = "cpal", test))]
 impl StreamingVoiceResampler {
-    fn new(source_rate: u32) -> Self {
+    pub(crate) fn new(source_rate: u32) -> Self {
         Self {
             source_per_output: f64::from(source_rate) / f64::from(VOICE_SAMPLE_RATE),
             previous: None,
@@ -376,7 +386,7 @@ impl StreamingVoiceResampler {
         }
     }
 
-    fn push_sample(&mut self, sample: f32, mut emit: impl FnMut(f32)) {
+    pub(crate) fn push_sample(&mut self, sample: f32, mut emit: impl FnMut(f32)) {
         let Some(previous) = self.previous else {
             self.previous = Some(sample);
             emit(sample);
@@ -396,8 +406,8 @@ impl StreamingVoiceResampler {
     }
 }
 
-#[cfg(any(feature = "cpal", test))]
-fn voice_f32_to_i16(sample: f32) -> i16 {
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
+pub(crate) fn voice_f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32_768.0)
         .round()
         .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
@@ -418,7 +428,12 @@ pub fn voice_activation_level(samples: &[i16; VOICE_FRAME_SAMPLES]) -> f32 {
         .map(|sample| f64::from(*sample) * f64::from(*sample))
         .sum::<f64>()
         / VOICE_FRAME_SAMPLES as f64;
-    let rms = mean_square.sqrt() / 32_768.0;
+    voice_level_from_rms(mean_square.sqrt() / 32_768.0)
+}
+
+/// [`voice_activation_level`]'s curve, for a root mean square already in
+/// `0.0..=1.0` of full scale.
+pub(crate) fn voice_level_from_rms(rms: f64) -> f32 {
     if rms <= 0.0 {
         return 0.0;
     }
@@ -546,8 +561,18 @@ fn update_step_index(code: u8, step_index: &mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::voice_processing::VoiceProcessingConfig;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{mpsc, Arc};
+
+    /// The unprocessed capture path, which is what these tests pin: the
+    /// downmix, the resampling, the frame geometry and the encoder.
+    fn raw_processing() -> VoiceProcessing {
+        VoiceProcessing::new(
+            VoiceProcessingSwitches::new(VoiceProcessingConfig::DISABLED),
+            None,
+        )
+    }
 
     #[test]
     fn activation_level_spans_the_sixty_decibel_window_above_silence() {
@@ -584,8 +609,9 @@ mod tests {
     fn capture_processor_downmixes_and_stream_resamples_across_callbacks() {
         let (sender, receiver) = mpsc::sync_channel(2);
         let dropped = Arc::new(AtomicU64::new(0));
-        let mut processor = VoiceCaptureProcessor::new(48_000, 2, sender, dropped.clone())
-            .expect("48 kHz stereo capture should be supported");
+        let mut processor =
+            VoiceCaptureProcessor::new(48_000, 2, sender, dropped.clone(), raw_processing())
+                .expect("48 kHz stereo capture should be supported");
         let stereo = [1_000.0 / 32_768.0, 3_000.0 / 32_768.0].repeat(960);
 
         processor.process_interleaved(&stereo[..734]);
@@ -604,8 +630,9 @@ mod tests {
     fn capture_processor_uses_bounded_try_send_without_blocking() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let dropped = Arc::new(AtomicU64::new(0));
-        let mut processor = VoiceCaptureProcessor::new(16_000, 1, sender, dropped.clone())
-            .expect("16 kHz mono capture should be supported");
+        let mut processor =
+            VoiceCaptureProcessor::new(16_000, 1, sender, dropped.clone(), raw_processing())
+                .expect("16 kHz mono capture should be supported");
 
         processor.process_interleaved(&vec![0.25_f32; VOICE_FRAME_SAMPLES * 2]);
 
@@ -617,8 +644,9 @@ mod tests {
     fn captured_frames_carry_the_input_level_the_gate_needs() {
         let (sender, receiver) = mpsc::sync_channel(2);
         let dropped = Arc::new(AtomicU64::new(0));
-        let mut processor = VoiceCaptureProcessor::new(16_000, 1, sender, dropped)
-            .expect("16 kHz mono capture should be supported");
+        let mut processor =
+            VoiceCaptureProcessor::new(16_000, 1, sender, dropped, raw_processing())
+                .expect("16 kHz mono capture should be supported");
 
         processor.process_interleaved(&[0.0_f32; VOICE_FRAME_SAMPLES]);
         processor.process_interleaved(&[0.25_f32; VOICE_FRAME_SAMPLES]);
@@ -640,7 +668,13 @@ mod tests {
     fn capture_processor_rejects_unbounded_device_shapes() {
         let make = |sample_rate, channels| {
             let (sender, _) = mpsc::sync_channel(1);
-            VoiceCaptureProcessor::new(sample_rate, channels, sender, Arc::new(AtomicU64::new(0)))
+            VoiceCaptureProcessor::new(
+                sample_rate,
+                channels,
+                sender,
+                Arc::new(AtomicU64::new(0)),
+                raw_processing(),
+            )
         };
         assert!(matches!(
             make(7_999, 1),

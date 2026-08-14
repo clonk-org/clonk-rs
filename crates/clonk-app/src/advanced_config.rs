@@ -516,6 +516,12 @@ fn voice(config: &Config) -> AdvancedConfigSection {
             // threshold worth choosing would otherwise sit below 5.
             int_row(config, section, "ActivationThreshold", 40, 0, 100),
             int_row(config, section, "ActivationHangover", 400, 0, 2_000),
+            // What the capture does with what it hears, each stage on its own
+            // (clonk-org/clonk-rs#421). On by default: they follow the
+            // microphone opt-in rather than adding a second one.
+            bool_row(config, section, "EchoCancellation", true),
+            bool_row(config, section, "NoiseSuppression", true),
+            bool_row(config, section, "AutomaticGainControl", true),
         ],
     )
 }
@@ -853,6 +859,17 @@ mod tests {
                 max: 2_000,
             })
         ));
+        for stage in [
+            "EchoCancellation",
+            "NoiseSuppression",
+            "AutomaticGainControl",
+        ] {
+            assert_eq!(
+                controller.value("Voice", stage),
+                Some(&AdvancedConfigValue::Bool(true)),
+                "{stage} is editable on its own and starts on",
+            );
+        }
     }
 
     #[test]
