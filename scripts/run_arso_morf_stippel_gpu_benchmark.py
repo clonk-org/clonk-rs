@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -40,6 +41,7 @@ EMBEDDED_PLAYER = (
 FIXTURE_MARKER = ".clonk-rs-disposable-stippel-benchmark"
 FIXTURE_PREFIX = "LC_ARSO_MORF_STIPPEL_FIXTURE"
 PRESENTATION_PREFIX = "LC_APP_PRESENTATION_BENCHMARK"
+RETAINED_GPU_PROFILE_PREFIX = "LC_APP_RETAINED_GPU_PROFILE"
 PRESENTATION_CONTEXT_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_CONTEXT"
 PRESENTATION_NETWORK_PREFIX = "LC_APP_PRESENTATION_BENCHMARK_NETWORK"
 PRESENTATION_PASS = (
@@ -186,6 +188,27 @@ def parse_presentation_line(line):
     )
     try:
         parsed = {key: int(fields[key]) for key in integer_fields}
+        submission_kind_fields = (
+            "retained_gpu_present_submissions",
+            "cpu_present_submissions",
+        )
+        present_submission_kind_fields = [
+            key for key in submission_kind_fields if key in fields
+        ]
+        if present_submission_kind_fields and len(
+            present_submission_kind_fields
+        ) != len(submission_kind_fields):
+            raise ValueError(
+                "retained and CPU submission counts must appear together"
+            )
+        parsed.update(
+            {
+                key: int(fields[key])
+                for key in present_submission_kind_fields
+            }
+        )
+        for key in submission_kind_fields:
+            parsed.setdefault(key, None)
         parsed.update({key: float(fields[key]) for key in float_fields})
         raw_samples = fields["graphics_pass_samples_ns"]
         if not raw_samples.startswith("[") or not raw_samples.endswith("]"):
@@ -205,9 +228,723 @@ def parse_presentation_line(line):
             f"graphics pass sample count is {sample_count} but "
             f"{raw_sample_count} raw samples were reported"
         )
+    successful_submissions = parsed["successful_present_submissions"]
+    if raw_sample_count != successful_submissions:
+        raise BenchmarkFailure(
+            f"{raw_sample_count} graphics samples were reported for "
+            f"{successful_submissions} successful submissions"
+        )
     if any(sample < 0 for sample in parsed["graphics_pass_samples_ns"]):
         raise BenchmarkFailure("graphics pass samples cannot be negative")
+    if any(parsed[key] < 0 for key in integer_fields):
+        raise BenchmarkFailure("presentation counters cannot be negative")
+    if any(
+        not math.isfinite(parsed[key]) or parsed[key] < 0
+        for key in float_fields
+    ):
+        raise BenchmarkFailure(
+            "presentation summary values must be finite and nonnegative"
+        )
+    if parsed["elapsed_seconds"] == 0:
+        raise BenchmarkFailure("presentation elapsed_seconds must be positive")
+    retained_submissions = parsed["retained_gpu_present_submissions"]
+    cpu_submissions = parsed["cpu_present_submissions"]
+    if retained_submissions is not None:
+        if retained_submissions < 0 or cpu_submissions < 0:
+            raise BenchmarkFailure("presentation counters cannot be negative")
+        submission_total = retained_submissions + cpu_submissions
+        if submission_total != parsed["successful_present_submissions"]:
+            raise BenchmarkFailure(
+                f"submission kind counts total {submission_total} but "
+                f"{parsed['successful_present_submissions']} successful "
+                "submissions were reported"
+            )
     return parsed
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise BenchmarkFailure(f"duplicate retained GPU profile key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise BenchmarkFailure(
+        f"invalid retained GPU profile JSON constant: {value}"
+    )
+
+
+def _exact_nonnegative_integer(value, label):
+    if type(value) is not int or value < 0 or value > (1 << 64) - 1:
+        raise BenchmarkFailure(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _exact_unsigned_integer(value, bits, label):
+    if type(value) is not int or value < 0 or value > (1 << bits) - 1:
+        raise BenchmarkFailure(f"{label} must be an unsigned {bits}-bit integer")
+    return value
+
+
+def _exact_signed_integer(value, bits, label):
+    minimum = -(1 << (bits - 1))
+    maximum = (1 << (bits - 1)) - 1
+    if type(value) is not int or value < minimum or value > maximum:
+        raise BenchmarkFailure(f"{label} must be a signed {bits}-bit integer")
+    return value
+
+
+def _exact_string(value, label, *, nonempty=False):
+    if type(value) is not str or (nonempty and not value):
+        qualifier = "nonempty " if nonempty else ""
+        raise BenchmarkFailure(f"{label} must be a {qualifier}string")
+    return value
+
+
+def _extent(value, label):
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(
+            type(dimension) is not int
+            or dimension <= 0
+            or dimension > (1 << 32) - 1
+            for dimension in value
+        )
+    ):
+        raise BenchmarkFailure(
+            f"{label} must be two positive unsigned 32-bit integers"
+        )
+    return value
+
+
+def _require_mapping(value, label):
+    if not isinstance(value, dict):
+        raise BenchmarkFailure(f"{label} must be a JSON object")
+    return value
+
+
+def _feature_bits(value, label):
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(type(word) is not int or word < 0 or word > (1 << 64) - 1 for word in value)
+    ):
+        raise BenchmarkFailure(f"{label} must be two unsigned 64-bit integers")
+    return value
+
+
+def _finite_positive_number(value, label):
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise BenchmarkFailure(f"{label} must be positive and finite")
+    return float(value)
+
+
+def _exact_bool(value, label):
+    if type(value) is not bool:
+        raise BenchmarkFailure(f"{label} must be a boolean")
+    return value
+
+
+def validate_retained_gpu_profile(profile):
+    schema_version = profile.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise BenchmarkFailure("retained GPU profile schema_version must be 1")
+    fingerprint = _require_mapping(
+        profile.get("fingerprint"), "retained GPU fingerprint"
+    )
+    adapter = _require_mapping(
+        fingerprint.get("adapter"), "retained GPU adapter fingerprint"
+    )
+    for key in ("name", "driver", "driver_info"):
+        _exact_string(adapter.get(key), f"retained GPU adapter.{key}")
+    _exact_string(
+        adapter.get("device_type"),
+        "retained GPU adapter.device_type",
+        nonempty=True,
+    )
+    _exact_string(
+        adapter.get("backend"),
+        "retained GPU adapter.backend",
+        nonempty=True,
+    )
+    adapter_enum_values = {
+        "device_type": {
+            "other",
+            "integrated_gpu",
+            "discrete_gpu",
+            "virtual_gpu",
+            "cpu",
+        },
+        "backend": {"noop", "vulkan", "metal", "dx12", "gl", "webgpu"},
+    }
+    for key, allowed_values in adapter_enum_values.items():
+        if adapter[key] not in allowed_values:
+            raise BenchmarkFailure(
+                f"retained GPU adapter.{key} has an unknown value"
+            )
+    for key in ("vendor_id", "device_id", "subgroup_min_size", "subgroup_max_size"):
+        _exact_unsigned_integer(
+            adapter.get(key), 32, f"retained GPU adapter.{key}"
+        )
+    pci_bus_id = adapter.get("pci_bus_id")
+    if pci_bus_id is not None:
+        _exact_string(
+            pci_bus_id,
+            "retained GPU adapter.pci_bus_id",
+            nonempty=True,
+        )
+    if adapter["subgroup_min_size"] > adapter["subgroup_max_size"]:
+        raise BenchmarkFailure(
+            "retained GPU adapter subgroup bounds are reversed"
+        )
+    _exact_bool(
+        adapter.get("transient_saves_memory"),
+        "retained GPU adapter.transient_saves_memory",
+    )
+    adapter_features = _feature_bits(
+        fingerprint.get("adapter_feature_bits"),
+        "retained GPU adapter_feature_bits",
+    )
+    device = _require_mapping(
+        fingerprint.get("device"), "retained GPU device fingerprint"
+    )
+    device_features = _feature_bits(
+        device.get("feature_bits"), "retained GPU device.feature_bits"
+    )
+    device_period = _finite_positive_number(
+        device.get("timestamp_period_ns"),
+        "retained GPU device.timestamp_period_ns",
+    )
+    _exact_string(
+        device.get("limits_debug"),
+        "retained GPU device.limits_debug",
+        nonempty=True,
+    )
+    if (
+        _exact_unsigned_integer(
+            device.get("max_texture_dimension_2d"),
+            32,
+            "retained GPU device.max_texture_dimension_2d",
+        )
+        == 0
+    ):
+        raise BenchmarkFailure(
+            "retained GPU device.max_texture_dimension_2d must be positive"
+        )
+    surface = _require_mapping(
+        fingerprint.get("surface"), "retained GPU surface fingerprint"
+    )
+    for key in ("format", "present_mode", "alpha_mode"):
+        _exact_string(
+            surface.get(key),
+            f"retained GPU surface.{key}",
+            nonempty=True,
+        )
+    surface_extent = _extent(
+        surface.get("surface_extent"), "retained GPU surface.surface_extent"
+    )
+    _extent(
+        surface.get("buffer_extent"), "retained GPU surface.buffer_extent"
+    )
+    renderer_config = _require_mapping(
+        fingerprint.get("renderer"), "retained GPU renderer fingerprint"
+    )
+    for key in ("mipmaps", "smooth_landscape", "shader_landscape"):
+        _exact_bool(
+            renderer_config.get(key), f"retained GPU renderer.{key}"
+        )
+    landscape_detail = _exact_unsigned_integer(
+        renderer_config.get("landscape_detail"),
+        32,
+        "retained GPU renderer.landscape_detail",
+    )
+    if not 1 <= landscape_detail <= 4:
+        raise BenchmarkFailure(
+            "retained GPU renderer.landscape_detail must be in 1..=4"
+        )
+    renderer_surface_format = _exact_string(
+        renderer_config.get("surface_format"),
+        "retained GPU renderer.surface_format",
+        nonempty=True,
+    )
+    if renderer_surface_format != surface["format"]:
+        raise BenchmarkFailure(
+            "retained GPU renderer and surface formats disagree"
+        )
+    frontend = _require_mapping(
+        fingerprint.get("frontend"), "retained GPU frontend fingerprint"
+    )
+    for key in (
+        "no_alpha_add",
+        "no_box_fades",
+        "shader",
+        "use_shader_gamma",
+        "disable_gamma",
+    ):
+        _exact_bool(frontend.get(key), f"retained GPU frontend.{key}")
+    for key in ("tex_indent", "blit_offset"):
+        _exact_signed_integer(
+            frontend.get(key), 32, f"retained GPU frontend.{key}"
+        )
+    _exact_unsigned_integer(
+        frontend.get("allowed_blit_modes"),
+        32,
+        "retained GPU frontend.allowed_blit_modes",
+    )
+    presentation = _require_mapping(
+        fingerprint.get("presentation"),
+        "retained GPU presentation fingerprint",
+    )
+    physical_extent = _extent(
+        presentation.get("physical_extent"),
+        "retained GPU presentation.physical_extent",
+    )
+    if physical_extent != surface_extent:
+        raise BenchmarkFailure(
+            "retained GPU presentation and surface extents disagree"
+        )
+    _finite_positive_number(
+        presentation.get("scale"), "retained GPU presentation.scale"
+    )
+    _exact_unsigned_integer(
+        presentation.get("crop_top"),
+        32,
+        "retained GPU presentation.crop_top",
+    )
+    timestamp_queries = _require_mapping(
+        profile.get("timestamp_queries"), "retained GPU timestamp_queries"
+    )
+    requested = _exact_bool(
+        timestamp_queries.get("requested"),
+        "retained GPU timestamp_queries.requested",
+    )
+    supported = _exact_bool(
+        timestamp_queries.get("supported"),
+        "retained GPU timestamp_queries.supported",
+    )
+    enabled = _exact_bool(
+        timestamp_queries.get("enabled"),
+        "retained GPU timestamp_queries.enabled",
+    )
+    if enabled != (requested and supported):
+        raise BenchmarkFailure(
+            "retained GPU timestamp enabled status disagrees with request/support"
+        )
+    timestamp_bit = 1 << 7
+    if supported != bool(adapter_features[0] & timestamp_bit):
+        raise BenchmarkFailure(
+            "retained GPU timestamp support disagrees with adapter features"
+        )
+    expected_device_features = [timestamp_bit, 0] if enabled else [0, 0]
+    if device_features != expected_device_features:
+        raise BenchmarkFailure(
+            "retained GPU device features do not match timestamp-query status"
+        )
+    for key in ("dropped_frames", "readback_errors", "device_discontinuities"):
+        if _exact_nonnegative_integer(
+            timestamp_queries.get(key), f"retained GPU timestamp_queries.{key}"
+        ) != 0:
+            raise BenchmarkFailure(f"retained GPU timestamp telemetry {key} is nonzero")
+
+    frames = profile.get("frames")
+    if not isinstance(frames, list):
+        raise BenchmarkFailure("retained GPU profile frames must be a JSON array")
+    stage_keys = (
+        "frame_preparation_ns",
+        "validation_ns",
+        "texture_synchronization_ns",
+        "stream_packing_upload_ns",
+        "command_encoding_ns",
+        "drawable_acquisition_ns",
+        "queue_submission_ns",
+        "presentation_ns",
+    )
+    for sample_index, frame_value in enumerate(frames):
+        frame = _require_mapping(frame_value, f"retained GPU frame {sample_index}")
+        if _exact_nonnegative_integer(
+            frame.get("sample_index"),
+            f"retained GPU frame {sample_index} sample_index",
+        ) != sample_index:
+            raise BenchmarkFailure(
+                "retained GPU profile sample indices must be consecutive from zero"
+            )
+        end_to_end = _exact_nonnegative_integer(
+            frame.get("end_to_end_ns"),
+            f"retained GPU frame {sample_index} end_to_end_ns",
+        )
+        cpu = _require_mapping(
+            frame.get("cpu"), f"retained GPU frame {sample_index} cpu"
+        )
+        named_sum = sum(
+            _exact_nonnegative_integer(
+                cpu.get(key), f"retained GPU frame {sample_index} cpu.{key}"
+            )
+            for key in stage_keys
+        )
+        named_total = _exact_nonnegative_integer(
+            cpu.get("named_total_ns"),
+            f"retained GPU frame {sample_index} cpu.named_total_ns",
+        )
+        unclassified = _exact_nonnegative_integer(
+            cpu.get("unclassified_ns"),
+            f"retained GPU frame {sample_index} cpu.unclassified_ns",
+        )
+        overrun = _exact_nonnegative_integer(
+            cpu.get("overrun_ns"),
+            f"retained GPU frame {sample_index} cpu.overrun_ns",
+        )
+        if named_sum != named_total or named_total + unclassified != end_to_end + overrun:
+            raise BenchmarkFailure(
+                f"retained GPU CPU reconciliation failed for sample {sample_index}"
+            )
+        renderer = _require_mapping(
+            frame.get("renderer"),
+            f"retained GPU frame {sample_index} renderer",
+        )
+        renderer_counter_keys = (
+            "resident_source_textures",
+            "created_source_textures",
+            "full_upload_calls",
+            "full_upload_bytes",
+            "dirty_upload_calls",
+            "dirty_upload_bytes",
+            "draw_calls",
+            "quad_draw_calls",
+            "sprite_draw_calls",
+            "object_sprite_draw_calls",
+            "landscape_draw_calls",
+            "shader_landscape_draw_calls",
+            "solid_draw_calls",
+            "solid_rect_draw_calls",
+            "monitor_gamma_draw_calls",
+            "presentation_draw_calls",
+            "total_draw_calls",
+            "compatible_resource_runs",
+            "generic_vertices",
+            "generic_vertex_upload_bytes",
+            "quad_instances",
+            "sprite_instances",
+            "object_sprite_instances",
+            "solid_rect_instances",
+            "quad_instance_upload_bytes",
+            "sprite_instance_upload_bytes",
+            "object_sprite_upload_bytes",
+            "solid_rect_upload_bytes",
+        )
+        renderer_counts = {
+            key: _exact_nonnegative_integer(
+                renderer.get(key),
+                f"retained GPU frame {sample_index} renderer.{key}",
+            )
+            for key in renderer_counter_keys
+        }
+        _exact_bool(
+            renderer.get("composition_recreated"),
+            f"retained GPU frame {sample_index} renderer.composition_recreated",
+        )
+        classified_scene = sum(
+            renderer_counts[key]
+            for key in (
+                "quad_draw_calls",
+                "sprite_draw_calls",
+                "object_sprite_draw_calls",
+                "landscape_draw_calls",
+                "solid_draw_calls",
+                "solid_rect_draw_calls",
+            )
+        )
+        classified_total = sum(
+            renderer_counts[key]
+            for key in (
+                "draw_calls",
+                "shader_landscape_draw_calls",
+                "monitor_gamma_draw_calls",
+                "presentation_draw_calls",
+            )
+        )
+        if (
+            classified_scene != renderer_counts["draw_calls"]
+            or renderer_counts["compatible_resource_runs"]
+            != renderer_counts["draw_calls"]
+            or classified_total != renderer_counts["total_draw_calls"]
+        ):
+            raise BenchmarkFailure(
+                f"retained GPU draw counts do not reconcile for sample {sample_index}"
+            )
+        if renderer_counts["presentation_draw_calls"] != 1:
+            raise BenchmarkFailure(
+                f"retained GPU frame {sample_index} must report exactly one "
+                "presentation draw"
+            )
+        if (
+            renderer_counts["shader_landscape_draw_calls"] > 1
+            or renderer_counts["monitor_gamma_draw_calls"] > 1
+        ):
+            raise BenchmarkFailure(
+                f"retained GPU fixed-pass draw count exceeds one for sample {sample_index}"
+            )
+        if (
+            not renderer_config["shader_landscape"]
+            and renderer_counts["shader_landscape_draw_calls"] != 0
+        ):
+            raise BenchmarkFailure(
+                "retained GPU shader-landscape draw contradicts renderer config "
+                f"for sample {sample_index}"
+            )
+        stream_layouts = (
+            ("generic_vertices", "generic_vertex_upload_bytes", 72),
+            ("quad_instances", "quad_instance_upload_bytes", 232),
+            ("sprite_instances", "sprite_instance_upload_bytes", 40),
+            ("object_sprite_instances", "object_sprite_upload_bytes", 88),
+            ("solid_rect_instances", "solid_rect_upload_bytes", 36),
+        )
+        if any(
+            renderer_counts[byte_key]
+            != renderer_counts[count_key] * byte_stride
+            for count_key, byte_key, byte_stride in stream_layouts
+        ):
+            raise BenchmarkFailure(
+                f"retained GPU stream bytes do not reconcile for sample {sample_index}"
+            )
+        for upload_kind in ("full", "dirty"):
+            has_calls = renderer_counts[f"{upload_kind}_upload_calls"] != 0
+            has_bytes = renderer_counts[f"{upload_kind}_upload_bytes"] != 0
+            if has_calls != has_bytes:
+                raise BenchmarkFailure(
+                    f"retained GPU {upload_kind} upload calls/bytes disagree "
+                    f"for sample {sample_index}"
+                )
+        if (
+            renderer_counts["created_source_textures"]
+            > renderer_counts["full_upload_calls"]
+        ):
+            raise BenchmarkFailure(
+                "retained GPU created textures exceed full uploads "
+                f"for sample {sample_index}"
+            )
+        capture = _require_mapping(
+            frame.get("frontend_capture"),
+            f"retained GPU frame {sample_index} frontend_capture",
+        )
+        capture_keys = (
+            "generic_sprite_fallbacks",
+            "spatial_fog_fallbacks",
+            "precomputed_fog_modulation_fallbacks",
+            "texture_indent_fallbacks",
+            "owner_mask_fallbacks",
+            "physical_texture_tile_fallbacks",
+            "fog_expanded_chunks",
+        )
+        capture_counts = {
+            key: _exact_nonnegative_integer(
+                capture.get(key),
+                f"retained GPU frame {sample_index} frontend_capture.{key}",
+            )
+            for key in capture_keys
+        }
+        generic_fallbacks = capture_counts["generic_sprite_fallbacks"]
+        if any(
+            capture_counts[key] > generic_fallbacks
+            for key in (
+                "spatial_fog_fallbacks",
+                "precomputed_fog_modulation_fallbacks",
+                "texture_indent_fallbacks",
+                "owner_mask_fallbacks",
+                "physical_texture_tile_fallbacks",
+            )
+        ):
+            raise BenchmarkFailure(
+                "retained GPU fallback reasons exceed generic fallbacks "
+                f"for sample {sample_index}"
+            )
+        if (
+            capture_counts["spatial_fog_fallbacks"] == 0
+            and capture_counts["fog_expanded_chunks"] != 0
+        ):
+            raise BenchmarkFailure(
+                "retained GPU fog chunks lack a spatial fallback "
+                f"for sample {sample_index}"
+            )
+
+    gpu_frames = profile.get("gpu_timestamp_frames")
+    if not isinstance(gpu_frames, list):
+        raise BenchmarkFailure(
+            "retained GPU gpu_timestamp_frames must be a JSON array"
+        )
+    frame_ids = [frame.get("timestamp_frame_id") for frame in frames]
+    if not enabled:
+        if any(frame_id is not None for frame_id in frame_ids) or gpu_frames:
+            raise BenchmarkFailure(
+                "disabled retained GPU timestamps must not report frame IDs or samples"
+            )
+        return
+    if any(type(frame_id) is not int or frame_id <= 0 for frame_id in frame_ids):
+        raise BenchmarkFailure(
+            "enabled retained GPU timestamps require positive frame IDs"
+        )
+    if len(set(frame_ids)) != len(frame_ids):
+        raise BenchmarkFailure("retained GPU timestamp frame IDs must be unique")
+    if frame_ids != sorted(frame_ids):
+        raise BenchmarkFailure(
+            "retained GPU timestamp frame IDs must increase with CPU samples"
+        )
+
+    gpu_by_id = {}
+    gpu_frame_ids = []
+    renderer_generations = set()
+    allowed_passes = {
+        "shader_landscape",
+        "scene",
+        "monitor_gamma",
+        "presentation",
+    }
+    for gpu_value in gpu_frames:
+        gpu = _require_mapping(gpu_value, "retained GPU timestamp frame")
+        frame_id = _exact_nonnegative_integer(
+            gpu.get("frame_id"), "retained GPU timestamp frame_id"
+        )
+        if frame_id == 0 or frame_id in gpu_by_id:
+            raise BenchmarkFailure("retained GPU timestamp frame IDs must be unique")
+        gpu_frame_ids.append(frame_id)
+        renderer_generation = _exact_nonnegative_integer(
+            gpu.get("renderer_generation"),
+            f"retained GPU timestamp frame {frame_id} renderer_generation",
+        )
+        if renderer_generation == 0:
+            raise BenchmarkFailure(
+                "retained GPU timestamp renderer generation must be positive"
+            )
+        renderer_generations.add(renderer_generation)
+        period = _finite_positive_number(
+            gpu.get("timestamp_period_ns"),
+            f"retained GPU timestamp frame {frame_id} timestamp_period_ns",
+        )
+        if period != device_period:
+            raise BenchmarkFailure(
+                "retained GPU timestamp period disagrees with device fingerprint"
+            )
+        passes = gpu.get("passes")
+        if not isinstance(passes, list):
+            raise BenchmarkFailure(
+                f"retained GPU timestamp frame {frame_id} passes must be an array"
+            )
+        observed_passes = []
+        observed_pass_names = set()
+        previous_end_tick = None
+        for pass_value in passes:
+            sample = _require_mapping(
+                pass_value, f"retained GPU timestamp frame {frame_id} pass"
+            )
+            pass_name = sample.get("pass")
+            if pass_name not in allowed_passes or pass_name in observed_pass_names:
+                raise BenchmarkFailure(
+                    f"retained GPU timestamp frame {frame_id} has invalid or duplicate pass"
+                )
+            observed_passes.append(pass_name)
+            observed_pass_names.add(pass_name)
+            begin = _exact_nonnegative_integer(
+                sample.get("begin_tick"),
+                f"retained GPU timestamp frame {frame_id} {pass_name} begin_tick",
+            )
+            end = _exact_nonnegative_integer(
+                sample.get("end_tick"),
+                f"retained GPU timestamp frame {frame_id} {pass_name} end_tick",
+            )
+            validity = sample.get("validity")
+            if validity not in {
+                "valid",
+                "invalid_period",
+                "counter_rollover",
+                "invalid_duration",
+            }:
+                raise BenchmarkFailure(
+                    "retained GPU timestamp sample has an invalid validity value"
+                )
+            if validity != "valid":
+                raise BenchmarkFailure(
+                    f"retained GPU timestamp sample is not valid: {validity}"
+                )
+            if end < begin:
+                raise BenchmarkFailure("retained GPU timestamp ends before it begins")
+            if previous_end_tick is not None and begin < previous_end_tick:
+                raise BenchmarkFailure(
+                    "retained GPU timestamp intervals are not ordered in "
+                    f"frame {frame_id}"
+                )
+            previous_end_tick = end
+            duration = sample.get("duration_ns")
+            if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+                raise BenchmarkFailure(
+                    "retained GPU timestamp duration must be nonnegative and finite"
+                )
+            expected_duration = (end - begin) * period
+            if not math.isclose(
+                float(duration), expected_duration, rel_tol=1e-9, abs_tol=1e-6
+            ):
+                raise BenchmarkFailure(
+                    "GPU timestamp duration does not match raw ticks"
+                )
+        gpu_by_id[frame_id] = observed_passes
+    if frame_ids != gpu_frame_ids:
+        raise BenchmarkFailure(
+            "retained GPU timestamp frames must match CPU frame order"
+        )
+    if len(renderer_generations) != 1:
+        raise BenchmarkFailure(
+            "retained GPU timestamp renderer generation changed without telemetry"
+        )
+    for frame in frames:
+        frame_id = frame["timestamp_frame_id"]
+        renderer = _require_mapping(
+            frame.get("renderer"), f"retained GPU frame {frame_id} renderer"
+        )
+        expected_passes = []
+        if _exact_nonnegative_integer(
+            renderer.get("shader_landscape_draw_calls"),
+            f"retained GPU frame {frame_id} shader_landscape_draw_calls",
+        ):
+            expected_passes.append("shader_landscape")
+        expected_passes.append("scene")
+        if _exact_nonnegative_integer(
+            renderer.get("monitor_gamma_draw_calls"),
+            f"retained GPU frame {frame_id} monitor_gamma_draw_calls",
+        ):
+            expected_passes.append("monitor_gamma")
+        expected_passes.append("presentation")
+        if gpu_by_id[frame_id] != expected_passes:
+            raise BenchmarkFailure(
+                f"retained GPU timestamp passes do not match frame {frame_id} draws"
+            )
+
+
+def parse_retained_gpu_profile(lines, *, required):
+    marker = f"{RETAINED_GPU_PROFILE_PREFIX} "
+    matches = [line.strip()[len(marker) :] for line in lines if line.startswith(marker)]
+    if not matches:
+        if required:
+            raise BenchmarkFailure("required retained GPU profile is missing")
+        return None
+    if len(matches) != 1:
+        raise BenchmarkFailure(
+            "expected exactly one retained GPU profile; observed "
+            f"{len(matches)}"
+        )
+    try:
+        profile = json.loads(
+            matches[0],
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, TypeError) as error:
+        raise BenchmarkFailure(f"invalid retained GPU profile JSON: {error}") from error
+    if not isinstance(profile, dict):
+        raise BenchmarkFailure("retained GPU profile must be a JSON object")
+    validate_retained_gpu_profile(profile)
+    return profile
 
 
 def parse_presentation_context_line(line):
@@ -755,6 +1492,7 @@ def controlled_process_environment(inherited):
         "LC_RUST_ENGINE_RANDOM_SEED",
         "LC_RUST_ENGINE_MAP_SEED",
         "LC_RUST_ENGINE_STARTUP_PLAYERS",
+        "LC_GPU_TIMESTAMP_QUERIES",
         "LC_APP_PRESENTATION_BENCHMARK_KEEP_RUNNING",
         "LC_APP_PRESENTATION_BENCHMARK_INPUT_INTERVAL_MS",
     ):
@@ -766,6 +1504,12 @@ def controlled_process_environment(inherited):
             "LC_LOG": BENCHMARK_LOG_FILTER,
         }
     )
+    return environment
+
+
+def timestamp_query_process_environment(base):
+    environment = base.copy()
+    environment["LC_GPU_TIMESTAMP_QUERIES"] = "1"
     return environment
 
 
@@ -984,7 +1728,13 @@ def validate_paired_arguments(arguments):
     return all(requested)
 
 
-def parse_presentation_evidence(lines, process_status):
+def parse_presentation_evidence(
+    lines,
+    process_status,
+    *,
+    require_retained_gpu_profile=False,
+    expected_timestamp_query_request=None,
+):
     report = parse_presentation_line(
         single_machine_line(lines, PRESENTATION_PREFIX, "elapsed_seconds")
     )
@@ -1011,12 +1761,49 @@ def parse_presentation_evidence(lines, process_status):
             f"app reported budget result={budget_result} but exited with status "
             f"{process_status}; expected {expected_status}"
         )
+    retained_gpu_profile = parse_retained_gpu_profile(
+        lines, required=require_retained_gpu_profile
+    )
+    if retained_gpu_profile is not None:
+        requested = retained_gpu_profile["timestamp_queries"]["requested"]
+        if (
+            expected_timestamp_query_request is not None
+            and requested != expected_timestamp_query_request
+        ):
+            raise BenchmarkFailure(
+                "retained GPU timestamp request status disagrees with "
+                "benchmark environment"
+            )
+        profile_frames = retained_gpu_profile["frames"]
+        retained_submissions = report["retained_gpu_present_submissions"]
+        if retained_submissions is None:
+            raise BenchmarkFailure(
+                "retained GPU profile requires submission kind counts"
+            )
+        if len(profile_frames) != retained_submissions:
+            raise BenchmarkFailure(
+                f"profile frame count is {len(profile_frames)} but "
+                f"{retained_submissions} retained submissions were reported"
+            )
+        profile_durations = [frame["end_to_end_ns"] for frame in profile_frames]
+        if profile_durations != report["graphics_pass_samples_ns"]:
+            raise BenchmarkFailure(
+                "retained GPU profile durations do not match the legacy raw "
+                "graphics samples"
+            )
     return {
+        "schema_version": 2,
         "process_status": process_status,
         "budget_result": budget_result,
         "presentation": report,
         "context": context,
         "network": network,
+        "retained_gpu_profile": retained_gpu_profile,
+        "retained_gpu_profile_sha256": (
+            None
+            if retained_gpu_profile is None
+            else json_sha256(retained_gpu_profile)
+        ),
     }
 
 
@@ -1031,6 +1818,8 @@ def run_paired_arm(
     environment,
     artifact_dir,
     expected_inputs,
+    require_retained_gpu_profile,
+    expected_timestamp_query_request,
 ):
     output_dir = artifact_dir / label
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -1066,7 +1855,15 @@ def run_paired_arm(
         "command": command,
         "input_sha256_before": input_before["sha256"],
         "config_after": file_fingerprint(run_config),
-        **parse_presentation_evidence(lines, process_status),
+        "timestamp_query_environment": environment.get(
+            "LC_GPU_TIMESTAMP_QUERIES"
+        ),
+        **parse_presentation_evidence(
+            lines,
+            process_status,
+            require_retained_gpu_profile=require_retained_gpu_profile,
+            expected_timestamp_query_request=expected_timestamp_query_request,
+        ),
     }
     write_json(output_dir / "report.json", evidence)
     return evidence
@@ -1138,7 +1935,7 @@ def run_paired_benchmark(arguments):
         ) from error
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "benchmark": "Arso-Morf 1,000-ST5B network presentation A/B",
         "result": "running",
         "started_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1228,6 +2025,18 @@ def run_paired_benchmark(arguments):
                 "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK",
             )
         }
+        baseline_environment = environment.copy()
+        candidate_environment = timestamp_query_process_environment(
+            environment
+        )
+        manifest["timestamp_query_environment"] = {
+            "baseline": baseline_environment.get(
+                "LC_GPU_TIMESTAMP_QUERIES"
+            ),
+            "candidate": candidate_environment[
+                "LC_GPU_TIMESTAMP_QUERIES"
+            ],
+        }
 
         observed = verify_paired_input_fingerprint(
             inputs, fixture, config, stage="before baseline"
@@ -1243,9 +2052,11 @@ def run_paired_benchmark(arguments):
                 config=config,
                 fixture=fixture,
                 ports=ports,
-                environment=environment,
+                environment=baseline_environment,
                 artifact_dir=artifact_dir,
                 expected_inputs=inputs,
+                require_retained_gpu_profile=False,
+                expected_timestamp_query_request=False,
             )
             manifest["runs"]["baseline"] = baseline
             write_json(artifact_dir / "manifest.json", manifest)
@@ -1271,9 +2082,11 @@ def run_paired_benchmark(arguments):
                 config=config,
                 fixture=fixture,
                 ports=ports,
-                environment=environment,
+                environment=candidate_environment,
                 artifact_dir=artifact_dir,
                 expected_inputs=inputs,
+                require_retained_gpu_profile=True,
+                expected_timestamp_query_request=True,
             )
             manifest["runs"]["candidate"] = candidate
             write_json(artifact_dir / "manifest.json", manifest)
@@ -1375,6 +2188,7 @@ def run_benchmark(arguments):
                 "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK": "1",
             }
         )
+        environment = timestamp_query_process_environment(environment)
         presentation_lines, presentation_status = run_and_echo(
             app_command(
                 arguments,
@@ -1390,28 +2204,20 @@ def run_benchmark(arguments):
                 + APP_TIMEOUT_GRACE_SECONDS
             ),
         )
-        report = parse_presentation_line(
-            single_machine_line(
-                presentation_lines, PRESENTATION_PREFIX, "elapsed_seconds"
-            )
+        evidence = parse_presentation_evidence(
+            presentation_lines,
+            presentation_status,
+            require_retained_gpu_profile=True,
+            expected_timestamp_query_request=True,
         )
-        context = parse_presentation_context_line(
-            single_machine_line(
-                presentation_lines,
-                PRESENTATION_CONTEXT_PREFIX,
-                "runtime_players",
-            )
-        )
-        network_evidence = require_network_evidence(presentation_lines)
-        validate_playing_context(context)
-        validate_runtime_stippel_census(context)
+        report = evidence["presentation"]
+        context = evidence["context"]
+        network_evidence = evidence["network"]
         validate_native_cadence(report)
         validate_native_presentation_cadence(report)
-        require_single_result(presentation_lines, PRESENTATION_PASS)
-        if presentation_status != 0:
+        if evidence["budget_result"] != "pass":
             raise BenchmarkFailure(
-                "app exited with status "
-                f"{presentation_status} after reporting a passing budget"
+                "candidate did not pass the native presentation budget"
             )
 
     if sha256(SOURCE_SCENARIO / "Objects.txt") != source_hash:
