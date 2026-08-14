@@ -13,6 +13,7 @@ use clonk_frontend::startup_options_advanced::{
 };
 
 use crate::input::advanced_config_default_raw_keyboard_keys;
+use crate::settings::VoiceActivationMode;
 
 const I32_MIN: i128 = i32::MIN as i128;
 const I32_MAX: i128 = i32::MAX as i128;
@@ -25,6 +26,10 @@ const C4_MAX_COMMENT: usize = 256;
 
 const UPPER_BOARD_VALUES: &[(&str, i32)] = &[("Hide", 0), ("Full", 1), ("Small", 2), ("Mini", 3)];
 const DISPLAY_MODE_VALUES: &[(&str, i32)] = &[("Fullscreen", 0), ("Window", 1)];
+const VOICE_ACTIVATION_MODE_VALUES: &[(&str, i32)] = &[
+    (VoiceActivationMode::PUSH_TO_TALK, 0),
+    (VoiceActivationMode::VOICE_ACTIVATED, 1),
+];
 const SCRIPT_STRICTNESS_VALUES: &[(&str, i32)] = &[
     ("NonStrict", 0),
     ("Strict1", 1),
@@ -153,6 +158,7 @@ fn enum_values(section: &str, key: &str) -> Option<&'static [(&'static str, i32)
         ("Graphics", "DisplayMode") => Some(DISPLAY_MODE_VALUES),
         ("Developer", "ConsoleScriptStrictness") => Some(SCRIPT_STRICTNESS_VALUES),
         ("Logging", "LogLevelStdout") => Some(LOG_LEVEL_VALUES),
+        ("Voice", "ActivationMode") => Some(VOICE_ACTIVATION_MODE_VALUES),
         _ => None,
     }
 }
@@ -492,6 +498,17 @@ fn voice(config: &Config) -> AdvancedConfigSection {
             bool_row(config, section, "Enabled", false),
             int_row(config, section, "Volume", 100, 0, 100),
             i32_row(config, section, "PushToTalkKey", default_push_to_talk),
+            enum_row(
+                config,
+                section,
+                "ActivationMode",
+                VoiceActivationMode::PUSH_TO_TALK,
+                VOICE_ACTIVATION_MODE_VALUES,
+            ),
+            // Linear in decibels over -60..0 dBFS, not in amplitude: every
+            // threshold worth choosing would otherwise sit below 5.
+            int_row(config, section, "ActivationThreshold", 40, 0, 100),
+            int_row(config, section, "ActivationHangover", 400, 0, 2_000),
         ],
     )
 }
@@ -807,6 +824,27 @@ mod tests {
                     crate::input::encode_virtual_key_code(winit::keyboard::KeyCode::Backquote)
                         .expect("backquote has a native key code")
                 )
+        ));
+        assert_eq!(
+            controller.value("Voice", "ActivationMode"),
+            Some(&AdvancedConfigValue::Text("PushToTalk".to_string())),
+            "push-to-talk stays the default activation mode",
+        );
+        assert!(matches!(
+            controller.value("Voice", "ActivationThreshold"),
+            Some(AdvancedConfigValue::Integer {
+                value: 40,
+                min: 0,
+                max: 100,
+            })
+        ));
+        assert!(matches!(
+            controller.value("Voice", "ActivationHangover"),
+            Some(AdvancedConfigValue::Integer {
+                value: 400,
+                min: 0,
+                max: 2_000,
+            })
         ));
     }
 

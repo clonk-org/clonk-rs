@@ -2,8 +2,14 @@
 //! positional mix.
 //!
 //! This is a deliberate Rust-only extension (clonk-org/clonk-rs#301), **not a
-//! parity claim** — there is no C++ oracle for any of it. It is opt-in
-//! push-to-talk and opens the microphone only for a held configured key.
+//! parity claim** — there is no C++ oracle for any of it. It is opt-in: nothing
+//! here opens a microphone unless `Voice.Enabled` is set. An opted-in player
+//! then chooses how it opens, and push-to-talk — the microphone open only for a
+//! held configured key — is and stays the default. Voice activation
+//! (clonk-org/clonk-rs#422) is the alternative: the capture is open while the
+//! player is eligible to speak, and [`VoiceActivationGate`] decides per frame
+//! whether what it hears is transmitted. Neither mode weakens the other, and a
+//! player who has taken neither opt-in is never recorded at all.
 //!
 //! **The determinism boundary is the invariant to protect.** Fixed 20 ms,
 //! 16 kHz mono IMA ADPCM frames travel on a bounded, droppable UDP media lane
@@ -31,8 +37,12 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use clonk_audio::{decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError};
+use clonk_audio::{
+    decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceInputFrame,
+};
 use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
+
+use crate::settings::VoiceActivation;
 
 pub(crate) const SPEAKING_HANGOVER: Duration = Duration::from_millis(250);
 
@@ -94,6 +104,44 @@ pub(crate) struct CapturedVoiceFrame {
     pub(crate) payload: EncodedVoiceFrame,
 }
 
+/// Decides which captured frames a voice-activated capture actually transmits.
+///
+/// Push-to-talk has no gate: a held key is the player saying "send this". Voice
+/// activation replaces that decision with the measured input level, so the gate
+/// opens on a frame at or above the configured threshold and stays open for a
+/// configured tail of frames afterwards — without one, every pause between
+/// words would clip the end of the last one.
+#[derive(Debug, Default)]
+struct VoiceActivationGate {
+    open: bool,
+    hangover_remaining: u32,
+}
+
+impl VoiceActivationGate {
+    /// `Some(reopened)` to transmit this frame, where `reopened` marks the
+    /// frame that broke a silence and therefore starts a new stream. `None`
+    /// suppresses the frame.
+    fn admit(&mut self, level: f32, activation: &VoiceActivation) -> Option<bool> {
+        let transmit = if level >= activation.threshold {
+            self.hangover_remaining = activation.hangover_frames;
+            true
+        } else if self.hangover_remaining > 0 {
+            self.hangover_remaining -= 1;
+            true
+        } else {
+            false
+        };
+        let reopened = transmit && !self.open;
+        self.open = transmit;
+        transmit.then_some(reopened)
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.hangover_remaining = 0;
+    }
+}
+
 pub(crate) struct AcceptedRemoteVoiceFrame {
     pub(crate) stream_id: u64,
     pub(crate) samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
@@ -101,11 +149,11 @@ pub(crate) struct AcceptedRemoteVoiceFrame {
 }
 
 pub(crate) trait VoiceFrameSource {
-    fn drain_frames(&self) -> Vec<EncodedVoiceFrame>;
+    fn drain_frames(&self) -> Vec<VoiceInputFrame>;
 }
 
 impl VoiceFrameSource for VoiceCapture {
-    fn drain_frames(&self) -> Vec<EncodedVoiceFrame> {
+    fn drain_frames(&self) -> Vec<VoiceInputFrame> {
         self.drain_frames()
     }
 }
@@ -123,14 +171,27 @@ pub(crate) struct VoiceChatState {
     capture: Option<Box<dyn VoiceFrameSource>>,
     capture_opener: VoiceCaptureOpener,
     capture_key: Option<winit::keyboard::KeyCode>,
+    activation_gate: VoiceActivationGate,
+    activation_open_failed: bool,
     stream_epoch: u32,
     next_sequence: u16,
     pub(crate) remote_streams: BTreeMap<(i32, i32), RemoteVoiceStream>,
 }
 
 impl Default for VoiceChatState {
+    #[cfg(not(test))]
     fn default() -> Self {
         Self::with_source_opener(VoiceCapture::open)
+    }
+
+    /// Under test the default state can never reach a real device. A test that
+    /// forgets to inject a source would otherwise open the *developer's*
+    /// microphone, pass locally, and then fail on a CI runner that has no input
+    /// device — which is exactly how this arrived. Tests that exercise capture
+    /// pass their own source to [`VoiceChatState::with_source_opener`].
+    #[cfg(test)]
+    fn default() -> Self {
+        Self::with_source_opener(|| Err::<VoiceCapture, _>(VoiceCaptureError::Unavailable))
     }
 }
 
@@ -147,6 +208,8 @@ impl VoiceChatState {
                 opener().map(|source| Box::new(source) as Box<dyn VoiceFrameSource>)
             }),
             capture_key: None,
+            activation_gate: VoiceActivationGate::default(),
+            activation_open_failed: false,
             stream_epoch: 0,
             next_sequence: 0,
             remote_streams: BTreeMap::new(),
@@ -162,23 +225,45 @@ impl VoiceChatState {
         Self::with_source_opener(opener)
     }
 
+    /// `key` is the push-to-talk key whose release closes this capture again;
+    /// `None` opens a capture no key owns.
     pub(crate) fn start_capture(
         &mut self,
-        key: winit::keyboard::KeyCode,
+        key: Option<winit::keyboard::KeyCode>,
     ) -> Result<(), VoiceCaptureError> {
         if self.capture.is_some() {
             return Ok(());
         }
         self.capture = Some((self.capture_opener)()?);
-        self.capture_key = Some(key);
+        self.capture_key = key;
+        self.activation_gate.close();
         self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
         self.next_sequence = 0;
         Ok(())
     }
 
+    /// Opens a capture no push-to-talk key owns, for a player who has chosen
+    /// voice activation.
+    ///
+    /// A failed open latches. Voice activation has no key press to rate-limit
+    /// it, so without the latch a missing or busy microphone would be reopened
+    /// on every tick for as long as the player stays in the game. The latch
+    /// clears the next time the capture stops — which is what a player who has
+    /// just plugged a microphone in will cause by leaving and re-entering.
+    pub(crate) fn start_voice_activated_capture(&mut self) -> Result<(), VoiceCaptureError> {
+        if self.capture.is_some() || self.activation_open_failed {
+            return Ok(());
+        }
+        let opened = self.start_capture(None);
+        self.activation_open_failed = opened.is_err();
+        opened
+    }
+
     pub(crate) fn stop_capture(&mut self) {
         self.capture = None;
         self.capture_key = None;
+        self.activation_open_failed = false;
+        self.activation_gate.close();
     }
 
     pub(crate) fn capture_active(&self) -> bool {
@@ -189,24 +274,53 @@ impl VoiceChatState {
         self.capture_key
     }
 
-    pub(crate) fn drain_captured_frames(&mut self) -> Vec<CapturedVoiceFrame> {
+    /// `activation` is `Some` only in voice-activated mode, where it decides
+    /// per frame whether the microphone's output is transmitted at all. On the
+    /// push-to-talk default it is `None` and every captured frame goes out.
+    pub(crate) fn drain_captured_frames(
+        &mut self,
+        activation: Option<&VoiceActivation>,
+    ) -> Vec<CapturedVoiceFrame> {
         let Some(capture) = self.capture.as_ref() else {
             return Vec::new();
         };
-        let stream_epoch = self.stream_epoch;
         capture
             .drain_frames()
             .into_iter()
-            .map(|payload| {
-                let sequence = self.next_sequence;
-                self.next_sequence = self.next_sequence.wrapping_add(1);
-                CapturedVoiceFrame {
-                    stream_epoch,
-                    sequence,
-                    payload,
-                }
+            .filter_map(|frame| match activation {
+                None => Some((frame.payload, false)),
+                Some(activation) => self
+                    .activation_gate
+                    .admit(frame.level, activation)
+                    .map(|reopened| (frame.payload, reopened)),
             })
+            // The gate borrows `self` mutably, so the stamping pass cannot be
+            // fused into it.
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(payload, reopened)| self.stamp_captured_frame(payload, reopened))
             .collect()
+    }
+
+    fn stamp_captured_frame(
+        &mut self,
+        payload: EncodedVoiceFrame,
+        starts_new_stream: bool,
+    ) -> CapturedVoiceFrame {
+        // Nothing has gone out on this epoch yet when the sequence is still 0,
+        // so the first frame after a capture opens keeps the epoch
+        // `start_capture` already allocated.
+        if starts_new_stream && self.next_sequence != 0 {
+            self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
+            self.next_sequence = 0;
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        CapturedVoiceFrame {
+            stream_epoch: self.stream_epoch,
+            sequence,
+            payload,
+        }
     }
 
     pub(crate) fn note_remote_frame(
@@ -464,19 +578,36 @@ mod tests {
     }
 
     struct TestVoiceSource {
-        frames: RefCell<Vec<EncodedVoiceFrame>>,
+        frames: RefCell<Vec<VoiceInputFrame>>,
     }
 
     impl TestVoiceSource {
-        fn with_frame(frame: EncodedVoiceFrame) -> Self {
+        fn with_frame(payload: EncodedVoiceFrame) -> Self {
             Self {
-                frames: RefCell::new(vec![frame]),
+                frames: RefCell::new(vec![VoiceInputFrame {
+                    payload,
+                    level: 1.0,
+                }]),
+            }
+        }
+
+        fn with_levels(levels: &[f32]) -> Self {
+            Self {
+                frames: RefCell::new(
+                    levels
+                        .iter()
+                        .map(|&level| VoiceInputFrame {
+                            payload: [0; clonk_audio::VOICE_ENCODED_FRAME_BYTES],
+                            level,
+                        })
+                        .collect(),
+                ),
             }
         }
     }
 
     impl VoiceFrameSource for TestVoiceSource {
-        fn drain_frames(&self) -> Vec<EncodedVoiceFrame> {
+        fn drain_frames(&self) -> Vec<VoiceInputFrame> {
             std::mem::take(&mut *self.frames.borrow_mut())
         }
     }
@@ -640,15 +771,15 @@ mod tests {
         assert!(!voice.capture_active());
 
         voice
-            .start_capture(winit::keyboard::KeyCode::Backquote)
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
             .unwrap();
         voice
-            .start_capture(winit::keyboard::KeyCode::Backquote)
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
             .unwrap();
         assert_eq!(opens.get(), 1);
         assert_eq!(
             voice
-                .drain_captured_frames()
+                .drain_captured_frames(None)
                 .into_iter()
                 .map(|frame| (frame.stream_epoch, frame.sequence))
                 .collect::<Vec<_>>(),
@@ -657,16 +788,104 @@ mod tests {
 
         voice.stop_capture();
         voice
-            .start_capture(winit::keyboard::KeyCode::Backquote)
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
             .unwrap();
         assert_eq!(opens.get(), 2);
         assert_eq!(
             voice
-                .drain_captured_frames()
+                .drain_captured_frames(None)
                 .into_iter()
                 .map(|frame| (frame.stream_epoch, frame.sequence))
                 .collect::<Vec<_>>(),
             vec![(2, 0)],
+        );
+    }
+
+    #[test]
+    fn voice_activation_transmits_speech_with_a_release_tail_on_a_fresh_stream() {
+        let levels = [0.1, 0.9, 0.1, 0.1, 0.1, 0.9];
+        let mut voice =
+            VoiceChatState::with_capture_opener(move || Ok(TestVoiceSource::with_levels(&levels)));
+        let activation = VoiceActivation {
+            threshold: 0.5,
+            hangover_frames: 2,
+        };
+
+        voice.start_capture(None).unwrap();
+
+        assert_eq!(
+            voice
+                .drain_captured_frames(Some(&activation))
+                .into_iter()
+                .map(|frame| (frame.stream_epoch, frame.sequence))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (1, 1), (1, 2), (2, 0)],
+            "silence before speech is dropped, two frames of tail follow it, \
+             and speaking again after the tail expires starts a new stream",
+        );
+    }
+
+    #[test]
+    fn push_to_talk_transmits_every_captured_frame_including_silence() {
+        let levels = [0.0, 0.0];
+        let mut voice =
+            VoiceChatState::with_capture_opener(move || Ok(TestVoiceSource::with_levels(&levels)));
+
+        voice
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote))
+            .unwrap();
+
+        assert_eq!(
+            voice
+                .drain_captured_frames(None)
+                .into_iter()
+                .map(|frame| (frame.stream_epoch, frame.sequence))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (1, 1)],
+            "a held key is the player's decision to transmit; the level is not consulted",
+        );
+    }
+
+    #[test]
+    fn a_zero_threshold_keeps_a_voice_activated_capture_permanently_open() {
+        let levels = [0.0, 0.0];
+        let mut voice =
+            VoiceChatState::with_capture_opener(move || Ok(TestVoiceSource::with_levels(&levels)));
+        let activation = VoiceActivation {
+            threshold: 0.0,
+            hangover_frames: 0,
+        };
+
+        voice.start_capture(None).unwrap();
+
+        assert_eq!(voice.drain_captured_frames(Some(&activation)).len(), 2);
+    }
+
+    #[test]
+    fn stopping_a_capture_closes_the_activation_gate_behind_it() {
+        let opens = Cell::new(0);
+        let mut voice = VoiceChatState::with_capture_opener(move || {
+            opens.set(opens.get() + 1);
+            // The reopened capture hears nothing but a quiet room.
+            Ok(TestVoiceSource::with_levels(if opens.get() == 1 {
+                &[0.9]
+            } else {
+                &[0.1]
+            }))
+        });
+        let activation = VoiceActivation {
+            threshold: 0.5,
+            hangover_frames: 8,
+        };
+
+        voice.start_capture(None).unwrap();
+        assert_eq!(voice.drain_captured_frames(Some(&activation)).len(), 1);
+        voice.stop_capture();
+        voice.start_capture(None).unwrap();
+
+        assert!(
+            voice.drain_captured_frames(Some(&activation)).is_empty(),
+            "the reopened capture must not inherit the previous frame's release tail",
         );
     }
 

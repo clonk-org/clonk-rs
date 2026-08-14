@@ -48,14 +48,27 @@ save-game slots.
 
 ### Proximity voice chat
 
-Network games between Clonk Rust clients support push-to-talk proximity voice.
-It is off by default: open **Options → Advanced**, expand **Voice**, and enable
-`Enabled`. Hold the backquote key (`` ` ``) while playing to talk; the
-`PushToTalkKey` and `Volume` values are configurable in the same section. The
-game opens the microphone only while that key is held, and a speaker icon
-appears above the Clonk each participant currently has selected. Change
-`Enabled` before hosting or joining; transport negotiation is fixed for that
-network connection.
+Network games between Clonk Rust clients support proximity voice. It is off by
+default: open **Options → Advanced**, expand **Voice**, and enable `Enabled`.
+Nothing opens the microphone until you do, whatever the rest of the section
+says. A speaker icon appears above the Clonk each participant currently has
+selected. Change `Enabled` before hosting or joining; transport negotiation is
+fixed for that network connection.
+
+Once enabled, `ActivationMode` chooses how the microphone opens:
+
+- `PushToTalk` (the default) opens it only while a key is held. That key is
+  the backquote (`` ` ``) unless you change `PushToTalkKey`.
+- `VoiceActivated` opens it whenever you could speak — in a running game, with
+  the window focused and a Clonk selected — and transmits only while it hears
+  you. `ActivationThreshold` (0–100) sets how loud that has to be, spread
+  evenly over −60…0 dBFS rather than over raw amplitude, so the useful
+  settings sit in the middle of the range rather than bunched at the bottom;
+  `0` transmits continuously and `100` never opens. `ActivationHangover` is
+  how many milliseconds it keeps transmitting after you stop, so word endings
+  are not clipped.
+
+`Volume` scales incoming speech in either mode.
 
 Speech fades linearly over 700 landscape pixels. Terrain does not block it, so
 a wall or cave between two Clonks has no effect beyond their distance. Voice

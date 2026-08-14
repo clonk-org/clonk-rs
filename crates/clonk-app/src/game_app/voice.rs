@@ -18,6 +18,12 @@ impl GameApp {
         Some((client_id, self.local_owner))
     }
 
+    fn voice_activation(&self) -> Option<crate::settings::VoiceActivation> {
+        self.audio
+            .as_ref()
+            .and_then(|audio| audio.options.voice_activation())
+    }
+
     pub(crate) fn handle_voice_key(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
         let configured_key = self
             .audio
@@ -38,7 +44,12 @@ impl GameApp {
         match crate::voice_chat::push_to_talk_action(
             self.voice_chat.capture_key(),
             configured_key,
-            self.mode == AppMode::Running && self.voice_chat_enabled() && keyboard_scope_available,
+            // A player on voice activation is not holding a key to talk, so the
+            // configured key stays the game's to bind.
+            self.mode == AppMode::Running
+                && self.voice_chat_enabled()
+                && keyboard_scope_available
+                && self.voice_activation().is_none(),
             eligible,
             self.engine_key_repeated,
             key,
@@ -62,10 +73,27 @@ impl GameApp {
         {
             return true;
         }
-        if let Err(error) = self.voice_chat.start_capture(key) {
+        if let Err(error) = self.voice_chat.start_capture(Some(key)) {
             tracing::warn!(%error, "push-to-talk could not open the microphone");
         }
         true
+    }
+
+    /// Voice activation opens the microphone exactly where push-to-talk is
+    /// allowed to keep one open — the same eligibility, resolved by the caller
+    /// — only without a key to hold. It never opens one on the push-to-talk
+    /// default, and it closes a capture the player stranded by switching back:
+    /// no key owns that capture, so nothing else ever would.
+    fn update_voice_activated_capture(&mut self, voice_activated: bool) {
+        if !voice_activated {
+            if self.voice_chat.capture_active() && self.voice_chat.capture_key().is_none() {
+                self.voice_chat.stop_capture();
+            }
+            return;
+        }
+        if let Err(error) = self.voice_chat.start_voice_activated_capture() {
+            tracing::warn!(%error, "voice activation could not open the microphone");
+        }
     }
 
     fn remove_voice_playback(&self, speakers: impl IntoIterator<Item = (i32, i32)>) {
@@ -158,13 +186,15 @@ impl GameApp {
             && !self.runtime_top_default_dialog_is_exclusive())
         .then(|| self.local_voice_identity())
         .flatten();
-        if self.voice_chat.capture_active() && local_identity.is_none() {
+        if local_identity.is_none() {
             self.voice_chat.stop_capture();
         }
         let Some((client_id, player_id)) = local_identity else {
             return;
         };
-        for captured in self.voice_chat.drain_captured_frames() {
+        let activation = self.voice_activation();
+        self.update_voice_activated_capture(activation.is_some());
+        for captured in self.voice_chat.drain_captured_frames(activation.as_ref()) {
             let frame = match clonk_network::VoiceFrame::outbound(
                 player_id,
                 captured.stream_epoch,
