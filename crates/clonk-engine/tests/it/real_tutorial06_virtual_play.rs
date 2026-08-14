@@ -792,12 +792,13 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         .expect("the CRYS carrier survives the drained basin");
     if carrier.position.x < 278 {
         // Some material-motion layouts attach the swimmer to the x=226 wall.
-        // Hold the opposite Scale edge until the swimmer moves beyond the
-        // five-pixel attachment search, then use UpRight to reach the channel.
-        // A one-frame edge tap may only change Scale to Jump and let the Clonk
-        // reattach before gaining any horizontal distance. Stop then clears
-        // the diagonal swim velocity before Right resumes the crossing
-        // (C4Object.cpp:3618-3632,3654-3664,4823-4855,4957-4963;
+        // The first opposite Scale edge lets go; pressing that edge again
+        // after Scale changes to Jump deliberately recomputes horizontal
+        // steering. Hold it until the swimmer moves beyond the five-pixel
+        // attachment search, then use UpRight to reach the channel. Launch
+        // momentum alone need not survive the transition to Swim. Stop then
+        // clears the diagonal swim velocity before Right resumes the crossing
+        // (C4Object.cpp:3595-3632,3654-3664,3743-3755,4823-4855,4938-4963;
         // C4ObjectCom.cpp:310-314; C4Physics.h:24-25).
         let wall_x = carrier.position.x;
         let wall_direction = carrier.direction;
@@ -806,6 +807,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         } else {
             COM_RIGHT
         };
+        player.tap(let_go)?;
         player.hold_until(
             let_go,
             "the CRYS carrier releases the basin wall",
