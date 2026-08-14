@@ -1823,6 +1823,64 @@
     }
 
     #[test]
+    fn cross_check_fling_resynchronizes_fixed_position_for_same_action_flight() {
+        // CrossCheck's every-third-frame Hit path calls C4Object::Fling
+        // (C4GameObjects.cpp:167-184). With no Tumble action, Fling falls
+        // through ObjectActionJump (C4Object.cpp:1639-1651;
+        // C4ObjectCom.cpp:48-60). Even when Jump is already active, the
+        // successful SetAction unconditionally snaps fix_x/fix_y to x/y
+        // (C4Object.cpp:4142-4169).
+        let mut victim_def = hit_victim_definition(simple_definition("Clonk"), 100_000);
+        victim_def.configure_actions(
+            Some("Jump".to_string()),
+            HashMap::from([(
+                "Jump".to_string(),
+                ActionSpec::default()
+                    .with_procedure("FLIGHT")
+                    .with_directions(2),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(40);
+        engine.register_test_definition(victim_def);
+        engine.register_test_definition(hit_object_definition("Rock"));
+        let position = Vector2::new(50, 50);
+        let mut jump = ActionState::new("Jump");
+        jump.phase = 17;
+        let victim = engine.spawn_test_object(
+            hit_victim_spawn("Clonk", 100_000)
+                .with_fixed_position(FixedVec2::new(
+                    C4Fixed::from_raw(itofix(position.x).val() + 12_345),
+                    C4Fixed::from_raw(itofix(position.y).val() + 26_245),
+                ))
+                .with_action(jump),
+        );
+        let _rock = engine.spawn_test_object(hit_object_spawn("Rock", 5));
+
+        let victim_idx = engine.test_object_index(victim);
+        assert_ne!(
+            engine.objects[victim_idx].fixed_position,
+            FixedVec2::from_ints(position.x, position.y),
+            "fixture starts with sub-pixel drift"
+        );
+        engine.cross_check(3).test_value();
+
+        let victim_idx = engine.test_object_index(victim);
+        assert_eq!(engine.objects[victim_idx].state.action.phase, 0);
+        assert_eq!(
+            engine.objects[victim_idx].fixed_velocity,
+            FixedVec2::new(
+                C4Fixed::from_raw(itofix(5).val() * 50 / 100),
+                C4Fixed::ZERO,
+            )
+        );
+        assert_eq!(
+            engine.objects[victim_idx].fixed_position,
+            FixedVec2::from_ints(position.x, position.y)
+        );
+    }
+
+    #[test]
     fn cross_check_zero_hit_tracks_striker_controller_not_owner() {
         // EngObjHit is the one DoEnergy cause that updates the kill trace
         // even when integer division reduces iChange to zero. CrossCheck
