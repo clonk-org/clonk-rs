@@ -7602,7 +7602,6 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     );
     broadcast.test_value();
     app.test_network_events();
-    drop(app.network.take());
 
     let (order, _publications, player_infos, joins) = command_observer.test_join();
     assert_eq!(order, vec!["publish", "player-info", "join-player"]);
@@ -7615,6 +7614,76 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     assert_eq!(player.id, 42, "the readmitted profile gets a fresh ID");
     assert_eq!(joins.len(), 1);
     assert_eq!(joins[0].1.info_id, 42);
+
+    let first_rejoin = joins[0].1.clone();
+    let repeated_resource = match &first_rejoin.source {
+        clonk_engine::JoinPlayerSource::Resource(resource) => resource.clone(),
+        source => panic!("network rejoin used the wrong source: {source:?}"),
+    };
+    app.apply_join_player_control(first_rejoin).test_value();
+    let rejoined = app
+        .engine
+        .players()
+        .find(|player| player.player_info_id() == 42)
+        .map(clonk_engine::Player::id)
+        .test_value();
+
+    assert!(app
+        .engine
+        .execute_eliminate_player_control(&clonk_engine::EliminatePlayerControlData {
+            player: rejoined,
+            by_client: 0,
+        })
+        .expect("execute second host elimination"));
+    for _ in 0..60 {
+        app.snapshot = app.engine.test_tick();
+    }
+    // A retained Joined row can outlive the one frame where its runtime
+    // player disappears. Reconcile it from the current live roster, as C++'s
+    // C4PlayerList::Remove has already called SetRemoved by this point
+    // (src/C4PlayerList.cpp:219-267,398-409).
+    let players_after_second_retirement = app.player_info_ids_by_player();
+    app.mirror_retired_player_info(&players_after_second_retirement);
+    assert!(app.engine.player(rejoined).is_none());
+    assert_ne!(
+        app.control_player_infos.get(42).test_value().flags
+            & clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+        0,
+        "the first rejoin must release the profile when it retires"
+    );
+
+    let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+    app.network = Some(manager);
+    let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+    let command_observer = thread::spawn(move || {
+        commands.complete_runtime_host_join(repeated_resource, event_tx, direct_ready)
+    });
+
+    app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+        player_path.to_string_lossy().into_owned(),
+    ))
+    .test_value();
+    let broadcast = direct_wait.recv_timeout(Duration::from_secs(1));
+    assert!(
+        !app.status_text.starts_with("Unable to join player"),
+        "the profile's second readmission must not be refused: {}",
+        app.status_text
+    );
+    broadcast.test_value();
+    app.test_network_events();
+    drop(app.network.take());
+
+    let (order, _publications, player_infos, joins) = command_observer.test_join();
+    assert_eq!(order, vec!["publish", "player-info", "join-player"]);
+    let [info] = player_infos.as_slice() else {
+        panic!("expected a second authoritative PlayerInfo");
+    };
+    let [player] = info.players.as_slice() else {
+        panic!("expected a second admitted player");
+    };
+    assert_eq!(player.id, 43, "the second rejoin gets another fresh ID");
+    assert_eq!(joins.len(), 1);
+    assert_eq!(joins[0].1.info_id, 43);
 }
 
 #[test]
