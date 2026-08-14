@@ -156,6 +156,11 @@ const NOISE_ESTIMATE_BIAS: f32 = 2.0;
 /// that speech — which is loud and brief — is never mistaken for the floor.
 const NOISE_FLOOR_DECAY: f32 = 0.95;
 const NOISE_FLOOR_RISE: f32 = 0.995;
+/// A cold push-to-talk capture usually begins with speech, not with an empty
+/// room. Start below that first spectrum and approach stationary energy at the
+/// normal slow rise rate; seeding directly from it teaches the suppressor that
+/// the first word is noise.
+const NOISE_INITIAL_FLOOR_RATIO: f32 = 0.01;
 /// Weight of the previous frame's estimate in the decision-directed a-priori
 /// signal-to-noise ratio, which is what keeps the gain from flickering between
 /// frames and turning residual noise into warbling tones.
@@ -223,12 +228,18 @@ impl NoiseSuppressor {
             let imaginary = self.transform.imaginary[bin];
             let power = real * real + imaginary * imaginary;
             let floor = &mut self.noise[bin];
-            if self.frames <= NOISE_FLOOR_SEED_FRAMES {
-                *floor = floor.max(power);
+            if self.frames == 1 {
+                *floor = power * NOISE_INITIAL_FLOOR_RATIO;
             } else if power < *floor {
                 *floor = NOISE_FLOOR_DECAY * *floor + (1.0 - NOISE_FLOOR_DECAY) * power;
             } else {
                 *floor = NOISE_FLOOR_RISE * *floor + (1.0 - NOISE_FLOOR_RISE) * power;
+            }
+
+            if self.frames <= NOISE_FLOOR_SEED_FRAMES {
+                self.previous_gain[bin] = 1.0;
+                self.previous_power[bin] = power;
+                continue;
             }
 
             let noise = (NOISE_ESTIMATE_BIAS * *floor).max(f32::MIN_POSITIVE);
@@ -371,15 +382,19 @@ impl DiscreteTransform {
 /// Root mean square every talker is brought to: -18 dBFS leaves enough headroom
 /// for the peaks of ordinary speech without ever reaching full scale.
 const GAIN_TARGET_RMS: f32 = 0.126;
-/// Below this the frame is a quiet room rather than a person, and the gain is
-/// held where it is. Without this an empty room would be amplified until its
-/// hiss was as loud as speech.
+/// Below this the frame is a quiet room rather than a person. Its gain is held
+/// through short gaps between words, then returned to unity so room hiss does
+/// not retain a previous quiet talker's boost.
 const GAIN_SPEECH_FLOOR_RMS: f32 = 0.003_16;
 /// Per-frame share of the distance to the wanted gain. Coming down is quick, so
 /// a shout is caught within a syllable; going up is slow, so the gain does not
 /// pump between words.
 const GAIN_FALL_RATE: f32 = 0.3;
 const GAIN_RISE_RATE: f32 = 0.03;
+/// Keep the learned level through ordinary gaps between words, then return it
+/// to unity so a talker's earlier boost is not left on the empty room.
+const GAIN_IDLE_HOLD_FRAMES: u32 = 25;
+const GAIN_IDLE_RECOVERY_RATE: f32 = 0.03;
 /// 30 dB of lift for a distant microphone, 20 dB of cut for a loud one.
 const GAIN_MIN: f32 = 0.1;
 const GAIN_MAX: f32 = 31.6;
@@ -390,11 +405,15 @@ const GAIN_PEAK_CEILING: f32 = 0.99;
 #[derive(Debug)]
 struct AutomaticGainControl {
     gain: f32,
+    quiet_frames: u32,
 }
 
 impl AutomaticGainControl {
     fn new() -> Self {
-        Self { gain: 1.0 }
+        Self {
+            gain: 1.0,
+            quiet_frames: 0,
+        }
     }
 
     fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
@@ -407,6 +426,7 @@ impl AutomaticGainControl {
         let previous = self.gain;
 
         if rms > GAIN_SPEECH_FLOOR_RMS {
+            self.quiet_frames = 0;
             let wanted = (GAIN_TARGET_RMS / rms).clamp(GAIN_MIN, GAIN_MAX);
             let rate = if wanted < self.gain {
                 GAIN_FALL_RATE
@@ -414,6 +434,11 @@ impl AutomaticGainControl {
                 GAIN_RISE_RATE
             };
             self.gain += (wanted - self.gain) * rate;
+        } else {
+            self.quiet_frames = self.quiet_frames.saturating_add(1);
+            if self.quiet_frames > GAIN_IDLE_HOLD_FRAMES {
+                self.gain += (1.0 - self.gain) * GAIN_IDLE_RECOVERY_RATE;
+            }
         }
 
         // The gain is ramped across the frame rather than stepped, so the
@@ -549,6 +574,66 @@ mod tests {
     }
 
     #[test]
+    fn noise_suppression_learns_from_seed_frames_without_suppressing_them() {
+        let mut suppressor = NoiseSuppressor::new();
+        let mut phase = 0.0_f32;
+        let mut spoken = Vec::new();
+        let mut sent = Vec::new();
+
+        for frame_index in 0..NOISE_FLOOR_SEED_FRAMES {
+            let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+            for sample in frame.iter_mut() {
+                phase += std::f32::consts::TAU * 310.0 / 16_000.0;
+                *sample = 0.3 * phase.sin() + 0.08 * (2.3 * phase).sin();
+            }
+            if frame_index + 1 < NOISE_FLOOR_SEED_FRAMES {
+                spoken.extend_from_slice(&frame);
+            }
+
+            suppressor.process(&mut frame);
+
+            if frame_index > 0 {
+                sent.extend_from_slice(&frame);
+            }
+        }
+
+        let kept = rms(&sent) / rms(&spoken);
+        assert!(
+            kept > 0.95,
+            "learning the initial noise floor must not attenuate the first syllable, kept {kept:.3}",
+        );
+    }
+
+    #[test]
+    fn noise_suppression_does_not_learn_a_cold_push_to_talk_utterance_as_noise() {
+        let mut suppressor = NoiseSuppressor::new();
+        let mut phase = 0.0_f32;
+        let mut spoken = Vec::new();
+        let mut sent = Vec::new();
+
+        for index in 0..20 {
+            let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+            for sample in &mut frame {
+                phase += std::f32::consts::TAU * 310.0 / 16_000.0;
+                *sample = 0.3 * phase.sin() + 0.08 * (2.3 * phase).sin();
+            }
+            if (5..19).contains(&index) {
+                spoken.extend_from_slice(&frame);
+            }
+            suppressor.process(&mut frame);
+            if index >= 6 {
+                sent.extend_from_slice(&frame);
+            }
+        }
+
+        let kept = rms(&sent) / rms(&spoken);
+        assert!(
+            kept > 0.7,
+            "a short utterance that began with push-to-talk was mistaken for stationary noise; kept {kept:.3}",
+        );
+    }
+
+    #[test]
     fn noise_suppression_quiets_a_steady_hiss() {
         let mut suppressor = NoiseSuppressor::new();
         let mut hiss = TestSignal(1);
@@ -654,6 +739,42 @@ mod tests {
 
         assert_eq!(gain.gain, 1.0, "an empty room must not be amplified");
         assert!(rms(&sent) < 0.001);
+    }
+
+    #[test]
+    fn automatic_gain_control_releases_learned_gain_before_it_amplifies_room_noise() {
+        let mut gain = AutomaticGainControl::new();
+        let mut phase = 0.0_f32;
+        for _ in 0..250 {
+            let mut frame = [0.0; VOICE_FRAME_SAMPLES];
+            for sample in &mut frame {
+                phase += std::f32::consts::TAU * 300.0 / 16_000.0;
+                *sample = 0.01 * phase.sin();
+            }
+            gain.process(&mut frame);
+        }
+        assert!(gain.gain > 8.0, "the quiet talker must first earn gain");
+
+        let mut room = TestSignal(37);
+        let mut sent = Vec::new();
+        for index in 0..200 {
+            let mut frame = std::array::from_fn(|_| room.next() * 0.001);
+            gain.process(&mut frame);
+            if index >= 190 {
+                sent.extend_from_slice(&frame);
+            }
+        }
+
+        assert!(
+            gain.gain < 1.1,
+            "gain from an earlier talker stayed on the empty room at {}",
+            gain.gain,
+        );
+        assert!(
+            rms(&sent) < 0.001,
+            "the empty room was lifted back into audible hiss at {} RMS",
+            rms(&sent),
+        );
     }
 
     #[test]
