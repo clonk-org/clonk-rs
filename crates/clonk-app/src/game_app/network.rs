@@ -6302,6 +6302,8 @@ impl GameApp {
     /// it again, which is how a restart earns a rejected `Start`
     /// (src/C4Network2.cpp:259-272,2292-2303).
     pub(crate) fn clear_live_network_session(&mut self) {
+        let removed_voice = self.voice_chat.clear();
+        self.remove_voice_playback(removed_voice);
         if self.network.is_none() {
             return;
         }

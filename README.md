@@ -78,6 +78,19 @@ Once enabled, `ActivationMode` chooses how the microphone opens:
 
 `Volume` scales incoming speech in either mode.
 
+**Options → Advanced → Voice → InputDevice** chooses the microphone.
+**System default** asks CPAL to use the operating system's default input and
+follows route changes the host reports. Choosing a named entry persists its
+host-provided endpoint ID rather than its display name, so identically named
+entries remain distinct. Clonk never substitutes a different endpoint ID: if
+the selected ID disappears, capture waits, and resumes when that ID returns.
+This is an endpoint guarantee, not a universal physical-device serial number.
+CoreAudio and WASAPI normally provide stable device or endpoint IDs; Linux ALSA
+may expose virtual routing aliases and card-index IDs, which can follow another
+physical microphone or be reassigned when hardware order changes. Device or
+route changes affect only the local capture source: remote voice playback and
+deterministic game state are left untouched.
+
 What the microphone picks up is cleaned up before it is sent, and each stage
 can be switched off on its own under **Options → Advanced → Voice**:
 

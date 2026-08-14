@@ -7,9 +7,11 @@
 //! `clonk-frontend`. Unknown INI extensions never enter the editor and therefore
 //! survive a Save unchanged.
 
+use clonk_audio::VoiceInputDevice;
 use clonk_core::std_config::Config;
 use clonk_frontend::startup_options_advanced::{
-    AdvancedConfigChange, AdvancedConfigRow, AdvancedConfigSection, AdvancedConfigValue,
+    AdvancedConfigChange, AdvancedConfigChoice, AdvancedConfigRow, AdvancedConfigSection,
+    AdvancedConfigValue,
 };
 
 use crate::input::advanced_config_default_raw_keyboard_keys;
@@ -171,6 +173,45 @@ fn text_row(config: &Config, section: &str, key: &str, default: &str) -> Advance
                 .unwrap_or(default)
                 .to_string(),
         ),
+    )
+}
+
+fn voice_input_device_row(config: &Config, devices: &[VoiceInputDevice]) -> AdvancedConfigRow {
+    let value = configured_value(config, "Voice", "InputDevice")
+        .unwrap_or_default()
+        .to_string();
+    let mut devices = devices.iter().collect::<Vec<_>>();
+    devices.sort_by(|left, right| {
+        (&left.name, left.id.as_str()).cmp(&(&right.name, right.id.as_str()))
+    });
+    let mut choices = vec![AdvancedConfigChoice {
+        value: String::new(),
+        label: "System default".to_string(),
+    }];
+    choices.extend(devices.iter().map(|device| {
+        let duplicate_name = devices
+            .iter()
+            .filter(|candidate| candidate.name == device.name)
+            .count()
+            > 1;
+        AdvancedConfigChoice {
+            value: device.id.as_str().to_string(),
+            label: if duplicate_name {
+                format!("{} ({})", device.name, device.id)
+            } else {
+                device.name.clone()
+            },
+        }
+    }));
+    if !value.is_empty() && !choices.iter().any(|choice| choice.value == value) {
+        choices.push(AdvancedConfigChoice {
+            label: format!("Unavailable device ({value})"),
+            value: value.clone(),
+        });
+    }
+    AdvancedConfigRow::new(
+        "InputDevice",
+        AdvancedConfigValue::Choice { value, choices },
     )
 }
 
@@ -485,7 +526,7 @@ fn sound(config: &Config) -> AdvancedConfigSection {
     )
 }
 
-fn voice(config: &Config) -> AdvancedConfigSection {
+fn voice(config: &Config, input_devices: &[VoiceInputDevice]) -> AdvancedConfigSection {
     let section = "Voice";
     let default_push_to_talk =
         crate::input::encode_virtual_key_code(winit::keyboard::KeyCode::Backquote)
@@ -496,14 +537,16 @@ fn voice(config: &Config) -> AdvancedConfigSection {
             // Port-only extension: LegacyClonk has no microphone or voice
             // settings, so this section has no C4Config counterpart.
             //
-            // These three are also on the Options dialog's Audio sheet
-            // (clonk-org/clonk-rs#452), in a group placed in the vertical slack
-            // C++'s own grid leaves unused. They stay here as well because the
-            // Audio group is omitted where that slack is too small -- 640x480
-            // leaves 50px -- and because this editor is the only surface for
-            // the remaining Voice keys.
+            // Enabled, Volume, PushToTalkKey and ActivationMode are also on
+            // the Options dialog's Audio sheet (clonk-org/clonk-rs#452), in a
+            // group placed in the vertical slack C++'s own grid leaves unused.
+            // They stay here as well because the Audio group is omitted where
+            // that slack is too small -- 640x480 leaves 50px -- and because
+            // this editor is the only surface for InputDevice and the remaining
+            // Voice keys.
             bool_row(config, section, "Enabled", false),
             int_row(config, section, "Volume", 100, 0, 100),
+            voice_input_device_row(config, input_devices),
             i32_row(config, section, "PushToTalkKey", default_push_to_talk),
             enum_row(
                 config,
@@ -685,11 +728,21 @@ fn simple_sections(config: &Config) -> Vec<AdvancedConfigSection> {
 /// `C4Config::CompileFunc`. Nested logger fields are deliberately absent: the
 /// native GUI compiler ignores names below depth two as well.
 pub fn sections(config: &Config) -> Vec<AdvancedConfigSection> {
+    sections_with_voice_input_devices(config, &[])
+}
+
+/// Builds the advanced schema with microphone metadata supplied by the host.
+/// The caller owns enumeration, so this projection remains deterministic and
+/// never opens or queries an audio device itself.
+pub fn sections_with_voice_input_devices(
+    config: &Config,
+    input_devices: &[VoiceInputDevice],
+) -> Vec<AdvancedConfigSection> {
     let mut sections = vec![general(config), controls(config)];
     sections.extend((0..4).map(|index| gamepad(config, index)));
     sections.push(graphics(config));
     sections.push(sound(config));
-    sections.push(voice(config));
+    sections.push(voice(config, input_devices));
     sections.push(network(config));
     sections.extend(simple_sections(config));
     sections
@@ -870,6 +923,74 @@ mod tests {
                 "{stage} is editable on its own and starts on",
             );
         }
+    }
+
+    #[test]
+    fn voice_input_device_choices_use_stable_ids_and_disambiguate_duplicate_names() {
+        let devices = [
+            clonk_audio::VoiceInputDevice {
+                id: "coreaudio:desk-b"
+                    .parse()
+                    .expect("valid host-qualified device ID"),
+                name: "Desk microphone".to_string(),
+            },
+            clonk_audio::VoiceInputDevice {
+                id: "coreaudio:desk-a"
+                    .parse()
+                    .expect("valid host-qualified device ID"),
+                name: "Desk microphone".to_string(),
+            },
+        ];
+        let controller = AdvancedConfigController::new(sections_with_voice_input_devices(
+            &Config::new(),
+            &devices,
+        ));
+
+        assert_eq!(
+            controller.value("Voice", "InputDevice"),
+            Some(&AdvancedConfigValue::Choice {
+                value: String::new(),
+                choices: vec![
+                    clonk_frontend::startup_options_advanced::AdvancedConfigChoice {
+                        value: String::new(),
+                        label: "System default".to_string(),
+                    },
+                    clonk_frontend::startup_options_advanced::AdvancedConfigChoice {
+                        value: "coreaudio:desk-a".to_string(),
+                        label: "Desk microphone (coreaudio:desk-a)".to_string(),
+                    },
+                    clonk_frontend::startup_options_advanced::AdvancedConfigChoice {
+                        value: "coreaudio:desk-b".to_string(),
+                        label: "Desk microphone (coreaudio:desk-b)".to_string(),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn unavailable_persisted_voice_input_device_remains_selectable() {
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "InputDevice", "coreaudio:unplugged");
+        let devices = [clonk_audio::VoiceInputDevice {
+            id: "coreaudio:present"
+                .parse()
+                .expect("valid host-qualified device ID"),
+            name: "Present microphone".to_string(),
+        }];
+        let controller =
+            AdvancedConfigController::new(sections_with_voice_input_devices(&config, &devices));
+
+        let Some(AdvancedConfigValue::Choice { value, choices }) =
+            controller.value("Voice", "InputDevice")
+        else {
+            panic!("voice input device is a choice row");
+        };
+        assert_eq!(value, "coreaudio:unplugged");
+        assert!(choices.iter().any(|choice| {
+            choice.value == "coreaudio:unplugged"
+                && choice.label == "Unavailable device (coreaudio:unplugged)"
+        }));
     }
 
     #[test]

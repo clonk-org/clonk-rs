@@ -1,3 +1,5 @@
+use std::fmt;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "cpal")]
 use std::sync::mpsc;
@@ -5,6 +7,10 @@ use std::sync::mpsc::Receiver;
 #[cfg(any(feature = "cpal", test))]
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
+#[cfg(feature = "cpal")]
+use std::sync::Mutex;
+#[cfg(any(feature = "cpal", test))]
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -25,6 +31,86 @@ const IMA_CODE_BYTES: usize = (VOICE_FRAME_SAMPLES - 1).div_ceil(2);
 pub const VOICE_ENCODED_FRAME_BYTES: usize = IMA_HEADER_BYTES + IMA_CODE_BYTES;
 pub type EncodedVoiceFrame = [u8; VOICE_ENCODED_FRAME_BYTES];
 
+/// Opaque CPAL input-endpoint identity suitable for persistence.
+///
+/// IDs obtained from CPAL use `<host>:<device>`. Parsing intentionally preserves
+/// every nonempty string byte-for-byte: a corrupt or foreign persisted ID stays
+/// an exact (unavailable) selection instead of silently becoming the default.
+/// This identifies a host endpoint, not necessarily a physical device;
+/// stability and routing are defined by that host.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct VoiceInputDeviceId(Box<str>);
+
+impl VoiceInputDeviceId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for VoiceInputDeviceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("voice input device ID cannot be empty")]
+pub struct VoiceInputDeviceIdParseError;
+
+impl FromStr for VoiceInputDeviceId {
+    type Err = VoiceInputDeviceIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        (!value.is_empty())
+            .then(|| Self(Box::from(value)))
+            .ok_or(VoiceInputDeviceIdParseError)
+    }
+}
+
+/// User-facing metadata for one selectable input endpoint.
+///
+/// Names are labels only and need not be unique. Persist and compare [`Self::id`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceInputDevice {
+    pub id: VoiceInputDeviceId,
+    pub name: String,
+}
+
+/// Enumerates the input endpoints currently exposed by CPAL's default host.
+///
+/// This queries metadata only; it does not build or start a capture stream.
+pub fn voice_input_devices() -> Result<Vec<VoiceInputDevice>, VoiceCaptureError> {
+    #[cfg(feature = "cpal")]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+
+        let host = cpal::default_host();
+        let devices = host
+            .input_devices()
+            .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))?;
+        Ok(devices
+            .filter_map(|device| {
+                let id = device.id().map_err(|error| {
+                    tracing::warn!(%error, "input device disappeared while reading its ID");
+                });
+                let description = device.description().map_err(|error| {
+                    tracing::warn!(%error, "input device disappeared while reading its description");
+                });
+                id.ok()
+                    .zip(description.ok())
+                    .map(|(id, description)| VoiceInputDevice {
+                        id: VoiceInputDeviceId(Box::from(id.to_string())),
+                        name: description.name().to_string(),
+                    })
+            })
+            .collect())
+    }
+    #[cfg(not(feature = "cpal"))]
+    {
+        Err(VoiceCaptureError::Unavailable)
+    }
+}
+
 /// One captured frame together with how loud it was, so a voice-activation
 /// gate never has to decode a frame back just to decide whether to transmit it.
 ///
@@ -36,6 +122,12 @@ pub struct VoiceInputFrame {
     pub payload: EncodedVoiceFrame,
     /// See [`voice_activation_level`].
     pub level: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct QueuedVoiceInputFrame {
+    callback_generation: u64,
+    frame: VoiceInputFrame,
 }
 
 /// At most 160 ms of captured audio can wait for the app. The CPAL callback
@@ -77,6 +169,10 @@ pub enum VoiceCaptureError {
     Unavailable,
     #[error("no microphone input device is available")]
     NoInputDevice,
+    #[error("selected microphone input device is not available: {0}")]
+    InputDeviceUnavailable(VoiceInputDeviceId),
+    #[error("failed to enumerate microphone input devices: {0}")]
+    InputDevices(String),
     #[error("failed to query the microphone input format: {0}")]
     InputConfig(String),
     #[error("unsupported microphone input format: {sample_rate} Hz, {channels} channels")]
@@ -85,10 +181,378 @@ pub enum VoiceCaptureError {
     Stream(String),
 }
 
+#[cfg(any(feature = "cpal", test))]
+const VOICE_CAPTURE_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(any(feature = "cpal", test))]
+const VOICE_CAPTURE_EVENT_QUEUE: usize = 8;
+
+#[cfg(any(feature = "cpal", test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CaptureDeviceInventory {
+    default: Option<VoiceInputDeviceId>,
+    inputs: Vec<VoiceInputDeviceId>,
+}
+
+#[cfg(any(feature = "cpal", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CaptureDeviceTarget {
+    SystemDefault(VoiceInputDeviceId),
+    Exact(VoiceInputDeviceId),
+}
+
+#[cfg(any(feature = "cpal", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureStreamEventAction {
+    #[cfg(feature = "cpal")]
+    Keep,
+    Refresh,
+    Invalidate,
+}
+
+#[cfg(any(feature = "cpal", test))]
+#[derive(Clone, Copy, Debug)]
+struct CaptureStreamEvent {
+    generation: u64,
+    action: CaptureStreamEventAction,
+}
+
+#[cfg(any(feature = "cpal", test))]
+#[derive(Clone)]
+struct CaptureStreamCallbacks {
+    generation: u64,
+    frames: SyncSender<QueuedVoiceInputFrame>,
+    dropped_frames: Arc<AtomicU64>,
+    active_generation: Arc<AtomicU64>,
+    invalidated_generation: Arc<AtomicU64>,
+    route_changed_generation: Arc<AtomicU64>,
+    events: SyncSender<CaptureStreamEvent>,
+}
+
+#[cfg(any(feature = "cpal", test))]
+impl CaptureStreamCallbacks {
+    fn send_frame(&self, frame: VoiceInputFrame) {
+        if self.active_generation.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+        self.enqueue_frame(self.generation, frame);
+    }
+
+    fn enqueue_frame(&self, generation: u64, frame: VoiceInputFrame) {
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+            self.frames.try_send(QueuedVoiceInputFrame {
+                callback_generation: generation,
+                frame,
+            })
+        {
+            self.dropped_frames.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    fn enqueue_frame_after_activation_check(&self, frame: VoiceInputFrame) {
+        self.enqueue_frame(self.generation, frame);
+    }
+
+    fn report(&self, action: CaptureStreamEventAction) {
+        let generation = self.generation;
+        match action {
+            #[cfg(feature = "cpal")]
+            CaptureStreamEventAction::Keep => {}
+            CaptureStreamEventAction::Refresh => {
+                self.route_changed_generation
+                    .fetch_max(generation, Ordering::Release);
+                let _ = self.active_generation.compare_exchange(
+                    generation,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            CaptureStreamEventAction::Invalidate => {
+                self.invalidated_generation
+                    .fetch_max(generation, Ordering::Release);
+                let _ = self.active_generation.compare_exchange(
+                    generation,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+        }
+        let _ = self
+            .events
+            .try_send(CaptureStreamEvent { generation, action });
+    }
+}
+
+#[cfg(any(feature = "cpal", test))]
+trait VoiceCaptureBackend {
+    type Stream;
+
+    fn inventory(
+        &mut self,
+        selected: Option<&VoiceInputDeviceId>,
+    ) -> Result<CaptureDeviceInventory, VoiceCaptureError>;
+
+    fn open_stream(
+        &mut self,
+        target: &CaptureDeviceTarget,
+        callbacks: CaptureStreamCallbacks,
+        options: &VoiceCaptureOptions,
+    ) -> Result<Self::Stream, VoiceCaptureError>;
+}
+
+#[cfg(any(feature = "cpal", test))]
+struct ActiveCaptureStream<S> {
+    target: CaptureDeviceTarget,
+    callback_generation: u64,
+    invalidated_generation: Arc<AtomicU64>,
+    route_changed_generation: Arc<AtomicU64>,
+    _stream: S,
+}
+
+#[cfg(any(feature = "cpal", test))]
+struct VoiceCaptureManager<B: VoiceCaptureBackend> {
+    backend: B,
+    options: VoiceCaptureOptions,
+    active: Option<ActiveCaptureStream<B::Stream>>,
+    active_generation: Arc<AtomicU64>,
+    stream_generation: Arc<AtomicU64>,
+    next_callback_generation: u64,
+    frames: SyncSender<QueuedVoiceInputFrame>,
+    dropped_frames: Arc<AtomicU64>,
+    event_sender: SyncSender<CaptureStreamEvent>,
+    events: Receiver<CaptureStreamEvent>,
+    next_poll: Instant,
+}
+
+#[cfg(any(feature = "cpal", test))]
+impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
+    fn new(
+        backend: B,
+        options: VoiceCaptureOptions,
+        frames: SyncSender<QueuedVoiceInputFrame>,
+        dropped_frames: Arc<AtomicU64>,
+    ) -> Self {
+        let (event_sender, events) = std::sync::mpsc::sync_channel(VOICE_CAPTURE_EVENT_QUEUE);
+        Self {
+            backend,
+            options,
+            active: None,
+            active_generation: Arc::new(AtomicU64::new(0)),
+            stream_generation: Arc::new(AtomicU64::new(0)),
+            next_callback_generation: 1,
+            frames,
+            dropped_frames,
+            event_sender,
+            events,
+            next_poll: Instant::now() + VOICE_CAPTURE_DEVICE_POLL_INTERVAL,
+        }
+    }
+
+    fn open_initial(&mut self) -> Result<(), VoiceCaptureError> {
+        let inventory = self.backend.inventory(self.options.input_device.as_ref())?;
+        let target = match self.options.input_device.as_ref() {
+            Some(selected) if inventory.inputs.contains(selected) => {
+                CaptureDeviceTarget::Exact(selected.clone())
+            }
+            Some(selected) => {
+                return Err(VoiceCaptureError::InputDeviceUnavailable(selected.clone()));
+            }
+            None => inventory
+                .default
+                .map(CaptureDeviceTarget::SystemDefault)
+                .ok_or(VoiceCaptureError::NoInputDevice)?,
+        };
+        self.replace_stream(target)
+    }
+
+    fn replace_stream(&mut self, target: CaptureDeviceTarget) -> Result<(), VoiceCaptureError> {
+        let callback_generation = self.next_callback_generation;
+        self.next_callback_generation = callback_generation.wrapping_add(1).max(1);
+        let invalidated_generation = Arc::new(AtomicU64::new(0));
+        let route_changed_generation = Arc::new(AtomicU64::new(0));
+        let callbacks = CaptureStreamCallbacks {
+            generation: callback_generation,
+            frames: self.frames.clone(),
+            dropped_frames: self.dropped_frames.clone(),
+            active_generation: self.active_generation.clone(),
+            invalidated_generation: invalidated_generation.clone(),
+            route_changed_generation: route_changed_generation.clone(),
+            events: self.event_sender.clone(),
+        };
+        let stream = self
+            .backend
+            .open_stream(&target, callbacks, &self.options)?;
+        let previous = self.active.replace(ActiveCaptureStream {
+            target,
+            callback_generation,
+            invalidated_generation,
+            route_changed_generation,
+            _stream: stream,
+        });
+        self.active_generation
+            .store(callback_generation, Ordering::Release);
+        let reported_during_open = self.active.as_ref().is_some_and(|active| {
+            active.invalidated_generation.load(Ordering::Acquire) == callback_generation
+                || active.route_changed_generation.load(Ordering::Acquire) == callback_generation
+        });
+        if reported_during_open {
+            let _ = self.active_generation.compare_exchange(
+                callback_generation,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        let stream_generation = self
+            .stream_generation
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        self.stream_generation
+            .store(stream_generation, Ordering::Release);
+        drop(previous);
+        Ok(())
+    }
+
+    /// Reconciles the active stream with a fresh device snapshot. The return
+    /// value is true only after a new physical stream has opened successfully.
+    fn refresh(&mut self) -> Result<bool, VoiceCaptureError> {
+        let inventory = self.backend.inventory(self.options.input_device.as_ref())?;
+        let target = match self.options.input_device.as_ref() {
+            Some(selected) if inventory.inputs.contains(selected) => {
+                Some(CaptureDeviceTarget::Exact(selected.clone()))
+            }
+            Some(_) => None,
+            None => inventory.default.map(CaptureDeviceTarget::SystemDefault),
+        };
+
+        let Some(target) = target else {
+            self.deactivate();
+            return Ok(false);
+        };
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.target == target)
+        {
+            return Ok(false);
+        }
+
+        match self.replace_stream(target) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                self.deactivate();
+                Err(error)
+            }
+        }
+    }
+
+    fn deactivate(&mut self) {
+        self.active_generation.store(0, Ordering::Release);
+        drop(self.active.take());
+    }
+
+    fn service(&mut self, now: Instant) -> Result<bool, VoiceCaptureError> {
+        let poll_due = now >= self.next_poll;
+        let active_invalidated = self.active.as_ref().is_some_and(|active| {
+            active.invalidated_generation.swap(0, Ordering::AcqRel) == active.callback_generation
+        });
+        let active_route_changed = self.active.as_ref().is_some_and(|active| {
+            active.route_changed_generation.swap(0, Ordering::AcqRel) == active.callback_generation
+        });
+        #[cfg(feature = "cpal")]
+        let mut saw_recoverable_error = false;
+        let mut saw_route_change = active_route_changed;
+        let mut saw_invalidation = active_invalidated;
+        while let Ok(event) = self.events.try_recv() {
+            if self
+                .active
+                .as_ref()
+                .map(|active| active.callback_generation)
+                != Some(event.generation)
+            {
+                continue;
+            }
+            match event.action {
+                #[cfg(feature = "cpal")]
+                CaptureStreamEventAction::Keep => saw_recoverable_error = true,
+                CaptureStreamEventAction::Refresh => saw_route_change = true,
+                CaptureStreamEventAction::Invalidate => saw_invalidation = true,
+            }
+        }
+        #[cfg(feature = "cpal")]
+        if saw_recoverable_error {
+            tracing::warn!("recoverable cpal microphone input stream error");
+        }
+        if saw_route_change {
+            tracing::warn!("cpal microphone input route changed");
+        }
+        if saw_invalidation {
+            tracing::error!("cpal microphone input stream invalidated");
+        }
+
+        if saw_invalidation || saw_route_change {
+            self.deactivate();
+            self.next_poll = now + VOICE_CAPTURE_DEVICE_POLL_INTERVAL;
+            return self.refresh();
+        }
+        if !poll_due {
+            return Ok(false);
+        }
+        self.next_poll = now + VOICE_CAPTURE_DEVICE_POLL_INTERVAL;
+        self.refresh()
+    }
+
+    fn drain_frames(&mut self, receiver: &Receiver<QueuedVoiceInputFrame>) -> Vec<VoiceInputFrame> {
+        match self.service(Instant::now()) {
+            Ok(true) => {
+                // A stream generation is an app-visible media boundary. No
+                // frame captured before the swap may cross it.
+                receiver.try_iter().for_each(drop);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "microphone stream refresh failed; capture remains idle");
+            }
+        }
+        self.collect_active_frames(receiver, || {})
+    }
+
+    fn collect_active_frames(
+        &self,
+        receiver: &Receiver<QueuedVoiceInputFrame>,
+        after_collect: impl FnOnce(),
+    ) -> Vec<VoiceInputFrame> {
+        let generation_before = self.active_generation.load(Ordering::Acquire);
+        let frames = receiver
+            .try_iter()
+            .filter(|queued| queued.callback_generation == generation_before)
+            .map(|queued| queued.frame)
+            .collect();
+        after_collect();
+        if generation_before != 0
+            && self.active_generation.load(Ordering::Acquire) == generation_before
+        {
+            frames
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn stream_generation(&self) -> u64 {
+        self.stream_generation.load(Ordering::Acquire)
+    }
+}
+
 /// How a capture treats what it hears: which processing stages run, and the
 /// far-end signal the echo canceller needs.
 #[derive(Clone, Debug)]
 pub struct VoiceCaptureOptions {
+    /// `None` follows the system default. `Some` opens only the matching CPAL
+    /// endpoint ID; this layer never substitutes another ID. An endpoint may
+    /// itself be a host routing alias (notably under ALSA).
+    pub input_device: Option<VoiceInputDeviceId>,
     /// Read by the microphone thread once per frame, so a settings change
     /// reaches a capture that is already open.
     pub processing: Arc<VoiceProcessingSwitches>,
@@ -101,6 +565,7 @@ pub struct VoiceCaptureOptions {
 impl VoiceCaptureOptions {
     pub fn new(processing: Arc<VoiceProcessingSwitches>) -> Self {
         Self {
+            input_device: None,
             processing,
             echo_reference: None,
         }
@@ -116,14 +581,14 @@ impl VoiceCaptureOptions {
 /// never opens an input device or requests microphone permission.
 pub struct VoiceCapture {
     #[cfg(feature = "cpal")]
-    _stream: cpal::Stream,
-    frames: Receiver<VoiceInputFrame>,
+    manager: Mutex<VoiceCaptureManager<CpalVoiceCaptureBackend>>,
+    frames: Receiver<QueuedVoiceInputFrame>,
     dropped_frames: Arc<AtomicU64>,
 }
 
 impl VoiceCapture {
-    /// Opens and starts the default microphone input stream. This is the only
-    /// production entry point that touches a capture device.
+    /// Opens and starts the configured microphone input endpoint. This is the
+    /// only production entry point that touches a capture device.
     pub fn open(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
         #[cfg(feature = "cpal")]
         {
@@ -137,8 +602,40 @@ impl VoiceCapture {
     }
 
     /// Drains every complete frame currently available without waiting.
+    ///
+    /// This also performs the throttled hotplug check. Call
+    /// [`Self::stream_generation`] after draining when the frames need to be
+    /// associated with a physical-stream generation.
     pub fn drain_frames(&self) -> Vec<VoiceInputFrame> {
-        self.frames.try_iter().collect()
+        #[cfg(feature = "cpal")]
+        {
+            self.manager
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .drain_frames(&self.frames)
+        }
+        #[cfg(not(feature = "cpal"))]
+        {
+            self.frames.try_iter().map(|queued| queued.frame).collect()
+        }
+    }
+
+    /// Generation of the most recently opened physical capture stream.
+    ///
+    /// The initial stream is generation 1. A successful hotplug replacement
+    /// advances it exactly once; scans, failures and idle time leave it alone.
+    pub fn stream_generation(&self) -> u64 {
+        #[cfg(feature = "cpal")]
+        {
+            self.manager
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .stream_generation()
+        }
+        #[cfg(not(feature = "cpal"))]
+        {
+            0
+        }
     }
 
     /// Frames discarded because the bounded app queue was full.
@@ -148,33 +645,108 @@ impl VoiceCapture {
 
     #[cfg(feature = "cpal")]
     fn open_cpal(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
+        let (sender, frames) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let dropped_frames = Arc::new(AtomicU64::new(0));
+        let mut manager = VoiceCaptureManager::new(
+            CpalVoiceCaptureBackend,
+            options,
+            sender,
+            dropped_frames.clone(),
+        );
+        manager.open_initial()?;
+        Ok(Self {
+            manager: Mutex::new(manager),
+            frames,
+            dropped_frames,
+        })
+    }
+}
+
+#[cfg(feature = "cpal")]
+struct CpalVoiceCaptureBackend;
+
+#[cfg(feature = "cpal")]
+impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
+    type Stream = cpal::Stream;
+
+    fn inventory(
+        &mut self,
+        selected: Option<&VoiceInputDeviceId>,
+    ) -> Result<CaptureDeviceInventory, VoiceCaptureError> {
+        use cpal::traits::{DeviceTrait, HostTrait};
+
+        let host = cpal::default_host();
+        let default = if selected.is_none() {
+            host.default_input_device()
+                .map(|device| {
+                    device
+                        .id()
+                        .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
+                        .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let inputs = if selected.is_some() {
+            host.input_devices()
+                .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))?
+                .map(|device| {
+                    device
+                        .id()
+                        .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
+                        .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        Ok(CaptureDeviceInventory { default, inputs })
+    }
+
+    fn open_stream(
+        &mut self,
+        target: &CaptureDeviceTarget,
+        callbacks: CaptureStreamCallbacks,
+        options: &VoiceCaptureOptions,
+    ) -> Result<Self::Stream, VoiceCaptureError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(VoiceCaptureError::NoInputDevice)?;
+        let device = match target {
+            CaptureDeviceTarget::SystemDefault(expected) => {
+                let device = host
+                    .default_input_device()
+                    .ok_or(VoiceCaptureError::NoInputDevice)?;
+                let actual = device
+                    .id()
+                    .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
+                    .map_err(|error| VoiceCaptureError::InputConfig(error.to_string()))?;
+                if &actual != expected {
+                    return Err(VoiceCaptureError::Stream(
+                        "system default microphone changed while opening".to_string(),
+                    ));
+                }
+                device
+            }
+            CaptureDeviceTarget::Exact(selected) => selected
+                .as_str()
+                .parse::<cpal::DeviceId>()
+                .ok()
+                .and_then(|id| host.device_by_id(&id))
+                .ok_or_else(|| VoiceCaptureError::InputDeviceUnavailable(selected.clone()))?,
+        };
         let supported = device
             .default_input_config()
             .map_err(|error| VoiceCaptureError::InputConfig(error.to_string()))?;
         validate_capture_config(supported.sample_rate(), supported.channels())?;
 
-        let (sender, frames) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
-        let dropped_frames = Arc::new(AtomicU64::new(0));
         let stream_config = supported.config();
-        let processing = VoiceProcessing::new(options.processing, options.echo_reference);
-        // One arm per PCM format cpal can hand us; only the negotiated one
-        // ever runs, so each may take the channel, the counter and the
-        // processing chain by value.
+        let processing =
+            VoiceProcessing::new(options.processing.clone(), options.echo_reference.clone());
         macro_rules! input_stream {
             ($sample:ty) => {
-                build_voice_input_stream::<$sample>(
-                    &device,
-                    stream_config,
-                    sender,
-                    dropped_frames.clone(),
-                    processing,
-                )?
+                build_voice_input_stream::<$sample>(&device, stream_config, callbacks, processing)?
             };
         }
         let stream = match supported.sample_format() {
@@ -199,11 +771,7 @@ impl VoiceCapture {
         stream
             .play()
             .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
-        Ok(Self {
-            _stream: stream,
-            frames,
-            dropped_frames,
-        })
+        Ok(stream)
     }
 }
 
@@ -221,11 +789,19 @@ fn validate_capture_config(sample_rate: u32, channels: u16) -> Result<(), VoiceC
 }
 
 #[cfg(feature = "cpal")]
+fn cpal_stream_error_action(kind: cpal::ErrorKind) -> CaptureStreamEventAction {
+    match kind {
+        cpal::ErrorKind::DeviceChanged => CaptureStreamEventAction::Refresh,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied => CaptureStreamEventAction::Keep,
+        _ => CaptureStreamEventAction::Invalidate,
+    }
+}
+
+#[cfg(feature = "cpal")]
 fn build_voice_input_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    sender: SyncSender<VoiceInputFrame>,
-    dropped_frames: Arc<AtomicU64>,
+    callbacks: CaptureStreamCallbacks,
     processing: VoiceProcessing,
 ) -> Result<cpal::Stream, VoiceCaptureError>
 where
@@ -233,18 +809,21 @@ where
 {
     use cpal::traits::DeviceTrait;
 
-    let mut processor = VoiceCaptureProcessor::new(
+    let error_callbacks = callbacks.clone();
+    let mut processor = VoiceCaptureProcessor::new_managed(
         config.sample_rate,
         config.channels,
-        sender,
-        dropped_frames,
+        callbacks,
         processing,
     )?;
     device
         .build_input_stream(
             config,
             move |data: &[T], _| processor.process_interleaved(data),
-            move |error| tracing::error!(%error, "cpal microphone input stream error"),
+            move |error| {
+                let action = cpal_stream_error_action(error.kind());
+                error_callbacks.report(action);
+            },
             None,
         )
         .map_err(|error| VoiceCaptureError::Stream(error.to_string()))
@@ -299,17 +878,50 @@ struct VoiceCaptureProcessor {
     frame: [f32; VOICE_FRAME_SAMPLES],
     sample_count: usize,
     processing: VoiceProcessing,
-    sender: SyncSender<VoiceInputFrame>,
-    dropped_frames: Arc<AtomicU64>,
+    callbacks: CaptureStreamCallbacks,
 }
 
 #[cfg(any(feature = "cpal", test))]
 impl VoiceCaptureProcessor {
+    #[cfg(test)]
     fn new(
         sample_rate: u32,
         channels: u16,
-        sender: SyncSender<VoiceInputFrame>,
+        sender: SyncSender<QueuedVoiceInputFrame>,
         dropped_frames: Arc<AtomicU64>,
+        processing: VoiceProcessing,
+    ) -> Result<Self, VoiceCaptureError> {
+        let (events, _) = std::sync::mpsc::sync_channel(1);
+        Self::new_with_callbacks(
+            sample_rate,
+            channels,
+            CaptureStreamCallbacks {
+                generation: 1,
+                frames: sender,
+                dropped_frames,
+                active_generation: Arc::new(AtomicU64::new(1)),
+                invalidated_generation: Arc::new(AtomicU64::new(0)),
+                route_changed_generation: Arc::new(AtomicU64::new(0)),
+                events,
+            },
+            processing,
+        )
+    }
+
+    #[cfg(feature = "cpal")]
+    fn new_managed(
+        sample_rate: u32,
+        channels: u16,
+        callbacks: CaptureStreamCallbacks,
+        processing: VoiceProcessing,
+    ) -> Result<Self, VoiceCaptureError> {
+        Self::new_with_callbacks(sample_rate, channels, callbacks, processing)
+    }
+
+    fn new_with_callbacks(
+        sample_rate: u32,
+        channels: u16,
+        callbacks: CaptureStreamCallbacks,
         processing: VoiceProcessing,
     ) -> Result<Self, VoiceCaptureError> {
         validate_capture_config(sample_rate, channels)?;
@@ -319,8 +931,7 @@ impl VoiceCaptureProcessor {
             frame: [0.0; VOICE_FRAME_SAMPLES],
             sample_count: 0,
             processing,
-            sender,
-            dropped_frames,
+            callbacks,
         })
     }
 
@@ -336,8 +947,7 @@ impl VoiceCaptureProcessor {
                 frame,
                 sample_count,
                 processing,
-                sender,
-                dropped_frames,
+                callbacks,
                 ..
             } = self;
             resampler.push_sample(mono, |sample| {
@@ -353,11 +963,7 @@ impl VoiceCaptureProcessor {
                         payload: encode_voice_frame(&samples),
                         level,
                     };
-                    if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
-                        sender.try_send(captured)
-                    {
-                        dropped_frames.fetch_add(1, Ordering::Relaxed);
-                    }
+                    callbacks.send_frame(captured);
                     *sample_count = 0;
                 }
             });
@@ -656,7 +1262,161 @@ mod tests {
     use super::*;
     use crate::voice_processing::VoiceProcessingConfig;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{mpsc, Arc};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FakeCaptureBackend {
+        state: Arc<Mutex<FakeCaptureBackendState>>,
+    }
+
+    struct FakeCaptureBackendState {
+        inventory: CaptureDeviceInventory,
+        opens: Vec<CaptureDeviceTarget>,
+        callbacks: Vec<CaptureStreamCallbacks>,
+        stream_drops: Arc<AtomicU64>,
+        input_enumeration_unavailable: bool,
+        fail_next_inventory: bool,
+        fail_next_open: bool,
+        event_during_next_open: Option<CaptureStreamEventAction>,
+    }
+
+    struct FakeCaptureStream {
+        stream_drops: Arc<AtomicU64>,
+    }
+
+    impl Drop for FakeCaptureStream {
+        fn drop(&mut self) {
+            self.stream_drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl FakeCaptureBackend {
+        fn new(inventory: CaptureDeviceInventory) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeCaptureBackendState {
+                    inventory,
+                    opens: Vec::new(),
+                    callbacks: Vec::new(),
+                    stream_drops: Arc::new(AtomicU64::new(0)),
+                    input_enumeration_unavailable: false,
+                    fail_next_inventory: false,
+                    fail_next_open: false,
+                    event_during_next_open: None,
+                })),
+            }
+        }
+
+        fn opens(&self) -> Vec<CaptureDeviceTarget> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .opens
+                .clone()
+        }
+
+        fn set_inventory(&self, inventory: CaptureDeviceInventory) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .inventory = inventory;
+        }
+
+        fn callbacks(&self) -> Vec<CaptureStreamCallbacks> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .callbacks
+                .clone()
+        }
+
+        fn stream_drops(&self) -> u64 {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .stream_drops
+                .load(Ordering::Relaxed)
+        }
+
+        fn fail_next_open(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .fail_next_open = true;
+        }
+
+        fn fail_next_inventory(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .fail_next_inventory = true;
+        }
+
+        fn report_during_next_open(&self, action: CaptureStreamEventAction) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .event_during_next_open = Some(action);
+        }
+
+        fn make_input_enumeration_unavailable(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .input_enumeration_unavailable = true;
+        }
+    }
+
+    impl VoiceCaptureBackend for FakeCaptureBackend {
+        type Stream = FakeCaptureStream;
+
+        fn inventory(
+            &mut self,
+            selected: Option<&VoiceInputDeviceId>,
+        ) -> Result<CaptureDeviceInventory, VoiceCaptureError> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if std::mem::take(&mut state.fail_next_inventory) {
+                return Err(VoiceCaptureError::InputDevices(
+                    "injected inventory failure".to_string(),
+                ));
+            }
+            if selected.is_some() && state.input_enumeration_unavailable {
+                return Err(VoiceCaptureError::InputDevices(
+                    "injected input enumeration failure".to_string(),
+                ));
+            }
+            Ok(state.inventory.clone())
+        }
+
+        fn open_stream(
+            &mut self,
+            target: &CaptureDeviceTarget,
+            callbacks: CaptureStreamCallbacks,
+            _options: &VoiceCaptureOptions,
+        ) -> Result<Self::Stream, VoiceCaptureError> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.opens.push(target.clone());
+            if let Some(action) = state.event_during_next_open.take() {
+                callbacks.report(action);
+            }
+            state.callbacks.push(callbacks);
+            let stream = FakeCaptureStream {
+                stream_drops: state.stream_drops.clone(),
+            };
+            if std::mem::take(&mut state.fail_next_open) {
+                drop(stream);
+                return Err(VoiceCaptureError::Stream(
+                    "injected open failure".to_string(),
+                ));
+            }
+            Ok(stream)
+        }
+    }
 
     /// The unprocessed capture path, which is what these tests pin: the
     /// downmix, the resampling, the frame geometry and the encoder.
@@ -665,6 +1425,788 @@ mod tests {
             VoiceProcessingSwitches::new(VoiceProcessingConfig::DISABLED),
             None,
         )
+    }
+
+    fn input_device_id(value: &str) -> VoiceInputDeviceId {
+        value.parse().expect("a test CPAL device ID")
+    }
+
+    fn input_frame(marker: u8) -> VoiceInputFrame {
+        VoiceInputFrame {
+            payload: [marker; VOICE_ENCODED_FRAME_BYTES],
+            level: f32::from(marker) / 255.0,
+        }
+    }
+
+    #[test]
+    fn capture_opens_the_exact_selected_device_even_when_names_collide() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first, second.clone()],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        options.input_device = Some(second.clone());
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            options,
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        capture.open_initial().expect("selected input opens");
+
+        assert_eq!(backend.opens(), [CaptureDeviceTarget::Exact(second)]);
+        assert_eq!(capture.stream_generation(), 1);
+    }
+
+    #[test]
+    fn stream_error_reported_during_open_quarantines_before_activation() {
+        for action in [
+            CaptureStreamEventAction::Refresh,
+            CaptureStreamEventAction::Invalidate,
+        ] {
+            let default = input_device_id("test:default");
+            let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+                default: Some(default.clone()),
+                inputs: vec![default],
+            });
+            backend.report_during_next_open(action);
+            let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+            let mut capture = VoiceCaptureManager::new(
+                backend.clone(),
+                VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                    VoiceProcessingConfig::DISABLED,
+                )),
+                sender,
+                Arc::new(AtomicU64::new(0)),
+            );
+
+            capture
+                .open_initial()
+                .expect("the physical stream opened before its callback error");
+            backend.callbacks()[0].send_frame(input_frame(1));
+
+            assert!(receiver.try_recv().is_err(), "{action:?}");
+            assert_eq!(capture.active_generation.load(Ordering::Acquire), 0);
+            assert!(capture
+                .service(Instant::now())
+                .expect("the first service rebuilds the quarantined stream"));
+            assert_eq!(capture.stream_generation(), 2);
+            assert_eq!(backend.opens().len(), 2);
+            assert_eq!(backend.stream_drops(), 1);
+        }
+    }
+
+    #[test]
+    fn missing_selected_input_is_reported_without_opening_the_default() {
+        let default = input_device_id("test:default");
+        let selected = input_device_id("test:missing");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(default),
+            inputs: Vec::new(),
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        options.input_device = Some(selected.clone());
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            options,
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        assert!(matches!(
+            capture.open_initial(),
+            Err(VoiceCaptureError::InputDeviceUnavailable(id)) if id == selected
+        ));
+        assert!(backend.opens().is_empty());
+        assert_eq!(capture.stream_generation(), 0);
+    }
+
+    #[test]
+    fn default_capture_does_not_require_full_device_enumeration() {
+        let default = input_device_id("test:default");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(default.clone()),
+            inputs: vec![default.clone()],
+        });
+        backend.make_input_enumeration_unavailable();
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        capture
+            .open_initial()
+            .expect("a usable default does not need enumeration");
+
+        assert_eq!(
+            backend.opens(),
+            [CaptureDeviceTarget::SystemDefault(default)]
+        );
+    }
+
+    #[test]
+    fn exact_capture_fails_closed_when_device_enumeration_is_unavailable() {
+        let selected = input_device_id("test:selected");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected.clone()],
+        });
+        backend.make_input_enumeration_unavailable();
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        options.input_device = Some(selected);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            options,
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        assert!(matches!(
+            capture.open_initial(),
+            Err(VoiceCaptureError::InputDevices(message))
+                if message == "injected input enumeration failure"
+        ));
+        assert!(backend.opens().is_empty());
+        assert_eq!(capture.stream_generation(), 0);
+    }
+
+    #[test]
+    fn removed_selected_device_waits_for_that_device_to_return() {
+        let selected = input_device_id("test:selected");
+        let other = input_device_id("test:other");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(other.clone()),
+            inputs: vec![selected.clone(), other.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let dropped_frames = Arc::new(AtomicU64::new(0));
+        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        options.input_device = Some(selected.clone());
+        let mut capture =
+            VoiceCaptureManager::new(backend.clone(), options, sender, dropped_frames.clone());
+        capture.open_initial().expect("selected input opens");
+        backend.callbacks()[0].send_frame(input_frame(1));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(1)]);
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(other.clone()),
+            inputs: vec![other.clone()],
+        });
+        assert!(!capture
+            .service(capture.next_poll)
+            .expect("the removal poll is handled"));
+        assert_eq!(
+            backend.opens(),
+            [CaptureDeviceTarget::Exact(selected.clone())]
+        );
+        assert_eq!(backend.stream_drops(), 1);
+        assert_eq!(capture.stream_generation(), 1);
+
+        let unrelated = input_device_id("test:unrelated");
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(other),
+            inputs: vec![unrelated],
+        });
+        assert!(!capture
+            .service(capture.next_poll)
+            .expect("the unrelated addition poll is ignored"));
+        assert_eq!(backend.opens().len(), 1);
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: None,
+            inputs: vec![selected.clone()],
+        });
+        assert!(capture
+            .service(capture.next_poll)
+            .expect("the readdition poll reopens the selected input"));
+        assert_eq!(
+            backend.opens(),
+            [
+                CaptureDeviceTarget::Exact(selected.clone()),
+                CaptureDeviceTarget::Exact(selected),
+            ]
+        );
+        assert_eq!(capture.stream_generation(), 2);
+        backend.callbacks()[1].send_frame(input_frame(2));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
+        assert_eq!(dropped_frames.load(Ordering::Relaxed), 0);
+
+        drop(capture);
+        assert_eq!(backend.stream_drops(), 2);
+    }
+
+    #[test]
+    fn system_default_capture_follows_a_changed_default_device() {
+        let first = input_device_id("test:first-default");
+        let second = input_device_id("test:second-default");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second.clone()],
+        });
+        assert!(capture.refresh().expect("new default opens"));
+
+        assert_eq!(
+            backend.opens(),
+            [
+                CaptureDeviceTarget::SystemDefault(input_device_id("test:first-default")),
+                CaptureDeviceTarget::SystemDefault(second),
+            ]
+        );
+        assert_eq!(backend.stream_drops(), 1);
+        assert_eq!(capture.stream_generation(), 2);
+        backend.callbacks()[1].send_frame(input_frame(2));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
+    }
+
+    #[test]
+    fn unchanged_default_identity_does_not_advance_the_stream_generation() {
+        let default = input_device_id("test:default-alias");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(default.clone()),
+            inputs: vec![default],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+
+        assert!(!capture
+            .service(capture.next_poll)
+            .expect("an unchanged default scan keeps the stream"));
+
+        assert_eq!(capture.stream_generation(), 1);
+        assert_eq!(backend.opens().len(), 1);
+        assert_eq!(backend.stream_drops(), 0);
+    }
+
+    #[test]
+    fn route_change_reopens_an_exact_selection_instead_of_accepting_a_reroute() {
+        let selected = input_device_id("test:selected");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected.clone()],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        options.input_device = Some(selected.clone());
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            options,
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("selected input opens");
+        let callbacks = backend.callbacks()[0].clone();
+        let generation = callbacks.generation;
+        for _ in 0..VOICE_CAPTURE_EVENT_QUEUE {
+            let _ = callbacks.events.try_send(CaptureStreamEvent {
+                generation,
+                action: CaptureStreamEventAction::Refresh,
+            });
+        }
+        callbacks.report(CaptureStreamEventAction::Refresh);
+
+        assert!(capture
+            .service(Instant::now())
+            .expect("route change reopens the exact input"));
+
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(
+            backend.opens(),
+            [
+                CaptureDeviceTarget::Exact(selected.clone()),
+                CaptureDeviceTarget::Exact(selected),
+            ]
+        );
+        assert_eq!(backend.stream_drops(), 1);
+    }
+
+    #[test]
+    fn route_event_drained_after_the_atomic_snapshot_still_rebuilds() {
+        let selected = input_device_id("test:selected");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let callbacks = backend.callbacks()[0].clone();
+
+        // A generation-filtered event without its sticky flag models the
+        // callback landing between service's atomic snapshot and queue drain.
+        callbacks
+            .events
+            .try_send(CaptureStreamEvent {
+                generation: callbacks.generation,
+                action: CaptureStreamEventAction::Refresh,
+            })
+            .expect("the route event queues");
+
+        assert!(capture
+            .service(Instant::now())
+            .expect("the queued route event rebuilds the stream"));
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 2);
+        assert_eq!(backend.stream_drops(), 1);
+    }
+
+    #[test]
+    fn default_route_change_reopens_the_new_default_with_a_clean_generation() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let callbacks = backend.callbacks()[0].clone();
+        callbacks.send_frame(input_frame(1));
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second.clone()],
+        });
+        callbacks.report(CaptureStreamEventAction::Refresh);
+
+        assert!(capture.drain_frames(&receiver).is_empty());
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 2);
+        assert_eq!(backend.stream_drops(), 1);
+        assert_eq!(
+            capture.active.as_ref().map(|active| &active.target),
+            Some(&CaptureDeviceTarget::SystemDefault(second))
+        );
+
+        callbacks.enqueue_frame_after_activation_check(input_frame(1));
+        backend.callbacks()[1].send_frame(input_frame(2));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
+    }
+
+    #[test]
+    fn default_route_inventory_failure_quarantines_frames_and_retries() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let callbacks = backend.callbacks()[0].clone();
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second.clone()],
+        });
+        backend.fail_next_inventory();
+        callbacks.send_frame(input_frame(1));
+        callbacks.report(CaptureStreamEventAction::Refresh);
+        callbacks.send_frame(input_frame(2));
+
+        assert!(capture.drain_frames(&receiver).is_empty());
+        assert_eq!(capture.stream_generation(), 1);
+        assert_eq!(backend.opens().len(), 1);
+        assert_eq!(backend.stream_drops(), 1);
+        assert!(capture.active.is_none());
+
+        assert!(capture
+            .service(capture.next_poll)
+            .expect("the default inventory retry succeeds"));
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 2);
+        assert_eq!(
+            capture.active.as_ref().map(|active| &active.target),
+            Some(&CaptureDeviceTarget::SystemDefault(second))
+        );
+        backend.callbacks()[1].send_frame(input_frame(3));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(3)]);
+    }
+
+    #[test]
+    fn late_callbacks_from_a_replaced_stream_cannot_affect_the_new_generation() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("first default opens");
+        let old_callbacks = backend.callbacks()[0].clone();
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second],
+        });
+        assert!(capture.refresh().expect("second default opens"));
+        let new_callbacks = backend.callbacks()[1].clone();
+
+        old_callbacks.send_frame(input_frame(1));
+        new_callbacks.send_frame(input_frame(2));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
+
+        old_callbacks.report(CaptureStreamEventAction::Invalidate);
+        assert!(!capture
+            .service(Instant::now())
+            .expect("a stale error is ignored"));
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 2);
+        assert_eq!(backend.stream_drops(), 1);
+    }
+
+    #[test]
+    fn frame_enqueued_by_an_old_callback_after_the_swap_is_filtered() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("first default opens");
+        let old_callbacks = backend.callbacks()[0].clone();
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second],
+        });
+        assert!(capture.refresh().expect("second default opens"));
+        capture.drain_frames(&receiver);
+
+        // Models preemption after the old callback's active-generation check
+        // but before its nonblocking queue send.
+        old_callbacks.enqueue_frame_after_activation_check(input_frame(1));
+        backend.callbacks()[1].send_frame(input_frame(2));
+
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
+        assert_eq!(capture.stream_generation(), 2);
+    }
+
+    #[test]
+    fn quarantine_between_generation_snapshot_and_return_discards_the_drain() {
+        let selected = input_device_id("test:selected");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let callbacks = backend.callbacks()[0].clone();
+        callbacks.send_frame(input_frame(1));
+
+        let frames = capture.collect_active_frames(&receiver, || {
+            callbacks.report(CaptureStreamEventAction::Refresh);
+        });
+
+        assert!(frames.is_empty());
+        assert_eq!(capture.active_generation.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn failed_replacement_keeps_capture_idle_and_retries_without_leaking() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("first default opens");
+        let stale_callbacks = backend.callbacks()[0].clone();
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second.clone()],
+        });
+        backend.fail_next_open();
+        assert!(matches!(
+            capture.refresh(),
+            Err(VoiceCaptureError::Stream(message)) if message == "injected open failure"
+        ));
+        assert_eq!(capture.stream_generation(), 1);
+        assert_eq!(backend.stream_drops(), 2);
+        stale_callbacks.send_frame(input_frame(1));
+        assert!(receiver.try_recv().is_err());
+
+        assert!(capture.refresh().expect("later retry succeeds"));
+        assert_eq!(capture.stream_generation(), 2);
+        backend
+            .callbacks()
+            .last()
+            .expect("replacement callbacks")
+            .send_frame(input_frame(2));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
+
+        drop(capture);
+        assert_eq!(backend.stream_drops(), 3);
+    }
+
+    #[test]
+    fn callback_from_a_failed_open_cannot_invalidate_the_later_retry() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("first default opens");
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second.clone()),
+            inputs: vec![first, second],
+        });
+        backend.fail_next_open();
+        assert!(capture.refresh().is_err());
+        let failed_callbacks = backend.callbacks()[1].clone();
+        assert!(capture.refresh().expect("retry opens"));
+        assert_eq!(capture.stream_generation(), 2);
+
+        failed_callbacks.report(CaptureStreamEventAction::Invalidate);
+        assert!(!capture
+            .service(Instant::now())
+            .expect("the failed attempt's callback is stale"));
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 3);
+    }
+
+    #[test]
+    fn fatal_stream_error_is_not_lost_when_the_event_queue_is_full() {
+        let selected = input_device_id("test:selected");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let callbacks = backend.callbacks()[0].clone();
+        for _ in 0..VOICE_CAPTURE_EVENT_QUEUE {
+            callbacks.report(CaptureStreamEventAction::Refresh);
+        }
+        callbacks.report(CaptureStreamEventAction::Invalidate);
+
+        assert!(capture
+            .service(Instant::now())
+            .expect("fatal error rebuilds the stream"));
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 2);
+        assert_eq!(backend.stream_drops(), 1);
+    }
+
+    #[test]
+    fn failed_future_attempt_cannot_mask_the_active_streams_fatal_error() {
+        let selected = input_device_id("test:selected");
+        let target = CaptureDeviceTarget::SystemDefault(selected.clone());
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected],
+        });
+        let (sender, _receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let active_callbacks = backend.callbacks()[0].clone();
+        for _ in 0..VOICE_CAPTURE_EVENT_QUEUE {
+            active_callbacks.report(CaptureStreamEventAction::Refresh);
+        }
+
+        backend.fail_next_open();
+        assert!(capture.replace_stream(target).is_err());
+        let failed_callbacks = backend.callbacks()[1].clone();
+        failed_callbacks.report(CaptureStreamEventAction::Invalidate);
+        active_callbacks.report(CaptureStreamEventAction::Invalidate);
+
+        assert!(capture
+            .service(Instant::now())
+            .expect("the active stream's fatal error rebuilds it"));
+        assert_eq!(capture.stream_generation(), 2);
+        assert_eq!(backend.opens().len(), 3);
+        assert_eq!(backend.stream_drops(), 2);
+    }
+
+    #[test]
+    fn transient_inventory_failure_leaves_a_healthy_stream_active() {
+        let selected = input_device_id("test:selected");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(selected.clone()),
+            inputs: vec![selected],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("default input opens");
+        let callbacks = backend.callbacks()[0].clone();
+
+        backend.fail_next_inventory();
+        assert!(matches!(
+            capture.refresh(),
+            Err(VoiceCaptureError::InputDevices(message)) if message == "injected inventory failure"
+        ));
+
+        callbacks.send_frame(input_frame(1));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(1)]);
+        assert_eq!(capture.stream_generation(), 1);
+        assert_eq!(backend.opens().len(), 1);
+        assert_eq!(backend.stream_drops(), 0);
+    }
+
+    #[test]
+    fn successful_replacement_clears_frames_queued_by_the_previous_stream() {
+        let first = input_device_id("test:first");
+        let second = input_device_id("test:second");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(first.clone()),
+            inputs: vec![first.clone(), second.clone()],
+        });
+        let (sender, receiver) = mpsc::sync_channel(VOICE_CAPTURE_QUEUE_FRAMES);
+        let mut capture = VoiceCaptureManager::new(
+            backend.clone(),
+            VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+                VoiceProcessingConfig::DISABLED,
+            )),
+            sender,
+            Arc::new(AtomicU64::new(0)),
+        );
+        capture.open_initial().expect("first default opens");
+        let first_callbacks = backend.callbacks()[0].clone();
+        first_callbacks.send_frame(input_frame(1));
+
+        backend.set_inventory(CaptureDeviceInventory {
+            default: Some(second),
+            inputs: vec![first],
+        });
+        first_callbacks.report(CaptureStreamEventAction::Refresh);
+        assert!(capture.drain_frames(&receiver).is_empty());
+        assert_eq!(capture.stream_generation(), 2);
+
+        backend.callbacks()[1].send_frame(input_frame(2));
+        assert_eq!(capture.drain_frames(&receiver), [input_frame(2)]);
     }
 
     #[test]
@@ -711,7 +2253,7 @@ mod tests {
         assert!(receiver.try_recv().is_err());
         processor.process_interleaved(&stereo[734..]);
 
-        let frame = receiver.try_recv().expect("one 20 ms frame");
+        let frame = receiver.try_recv().expect("one 20 ms frame").frame;
         let decoded =
             decode_voice_frame(&frame.payload).expect("captured frame should be canonical");
         assert!(decoded.iter().all(|sample| sample.abs_diff(2_000) <= 1));
@@ -770,9 +2312,10 @@ mod tests {
 
         let silent = receiver
             .try_recv()
-            .expect("a silent frame is still captured");
+            .expect("a silent frame is still captured")
+            .frame;
         assert_eq!(silent.level, 0.0);
-        let loud = receiver.try_recv().expect("a loud frame");
+        let loud = receiver.try_recv().expect("a loud frame").frame;
         assert!(
             (loud.level - 0.799).abs() < 0.01,
             "a quarter of full scale is -12 dBFS, got {}",
@@ -805,5 +2348,40 @@ mod tests {
             make(16_000, 33),
             Err(VoiceCaptureError::UnsupportedInputConfig { .. })
         ));
+    }
+
+    #[cfg(feature = "cpal")]
+    #[test]
+    fn cpal_stream_errors_only_rebuild_when_the_stream_is_invalid() {
+        assert_eq!(
+            cpal_stream_error_action(cpal::ErrorKind::DeviceChanged),
+            CaptureStreamEventAction::Refresh,
+        );
+        for kind in [cpal::ErrorKind::Xrun, cpal::ErrorKind::RealtimeDenied] {
+            assert_eq!(
+                cpal_stream_error_action(kind),
+                CaptureStreamEventAction::Keep,
+                "{kind:?}",
+            );
+        }
+        for kind in [
+            cpal::ErrorKind::DeviceBusy,
+            cpal::ErrorKind::DeviceNotAvailable,
+            cpal::ErrorKind::HostUnavailable,
+            cpal::ErrorKind::InvalidInput,
+            cpal::ErrorKind::PermissionDenied,
+            cpal::ErrorKind::ResourceExhausted,
+            cpal::ErrorKind::StreamInvalidated,
+            cpal::ErrorKind::UnsupportedConfig,
+            cpal::ErrorKind::UnsupportedOperation,
+            cpal::ErrorKind::BackendError,
+            cpal::ErrorKind::Other,
+        ] {
+            assert_eq!(
+                cpal_stream_error_action(kind),
+                CaptureStreamEventAction::Invalidate,
+                "{kind:?}",
+            );
+        }
     }
 }
