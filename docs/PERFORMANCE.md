@@ -970,18 +970,21 @@ For an A/B comparison, reuse identical serialized fixture bytes, config, seed,
 window size, and hardware, and add only the measurement instrumentation to the
 baseline app.
 
-Two deterministic microbenchmarks isolate object capture and renderer upload
-from the windowed network run:
+Four deterministic microbenchmarks isolate object and particle capture from
+retained-renderer submission:
 
 ```sh
 cargo bench -p clonk-frontend --features bench --bench object_capture --locked
+cargo bench -p clonk-frontend --features bench --bench particle_capture --locked
 cargo bench -p clonk-app-render --features bench --bench object_sprite_render --locked
+cargo bench -p clonk-app-render --features bench --bench particle_render --locked
 ```
 
-Both use 1,000 ST5B-shaped faces (15x15, 20 phases, alternating transforms and
-sampling, unique modulation). `object_capture` runs unfogged and with an exact
-64-pixel fog-chunk crossing through an explicit reverse painter order. Its
-scoped counting allocator compares one object with 1,000 after warming the same
+The two object suites use 1,000 ST5B-shaped faces (15x15, 20 phases,
+alternating transforms and sampling, unique modulation). `object_capture` runs
+unfogged and with an exact 64-pixel fog-chunk crossing through an explicit
+reverse painter order. Its scoped counting allocator compares one object with
+1,000 after warming the same
 retained ordering maps, sets, phase lists and capture storage; equality is the
 gate, so allocations may remain per frame/resource run but cannot scale per
 representable object. The scope starts after `ObjectSnapshot` and render-order
@@ -999,6 +1002,73 @@ draws and 232,000 generic instance-upload bytes. Including the fixed final
 presentation pass, the raw GPU draw totals are 2 and 1,001 respectively. These
 are representation counts, not a substitute for the real presentation cadence
 below.
+
+The object renderer also has a `compact_1000_st5b_amortized` throughput case.
+It performs the same retained build, upload, encoding, submission and statistics
+work for 16 frames, but waits for device completion only after the batch. The
+particle renderer's `2000_fire_and_fire2_amortized` case uses the same cadence
+for 1,000 normal and 1,000 additive particle sprites. These are steady
+submission-throughput measurements, not GPU-only timing or single-frame
+latency; keep the original completion-per-frame cases when diagnosing latency.
+
+To measure the default, timestamp-disabled instrumentation overhead, build
+separate retained baseline and candidate executables and explicitly remove
+`LC_GPU_TIMESTAMP_QUERIES`. Force wgpu's opt-in no-op adapter with
+`WGPU_NOOP_BACKEND=1 WGPU_BACKEND=noop`; this runs the same host validation,
+packing, encoding, submission and statistics path without conflating desktop
+GPU-completion load with the instrumentation cost. It is not rendering-
+throughput or GPU-performance evidence. Every renderer-benchmark log must name
+the selected adapter backend as `Noop`. Use these exact selectors:
+
+- `object_capture/unfogged_1000_st5b`;
+- `particle_capture/2000_fire_and_fire2`;
+- `object_sprite_render/compact_1000_st5b_amortized`;
+- `particle_render/2000_fire_and_fire2_amortized`.
+
+Run three baseline-candidate-candidate-baseline quartets followed by three
+candidate-baseline-baseline-candidate quartets for each case on the same idle,
+AC-powered machine. Preserve every raw Criterion estimate and load/thermal log.
+Reject a whole quartet if `max/min` exceeds 1.05 for either arm's two
+`median.point_estimate` values, any run's Criterion
+`std_dev.point_estimate / mean.point_estimate` exceeds 0.10, AC/thermal state
+changes, or external load exceeds the predeclared limit. Collect exactly six
+valid quartets per case without stopping early.
+
+For each valid quartet compute
+`d = (ln(C1) + ln(C2) - ln(B1) - ln(B2)) / 2`, using those four median point
+estimates. From its six `d` values, compute the one-sided 95% Student-t upper bound
+`exp(mean(d) + t(0.95, 5) * sample_stddev(d) / sqrt(6)) - 1`. Treat the overhead
+as negligible only when that bound is below 2%; report the absolute duration as
+well as the percentage. When comparing the pre-amortized baseline at
+`346b776cf23f9fe632d1868560121b31368b38bf`, apply the identical benchmark-only
+object/particle harness patch to both source trees; its unified-diff SHA-256 is
+`108e537372dda870b3b8cb2c6312dca4fda478a10d5da80eb5a84660c5bfa96b`.
+
+The 2026-08-14 control used that base and candidate on an AC-powered Apple M4
+Max running macOS 26.5.2. All renderer arms reported `backend: Noop`; Criterion
+used a two-second warmup, five-second measurement and 20 samples. The table
+reports the geometric candidate/baseline effect, arithmetic mean signed
+candidate-minus-baseline duration, and preregistered one-sided Student-t bound:
+
+| Case | Valid/attempted quartets | Geometric effect | Mean C−B duration | 95% upper bound |
+| --- | ---: | ---: | ---: | ---: |
+| Object capture | 6/42 | +1.037% | +2,344 ns | +1.980% |
+| Particle capture | 6/6 | +0.319% | +77 ns | +0.890% |
+| Compact object submission | 6/14 | +0.788% | +194 ns | +1.113% |
+| Particle submission | 6/19 | +1.162% | +273 ns | +1.848% |
+
+Every bound is below 2%. The object-capture result is deliberately reported at
+its narrow 0.020-percentage-point margin. Of 57 rejected quartets, 55 tripped
+the predeclared external-load screen; contemporaneous snapshots repeatedly
+showed unrelated compiler/test activity. All 57 also failed the same-arm spread
+screen, and quartets were not replaced based on effect direction.
+An earlier particle-submission campaign that reached only one valid quartet
+before its fixed attempt cap was excluded wholesale. After recording the
+aggregate results and hashes above, the local
+1.9 GiB raw-log bundle and its disposable benchmark worktrees were removed to
+recover disk space; the raw estimates are therefore not retained in the
+repository. Exploratory Metal runs were nonstationary under concurrent desktop
+GPU load and are not presented as latency evidence.
 
 The runner can enforce and retain that paired comparison while leaving the
 single-binary invocation above unchanged. Build an instrumented `origin/main`
@@ -1044,6 +1114,70 @@ acceptance target. The candidate must still satisfy every native-cadence,
 therefore also run from an interactive visible desktop; it does not make a
 headless automation session valid presentation evidence.
 
+#### Retained-renderer stage evidence
+
+The instrumented candidate emits one compact JSON object prefixed by
+`LC_APP_RETAINED_GPU_PROFILE`. Paired mode requires that record from the
+candidate but keeps it optional for an older baseline binary. It preserves the
+raw record and its SHA-256 in the arm report instead of reducing it to a few
+averages. The record is tied to the exact adapter, enabled device features,
+surface and buffer formats/extents, renderer switches, frontend raster
+switches, and presentation scale/crop. The compact line can exceed live-console
+display limits; use the retained `stdout.log` and parsed arm report as the
+artifact rather than copied console output.
+
+Arso-Morf is the mixed-content procedure for this evidence: the ordinary real
+scene contributes landscape, fog, compact objects, generic UI/text sprites,
+solids and compositor passes in addition to the 1,000 ST5B workload. Inspect
+the structural counters before comparing timings; a missing draw family means
+the two runs did not profile the same effective content.
+
+Each successful retained presentation has one raw CPU sample. Its named stages
+are frame preparation, renderer validation, texture synchronization, stream
+packing/upload, retained pass encoding plus command-buffer finalization,
+drawable acquisition, the CPU call to
+`Queue::submit`, and the CPU call to present the drawable. These intervals are
+host wall time. In particular, queue submission and presentation are **not**
+GPU execution time. The existing end-to-end graphics duration remains the
+governor input; every profile records an unclassified residual or an overrun so
+the named intervals reconcile exactly without moving that endpoint or hiding
+overlap.
+
+The same per-frame sample records structural work rather than inferring it from
+time: every retained draw kind, fixed compositor pass, compatible-resource run,
+vertex/instance stream count and upload byte count, source-texture write call
+and byte count (including mip levels), composition recreation, expanded fog
+chunk, and successful generic-sprite fallback reason. Fallback reasons are
+non-exclusive, so their sum may exceed the fallback total.
+
+GPU pass timing is separately opt-in. The runner removes any ambient setting,
+leaves the baseline uninstrumented, and launches the candidate with:
+
+```sh
+LC_GPU_TIMESTAMP_QUERIES=1
+```
+
+If the selected adapter does not advertise `TIMESTAMP_QUERY`, the device's
+optional feature set remains empty, every CPU frame carries a null timestamp
+ID, and the GPU frame list is empty. If it is supported, the renderer allocates
+a bounded asynchronous query pool and identifies the actual shader-landscape,
+scene, monitor-gamma, and presentation passes encoded for each frame. Normal
+rendering only polls; it never waits for the GPU. The benchmark performs one
+bounded drain after the measurement window, then requires an exact one-to-one
+frame-ID correlation. Raw ticks, the queue's timestamp period, pass name, and
+derived nanoseconds are all retained. Counter rollover and invalid periods or
+durations remain visible as raw invalid samples and fail candidate validation,
+as do missing/duplicate IDs, dropped frames, readback errors, device
+discontinuities, nonzero telemetry, or a pass set that disagrees with the
+structural counters.
+
+The profile parser is deliberately fail closed for the candidate: CPU sample
+count must equal retained submissions, each end-to-end duration must equal the
+corresponding legacy `graphics_pass_samples_ns` entry, all integer fields reject
+JSON booleans/floats, and CPU reconciliation must hold exactly. A legacy
+baseline without the new prefix is still valid A/B input; a partial, duplicate,
+or malformed candidate record is not.
+
 ### 4K fogged-landscape renderer microbenchmark
 
 Run the retained renderer against prebuilt 3840x2160 fog workloads:
@@ -1062,8 +1196,9 @@ presentation pass; a count mismatch fails before Criterion records samples.
 The reported wall time covers retained-renderer processing of the prebuilt
 scene, command encoding, queue submission, and waiting for device completion.
 It excludes frontend fog capture and scene construction, and it is not a
-GPU-only duration. Stage-separated CPU measurements and timestamp-query GPU
-pass timing remain tracked by clonk-org/clonk-rs#267.
+GPU-only duration. Use the windowed Arso-Morf profile above when stage-separated
+CPU samples, frontend fallback reasons, or named GPU-pass timestamps are needed;
+the Criterion wall-time sample remains a combined renderer/GPU measurement.
 
 ### Deep Sea retained-GPU presentation benchmark
 
